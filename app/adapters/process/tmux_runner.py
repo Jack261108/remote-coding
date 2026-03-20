@@ -1,28 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import shlex
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.adapters.process.claude_stop_hook import ClaudeStopArtifacts, build_task_artifacts
 from app.domain.models import CLIEvent, EventType
 
-CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
-CCB_DONE_PREFIX = "TGCLI_DONE"
-_INTERACTIVE_SYSTEM_PROMPT = (
-    "你是 Telegram CLI 网关的后端。直接输出回复正文，不要输出 TGCLI_BEGIN/TGCLI_DONE 等标签。"
-)
-_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))")
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B-\x1F\x7F]")
-_MARKER_ARTIFACT_RE = re.compile(r"^_*(?:TGCLI_BEGIN|TGCLI_DONE)_*(?:\s*[:：]?\s*[A-Za-z0-9_-]+)?$", re.IGNORECASE)
-_PROGRESS_LINE_RE = re.compile(r"^[✢✳✶✻✽·](?:\s*[A-Za-z][A-Za-z0-9\- _()/.]*?(?:…|\.\.\.))?(?:\s*\([^)]*\))?$")
-_READY_PROMPT_RE = re.compile(r"\?\s*for\s+shortcuts", re.IGNORECASE)
-_ASSISTANT_START_RE = re.compile(r"(?:^|\n)\s*⏺\s*")
-_PROMPT_LINE_RE = re.compile(r"(?:^|\n)\s*❯")
-_SEPARATOR_LINE_RE = re.compile(r"(?:^|\n)\s*[─-]{10,}")
-
+_INTERACTIVE_SYSTEM_PROMPT = "你是 Telegram CLI 网关的后端。直接输出回复正文。"
 
 
 @dataclass
@@ -35,12 +22,10 @@ class _TmuxTaskMeta:
     persistent_terminal: bool = False
     cancel_requested: bool = False
     interactive: bool = False
-    begin_marker: str = ""
-    done_marker: str = ""
-    in_reply_block: bool = False
-    reply_buffer: str = ""
-    parse_buffer: str = ""
-    prompt_text: str = ""
+    provider: str | None = None
+    settings_file: Path | None = None
+    response_file: Path | None = None
+    stop_exit_sent: bool = False
 
 
 class TmuxRunner:
@@ -76,6 +61,7 @@ class TmuxRunner:
         env: dict[str, str] | None = None,
         terminal_key: str | None = None,
         interactive: bool = False,
+        provider: str | None = None,
     ):
         if not argv:
             yield CLIEvent(type=EventType.FAILED, task_id=task_id, error="命令参数为空")
@@ -98,10 +84,14 @@ class TmuxRunner:
         self._safe_unlink(exit_file)
         self._safe_unlink(command_file)
 
-        begin_marker = ""
-        done_marker = ""
+        artifacts: ClaudeStopArtifacts | None = None
+        run_argv = list(argv)
 
         try:
+            artifacts = self._build_claude_artifacts(task_id=task_id, provider=provider, interactive=interactive)
+            if artifacts is not None and not interactive:
+                run_argv = self._inject_claude_settings(run_argv, artifacts)
+
             if interactive:
                 if not persistent_terminal:
                     yield CLIEvent(type=EventType.FAILED, task_id=task_id, error="交互式模式仅支持持久终端")
@@ -110,13 +100,10 @@ class TmuxRunner:
                     yield CLIEvent(type=EventType.FAILED, task_id=task_id, error="交互式模式参数错误")
                     return
 
-                prompt = argv[0]
-                begin_marker = CCB_BEGIN_PREFIX
-                done_marker = CCB_DONE_PREFIX
-                command = self._wrap_interactive_prompt(prompt=prompt, begin_marker=begin_marker, done_marker=done_marker)
+                command = self._wrap_interactive_prompt(prompt=argv[0])
             else:
                 command = self._build_shell_command(
-                    argv=argv,
+                    argv=run_argv,
                     workdir=workdir,
                     log_file=log_file,
                     exit_file=exit_file,
@@ -124,6 +111,7 @@ class TmuxRunner:
                     hide_launcher_line=persistent_terminal,
                 )
         except Exception as exc:
+            self._cleanup_artifacts(artifacts)
             yield CLIEvent(type=EventType.FAILED, task_id=task_id, error=f"任务脚本创建失败: {exc}")
             return
 
@@ -135,10 +123,9 @@ class TmuxRunner:
             command_file=command_file,
             persistent_terminal=persistent_terminal,
             interactive=interactive,
-            begin_marker=begin_marker,
-            done_marker=done_marker,
-            in_reply_block=interactive,
-            prompt_text=(argv[0].strip() if interactive and argv else ""),
+            provider=provider,
+            settings_file=artifacts.settings_file if artifacts is not None else None,
+            response_file=artifacts.response_file if artifacts is not None else None,
         )
 
         session_lock = self._get_session_lock(session_name) if persistent_terminal else None
@@ -160,73 +147,83 @@ class TmuxRunner:
         workdir: str,
         command: str,
     ):
-        if meta.persistent_terminal:
-            if meta.interactive:
-                ready, err = await self._ensure_claude_interactive_session(
-                    session_name=meta.session_name,
+        try:
+            if meta.persistent_terminal:
+                if meta.interactive:
+                    ready, err = await self._ensure_claude_interactive_session(
+                        session_name=meta.session_name,
+                        workdir=workdir,
+                        env=env,
+                    )
+                else:
+                    ready, err = await self._ensure_persistent_session(meta.session_name, workdir=workdir, env=env)
+
+                if not ready:
+                    yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
+                    return
+
+                if meta.interactive:
+                    # 每个任务都重绑 pipe-pane 到当前 task log，避免沿用旧文件导致本次任务读不到输出。
+                    try:
+                        await self._run_tmux("pipe-pane", "-t", meta.session_name)
+                    except Exception:
+                        pass
+
+                    pipe_cmd = f"cat >> {shlex.quote(str(meta.log_file))}"
+                    try:
+                        code, _, err_text = await self._run_tmux("pipe-pane", "-t", meta.session_name, pipe_cmd)
+                    except Exception as exc:
+                        yield CLIEvent(
+                            type=EventType.FAILED,
+                            task_id=meta.task_id,
+                            error=f"tmux 管道设置异常: {exc}",
+                        )
+                        return
+
+                    if code != 0:
+                        err = err_text.strip() or "unknown error"
+                        yield CLIEvent(
+                            type=EventType.FAILED,
+                            task_id=meta.task_id,
+                            error=(
+                                f"tmux 管道设置失败: {err}\n"
+                                f"tmux_session: {meta.session_name}\n"
+                                "hint: 请发送 /claude 重建会话后重试"
+                            ),
+                        )
+                        return
+
+                    respawn_command = self._build_interactive_claude_command(workdir=workdir, meta=meta)
+                    respawned, respawn_err = await self._respawn_and_send_command(
+                        session_name=meta.session_name,
+                        command=respawn_command,
+                        workdir=workdir,
+                    )
+                    if not respawned:
+                        yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=respawn_err)
+                        return
+
+                sent, send_err = await self._send_command(
+                    meta.session_name,
+                    command,
                     workdir=workdir,
                     env=env,
+                    interactive=meta.interactive,
                 )
+                if not sent:
+                    yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=send_err)
+                    return
             else:
-                ready, err = await self._ensure_persistent_session(meta.session_name, workdir=workdir, env=env)
-
-            if not ready:
-                yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
-                return
-
-            if meta.interactive:
-                # 每个任务都重绑 pipe-pane 到当前 task log，避免沿用旧文件导致本次任务读不到输出。
-                try:
-                    await self._run_tmux("pipe-pane", "-t", meta.session_name)
-                except Exception:
-                    pass
-
-                pipe_cmd = f"cat >> {shlex.quote(str(meta.log_file))}"
-                try:
-                    code, _, err_text = await self._run_tmux("pipe-pane", "-t", meta.session_name, pipe_cmd)
-                except Exception as exc:
-                    yield CLIEvent(
-                        type=EventType.FAILED,
-                        task_id=meta.task_id,
-                        error=f"tmux 管道设置异常: {exc}",
-                    )
+                started, err = await self._start_ephemeral_session(meta.session_name, workdir=workdir, env=env, command=command)
+                if not started:
+                    yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
                     return
 
-                if code != 0:
-                    err = err_text.strip() or "unknown error"
-                    yield CLIEvent(
-                        type=EventType.FAILED,
-                        task_id=meta.task_id,
-                        error=(
-                            f"tmux 管道设置失败: {err}\n"
-                            f"tmux_session: {meta.session_name}\n"
-                            "hint: 请发送 /claude 重建会话后重试"
-                        ),
-                    )
-                    return
+            async with self._lock:
+                self._tasks[meta.task_id] = meta
 
-            sent, send_err = await self._send_command(
-                meta.session_name,
-                command,
-                workdir=workdir,
-                env=env,
-                interactive=meta.interactive,
-            )
-            if not sent:
-                yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=send_err)
-                return
-        else:
-            started, err = await self._start_ephemeral_session(meta.session_name, workdir=workdir, env=env, command=command)
-            if not started:
-                yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
-                return
+            yield CLIEvent(type=EventType.STARTED, task_id=meta.task_id, content=f"tmux_session={meta.session_name}")
 
-        async with self._lock:
-            self._tasks[meta.task_id] = meta
-
-        yield CLIEvent(type=EventType.STARTED, task_id=meta.task_id, content=f"tmux_session={meta.session_name}")
-
-        try:
             async for event in self._watch_task(meta=meta, timeout_sec=timeout_sec):
                 yield event
         finally:
@@ -234,13 +231,14 @@ class TmuxRunner:
                 self._tasks.pop(meta.task_id, None)
             if meta.command_file is not None:
                 self._safe_unlink(meta.command_file)
+            self._cleanup_artifacts(meta)
 
     async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
         position = 0
         partial = ""
         timed_out = False
         exit_code: int | None = None
-        done_seen = False
+        final_reply: str | None = None
 
         started_at = asyncio.get_running_loop().time()
         last_partial_emit = started_at
@@ -250,30 +248,23 @@ class TmuxRunner:
             text, position = self._read_new_text(meta.log_file, position)
             if text:
                 partial, events = self._split_to_events(task_id=meta.task_id, text=partial + text)
-                for event in events:
-                    if meta.interactive:
-                        out_event, saw_done = self._process_interactive_stdout(meta=meta, event=event)
-                        done_seen = done_seen or saw_done
-                        if out_event is not None:
-                            yield out_event
-                    else:
+                if not meta.interactive:
+                    for event in events:
                         yield event
 
-            if partial and self._partial_flush_sec > 0 and (now - last_partial_emit) >= self._partial_flush_sec:
-                if meta.interactive:
-                    out_event, saw_done = self._process_interactive_partial(meta=meta, text=partial)
-                    done_seen = done_seen or saw_done
-                    partial = ""
-                    if out_event is not None:
-                        yield out_event
-                else:
-                    yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=partial)
-                    partial = ""
-                last_partial_emit = now
-
-            if meta.interactive and done_seen:
-                exit_code = 0
-                break
+            if meta.interactive and not meta.stop_exit_sent and meta.response_file is not None:
+                reply = self._read_response_once(meta.response_file)
+                if reply is not None:
+                    final_reply = reply
+                    meta.stop_exit_sent = True
+                    await self._send_command(
+                        meta.session_name,
+                        "/exit",
+                        workdir=str(meta.log_file.parent),
+                        env=None,
+                        interactive=True,
+                        allow_rebuild=False,
+                    )
 
             if meta.exit_file.exists():
                 exit_code = self._read_exit_code(meta.exit_file)
@@ -299,25 +290,24 @@ class TmuxRunner:
         text, position = self._read_new_text(meta.log_file, position)
         if text:
             partial, events = self._split_to_events(task_id=meta.task_id, text=partial + text)
-            for event in events:
-                if meta.interactive:
-                    out_event, saw_done = self._process_interactive_stdout(meta=meta, event=event)
-                    done_seen = done_seen or saw_done
-                    if out_event is not None:
-                        yield out_event
-                else:
+            if not meta.interactive:
+                for event in events:
                     yield event
 
-        if partial:
-            if meta.interactive:
-                out_event, saw_done = self._process_interactive_partial(meta=meta, text=partial)
-                done_seen = done_seen or saw_done
-                if out_event is not None:
-                    yield out_event
-            else:
-                yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=partial)
+        if partial and not meta.interactive:
+            yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=partial)
 
         canceled = await self._is_cancel_requested(meta.task_id)
+
+        should_read_response_file = meta.response_file is not None and final_reply is None and (
+            not meta.interactive or (not timed_out and not canceled)
+        )
+        if should_read_response_file:
+            final_reply = await self._read_response_with_retry(meta.response_file)
+
+        if final_reply is not None:
+            yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=final_reply)
+
         if timed_out:
             yield CLIEvent(type=EventType.TIMEOUT, task_id=meta.task_id, error=f"任务超时({timeout_sec}s)")
         elif canceled:
@@ -497,23 +487,7 @@ class TmuxRunner:
         workdir: str,
         env: dict[str, str] | None,
     ) -> tuple[bool, str]:
-        ready, err = await self._ensure_persistent_session(session_name, workdir=workdir, env=env)
-        if not ready:
-            return False, err
-
-        current_cmd = await self._session_current_command(session_name)
-        if "claude" in current_cmd:
-            return True, ""
-
-        command = self._build_interactive_claude_command(workdir=workdir)
-        respawned, respawn_err = await self._respawn_and_send_command(
-            session_name=session_name,
-            command=command,
-            workdir=workdir,
-        )
-        if not respawned:
-            return False, respawn_err
-        return True, ""
+        return await self._ensure_persistent_session(session_name, workdir=workdir, env=env)
 
     async def _send_command(
         self,
@@ -523,6 +497,7 @@ class TmuxRunner:
         workdir: str,
         env: dict[str, str] | None,
         interactive: bool = False,
+        allow_rebuild: bool = True,
     ) -> tuple[bool, str]:
         try:
             # 先退出 copy-mode，避免 send/paste 无效
@@ -531,7 +506,7 @@ class TmuxRunner:
             # 清空当前命令行，避免与用户手工输入粘连（例如: mkdir imagesbash -lc ...）
             code, _, err_text = await self._run_tmux("send-keys", "-t", session_name, "C-u")
             if code != 0:
-                rebuilt, rebuild_err = await self._force_rebuild_session(session_name, workdir=workdir, env=env)
+                rebuilt, rebuild_err = ((False, "已禁用自动重建") if not allow_rebuild else await self._force_rebuild_session(session_name, workdir=workdir, env=env))
                 if not rebuilt:
                     return False, self._format_send_failure(
                         base="tmux 清空输入失败",
@@ -568,7 +543,7 @@ class TmuxRunner:
             try:
                 code, _, err_text = await self._run_tmux("paste-buffer", "-p", "-t", session_name, "-b", buffer_name)
                 if code != 0:
-                    rebuilt, rebuild_err = await self._force_rebuild_session(session_name, workdir=workdir, env=env)
+                    rebuilt, rebuild_err = ((False, "已禁用自动重建") if not allow_rebuild else await self._force_rebuild_session(session_name, workdir=workdir, env=env))
                     if not rebuilt:
                         return False, self._format_send_failure(
                             base="tmux 粘贴命令失败",
@@ -592,7 +567,7 @@ class TmuxRunner:
                 enter_key = "C-m" if interactive else "Enter"
                 code, _, err_text = await self._run_tmux("send-keys", "-t", session_name, enter_key)
                 if code != 0:
-                    rebuilt, rebuild_err = await self._force_rebuild_session(session_name, workdir=workdir, env=env)
+                    rebuilt, rebuild_err = ((False, "已禁用自动重建") if not allow_rebuild else await self._force_rebuild_session(session_name, workdir=workdir, env=env))
                     if not rebuilt:
                         return False, self._format_send_failure(
                             base="tmux 执行命令失败",
@@ -610,8 +585,10 @@ class TmuxRunner:
                             rebuilt=True,
                         )
 
-                # 执行后清空输入行，尽量不在提示符保留 launcher 文本
-                await self._run_tmux("send-keys", "-t", session_name, "C-u")
+                # 非交互模式执行后清空输入行，尽量不在提示符保留 launcher 文本。
+                # 交互式 Claude 在发送 Enter 后再发 C-u 会破坏其 TUI 输入/输出状态。
+                if not interactive:
+                    await self._run_tmux("send-keys", "-t", session_name, "C-u")
                 return True, ""
             finally:
                 await self._run_tmux("delete-buffer", "-b", buffer_name)
@@ -762,244 +739,30 @@ class TmuxRunner:
         script_target = shlex.quote(str(command_file))
         return f"bash {script_target}; exec \"${{SHELL:-bash}}\" -l"
 
-    def _build_interactive_claude_command(self, *, workdir: str) -> str:
+    def _build_interactive_claude_command(self, *, workdir: str, meta: _TmuxTaskMeta) -> str:
+        if meta.settings_file is None:
+            raise ValueError("interactive claude settings_file 不能为空")
         workdir_target = shlex.quote(str(Path(workdir).resolve()))
         claude_bin = shlex.quote(self._claude_cli_bin)
+        settings_file = shlex.quote(str(meta.settings_file))
+        exit_file = shlex.quote(str(meta.exit_file))
         system_prompt = shlex.quote(_INTERACTIVE_SYSTEM_PROMPT)
-        return f"cd {workdir_target} && exec {claude_bin} --append-system-prompt {system_prompt}"
+        return (
+            f"cd {workdir_target} && {claude_bin} --settings {settings_file} "
+            f"--append-system-prompt {system_prompt}; "
+            f"code=$?; printf '%s' \"$code\" > {exit_file}; "
+            f"exec \"${{SHELL:-bash}}\" -l"
+        )
 
-    def _wrap_interactive_prompt(self, *, prompt: str, begin_marker: str, done_marker: str) -> str:
-        _ = begin_marker
-        _ = done_marker
+    def _wrap_interactive_prompt(self, *, prompt: str) -> str:
         safe_prompt = prompt.replace("\r", "").strip()
         if not safe_prompt:
             raise ValueError("prompt 不能为空")
         return safe_prompt
 
-    def _process_interactive_stdout(self, *, meta: _TmuxTaskMeta, event: CLIEvent) -> tuple[CLIEvent | None, bool]:
-        return self._process_interactive_text(meta=meta, text=event.content or "")
-
-    def _process_interactive_partial(self, *, meta: _TmuxTaskMeta, text: str) -> tuple[CLIEvent | None, bool]:
-        return self._process_interactive_text(meta=meta, text=text)
-
-    def _process_interactive_text(self, *, meta: _TmuxTaskMeta, text: str) -> tuple[CLIEvent | None, bool]:
-        raw = self._normalize_terminal_text(text)
-        if not raw:
-            return None, False
-
-        # 保留原始行结构用于识别回复边界（如 "⏺ ..." 与 "❯"），
-        # 在真正产出正文前再做噪音过滤。
-        meta.parse_buffer += raw
-        if len(meta.parse_buffer) > 32768:
-            meta.parse_buffer = meta.parse_buffer[-32768:]
-
-        while True:
-            if not meta.in_reply_block:
-                begin_match = self._search_marker(meta.parse_buffer, CCB_BEGIN_PREFIX, meta.task_id)
-                if begin_match is None:
-                    keep = max(32, len(meta.begin_marker) + 16)
-                    if len(meta.parse_buffer) > keep:
-                        meta.parse_buffer = meta.parse_buffer[-keep:]
-                    return None, False
-
-                meta.in_reply_block = True
-                meta.reply_buffer = ""
-                meta.parse_buffer = meta.parse_buffer[begin_match.end() :]
-                continue
-
-            # 进入 reply block 后，先剥掉可能混入正文开头的 marker 行。
-            head_begin_match = self._search_marker(meta.parse_buffer, CCB_BEGIN_PREFIX, meta.task_id)
-            if head_begin_match is not None and head_begin_match.start() == 0:
-                meta.parse_buffer = meta.parse_buffer[head_begin_match.end() :]
-                continue
-
-            done_match = self._search_marker(meta.parse_buffer, CCB_DONE_PREFIX, meta.task_id)
-            if done_match is None:
-                # 无 marker 场景：仅在识别到“助手回复块”后再输出，避免把进度动画当正文。
-                chunk, consumed, completed = self._extract_assistant_reply_chunk(meta.parse_buffer)
-                if consumed > 0:
-                    meta.parse_buffer = meta.parse_buffer[consumed:]
-                elif len(meta.parse_buffer) > 4096:
-                    # 防止长期无匹配导致缓冲无限增长
-                    meta.parse_buffer = meta.parse_buffer[-2048:]
-
-                if not chunk:
-                    return None, False
-
-                chunk = self._drop_ui_noise(chunk)
-                chunk = self._drop_reply_marker_artifacts(chunk)
-                chunk = self._drop_progress_lines(chunk)
-                stripped = chunk.strip()
-                if not stripped:
-                    return None, False
-
-                if self._looks_like_real_reply(stripped, meta.prompt_text):
-                    normalized = self._normalize_reply_payload(chunk)
-                    if normalized:
-                        return CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=normalized), completed
-                return None, False
-
-            meta.reply_buffer += meta.parse_buffer[: done_match.start()]
-            final = self._drop_ui_noise(meta.reply_buffer)
-            final = self._drop_reply_marker_artifacts(final)
-            final = self._drop_progress_lines(final)
-            final = self._normalize_reply_payload(final)
-            meta.reply_buffer = ""
-            meta.in_reply_block = False
-            meta.parse_buffer = meta.parse_buffer[done_match.end() :]
-
-            if final:
-                return CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=final), True
-            return None, True
-
-    def _normalize_terminal_text(self, text: str) -> str:
-        if not text:
-            return ""
-        normalized = _ANSI_ESCAPE_RE.sub("", text)
-        normalized = normalized.replace("\r", "")
-        normalized = _CONTROL_CHARS_RE.sub("", normalized)
-        return normalized
-
-    def _search_marker(self, text: str, prefix: str, task_id: str):
-        if not text:
-            return None
-        # 兼容 marker 变体：
-        # 1) TGCLI_BEGIN
-        # 2) __TGCLI_BEGIN__
-        # 3) TGCLI_BEGIN <task_id>
-        # 4) TGCLI_BEGIN: <task_id>
-        pattern = (
-            rf"(?<![A-Za-z0-9])"
-            rf"_*{re.escape(prefix)}_*"
-            rf"(?:[ \t]*[:：]?[ \t]*(?:{re.escape(task_id)}|[A-Za-z0-9_-]+))?"
-            rf"(?![A-Za-z0-9])"
-        )
-        return re.search(pattern, text)
-
-    def _drop_ui_noise(self, text: str) -> str:
-        if not text:
-            return ""
-
-        kept: list[str] = []
-        for raw_line in text.split("\n"):
-            line = raw_line.strip()
-            if not line:
-                kept.append(raw_line)
-                continue
-
-            if set(line) <= {"─", "-"}:
-                continue
-            if line.startswith("❯"):
-                continue
-            if "esc" in line and "interrupt" in line:
-                continue
-            if "Update" in line and "brew" in line and "claude-code" in line:
-                continue
-
-            kept.append(raw_line)
-
-        return "\n".join(kept)
-
-    def _drop_reply_marker_artifacts(self, text: str) -> str:
-        if not text:
-            return ""
-
-        kept: list[str] = []
-        for raw_line in text.split("\n"):
-            line = raw_line.strip()
-            if line and _MARKER_ARTIFACT_RE.match(line):
-                continue
-            kept.append(raw_line)
-        return "\n".join(kept)
-
-    def _drop_progress_lines(self, text: str) -> str:
-        if not text:
-            return ""
-
-        kept: list[str] = []
-        for raw_line in text.split("\n"):
-            line = raw_line.strip()
-            if not line:
-                kept.append(raw_line)
-                continue
-            if _PROGRESS_LINE_RE.match(line):
-                continue
-            if line.startswith("⎿") and "Tip:" in line:
-                continue
-            if _READY_PROMPT_RE.search(line):
-                continue
-            kept.append(raw_line)
-        return "\n".join(kept)
-
-    def _normalize_reply_payload(self, text: str) -> str:
-        if not text:
-            return ""
-        lines = text.split("\n")
-        while lines and not lines[0].strip():
-            lines.pop(0)
-        while lines and not lines[-1].strip():
-            lines.pop()
-        if not lines:
-            return ""
-        return "\n" + "\n".join(lines) + "\n"
-
-    def _extract_assistant_reply_chunk(self, text: str) -> tuple[str, int, bool]:
-        if not text:
-            return "", 0, False
-
-        start_match = _ASSISTANT_START_RE.search(text)
-        if start_match is None:
-            return "", 0, False
-
-        body_start = start_match.end()
-        tail = text[body_start:]
-
-        # 若出现新的助手起始符，按“同一回复块重绘”处理，截到下一个起始符前，避免重复输出。
-        next_start = _ASSISTANT_START_RE.search(tail)
-        if next_start is not None:
-            return tail[: next_start.start()], body_start + next_start.start(), True
-
-        candidates: list[int] = []
-        prompt_match = _PROMPT_LINE_RE.search(tail)
-        if prompt_match is not None:
-            candidates.append(prompt_match.start())
-        sep_match = _SEPARATOR_LINE_RE.search(tail)
-        if sep_match is not None:
-            candidates.append(sep_match.start())
-        done_match = self._search_marker(tail, CCB_DONE_PREFIX, "")
-        if done_match is not None:
-            candidates.append(done_match.start())
-
-        if candidates:
-            end = min(candidates)
-            consumed = body_start + end
-            return tail[:end], consumed, True
-
-        # 没有结束边界时，先缓存等待，不提前输出，避免重复推送同一回复。
-        return "", 0, False
-
-    def _looks_like_real_reply(self, text: str, prompt_text: str) -> bool:
-        lower = text.lower()
-        if "tgcli_begin" in lower or "tgcli_done" in lower:
-            return True
-        if any(ch in text for ch in ("。", "！", "？", "，", ":", "：")):
-            return True
-        if "\n" in text and len(text) >= 12:
-            return True
-        if len(text) >= 20:
-            return True
-        if prompt_text and text.strip() == prompt_text.strip():
-            return False
-        return False
-
     async def _session_current_command(self, session_name: str) -> str:
-        try:
-            code, out, _ = await self._run_tmux("display-message", "-p", "-t", session_name, "#{pane_current_command}")
-            if code != 0:
-                return ""
-            return (out or "").strip().lower()
-        except Exception:
-            return ""
+        _ = session_name
+        return ""
 
     def _read_new_text(self, file_path: Path, offset: int) -> tuple[str, int]:
         if not file_path.exists():
@@ -1020,6 +783,61 @@ class TmuxRunner:
 
         events = [CLIEvent(type=EventType.STDOUT, task_id=task_id, content=line) for line in lines if line]
         return partial, events
+
+    def _inject_claude_settings(self, argv: list[str], artifacts: ClaudeStopArtifacts) -> list[str]:
+        if not argv:
+            return argv
+        return [argv[0], "--settings", str(artifacts.settings_file), *argv[1:]]
+
+    def _build_claude_artifacts(
+        self,
+        *,
+        task_id: str,
+        provider: str | None,
+        interactive: bool,
+    ) -> ClaudeStopArtifacts | None:
+        _ = interactive
+        if provider != "claude_code":
+            return None
+        return build_task_artifacts(task_id=task_id, data_dir=self._data_dir)
+
+    def _read_response_once(self, response_file: Path) -> str | None:
+        try:
+            content = response_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        if content.strip():
+            return content
+        return None
+
+    async def _read_response_with_retry(self, response_file: Path) -> str | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 0.6
+        while True:
+            content = self._read_response_once(response_file)
+            if content is not None:
+                return content
+
+            if loop.time() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
+    def _cleanup_artifacts(self, meta: _TmuxTaskMeta | ClaudeStopArtifacts | None) -> None:
+        if meta is None:
+            return
+        if isinstance(meta, ClaudeStopArtifacts):
+            paths = (meta.settings_file, meta.response_file)
+        else:
+            paths = (meta.settings_file, meta.response_file)
+        for path in paths:
+            if path is None:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _read_exit_code(self, exit_file: Path) -> int | None:
         try:

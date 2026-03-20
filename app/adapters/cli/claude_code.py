@@ -18,6 +18,7 @@ class RunnerProtocol(Protocol):
         env: dict[str, str] | None = None,
         terminal_key: str | None = None,
         interactive: bool = False,
+        provider: str | None = None,
     ) -> AsyncIterator[CLIEvent]: ...
 
     async def ensure_claude_interactive_session(
@@ -56,6 +57,7 @@ class ClaudeCodeAdapter(BaseCLIAdapter):
             timeout_sec=task.timeout_sec,
             terminal_key=terminal_key,
             interactive=interactive,
+            provider=self.provider,
         ):
             yield event
 
