@@ -41,7 +41,7 @@ class AppContainer:
         self.task_store = MemoryTaskStore()
         self.session_store = MemorySessionStore()
 
-        self.runner = SubprocessRunner(data_dir=settings.tmux_data_dir)
+        self.runner = SubprocessRunner()
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
             data_dir=settings.tmux_data_dir,

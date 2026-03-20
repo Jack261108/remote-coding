@@ -29,7 +29,6 @@ class CodexCLIAdapter(BaseCLIAdapter):
             timeout_sec=task.timeout_sec,
             terminal_key=terminal_key,
             interactive=interactive,
-            provider=self.provider,
         ):
             yield event
 
