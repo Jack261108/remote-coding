@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from app.adapters.cli.base import BaseCLIAdapter
+from app.adapters.cli.claude_code import ClaudeCodeAdapter, RunnerProtocol
+from app.adapters.cli.codex_cli import CodexCLIAdapter
+from app.adapters.cli.gemini_cli import GeminiCLIAdapter
+from app.adapters.process.subprocess_runner import SubprocessRunner
+from app.adapters.process.tmux_runner import TmuxRunner
+from app.config.settings import Settings
+
+
+class CLIAdapterFactory:
+    _ALIASES = {
+        "claude": "claude_code",
+        "claude_code": "claude_code",
+        "claude-code": "claude_code",
+        "codex": "codex",
+        "codex_cli": "codex",
+        "codex-cli": "codex",
+        "gemini": "gemini",
+        "gemini_cli": "gemini",
+        "gemini-cli": "gemini",
+    }
+
+    def __init__(self, settings: Settings, runner: SubprocessRunner, tmux_runner: TmuxRunner | None = None) -> None:
+        self._claude_tmux_enabled = settings.claude_tmux_mode and tmux_runner is not None
+        self._tmux_runner = tmux_runner
+
+        claude_runner: RunnerProtocol = tmux_runner if self._claude_tmux_enabled and tmux_runner is not None else runner
+        self._adapters: dict[str, BaseCLIAdapter] = {
+            "claude_code": ClaudeCodeAdapter(cli_bin=settings.claude_cli_bin, runner=claude_runner),
+            "codex": CodexCLIAdapter(cli_bin=settings.codex_cli_bin, runner=runner),
+            "gemini": GeminiCLIAdapter(cli_bin=settings.gemini_cli_bin, runner=runner),
+        }
+
+    def normalize_provider(self, provider: str) -> str:
+        key = provider.strip().lower()
+        normalized = self._ALIASES.get(key)
+        if normalized is None:
+            raise ValueError(f"不支持 provider: {provider}")
+        return normalized
+
+    def get(self, provider: str) -> BaseCLIAdapter:
+        normalized = self.normalize_provider(provider)
+        return self._adapters[normalized]
+
+    def available_providers(self) -> list[str]:
+        return sorted(self._adapters.keys())
+
+    async def close_terminal(self, terminal_key: str) -> bool:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False
+        return await self._tmux_runner.close_terminal(terminal_key)
+
+    async def ensure_terminal(self, *, terminal_key: str, workdir: str) -> tuple[bool, str]:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
+        return await self._tmux_runner.ensure_terminal(terminal_key=terminal_key, workdir=workdir)
+
+    async def ensure_claude_interactive_session(self, *, terminal_key: str, workdir: str) -> tuple[bool, str]:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
+
+        claude_adapter = self._adapters.get("claude_code")
+        if isinstance(claude_adapter, ClaudeCodeAdapter):
+            return await claude_adapter.ensure_interactive_session(terminal_key=terminal_key, workdir=workdir)
+
+        return False, "claude adapter 不可用"
+
+    async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
+        return await self._tmux_runner.reveal_terminal(terminal_key)
