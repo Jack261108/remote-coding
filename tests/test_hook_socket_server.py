@@ -102,12 +102,13 @@ async def test_hook_socket_server_resolves_permission_tool_use_id_and_replies(tm
     assert pending == ("Bash", "tool-1", {"command": "pwd"})
     assert seen[-1].tool_use_id == "tool-1"
 
-    await server.respond_to_permission(tool_use_id="tool-1", decision="allow", reason="ok")
+    sent = await server.respond_to_permission(tool_use_id="tool-1", decision="allow", reason="ok")
     response = await asyncio.wait_for(reader.read(), timeout=1)
     writer.close()
     await writer.wait_closed()
     await server.stop()
 
+    assert sent is True
     assert json.loads(response.decode("utf-8")) == {"decision": "allow", "reason": "ok"}
 
 

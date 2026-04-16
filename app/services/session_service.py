@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import uuid
 
-from app.adapters.storage.memory import MemorySessionStore
+from app.adapters.storage.memory import SessionContextStore
 from app.domain.models import SessionContext, utc_now
 
 
 class SessionService:
-    def __init__(self, store: MemorySessionStore) -> None:
+    def __init__(self, store: SessionContextStore) -> None:
         self._store = store
 
     async def get_or_create(

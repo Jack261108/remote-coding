@@ -99,3 +99,30 @@ class SessionContext:
     claude_chat_active: bool = False
     claude_session_id: str | None = None
     updated_at: datetime = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict:
+        return {
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "provider": self.provider,
+            "workdir": self.workdir,
+            "terminal_mode": self.terminal_mode,
+            "terminal_id": self.terminal_id,
+            "claude_chat_active": self.claude_chat_active,
+            "claude_session_id": self.claude_session_id,
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "SessionContext":
+        return cls(
+            user_id=int(payload["user_id"]),
+            session_id=str(payload["session_id"]),
+            provider=str(payload["provider"]),
+            workdir=str(payload["workdir"]),
+            terminal_mode=bool(payload.get("terminal_mode", False)),
+            terminal_id=str(payload["terminal_id"]) if payload.get("terminal_id") is not None else None,
+            claude_chat_active=bool(payload.get("claude_chat_active", False)),
+            claude_session_id=str(payload["claude_session_id"]) if payload.get("claude_session_id") is not None else None,
+            updated_at=datetime.fromisoformat(str(payload["updated_at"])),
+        )

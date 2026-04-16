@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
@@ -15,8 +16,9 @@ from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.process.subprocess_runner import SubprocessRunner
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.process.transcript_writer import TranscriptWriter
+from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
+from app.adapters.storage.memory import MemoryTaskStore
 from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.router import create_router
@@ -53,7 +55,6 @@ class AppContainer:
         self.dispatcher = Dispatcher()
 
         self.task_store = MemoryTaskStore()
-        self.session_store = MemorySessionStore()
 
         self.runner = SubprocessRunner()
         self.claude_paths = ClaudePaths.resolve(settings.claude_config_dir)
@@ -64,6 +65,7 @@ class AppContainer:
         )
         self.hook_socket_server = HookSocketServer(settings.claude_hook_socket_path)
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
+        self.session_context_store = FileSessionContextStore(self.file_session_store)
         self.transcript_writer = TranscriptWriter(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
         self.structured_session_store = SessionStore(self.file_session_store)
@@ -81,7 +83,7 @@ class AppContainer:
             tmux_runner=self.tmux_runner,
         )
 
-        self.session_service = SessionService(store=self.session_store)
+        self.session_service = SessionService(store=self.session_context_store)
         self.task_service = TaskService(
             settings=settings,
             task_store=self.task_store,
@@ -100,6 +102,7 @@ class AppContainer:
         if self.settings.claude_install_hooks:
             self.hook_installer.install()
         await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
+        await self._restore_session_bindings()
         self._started = True
 
     async def stop(self) -> None:
@@ -129,6 +132,29 @@ class AppContainer:
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
+
+    async def _restore_session_bindings(self) -> None:
+        sessions = await self.session_service.list_all()
+        for session in sessions:
+            claude_session_id = session.claude_session_id
+            if not claude_session_id:
+                continue
+            state = self.structured_session_store.get_or_create(
+                session_id=claude_session_id,
+                provider="claude_code",
+                workdir=session.workdir,
+                terminal_id=session.terminal_id,
+                user_id=session.user_id,
+            )
+            if state.turns or state.tool_calls or state.pending_permission is not None:
+                continue
+            session_file = self.claude_jsonl_parser.session_file_path(session_id=claude_session_id, cwd=session.workdir)
+            if session_file.exists():
+                await self.sync_claude_session(claude_session_id, session.workdir)
+                continue
+            session.claude_session_id = None
+            session.updated_at = datetime.now(session.updated_at.tzinfo) if session.updated_at.tzinfo else datetime.now()
+            await self.session_service.clear_claude_session(user_id=session.user_id)
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         existing = self._jsonl_sync_tasks.get(session_id)

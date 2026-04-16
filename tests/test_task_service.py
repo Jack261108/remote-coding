@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from app.adapters.cli.base import BaseCLIAdapter
-from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
+from app.adapters.storage.file_session_context_store import FileSessionContextStore
+from app.adapters.storage.file_session_store import FileSessionStore
+from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
 from app.domain.models import CLIEvent, EventType, ExecutionTask, TaskStatus
 from app.services.session_service import SessionService
@@ -111,6 +113,10 @@ def make_settings(tmp_path: Path, *, claude_tmux_mode: bool = False) -> Settings
     )
 
 
+def make_file_backed_session_service(tmp_path: Path) -> SessionService:
+    return SessionService(FileSessionContextStore(FileSessionStore(str(tmp_path))))
+
+
 @pytest.mark.asyncio
 async def test_task_success(tmp_path: Path) -> None:
     adapter = StubAdapter(
@@ -124,7 +130,7 @@ async def test_task_success(tmp_path: Path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=make_file_backed_session_service(tmp_path),
         cli_factory=StubFactory(adapter),
         semaphore=asyncio.Semaphore(2),
     )
@@ -153,7 +159,7 @@ async def test_task_failed(tmp_path: Path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=make_file_backed_session_service(tmp_path),
         cli_factory=StubFactory(adapter),
         semaphore=asyncio.Semaphore(2),
     )
@@ -180,7 +186,7 @@ async def test_task_timeout(tmp_path: Path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=make_file_backed_session_service(tmp_path),
         cli_factory=StubFactory(adapter),
         semaphore=asyncio.Semaphore(2),
     )
@@ -205,7 +211,7 @@ async def test_task_cancel_call(tmp_path: Path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=make_file_backed_session_service(tmp_path),
         cli_factory=StubFactory(adapter),
         semaphore=asyncio.Semaphore(2),
     )
@@ -237,7 +243,7 @@ async def test_output_limit_truncate(tmp_path: Path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=make_file_backed_session_service(tmp_path),
         cli_factory=StubFactory(adapter),
         semaphore=asyncio.Semaphore(2),
     )
@@ -265,7 +271,7 @@ async def test_tmux_mode_passes_terminal_key(tmp_path: Path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=make_file_backed_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(2),
     )
@@ -282,7 +288,7 @@ async def test_tmux_mode_passes_terminal_key(tmp_path: Path) -> None:
 async def test_close_terminal_success(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
-    session_service = SessionService(MemorySessionStore())
+    session_service = make_file_backed_session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -315,7 +321,7 @@ async def test_close_terminal_success(tmp_path: Path) -> None:
 async def test_open_claude_chat_session_rebuilds_terminal(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
-    session_service = SessionService(MemorySessionStore())
+    session_service = make_file_backed_session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -355,7 +361,7 @@ async def test_open_claude_chat_session_rebuilds_terminal(tmp_path: Path) -> Non
 async def test_open_claude_chat_session_creates_terminal_without_previous_session(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
-    session_service = SessionService(MemorySessionStore())
+    session_service = make_file_backed_session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -389,7 +395,7 @@ async def test_create_and_run_claude_uses_claude_provider_in_chat_mode(tmp_path:
         ]
     )
     factory = StubFactory(adapter)
-    session_service = SessionService(MemorySessionStore())
+    session_service = make_file_backed_session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -429,7 +435,7 @@ async def test_create_and_run_fails_when_tmux_ensure_fails(tmp_path: Path) -> No
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=make_file_backed_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(2),
     )
@@ -447,7 +453,7 @@ async def test_create_and_run_passes_bound_claude_session_id_in_chat_mode(tmp_pa
         ]
     )
     factory = StubFactory(adapter)
-    session_service = SessionService(MemorySessionStore())
+    session_service = make_file_backed_session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -480,7 +486,7 @@ async def test_create_and_run_allows_unbound_first_turn_in_chat_mode(tmp_path: P
         ]
     )
     factory = StubFactory(adapter)
-    session_service = SessionService(MemorySessionStore())
+    session_service = make_file_backed_session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -506,7 +512,7 @@ async def test_create_and_run_allows_unbound_first_turn_in_chat_mode(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_get_or_create_keeps_claude_chat_active_when_not_explicitly_set(tmp_path: Path) -> None:
-    session_service = SessionService(MemorySessionStore())
+    session_service = make_file_backed_session_service(tmp_path)
     await session_service.get_or_create(
         user_id=1,
         provider="claude_code",
@@ -523,3 +529,26 @@ async def test_get_or_create_keeps_claude_chat_active_when_not_explicitly_set(tm
     )
 
     assert session.claude_chat_active is True
+
+
+@pytest.mark.asyncio
+async def test_file_backed_session_service_persists_context(tmp_path: Path) -> None:
+    service = make_file_backed_session_service(tmp_path)
+    session = await service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    reloaded = make_file_backed_session_service(tmp_path)
+    restored = await reloaded.get(1)
+
+    assert session.session_id
+    assert restored is not None
+    assert restored.session_id == session.session_id
+    assert restored.terminal_id == "user_1"
+    assert restored.claude_chat_active is True
+    assert restored.claude_session_id == "claude-session-1"

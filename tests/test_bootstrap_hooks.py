@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -19,6 +20,7 @@ def make_settings(tmp_path, *, install_hooks: bool = True) -> Settings:
             "DEFAULT_TIMEOUT_SEC": 10,
             "MAX_CONCURRENT_TASKS": 1,
             "CLAUDE_TMUX_MODE": False,
+            "TMUX_DATA_DIR": str(tmp_path),
             "CLAUDE_CLI_BIN": "claude",
             "CLAUDE_INSTALL_HOOKS": install_hooks,
             "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
@@ -200,3 +202,115 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
     await container.stop()
 
     assert container._jsonl_sync_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_start_restores_persisted_claude_session_snapshot(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = make_settings(tmp_path, install_hooks=False)
+    first = AppContainer(settings)
+    session = await first.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await first.session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="claude-session-1",
+        workdir=str(tmp_path),
+    )
+    project_dir = str(tmp_path).replace("/", "-").replace(".", "-")
+    session_file = first.claude_paths.projects_dir / project_dir / "claude-session-1.jsonl"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-04-16T10:00:01+00:00",
+                        "message": {
+                            "id": "a1",
+                            "content": [{"type": "text", "text": "恢复后的回复"}],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    second = AppContainer(settings)
+
+    async def fake_start(handler, permission_failure_handler=None):
+        return None
+
+    async def fake_stop():
+        return None
+
+    async def fake_close():
+        return None
+
+    monkeypatch.setattr(second.hook_socket_server, "start", fake_start)
+    monkeypatch.setattr(second.hook_socket_server, "stop", fake_stop)
+    monkeypatch.setattr(second.bot.session, "close", fake_close)
+
+    await second.start()
+
+    restored_session = await second.session_service.get(1)
+    restored_state = second.structured_session_store.get("claude-session-1")
+
+    assert restored_session is not None
+    assert restored_session.session_id == session.session_id
+    assert restored_session.claude_session_id == "claude-session-1"
+    assert restored_state is not None
+    assert restored_state.user_id == 1
+    assert restored_state.terminal_id == "user_1"
+    assert restored_state.last_reply == "恢复后的回复"
+
+    await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_clears_stale_claude_session_binding_when_snapshot_missing(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = make_settings(tmp_path, install_hooks=False)
+    first = AppContainer(settings)
+    await first.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await first.session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="missing-session",
+        workdir=str(tmp_path),
+    )
+
+    second = AppContainer(settings)
+
+    async def fake_start(handler, permission_failure_handler=None):
+        return None
+
+    async def fake_stop():
+        return None
+
+    async def fake_close():
+        return None
+
+    monkeypatch.setattr(second.hook_socket_server, "start", fake_start)
+    monkeypatch.setattr(second.hook_socket_server, "stop", fake_stop)
+    monkeypatch.setattr(second.bot.session, "close", fake_close)
+
+    await second.start()
+
+    restored_session = await second.session_service.get(1)
+
+    assert restored_session is not None
+    assert restored_session.claude_session_id is None
+    assert restored_session.claude_chat_active is True
+
+    await second.stop()

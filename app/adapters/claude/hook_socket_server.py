@@ -55,22 +55,24 @@ class HookSocketServer:
         with suppress(FileNotFoundError):
             self._socket_path.unlink()
 
-    async def respond_to_permission(self, *, tool_use_id: str, decision: str, reason: str | None = None) -> None:
+    async def respond_to_permission(self, *, tool_use_id: str, decision: str, reason: str | None = None) -> bool:
         async with self._lock:
             pending = self._pending_permissions.pop(tool_use_id, None)
         if pending is None:
-            return
+            return False
         await self._write_response(pending=pending, decision=decision, reason=reason)
+        return True
 
-    async def respond_to_permission_by_session(self, *, session_id: str, decision: str, reason: str | None = None) -> None:
+    async def respond_to_permission_by_session(self, *, session_id: str, decision: str, reason: str | None = None) -> bool:
         async with self._lock:
             candidates = [item for item in self._pending_permissions.values() if item.session_id == session_id]
             pending = max(candidates, key=lambda item: item.received_at, default=None)
             if pending is not None:
                 self._pending_permissions.pop(pending.tool_use_id, None)
         if pending is None:
-            return
+            return False
         await self._write_response(pending=pending, decision=decision, reason=reason)
+        return True
 
     async def cancel_pending_permissions(self, *, session_id: str) -> None:
         async with self._lock:

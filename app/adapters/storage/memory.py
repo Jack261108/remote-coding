@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
+from typing import Protocol
 
 from app.domain.models import SessionContext, TaskRecord
 
@@ -32,6 +33,14 @@ class MemoryTaskStore:
     async def iter_all(self) -> Iterable[TaskRecord]:
         async with self._lock:
             return list(self._tasks.values())
+
+
+class SessionContextStore(Protocol):
+    async def get(self, user_id: int) -> SessionContext | None: ...
+
+    async def list_all(self) -> list[SessionContext]: ...
+
+    async def save(self, session: SessionContext) -> None: ...
 
 
 class MemorySessionStore:

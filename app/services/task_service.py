@@ -271,7 +271,9 @@ class TaskService:
             return False, "当前没有待处理的权限请求"
         pending = state.pending_permission
         tool_use_id = pending.tool_use_id
-        await self._hook_socket_server.respond_to_permission(tool_use_id=tool_use_id, decision=decision, reason=reason)
+        sent = await self._hook_socket_server.respond_to_permission(tool_use_id=tool_use_id, decision=decision, reason=reason)
+        if not sent:
+            return False, "待处理权限请求已失效，请等待 Claude 重新发起"
         event_type = SessionEventType.PERMISSION_APPROVED if decision == "allow" else SessionEventType.PERMISSION_DENIED
         updated = self._structured_session_store.process(
             SessionEvent(
