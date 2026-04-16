@@ -149,7 +149,7 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
     state = container.structured_session_store.get("claude-session-1")
     assert state is not None
     assert state.user_id == 1
-    assert state.terminal_id == "user_1"
+    assert state.terminal_id == session.terminal_id
     assert state.phase == SessionPhase.WAITING_FOR_INPUT
     assert state.last_reply == "干净回复"
 
@@ -313,23 +313,28 @@ async def test_session_end_keeps_pending_sync_until_flushed(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_path) -> None:
+async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    await container.session_service.switch(
+    session_one = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
         terminal_mode=True,
         claude_chat_active=True,
     )
-    await container.session_service.switch(
-        user_id=2,
-        provider="claude_code",
-        workdir=str(tmp_path),
-        terminal_mode=True,
-        claude_chat_active=True,
-    )
+    session_two = type(session_one).from_dict({
+        **session_one.to_dict(),
+        "user_id": 2,
+        "session_id": "session-2",
+        "terminal_id": "user_2",
+        "claude_session_id": None,
+    })
+
+    async def fake_list_all():
+        return [session_one, session_two]
+
+    monkeypatch.setattr(container.session_service, "list_all", fake_list_all)
 
     matched = await container._match_session_context(
         HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running")
@@ -341,7 +346,7 @@ async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_
 @pytest.mark.asyncio
 async def test_restore_session_bindings_keeps_active_terminal_binding_when_snapshot_missing(tmp_path) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
-    await container.session_service.switch(
+    session = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -354,10 +359,10 @@ async def test_restore_session_bindings_keeps_active_terminal_binding_when_snaps
         workdir=str(tmp_path),
     )
     terminal_state = container.structured_session_store.get_or_create(
-        session_id="tgcli_user_1",
+        session_id=f"tgcli_{session.terminal_id}",
         provider="claude_code",
         workdir=str(tmp_path),
-        terminal_id="user_1",
+        terminal_id=session.terminal_id,
         user_id=1,
     )
     terminal_state.phase = SessionPhase.PROCESSING
@@ -456,24 +461,51 @@ async def test_start_restores_persisted_claude_session_snapshot(tmp_path, monkey
     async def fake_close():
         return None
 
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        second.structured_session_store.process(
+            second.structured_session_store.process.__globals__["SessionEvent"](
+                session_id=session_id,
+                type=second.structured_session_store.process.__globals__["SessionEventType"].FILE_SYNCED,
+                payload={
+                    "turns": [
+                        {
+                            "turn_id": "a1",
+                            "role": "assistant",
+                            "text": "\n恢复后的回复\n",
+                            "source": "jsonl",
+                            "is_complete": True,
+                            "started_at": "2026-04-16T10:00:01+00:00",
+                            "ended_at": "2026-04-16T10:00:01+00:00",
+                        }
+                    ],
+                    "tool_calls": {},
+                    "last_reply": "恢复后的回复",
+                    "last_reply_role": "assistant",
+                    "last_offset": 12,
+                },
+            )
+        )
+
     monkeypatch.setattr(second.hook_socket_server, "start", fake_start)
     monkeypatch.setattr(second.hook_socket_server, "stop", fake_stop)
     monkeypatch.setattr(second.bot.session, "close", fake_close)
+    monkeypatch.setattr(second, "sync_claude_session", fake_sync)
 
-    await second.start()
+    try:
+        await second.start()
 
-    restored_session = await second.session_service.get(1)
-    restored_state = second.structured_session_store.get("claude-session-1")
+        restored_session = await second.session_service.get(1)
+        restored_state = second.structured_session_store.get("claude-session-1")
 
-    assert restored_session is not None
-    assert restored_session.session_id == session.session_id
-    assert restored_session.claude_session_id == "claude-session-1"
-    assert restored_state is not None
-    assert restored_state.user_id == 1
-    assert restored_state.terminal_id == "user_1"
-    assert restored_state.last_reply == "恢复后的回复"
-
-    await second.stop()
+        assert restored_session is not None
+        assert restored_session.session_id == session.session_id
+        assert restored_session.claude_session_id == "claude-session-1"
+        assert restored_state is not None
+        assert restored_state.user_id == 1
+        assert restored_state.terminal_id == restored_session.terminal_id
+        assert restored_state.last_reply == "恢复后的回复"
+    finally:
+        await second.stop()
 
 
 @pytest.mark.asyncio
@@ -508,12 +540,13 @@ async def test_start_clears_stale_claude_session_binding_when_snapshot_missing(t
     monkeypatch.setattr(second.hook_socket_server, "stop", fake_stop)
     monkeypatch.setattr(second.bot.session, "close", fake_close)
 
-    await second.start()
+    try:
+        await second.start()
 
-    restored_session = await second.session_service.get(1)
+        restored_session = await second.session_service.get(1)
 
-    assert restored_session is not None
-    assert restored_session.claude_session_id is None
-    assert restored_session.claude_chat_active is True
-
-    await second.stop()
+        assert restored_session is not None
+        assert restored_session.claude_session_id is None
+        assert restored_session.claude_chat_active is True
+    finally:
+        await second.stop()
