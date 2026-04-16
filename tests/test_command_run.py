@@ -262,3 +262,32 @@ async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn()
     assert all("半截回复" not in item for item in message.answers)
     assert all("tmux 噪音" not in item for item in message.answers)
     assert message.answers[-1].startswith("任务执行完成")
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_before_exit() -> None:
+    message = DummyMessage()
+    turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="tmux 噪音\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.02, 0.06],
+    )
+
+    async def append_new_turn() -> None:
+        await asyncio.sleep(0.05)
+        turns.append(ConversationTurn(turn_id="turn-late", role="assistant", text="\n迟到回复\n", is_complete=True))
+
+    updater = asyncio.create_task(append_new_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.18)
+    await updater
+
+    assert "旧回复" not in "\n".join(message.answers)
+    assert "tmux 噪音" not in "\n".join(message.answers)
+    assert "迟到回复" in message.answers[2]

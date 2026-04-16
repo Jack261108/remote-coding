@@ -208,6 +208,7 @@ class TmuxRunner:
 
     async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
         position = 0
+        latest_completed_turn_id_before_run: str | None = None
         if meta.interactive:
             state = self._session_store.mark_interactive_turn_processing(
                 terminal_id=meta.terminal_id,
@@ -219,6 +220,12 @@ class TmuxRunner:
                 if state.session_id.startswith("claude-session-"):
                     meta.claude_session_id = state.session_id
                 position = state.checkpoint.last_offset
+            latest_completed_turn_id_before_run = self._session_store.latest_completed_assistant_turn_id(
+                terminal_id=meta.terminal_id,
+                workdir=meta.workdir,
+                claude_session_id=meta.claude_session_id,
+                fallback_session_id=meta.session_name,
+            )
         partial = ""
         timed_out = False
         exit_code: int | None = None
@@ -259,6 +266,15 @@ class TmuxRunner:
                     fallback_session_id=meta.session_name,
                 )
                 if completion_phase is not None:
+                    exit_code = 0
+                    break
+                latest_completed_turn_id = self._session_store.latest_completed_assistant_turn_id(
+                    terminal_id=meta.terminal_id,
+                    workdir=meta.workdir,
+                    claude_session_id=meta.claude_session_id,
+                    fallback_session_id=meta.session_name,
+                )
+                if latest_completed_turn_id and latest_completed_turn_id != latest_completed_turn_id_before_run:
                     exit_code = 0
                     break
 

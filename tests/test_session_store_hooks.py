@@ -197,3 +197,37 @@ def test_session_store_file_synced_replaces_old_state_and_interrupts_on_end(tmp_
 
     assert state.phase == SessionPhase.ENDED
     assert state.tool_calls["tool-2"].status == ToolStatus.INTERRUPTED
+
+
+def test_session_store_file_synced_promotes_complete_turn_without_waiting_hook(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-1", workdir="/tmp/project", terminal_id="user_1")
+    state.phase = SessionPhase.PROCESSING
+    store._persist(state)
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-1",
+            type=SessionEventType.FILE_SYNCED,
+            payload={
+                "turns": [
+                    {
+                        "turn_id": "a1",
+                        "role": "assistant",
+                        "text": "\n补同步后的回复\n",
+                        "source": "jsonl",
+                        "is_complete": True,
+                        "started_at": "2026-04-16T10:00:03+00:00",
+                        "ended_at": "2026-04-16T10:00:03+00:00",
+                    }
+                ],
+                "tool_calls": {},
+                "last_reply": "补同步后的回复",
+                "last_reply_role": "assistant",
+                "last_offset": 18,
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+    assert state.last_reply == "补同步后的回复"

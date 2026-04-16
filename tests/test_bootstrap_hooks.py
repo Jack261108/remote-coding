@@ -26,6 +26,7 @@ def make_settings(tmp_path, *, install_hooks: bool = True) -> Settings:
             "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
             "CLAUDE_HOOK_SOCKET_PATH": str(tmp_path / "hook.sock"),
             "CLAUDE_JSONL_SYNC_DEBOUNCE_MS": 10,
+            "CLAUDE_PERIODIC_RECHECK_MS": 10,
             "CODEX_CLI_BIN": "codex",
             "GEMINI_CLI_BIN": "gemini",
             "ALLOWED_WORKDIRS": str(tmp_path),
@@ -202,6 +203,44 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
     await container.stop()
 
     assert container._jsonl_sync_tasks == {}
+    assert container._periodic_recheck_task is None
+
+
+@pytest.mark.asyncio
+async def test_periodic_recheck_syncs_processing_claude_session(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await container.session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="claude-session-1",
+        workdir=str(tmp_path),
+    )
+    state = container.structured_session_store.get_or_create(
+        session_id="claude-session-1",
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        user_id=1,
+    )
+    state.phase = SessionPhase.PROCESSING
+    container.structured_session_store._persist(state)
+
+    seen: list[tuple[str, str]] = []
+
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        seen.append((session_id, cwd))
+
+    monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+
+    await container._recheck_active_claude_sessions()
+
+    assert seen == [("claude-session-1", str(tmp_path))]
 
 
 @pytest.mark.asyncio

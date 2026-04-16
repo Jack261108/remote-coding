@@ -63,3 +63,50 @@ def test_session_store_interactive_completion_waits_for_bound_claude_session(tmp
     )
 
     assert phase is None
+
+
+def test_session_store_returns_latest_completed_assistant_turn_id(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-1", workdir="/tmp", terminal_id="user_1")
+    store.get_or_create(session_id="tgcli_user_1", workdir="/tmp", terminal_id="user_1")
+    store.process(
+        SessionEvent(
+            session_id=state.session_id,
+            type=SessionEventType.FILE_SYNCED,
+            payload={
+                "turns": [
+                    {
+                        "turn_id": "u1",
+                        "role": "user",
+                        "text": "\n你好\n",
+                        "source": "jsonl",
+                        "is_complete": True,
+                        "started_at": "2026-04-16T10:00:00+00:00",
+                        "ended_at": "2026-04-16T10:00:00+00:00",
+                    },
+                    {
+                        "turn_id": "a1",
+                        "role": "assistant",
+                        "text": "\n第一条\n",
+                        "source": "jsonl",
+                        "is_complete": True,
+                        "started_at": "2026-04-16T10:00:01+00:00",
+                        "ended_at": "2026-04-16T10:00:01+00:00",
+                    },
+                ],
+                "tool_calls": {},
+                "last_reply": "第一条",
+                "last_reply_role": "assistant",
+                "last_offset": 12,
+            },
+        )
+    )
+
+    turn_id = store.latest_completed_assistant_turn_id(
+        terminal_id="user_1",
+        workdir="/tmp",
+        claude_session_id="claude-session-1",
+        fallback_session_id="tgcli_user_1",
+    )
+
+    assert turn_id == "a1"

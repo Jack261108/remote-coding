@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     claude_hook_socket_path: str = Field("/tmp/remote-coding-claude.sock", alias="CLAUDE_HOOK_SOCKET_PATH")
     claude_install_hooks: bool = Field(True, alias="CLAUDE_INSTALL_HOOKS")
     claude_jsonl_sync_debounce_ms: int = Field(100, alias="CLAUDE_JSONL_SYNC_DEBOUNCE_MS")
+    claude_periodic_recheck_ms: int = Field(500, alias="CLAUDE_PERIODIC_RECHECK_MS")
     codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
     gemini_cli_bin: str = Field("gemini", alias="GEMINI_CLI_BIN")
 
@@ -126,6 +127,7 @@ class Settings(BaseSettings):
         "tg_request_timeout_sec",
         "tg_polling_retry_delay_sec",
         "claude_jsonl_sync_debounce_ms",
+        "claude_periodic_recheck_ms",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:

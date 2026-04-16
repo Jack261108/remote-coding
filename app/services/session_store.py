@@ -116,6 +116,28 @@ class SessionStore:
             return state.phase
         return None
 
+    def latest_completed_assistant_turn_id(
+        self,
+        *,
+        terminal_id: str | None,
+        workdir: str,
+        claude_session_id: str | None = None,
+        fallback_session_id: str | None = None,
+    ) -> str | None:
+        state = self.get_interactive_state(
+            terminal_id=terminal_id,
+            workdir=workdir,
+            claude_session_id=claude_session_id,
+            fallback_session_id=fallback_session_id,
+            require_claude_session=True,
+        )
+        if state is None:
+            return None
+        for turn in reversed(state.turns):
+            if turn.role == "assistant" and turn.is_complete:
+                return turn.turn_id
+        return None
+
     def get_or_create(
         self,
         *,

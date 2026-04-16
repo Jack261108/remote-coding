@@ -27,7 +27,7 @@ from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.domain.hook_models import HookEvent
-from app.domain.session_models import SessionEvent, SessionEventType
+from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,7 @@ class AppContainer:
             hook_socket_server=self.hook_socket_server,
         )
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
+        self._periodic_recheck_task: asyncio.Task[None] | None = None
         self._started = False
 
     async def start(self) -> None:
@@ -103,12 +104,14 @@ class AppContainer:
             self.hook_installer.install()
         await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
         await self._restore_session_bindings()
+        self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
         self._started = True
 
     async def stop(self) -> None:
         if not self._started:
             await self.bot.session.close()
             return
+        await self._stop_periodic_recheck_task()
         await self._stop_jsonl_sync_tasks()
         await self.hook_socket_server.stop()
         await self.bot.session.close()
@@ -124,6 +127,15 @@ class AppContainer:
             )
         )
 
+    async def _stop_periodic_recheck_task(self) -> None:
+        task = self._periodic_recheck_task
+        self._periodic_recheck_task = None
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
     async def _stop_jsonl_sync_tasks(self) -> None:
         tasks = list(self._jsonl_sync_tasks.values())
         self._jsonl_sync_tasks.clear()
@@ -132,6 +144,29 @@ class AppContainer:
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
+
+    async def _periodic_recheck_loop(self) -> None:
+        interval_sec = self.settings.claude_periodic_recheck_ms / 1000
+        try:
+            while True:
+                await asyncio.sleep(interval_sec)
+                await self._recheck_active_claude_sessions()
+        except asyncio.CancelledError:
+            raise
+
+    async def _recheck_active_claude_sessions(self) -> None:
+        sessions = await self.session_service.list_all()
+        for session in sessions:
+            if session.provider != "claude_code" or not session.claude_chat_active:
+                continue
+            if not session.claude_session_id:
+                continue
+            state = self.structured_session_store.get(session.claude_session_id)
+            if state is None:
+                continue
+            if state.phase not in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+                continue
+            await self.sync_claude_session(session.claude_session_id, session.workdir)
 
     async def _restore_session_bindings(self) -> None:
         sessions = await self.session_service.list_all()
