@@ -6,11 +6,9 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.adapters.process.transcript_writer import TranscriptWriter
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase
-from app.domain.transcript_models import TranscriptEntry, TranscriptEntryKind
 from app.services.session_store import SessionStore
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
@@ -48,7 +46,6 @@ class TmuxRunner:
         partial_flush_sec: float = 0.5,
         claude_cli_bin: str = "claude",
         file_store: FileSessionStore | None = None,
-        transcript_writer: TranscriptWriter | None = None,
         session_store: SessionStore | None = None,
     ) -> None:
         self._tmux_bin = tmux_bin
@@ -62,9 +59,7 @@ class TmuxRunner:
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
         self._file_store = file_store or FileSessionStore(str(self._data_dir))
-        self._transcript_writer = transcript_writer or TranscriptWriter(self._file_store)
         self._session_store = session_store or SessionStore(self._file_store)
-        self._event_seq: dict[str, int] = {}
 
     async def run(
         self,
@@ -194,7 +189,6 @@ class TmuxRunner:
                 meta.claude_session_id = state.session_id
         else:
             self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_STARTED))
-            await self._append_structured_event(meta.session_name, TranscriptEntryKind.PHASE, payload={"phase": "processing"})
         yield CLIEvent(type=EventType.STARTED, task_id=meta.task_id, content=f"tmux_session={meta.session_name}")
 
         try:
@@ -317,7 +311,6 @@ class TmuxRunner:
         should_end_session = (not meta.interactive) or exit_code is not None
         if should_end_session and self._session_store.get(meta.session_name) is not None:
             self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_ENDED))
-            await self._append_structured_event(meta.session_name, TranscriptEntryKind.PHASE, payload={"phase": "ended"})
         if timed_out:
             yield CLIEvent(type=EventType.TIMEOUT, task_id=meta.task_id, error=f"任务超时({timeout_sec}s)")
         elif canceled:
@@ -341,26 +334,11 @@ class TmuxRunner:
         session_id = state.session_id
         if session_id.startswith("claude-session-"):
             meta.claude_session_id = session_id
-        if text:
-            await self._append_structured_event(
-                session_id,
-                TranscriptEntryKind.RAW,
-                text=text,
-                payload={"text": text, "offset": offset, "flush_partial": flush_partial},
-            )
         state.checkpoint.last_offset = offset
         self._session_store.save_checkpoint(session_id, state.checkpoint)
         self._session_store._persist(state)
         if False:
             yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content="")
-
-    async def _append_structured_event(self, session_id: str, kind: TranscriptEntryKind, text: str = "", turn_id: str | None = None, payload: dict | None = None) -> None:
-        seq = self._event_seq.get(session_id, 0) + 1
-        self._event_seq[session_id] = seq
-        await self._transcript_writer.append_event(
-            session_id,
-            TranscriptEntry(seq=seq, kind=kind, text=text, turn_id=turn_id, payload=payload or {}),
-        )
 
     async def cancel(self, task_id: str) -> bool:
         async with self._lock:

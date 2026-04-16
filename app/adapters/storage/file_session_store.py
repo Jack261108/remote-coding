@@ -23,9 +23,6 @@ class FileSessionStore:
     def raw_transcript_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "transcript.raw.log"
 
-    def events_path(self, session_id: str) -> Path:
-        return self.session_dir(session_id) / "transcript.events.jsonl"
-
     def cursor_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "parser.cursor.json"
 

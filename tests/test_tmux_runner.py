@@ -1,5 +1,4 @@
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -252,7 +251,7 @@ async def test_watch_task_flushes_partial_content(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_interactive_chunk_persists_snapshot_without_stdout(tmp_path: Path) -> None:
+async def test_process_interactive_chunk_updates_checkpoint_without_project_jsonl(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01)
     meta = _TmuxTaskMeta(
         session_name="tgcli_user_1",
@@ -293,11 +292,7 @@ async def test_process_interactive_chunk_persists_snapshot_without_stdout(tmp_pa
 
     raw_text = meta.log_file.read_text(encoding="utf-8")
     assert "冒泡排序说明" in raw_text
-
-    lines = runner._file_store.events_path(meta.session_name).read_text(encoding="utf-8").splitlines()
-    records = [json.loads(line) for line in lines]
-    assert [item["kind"] for item in records] == ["raw"]
-    assert records[0]["text"] == text
+    assert not (runner._file_store.session_dir(meta.session_name) / "transcript.events.jsonl").exists()
 
 
 @pytest.mark.asyncio

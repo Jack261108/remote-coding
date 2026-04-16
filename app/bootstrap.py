@@ -16,7 +16,6 @@ from app.domain.models import SessionContext
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.process.subprocess_runner import SubprocessRunner
 from app.adapters.process.tmux_runner import TmuxRunner
-from app.adapters.process.transcript_writer import TranscriptWriter
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
@@ -67,7 +66,6 @@ class AppContainer:
         self.hook_socket_server = HookSocketServer(settings.claude_hook_socket_path)
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
         self.session_context_store = FileSessionContextStore(self.file_session_store)
-        self.transcript_writer = TranscriptWriter(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
         self.structured_session_store = SessionStore(self.file_session_store)
         self.tmux_runner = TmuxRunner(
@@ -75,7 +73,6 @@ class AppContainer:
             data_dir=settings.tmux_data_dir,
             claude_cli_bin=settings.claude_cli_bin,
             file_store=self.file_session_store,
-            transcript_writer=self.transcript_writer,
             session_store=self.structured_session_store,
         )
         self.cli_factory = CLIAdapterFactory(
