@@ -58,7 +58,7 @@ class DummyTaskService:
 
 
 async def _run_and_wait(*, message: DummyMessage, task_service: DummyTaskService, wait_sec: float = 0.05) -> None:
-    await run_prompt_and_stream(
+    task = await run_prompt_and_stream(
         message=message,
         task_service=task_service,
         sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
@@ -68,6 +68,8 @@ async def _run_and_wait(*, message: DummyMessage, task_service: DummyTaskService
         workdir="/tmp",
     )
     await asyncio.sleep(wait_sec)
+    if task is not None:
+        await task
 
 
 def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
@@ -291,3 +293,30 @@ async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_befo
     assert "旧回复" not in "\n".join(message.answers)
     assert "tmux 噪音" not in "\n".join(message.answers)
     assert "迟到回复" in message.answers[2]
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_event() -> None:
+    message = DummyMessage()
+    turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.02],
+    )
+
+    async def append_new_turn() -> None:
+        await asyncio.sleep(0.06)
+        turns.append(ConversationTurn(turn_id="turn-after-exit", role="assistant", text="\n退出后补到的回复\n", is_complete=True))
+
+    updater = asyncio.create_task(append_new_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2)
+    await updater
+
+    assert "旧回复" not in "\n".join(message.answers)
+    assert "退出后补到的回复" in "\n".join(message.answers)

@@ -154,7 +154,7 @@ async def run_prompt_and_stream(
     provider: str | None,
     prompt: str,
     workdir: str | None = None,
-) -> None:
+) -> asyncio.Task | None:
     try:
         start = await task_service.create_and_run(
             user_id=user_id,
@@ -214,6 +214,7 @@ async def run_prompt_and_stream(
 
     async def stream_events() -> None:
         nonlocal interactive_pump
+        saw_exit = False
         try:
             async for event in start.events:
                 if event.type in {EventType.STDOUT, EventType.STDERR}:
@@ -249,6 +250,7 @@ async def run_prompt_and_stream(
                 duration, truncated = await _load_status_summary(task_service, start.task.task_id, user_id)
 
                 if event.type == EventType.EXITED:
+                    saw_exit = True
                     await message.answer(
                         _build_success_message(
                             task_id=start.task.task_id,
@@ -280,6 +282,10 @@ async def run_prompt_and_stream(
                         )
                     )
         finally:
+            if saw_exit and start.interactive:
+                await asyncio.sleep(0.1)
+                await emit_structured_reply()
+                await sender.flush(send_text)
             if interactive_pump is not None:
                 interactive_pump.cancel()
                 try:
@@ -312,6 +318,7 @@ async def run_prompt_and_stream(
         asyncio.get_running_loop().create_task(_notify_error())
 
     task.add_done_callback(_on_done)
+    return task
 
 
 def register_run_handler(router, *, task_service: TaskService, sender_factory):
