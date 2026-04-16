@@ -17,6 +17,7 @@ _MARKER_LINE_RE = re.compile(r"^\s*_*(?:TGCLI_BEGIN|TGCLI_DONE)_*(?:\s*[:：]?\s
 _BLANK_LINE_BURST_RE = re.compile(r"\n{3,}")
 _STREAM_PREVIEW_CHAR_LIMIT = 1800
 _STREAM_PREVIEW_LINE_LIMIT = 60
+_ACTIVE_STREAM_TASKS: set[asyncio.Task] = set()
 
 
 def parse_run_args(text: str | None) -> tuple[str | None, str]:
@@ -294,8 +295,10 @@ async def run_prompt_and_stream(
                     pass
 
     task = asyncio.create_task(stream_events())
+    _ACTIVE_STREAM_TASKS.add(task)
 
     def _on_done(done_task: asyncio.Task) -> None:
+        _ACTIVE_STREAM_TASKS.discard(done_task)
         if done_task.cancelled():
             return
         exc = done_task.exception()

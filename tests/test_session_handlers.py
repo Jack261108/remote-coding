@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -8,6 +9,7 @@ from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
+from app.bot.router import create_router
 from app.config.settings import Settings
 from app.domain.models import TaskRecord, TaskStatus
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, PendingPermission
@@ -252,3 +254,41 @@ async def test_permission_handlers_report_stale_pending_request(tmp_path) -> Non
 
     assert hook_socket_server.calls == [("tool-1", "allow", None)]
     assert message.answers == ["批准失败: 待处理权限请求已失效，请等待 Claude 重新发起"]
+
+
+@pytest.mark.asyncio
+async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    factory = StubFactory(StubAdapter(events=[]))
+    factory._tmux_runner = tmux_runner
+    factory._claude_tmux_enabled = True
+    factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
+    session_service = SessionService(MemorySessionStore())
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+        structured_session_store=tmux_runner._session_store,
+    )
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    task = asyncio.create_task(asyncio.sleep(0))
+    await task
+    run_mock = AsyncMock(return_value=task)
+    monkeypatch.setattr("app.bot.router.run_prompt_and_stream", run_mock)
+
+    router = create_router(settings=make_settings(tmp_path), task_service=service, session_service=session_service)
+    text_handler = router.message.handlers[-1].callback
+    message = DummyMessage("你好")
+
+    await text_handler(message)
+
+    run_mock.assert_awaited_once()

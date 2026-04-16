@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.bot.handlers.command_run import run_prompt_and_stream
+from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, SessionPhase
@@ -88,6 +88,34 @@ def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
         ended_at=ended_at,
         output_truncated=truncated,
     )
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_keeps_background_task_referenced_until_done() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        event_delays=[0.0, 0.03],
+    )
+
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    assert task in _ACTIVE_STREAM_TASKS
+    await task
+    assert task not in _ACTIVE_STREAM_TASKS
 
 
 @pytest.mark.asyncio
