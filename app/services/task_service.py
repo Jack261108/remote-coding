@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
@@ -18,7 +19,9 @@ from app.domain.models import (
     TaskStatus,
     utc_now,
 )
+from app.domain.session_models import SessionEvent, SessionEventType, SessionState
 from app.services.session_service import SessionService
+from app.services.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,7 @@ logger = logging.getLogger(__name__)
 class StartTaskResult:
     task: TaskRecord
     events: AsyncIterator[CLIEvent]
+    interactive: bool = False
 
 
 class TaskService:
@@ -38,12 +42,16 @@ class TaskService:
         session_service: SessionService,
         cli_factory: CLIAdapterFactory,
         semaphore: asyncio.Semaphore,
+        structured_session_store: SessionStore | None = None,
+        hook_socket_server: HookSocketServer | None = None,
     ) -> None:
         self._settings = settings
         self._task_store = task_store
         self._session_service = session_service
         self._cli_factory = cli_factory
         self._semaphore = semaphore
+        self._structured_session_store = structured_session_store
+        self._hook_socket_server = hook_socket_server
 
     async def create_and_run(
         self,
@@ -101,6 +109,7 @@ class TaskService:
             prompt=record.prompt,
             workdir=record.workdir,
             timeout_sec=record.timeout_sec,
+            claude_session_id=session.claude_session_id,
         )
 
         adapter = self._cli_factory.get(record.provider)
@@ -124,12 +133,17 @@ class TaskService:
 
         async def event_stream() -> AsyncIterator[CLIEvent]:
             async with self._semaphore:
-                async for event in adapter.run(execution, terminal_key=terminal_key, interactive=interactive):
+                async for event in adapter.run(
+                    execution,
+                    terminal_key=terminal_key,
+                    interactive=interactive,
+                    claude_session_id=session.claude_session_id,
+                ):
                     await self._apply_event(record, event)
                     await self._task_store.save(record)
                     yield event
 
-        return StartTaskResult(task=record, events=event_stream())
+        return StartTaskResult(task=record, events=event_stream(), interactive=interactive)
 
     async def cancel(self, task_id: str, user_id: int) -> bool:
         task = await self._task_store.get(task_id)
@@ -163,12 +177,27 @@ class TaskService:
     def is_claude_tmux_enabled(self) -> bool:
         return self._settings.claude_tmux_mode
 
+    async def get_structured_session(self, user_id: int) -> SessionState | None:
+        session = await self._session_service.get(user_id)
+        if session is None or not session.claude_session_id:
+            return None
+        if self._structured_session_store is not None:
+            state = self._structured_session_store.get(session.claude_session_id)
+            if state is not None:
+                return state
+        getter = getattr(self._cli_factory, "get_claude_session_state", None) or getattr(self._cli_factory, "get_session_state", None)
+        if getter is None:
+            return None
+        return getter(session.claude_session_id)
+
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)
         if session is None:
             return False, "当前无 session"
         if not session.terminal_mode or not session.terminal_id:
             if session.claude_chat_active:
+                session.claude_session_id = None
+                await self._session_service.clear_claude_session(user_id=user_id)
                 await self._session_service.switch(user_id=user_id, claude_chat_active=False)
                 return True, "Claude 会话已退出"
             return False, "当前没有可关闭的持久终端"
@@ -177,6 +206,8 @@ class TaskService:
         if not closed:
             return False, "终端不存在或关闭失败"
 
+        session.claude_session_id = None
+        await self._session_service.clear_claude_session(user_id=user_id)
         await self._session_service.switch(user_id=user_id, terminal_mode=False, claude_chat_active=False)
         return True, "终端已关闭"
 
@@ -214,14 +245,44 @@ class TaskService:
             return False, ensure_result[1]
 
         action = "Claude 会话已重建" if had_old_terminal else "Claude 会话已开启"
-        tmux_session = f"tgcli_{updated_session.terminal_id}"[:64]
-        return (
-            True,
-            f"{action}\ntmux_session: {tmux_session}\nterminal_id: {updated_session.terminal_id}\n{ensure_result[1]}",
-        )
+        message = action
+        if ensure_result[1]:
+            message = f"{message}\n{ensure_result[1]}"
+        return True, message
 
     def is_workdir_allowed(self, workdir: str) -> bool:
         return self._is_workdir_allowed(str(Path(workdir).resolve()))
+
+    async def bind_claude_session(self, *, user_id: int, claude_session_id: str, workdir: str | None = None) -> None:
+        await self._session_service.bind_claude_session(
+            user_id=user_id,
+            claude_session_id=claude_session_id,
+            workdir=workdir,
+        )
+
+    async def respond_to_pending_permission(self, *, user_id: int, decision: str, reason: str | None = None) -> tuple[bool, str]:
+        session = await self._session_service.get(user_id)
+        if session is None or not session.claude_session_id:
+            return False, "当前没有 Claude 会话"
+        if self._structured_session_store is None or self._hook_socket_server is None:
+            return False, "当前未启用 Claude hooks 权限通道"
+        state = self._structured_session_store.get(session.claude_session_id)
+        if state is None or state.pending_permission is None:
+            return False, "当前没有待处理的权限请求"
+        pending = state.pending_permission
+        tool_use_id = pending.tool_use_id
+        await self._hook_socket_server.respond_to_permission(tool_use_id=tool_use_id, decision=decision, reason=reason)
+        event_type = SessionEventType.PERMISSION_APPROVED if decision == "allow" else SessionEventType.PERMISSION_DENIED
+        updated = self._structured_session_store.process(
+            SessionEvent(
+                session_id=session.claude_session_id,
+                type=event_type,
+                payload={"tool_use_id": tool_use_id},
+            )
+        )
+        tool_name = updated.last_tool_name or pending.tool_name
+        action = "已批准" if decision == "allow" else "已拒绝"
+        return True, f"{action}权限请求: {tool_name}"
 
     async def _ensure_and_reveal_terminal(
         self,

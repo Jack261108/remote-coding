@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import json
+import re
+import shlex
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.adapters.claude.paths import ClaudePaths
+
+
+@dataclass(frozen=True, order=True)
+class ClaudeCodeVersion:
+    major: int
+    minor: int
+    patch: int
+
+
+class HookInstaller:
+    HOOK_SCRIPT_NAME = "remote-coding-hook.py"
+
+    def __init__(
+        self,
+        *,
+        paths: ClaudePaths,
+        socket_path: str,
+        python_bin: str | None = None,
+        claude_bin: str = "claude",
+    ) -> None:
+        self._paths = paths
+        self._socket_path = socket_path
+        self._python_bin = python_bin or sys.executable or "python3"
+        self._claude_bin = claude_bin
+
+    def install(self, *, version: ClaudeCodeVersion | None = None) -> Path:
+        hooks_dir = self._paths.hooks_dir
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+
+        script_path = self._paths.hook_script_path(self.HOOK_SCRIPT_NAME)
+        script_path.write_text(self._render_hook_script(), encoding="utf-8")
+        script_path.chmod(0o755)
+
+        self._update_settings(script_path=script_path, version=version or self.detect_claude_code_version())
+        return script_path
+
+    def detect_claude_code_version(self) -> ClaudeCodeVersion | None:
+        try:
+            completed = subprocess.run(
+                [self._claude_bin, "--version"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if completed.returncode != 0:
+            return None
+        return self.parse_claude_code_version(completed.stdout)
+
+    @staticmethod
+    def parse_claude_code_version(text: str) -> ClaudeCodeVersion | None:
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+        if match is None:
+            return None
+        return ClaudeCodeVersion(*(int(part) for part in match.groups()))
+
+    def supported_hook_events(self, version: ClaudeCodeVersion | None) -> list[tuple[str, list[dict[str, object]]]]:
+        hook_entry = [{"type": "command", "command": self._command()}]
+        hook_entry_with_timeout = [{"type": "command", "command": self._command(), "timeout": 86400}]
+        with_matcher = [{"matcher": "*", "hooks": hook_entry}]
+        with_matcher_and_timeout = [{"matcher": "*", "hooks": hook_entry_with_timeout}]
+        without_matcher = [{"hooks": hook_entry}]
+        pre_compact = [
+            {"matcher": "auto", "hooks": hook_entry},
+            {"matcher": "manual", "hooks": hook_entry},
+        ]
+
+        events: list[tuple[str, list[dict[str, object]]]] = [
+            ("UserPromptSubmit", without_matcher),
+            ("PreToolUse", with_matcher),
+            ("PostToolUse", with_matcher),
+            ("PermissionRequest", with_matcher_and_timeout),
+            ("Notification", with_matcher),
+            ("Stop", without_matcher),
+            ("SubagentStop", without_matcher),
+            ("SessionStart", without_matcher),
+            ("SessionEnd", without_matcher),
+            ("PreCompact", pre_compact),
+        ]
+        if version is None:
+            return events
+        if version >= ClaudeCodeVersion(2, 0, 0):
+            events.append(("PostToolUseFailure", with_matcher))
+        if version >= ClaudeCodeVersion(2, 0, 43):
+            events.append(("SubagentStart", without_matcher))
+        if version >= ClaudeCodeVersion(2, 1, 76):
+            events.append(("PostCompact", pre_compact))
+        if version >= ClaudeCodeVersion(2, 1, 78):
+            events.append(("StopFailure", without_matcher))
+        if version >= ClaudeCodeVersion(2, 1, 88):
+            events.append(("PermissionDenied", with_matcher))
+        return events
+
+    def _update_settings(self, *, script_path: Path, version: ClaudeCodeVersion | None) -> None:
+        settings_path = self._paths.settings_file
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, object] = {}
+        if settings_path.exists():
+            try:
+                payload = json.loads(settings_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                payload = {}
+
+        hooks = payload.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+
+        cleaned_hooks: dict[str, object] = {}
+        for event_name, config in hooks.items():
+            if isinstance(config, list):
+                cleaned_entries = [entry for entry in (self._clean_entry(item) for item in config if isinstance(item, dict)) if entry is not None]
+                if cleaned_entries:
+                    cleaned_hooks[event_name] = cleaned_entries
+            else:
+                cleaned_hooks[event_name] = config
+
+        for event_name, config in self.supported_hook_events(version):
+            existing = cleaned_hooks.get(event_name)
+            if not isinstance(existing, list):
+                existing = []
+            cleaned_hooks[event_name] = [*existing, *config]
+
+        payload["hooks"] = cleaned_hooks
+        settings_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _clean_entry(self, entry: dict[str, object]) -> dict[str, object] | None:
+        hooks = entry.get("hooks")
+        if not isinstance(hooks, list):
+            return entry
+        filtered_hooks = [hook for hook in hooks if not self._is_remote_coding_hook(hook)]
+        if not filtered_hooks:
+            return None
+        updated = dict(entry)
+        updated["hooks"] = filtered_hooks
+        return updated
+
+    def _is_remote_coding_hook(self, hook: object) -> bool:
+        if not isinstance(hook, dict):
+            return False
+        command = str(hook.get("command", ""))
+        return self.HOOK_SCRIPT_NAME in command
+
+    def _command(self) -> str:
+        return f"{shlex.quote(self._python_bin)} {shlex.quote(str(self._paths.hook_script_path(self.HOOK_SCRIPT_NAME)))}"
+
+    def _render_hook_script(self) -> str:
+        return f'''#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
+import socket
+import sys
+
+DEFAULT_SOCKET_PATH = {self._socket_path!r}
+
+
+def main() -> int:
+    payload = sys.stdin.buffer.read()
+    if not payload:
+        return 0
+
+    socket_path = os.environ.get("REMOTE_CODING_HOOK_SOCKET_PATH", DEFAULT_SOCKET_PATH)
+    response = b""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(socket_path)
+            client.sendall(payload)
+            try:
+                client.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                response += chunk
+    except OSError:
+        return 0
+
+    if response:
+        sys.stdout.write(response.decode("utf-8", errors="replace"))
+        sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''

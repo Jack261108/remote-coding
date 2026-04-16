@@ -20,6 +20,7 @@ class StubAdapter(BaseCLIAdapter):
         self.cancel_called = False
         self.last_terminal_key: str | None = None
         self.last_interactive: bool = False
+        self.last_claude_session_id: str | None = None
 
     async def run(
         self,
@@ -27,9 +28,11 @@ class StubAdapter(BaseCLIAdapter):
         *,
         terminal_key: str | None = None,
         interactive: bool = False,
+        claude_session_id: str | None = None,
     ) -> AsyncIterator[CLIEvent]:
         self.last_terminal_key = terminal_key
         self.last_interactive = interactive
+        self.last_claude_session_id = claude_session_id
         for event in self._events:
             await asyncio.sleep(0)
             yield CLIEvent(
@@ -334,8 +337,8 @@ async def test_open_claude_chat_session_rebuilds_terminal(tmp_path: Path) -> Non
 
     assert opened is True
     assert text.startswith("Claude 会话已重建")
-    assert "tmux_session: tgcli_user_1" in text
-    assert "terminal_id: user_1" in text
+    assert "tmux_session" not in text
+    assert "terminal_id" not in text
     assert factory._closed_terminal_key == "user_1"
     assert factory._ensured_interactive_terminal_key == "user_1"
     assert factory._ensured_interactive_workdir == str(tmp_path.resolve())
@@ -366,8 +369,8 @@ async def test_open_claude_chat_session_creates_terminal_without_previous_sessio
 
     assert opened is True
     assert text.startswith("Claude 会话已开启")
-    assert "tmux_session: tgcli_user_1" in text
-    assert "terminal_id: user_1" in text
+    assert "tmux_session" not in text
+    assert "terminal_id" not in text
     assert factory._closed_terminal_key is None
     assert factory._ensured_interactive_terminal_key == "user_1"
     assert factory._ensured_interactive_workdir == str(tmp_path.resolve())
@@ -408,6 +411,7 @@ async def test_create_and_run_claude_uses_claude_provider_in_chat_mode(tmp_path:
     assert result.task.provider == "claude_code"
     assert adapter.last_terminal_key == "user_1"
     assert adapter.last_interactive is True
+    assert adapter.last_claude_session_id is None
     assert factory._ensured_interactive_terminal_key == "user_1"
 
 
@@ -432,6 +436,72 @@ async def test_create_and_run_fails_when_tmux_ensure_fails(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="tmux 会话创建失败"):
         await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_create_and_run_passes_bound_claude_session_id_in_chat_mode(tmp_path: Path) -> None:
+    adapter = StubAdapter(
+        events=[
+            CLIEvent(type=EventType.STARTED, task_id="x"),
+            CLIEvent(type=EventType.EXITED, task_id="x", exit_code=0),
+        ]
+    )
+    factory = StubFactory(adapter)
+    session_service = SessionService(MemorySessionStore())
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    await service.open_claude_chat_session(1)
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    result = await service.create_and_run(
+        user_id=1,
+        provider="claude_code",
+        prompt="hello again",
+        workdir=str(tmp_path),
+    )
+    _ = [event async for event in result.events]
+
+    assert adapter.last_claude_session_id == "claude-session-1"
+    assert result.task.provider == "claude_code"
+
+
+@pytest.mark.asyncio
+async def test_create_and_run_allows_unbound_first_turn_in_chat_mode(tmp_path: Path) -> None:
+    adapter = StubAdapter(
+        events=[
+            CLIEvent(type=EventType.STARTED, task_id="x"),
+            CLIEvent(type=EventType.EXITED, task_id="x", exit_code=0),
+        ]
+    )
+    factory = StubFactory(adapter)
+    session_service = SessionService(MemorySessionStore())
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    await service.open_claude_chat_session(1)
+
+    result = await service.create_and_run(
+        user_id=1,
+        provider="claude_code",
+        prompt="first turn",
+        workdir=str(tmp_path),
+    )
+    _ = [event async for event in result.events]
+
+    assert result.interactive is True
+    assert adapter.last_claude_session_id is None
+    assert adapter.last_terminal_key == "user_1"
 
 
 @pytest.mark.asyncio

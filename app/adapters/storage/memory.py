@@ -43,6 +43,10 @@ class MemorySessionStore:
         async with self._lock:
             return self._sessions.get(user_id)
 
+    async def list_all(self) -> list[SessionContext]:
+        async with self._lock:
+            return list(self._sessions.values())
+
     async def save(self, session: SessionContext) -> None:
         async with self._lock:
             self._sessions[session.user_id] = session

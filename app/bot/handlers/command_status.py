@@ -6,6 +6,15 @@ from aiogram.types import Message
 from app.services.task_service import TaskService
 
 
+def _render_structured_session(state) -> str:
+    return (
+        "structured_session:\n"
+        f"phase: {state.phase.value}\n"
+        f"turns: {len(state.turns)}\n"
+        f"current_turn_id: {state.current_turn_id or '-'}"
+    )
+
+
 def _render_task(task) -> str:
     duration = f"{task.duration_sec:.2f}s" if task.duration_sec is not None else "-"
     return (
@@ -29,7 +38,13 @@ def register_status_handler(router, *, task_service: TaskService):
             if task is None:
                 await message.answer("未找到该任务。")
                 return
-            await message.answer(_render_task(task))
+            lines = [_render_task(task)]
+            if task.provider == "claude_code":
+                structured = await task_service.get_structured_session(user_id)
+                if structured is not None:
+                    lines.append("")
+                    lines.append(_render_structured_session(structured))
+            await message.answer("\n".join(lines))
             return
 
         tasks = await task_service.list_recent(user_id=user_id, limit=10)

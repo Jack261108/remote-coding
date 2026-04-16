@@ -20,6 +20,7 @@ class GeminiCLIAdapter(BaseCLIAdapter):
         *,
         terminal_key: str | None = None,
         interactive: bool = False,
+        claude_session_id: str | None = None,
     ) -> AsyncIterator[CLIEvent]:
         argv = [self._cli_bin, "-p", task.prompt]
         async for event in self._runner.run(

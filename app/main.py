@@ -17,19 +17,23 @@ async def run() -> None:
     settings = Settings()
     container = AppContainer(settings=settings)
     container.wire()
+    await container.start()
 
     logger.info("bot starting with polling")
 
-    while True:
-        try:
-            await container.dispatcher.start_polling(container.bot)
-            return
-        except TelegramNetworkError as exc:
-            logger.warning(
-                "telegram network error, will retry",
-                extra={"error": str(exc), "retry_delay_sec": settings.tg_polling_retry_delay_sec},
-            )
-            await asyncio.sleep(settings.tg_polling_retry_delay_sec)
+    try:
+        while True:
+            try:
+                await container.dispatcher.start_polling(container.bot)
+                return
+            except TelegramNetworkError as exc:
+                logger.warning(
+                    "telegram network error, will retry",
+                    extra={"error": str(exc), "retry_delay_sec": settings.tg_polling_retry_delay_sec},
+                )
+                await asyncio.sleep(settings.tg_polling_retry_delay_sec)
+    finally:
+        await container.stop()
 
 
 def main() -> None:

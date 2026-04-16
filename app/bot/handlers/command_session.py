@@ -9,6 +9,20 @@ from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 
 
+def _render_structured_session(state) -> str:
+    last_turn = state.turns[-1] if state.turns else None
+    last_reply = (last_turn.text.strip() if last_turn else "") or "-"
+    if len(last_reply) > 200:
+        last_reply = f"{last_reply[:200].rstrip()}..."
+    return (
+        "structured_session:\n"
+        f"phase: {state.phase.value}\n"
+        f"turns: {len(state.turns)}\n"
+        f"current_turn_id: {state.current_turn_id or '-'}\n"
+        f"last_reply: {last_reply}"
+    )
+
+
 def register_session_handler(router, *, task_service: TaskService, session_service: SessionService):
     @router.message(Command("session"))
     async def command_session(message: Message) -> None:
@@ -20,15 +34,17 @@ def register_session_handler(router, *, task_service: TaskService, session_servi
             if session is None:
                 await message.answer("当前无 session。")
                 return
-            terminal_info = session.terminal_id if session.terminal_mode and session.terminal_id else "-"
-            await message.answer(
-                f"session_id: {session.session_id}\n"
-                f"provider: {session.provider}\n"
-                f"workdir: {session.workdir}\n"
-                f"terminal_mode: {session.terminal_mode}\n"
-                f"terminal_id: {terminal_info}\n"
-                f"claude_chat_active: {session.claude_chat_active}"
-            )
+            lines = [
+                f"session_id: {session.session_id}",
+                f"provider: {session.provider}",
+                f"workdir: {session.workdir}",
+                f"claude_chat_active: {session.claude_chat_active}",
+            ]
+            structured = await task_service.get_structured_session(user_id)
+            if structured is not None:
+                lines.append("")
+                lines.append(_render_structured_session(structured))
+            await message.answer("\n".join(lines))
             return
 
         provider = args[1] if len(args) >= 2 else None
@@ -46,13 +62,10 @@ def register_session_handler(router, *, task_service: TaskService, session_servi
             return
 
         session = await session_service.switch(user_id=user_id, provider=provider, workdir=workdir)
-        terminal_info = session.terminal_id if session.terminal_mode and session.terminal_id else "-"
         await message.answer(
             f"session 已更新\n"
             f"session_id: {session.session_id}\n"
             f"provider: {session.provider}\n"
             f"workdir: {session.workdir}\n"
-            f"terminal_mode: {session.terminal_mode}\n"
-            f"terminal_id: {terminal_info}\n"
             f"claude_chat_active: {session.claude_chat_active}"
         )

@@ -7,6 +7,7 @@ from aiogram.types import Message
 from app.bot.handlers.command_cancel import register_cancel_handler
 from app.bot.handlers.command_claude import register_claude_handler
 from app.bot.handlers.command_exit import register_exit_handler
+from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
@@ -27,8 +28,6 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
             f"session_id: {session.session_id}\n"
             f"provider: {session.provider}\n"
             f"workdir: {session.workdir}\n"
-            f"terminal_mode: {session.terminal_mode}\n"
-            f"terminal_id: {session.terminal_id or '-'}\n"
             f"claude_chat_active: {session.claude_chat_active}"
             if session
             else "session: 尚未创建"
@@ -42,6 +41,8 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
             "/status [task_id]\n"
             "/cancel <task_id>\n"
             "/session [provider] [workdir]\n"
+            "/approve\n"
+            "/deny [reason]\n"
             "/exit 或 /quit (退出 Claude 会话并关闭持久终端)\n"
             f"可用 provider: {providers}\n"
             f"{session_text}"
@@ -61,6 +62,7 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
     register_cancel_handler(router, task_service=task_service)
     register_status_handler(router, task_service=task_service)
     register_session_handler(router, task_service=task_service, session_service=session_service)
+    register_permission_handlers(router, task_service=task_service)
     register_exit_handler(router, task_service=task_service)
 
     @router.message(F.text & ~F.text.startswith("/"))

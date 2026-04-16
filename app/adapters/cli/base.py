@@ -16,6 +16,7 @@ class BaseCLIAdapter(ABC):
         *,
         terminal_key: str | None = None,
         interactive: bool = False,
+        claude_session_id: str | None = None,
     ) -> AsyncIterator[CLIEvent]:
         raise NotImplementedError
 

@@ -38,6 +38,8 @@ class SessionService:
                     current.terminal_id = None
                 if claude_chat_active is not None:
                     current.claude_chat_active = claude_chat_active
+                if provider is not None and provider != "claude_code":
+                    current.claude_session_id = None
                 current.updated_at = utc_now()
                 await self._store.save(current)
             return current
@@ -50,6 +52,7 @@ class SessionService:
             terminal_mode=terminal_mode,
             terminal_id=f"user_{user_id}" if terminal_mode else None,
             claude_chat_active=claude_chat_active or False,
+            claude_session_id=None,
         )
         await self._store.save(session)
         return session
@@ -74,6 +77,7 @@ class SessionService:
                 terminal_mode=tm,
                 terminal_id=f"user_{user_id}" if tm else None,
                 claude_chat_active=claude_chat_active or False,
+                claude_session_id=None,
             )
             await self._store.save(session)
             return session
@@ -87,6 +91,8 @@ class SessionService:
             current.terminal_id = current.terminal_id or f"user_{user_id}" if terminal_mode else None
         if claude_chat_active is not None:
             current.claude_chat_active = claude_chat_active
+        if provider is not None and provider != "claude_code":
+            current.claude_session_id = None
         current.updated_at = utc_now()
 
         await self._store.save(current)
@@ -94,3 +100,26 @@ class SessionService:
 
     async def get(self, user_id: int) -> SessionContext | None:
         return await self._store.get(user_id)
+
+    async def list_all(self) -> list[SessionContext]:
+        return await self._store.list_all()
+
+    async def bind_claude_session(self, *, user_id: int, claude_session_id: str, workdir: str | None = None) -> SessionContext | None:
+        current = await self._store.get(user_id)
+        if current is None:
+            return None
+        current.claude_session_id = claude_session_id
+        if workdir is not None:
+            current.workdir = workdir
+        current.updated_at = utc_now()
+        await self._store.save(current)
+        return current
+
+    async def clear_claude_session(self, *, user_id: int) -> SessionContext | None:
+        current = await self._store.get(user_id)
+        if current is None:
+            return None
+        current.claude_session_id = None
+        current.updated_at = utc_now()
+        await self._store.save(current)
+        return current

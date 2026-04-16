@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     tmux_data_dir: str = Field("/tmp/tg-cli-gateway", alias="TMUX_DATA_DIR")
 
     claude_cli_bin: str = Field("claude", alias="CLAUDE_CLI_BIN")
+    claude_config_dir: str | None = Field(None, alias="CLAUDE_CONFIG_DIR")
+    claude_hook_socket_path: str = Field("/tmp/remote-coding-claude.sock", alias="CLAUDE_HOOK_SOCKET_PATH")
+    claude_install_hooks: bool = Field(True, alias="CLAUDE_INSTALL_HOOKS")
+    claude_jsonl_sync_debounce_ms: int = Field(100, alias="CLAUDE_JSONL_SYNC_DEBOUNCE_MS")
     codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
     gemini_cli_bin: str = Field("gemini", alias="GEMINI_CLI_BIN")
 
@@ -62,9 +66,9 @@ class Settings(BaseSettings):
             raise ValueError("TG_ALLOWED_USER_IDS 不能为空（或使用 * 代表允许所有用户）")
         return items
 
-    @field_validator("tg_proxy_url", mode="before")
+    @field_validator("tg_proxy_url", "claude_config_dir", mode="before")
     @classmethod
-    def parse_proxy_url(cls, value: Any) -> str | None:
+    def parse_optional_text(cls, value: Any) -> str | None:
         if value is None:
             return None
         text = str(value).strip()
@@ -85,9 +89,9 @@ class Settings(BaseSettings):
             return dirs
         raise ValueError("ALLOWED_WORKDIRS 格式错误，需为逗号分隔路径")
 
-    @field_validator("claude_tmux_mode", mode="before")
+    @field_validator("claude_tmux_mode", "claude_install_hooks", mode="before")
     @classmethod
-    def parse_claude_tmux_mode(cls, value: Any) -> bool:
+    def parse_bool_flag(cls, value: Any) -> bool:
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -98,7 +102,7 @@ class Settings(BaseSettings):
                 return False
         if isinstance(value, int):
             return value != 0
-        raise ValueError("CLAUDE_TMUX_MODE 格式错误，支持 true/false")
+        raise ValueError("布尔配置格式错误，支持 true/false")
 
     @field_validator("default_timeout_sec")
     @classmethod
@@ -121,6 +125,7 @@ class Settings(BaseSettings):
         "task_output_char_limit",
         "tg_request_timeout_sec",
         "tg_polling_retry_delay_sec",
+        "claude_jsonl_sync_debounce_ms",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:

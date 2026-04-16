@@ -55,6 +55,7 @@ class ExecutionTask:
     prompt: str
     workdir: str
     timeout_sec: int
+    claude_session_id: str | None = None
 
 
 @dataclass
@@ -96,4 +97,5 @@ class SessionContext:
     terminal_mode: bool = False
     terminal_id: str | None = None
     claude_chat_active: bool = False
+    claude_session_id: str | None = None
     updated_at: datetime = field(default_factory=utc_now)

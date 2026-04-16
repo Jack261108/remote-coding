@@ -31,10 +31,28 @@ async def test_chunk_sender_interval_flush() -> None:
 
     await sender.push("a", send_fn)
     await asyncio.sleep(0.01)
+
+    assert sent == ["a"]
+
     await sender.push("b", send_fn)
     await sender.flush(send_fn)
 
-    assert "a" in sent[0]
+    assert sent == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_sender_batches_burst_before_delayed_flush() -> None:
+    sender = ChunkSender(chunk_size=50, flush_interval_sec=0.02)
+    sent: list[str] = []
+
+    async def send_fn(text: str) -> None:
+        sent.append(text)
+
+    await sender.push("hello", send_fn)
+    await sender.push(" world", send_fn)
+    await asyncio.sleep(0.03)
+
+    assert sent == ["hello world"]
 
 
 @pytest.mark.asyncio

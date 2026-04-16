@@ -1,9 +1,16 @@
+import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
 from app.adapters.process.tmux_runner import _TmuxTaskMeta, TmuxRunner
 from app.domain.models import CLIEvent, EventType
+from app.domain.session_models import SessionPhase
+
+
+async def _collect_events(stream):
+    return [event async for event in stream]
 
 
 def test_build_shell_command_writes_script_file(tmp_path: Path) -> None:
@@ -36,7 +43,7 @@ def test_build_shell_command_hides_launcher_in_persistent_mode(tmp_path: Path) -
     )
 
     assert cmd.startswith("bash ")
-    assert "exec \"${SHELL:-bash}\" -l" in cmd
+    assert 'exec "${SHELL:-bash}" -l' in cmd
 
 
 def test_tmux_runner_enter_delay_default_is_positive() -> None:
@@ -169,7 +176,7 @@ async def test_send_command_uses_ctrl_m_in_interactive(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_interactive_run_rebinds_pipe_to_current_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     seen_pipe_calls: list[tuple[str, ...]] = []
 
@@ -209,275 +216,233 @@ async def test_interactive_run_rebinds_pipe_to_current_log(monkeypatch: pytest.M
     assert seen_pipe_calls[0] == ("pipe-pane", "-t", "tgcli_user_1")
     assert seen_pipe_calls[1][0:3] == ("pipe-pane", "-t", "tgcli_user_1")
     assert "cat >>" in seen_pipe_calls[1][3]
-    assert "t-pipe.log" in seen_pipe_calls[1][3]
+    assert "sessions/tgcli_user_1/transcript.raw.log" in seen_pipe_calls[1][3]
 
 
 @pytest.mark.asyncio
-async def test_watch_task_flushes_partial_content(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_watch_task_flushes_partial_content(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     task_id = "t1"
     log_file = tmp_path / f"{task_id}.log"
     exit_file = tmp_path / f"{task_id}.exit"
 
-    m = _TmuxTaskMeta(
+    meta = _TmuxTaskMeta(
         session_name="tgcli_user_1",
         log_file=log_file,
         exit_file=exit_file,
         task_id=task_id,
+        workdir=str(tmp_path),
         persistent_terminal=False,
     )
 
-    async def writer():
+    async def writer() -> None:
         await asyncio.sleep(0.02)
         log_file.write_text("partial", encoding="utf-8")
         await asyncio.sleep(0.03)
         exit_file.write_text("0", encoding="utf-8")
 
-    import asyncio
-
     write_task = asyncio.create_task(writer())
-    events = [event async for event in runner._watch_task(meta=m, timeout_sec=1)]
+    events = [event async for event in runner._watch_task(meta=meta, timeout_sec=1)]
     await write_task
 
-    stdout_events = [e for e in events if e.type.value == "STDOUT"]
+    stdout_events = [e for e in events if e.type == EventType.STDOUT]
     assert stdout_events
     assert any((e.content or "") for e in stdout_events)
-    assert events[-1].type.value == "EXITED"
+    assert events[-1].type == EventType.EXITED
 
 
-def test_process_interactive_text_extracts_reply_in_single_chunk() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
+@pytest.mark.asyncio
+async def test_process_interactive_chunk_persists_snapshot_without_stdout(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01)
+    meta = _TmuxTaskMeta(
         session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
+        log_file=runner._file_store.raw_transcript_path("tgcli_user_1"),
+        exit_file=tmp_path / "x.exit",
         task_id="t1",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
         persistent_terminal=True,
         interactive=True,
-        begin_marker="__TGCLI_BEGIN__",
-        done_marker="__TGCLI_DONE__",
     )
-
-    event, done = runner._process_interactive_partial(
-        meta=m,
-        text="noise\n__TGCLI_BEGIN__ t1\n你好，Jack\n__TGCLI_DONE__ t1\n",
+    runner._session_store.get_or_create(
+        session_id=meta.session_name,
+        provider="claude_code",
+        workdir=meta.workdir,
+        terminal_id=meta.terminal_id,
     )
+    text = "TGCLI_BEGIN\n冒泡排序说明\nTGCLI_DONE\n"
+    meta.log_file.write_text(text, encoding="utf-8")
 
-    assert done is True
-    assert event is not None
-    assert event.content in {"\n你好，Jack\n", " t1\n你好，Jack\n"}
+    events = [
+        event
+        async for event in runner._process_interactive_chunk(
+            meta=meta,
+            text=text,
+            flush_partial=False,
+            offset=len(text.encode("utf-8")),
+        )
+    ]
+
+    assert events == []
+
+    state = runner._session_store.get(meta.session_name)
+    assert state is not None
+    assert state.phase == SessionPhase.PROCESSING
+    assert state.turns == []
+    assert state.checkpoint.last_offset == len(text.encode("utf-8"))
+
+    raw_text = meta.log_file.read_text(encoding="utf-8")
+    assert "冒泡排序说明" in raw_text
+
+    lines = runner._file_store.events_path(meta.session_name).read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines]
+    assert [item["kind"] for item in records] == ["raw"]
+    assert records[0]["text"] == text
 
 
-def test_process_interactive_text_extracts_reply_across_chunks() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
-        session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
+@pytest.mark.asyncio
+async def test_process_interactive_chunk_uses_checkpoint_offset(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    session_name = "tgcli_user_1"
+    log_file = runner._file_store.raw_transcript_path(session_name)
+    old_text = "TGCLI_BEGIN\n旧回复\nTGCLI_DONE\n"
+    new_text = "TGCLI_BEGIN\n新回复\nTGCLI_DONE\n"
+    log_file.write_text(old_text + new_text, encoding="utf-8")
+
+    state = runner._session_store.get_or_create(
+        session_id=session_name,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+    )
+    state.checkpoint.last_offset = len(old_text.encode("utf-8"))
+    runner._session_store.save_checkpoint(session_name, state.checkpoint)
+
+    meta = _TmuxTaskMeta(
+        session_name=session_name,
+        log_file=log_file,
+        exit_file=tmp_path / "x.exit",
         task_id="t2",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
         persistent_terminal=True,
         interactive=True,
-        begin_marker="__TGCLI_BEGIN__",
-        done_marker="__TGCLI_DONE__",
     )
 
-    event1, done1 = runner._process_interactive_partial(meta=m, text="__TGCLI_BEGIN__\n你")
-    assert event1 is None
-    assert done1 is False
+    events = [
+        event
+        async for event in runner._process_interactive_chunk(
+            meta=meta,
+            text=new_text,
+            flush_partial=False,
+            offset=len((old_text + new_text).encode("utf-8")),
+        )
+    ]
 
-    event2, done2 = runner._process_interactive_partial(meta=m, text="好\n__TGCLI_DONE__")
-    assert done2 is True
-    assert event2 is not None
-    assert event2.content == "\n你好\n"
+    assert events == []
+    state = runner._session_store.get(session_name)
+    assert state is not None
+    assert state.checkpoint.last_offset == len((old_text + new_text).encode("utf-8"))
 
 
-def test_process_interactive_text_strips_ansi_before_marker_match() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
-        session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
+@pytest.mark.asyncio
+async def test_interactive_timeout_keeps_session_alive(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    session_name = "tgcli_user_1"
+    state = runner._session_store.get_or_create(session_id=session_name, workdir=str(tmp_path), terminal_id="user_1")
+    state.phase = SessionPhase.PROCESSING
+    runner._session_store._persist(state)
+
+    meta = _TmuxTaskMeta(
+        session_name=session_name,
+        log_file=runner._file_store.raw_transcript_path(session_name),
+        exit_file=tmp_path / "x.exit",
         task_id="t3",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=session_name,
         persistent_terminal=True,
         interactive=True,
-        begin_marker="__TGCLI_BEGIN__",
-        done_marker="__TGCLI_DONE__",
     )
 
-    ansi_wrapped = "\x1b[0m__TGCLI_BEGIN__\x1b[0m\nreply\n\x1b[0m__TGCLI_DONE__\x1b[0m\n"
-    event, done = runner._process_interactive_partial(meta=m, text=ansi_wrapped)
+    events = [event async for event in runner._watch_task(meta=meta, timeout_sec=0)]
 
-    assert done is True
-    assert event is not None
-    assert event.content == "\nreply\n"
+    assert events[-1].type == EventType.TIMEOUT
+    state = runner._session_store.get(session_name)
+    assert state is not None
+    assert state.phase == SessionPhase.PROCESSING
 
 
-def test_process_interactive_text_handles_control_chars_between_marker_tokens() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
-        session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
+@pytest.mark.asyncio
+async def test_watch_task_follows_late_bound_claude_session_on_first_turn(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x1.exit",
         task_id="t4",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
         persistent_terminal=True,
         interactive=True,
-        begin_marker="__TGCLI_BEGIN__",
-        done_marker="__TGCLI_DONE__",
     )
 
-    text = "\x1b[?2026l\x1b[?2026h\r\x1b[7A\x1b[38;5;231m⏺\x1b[1C\x1b[39m__TGCLI_BEGIN__\x1bt4\n"
-    event1, done1 = runner._process_interactive_partial(meta=m, text=text)
-    assert event1 is None
-    assert done1 is False
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    bound = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    bound.phase = SessionPhase.PROCESSING
+    runner._session_store._persist(bound)
+    await asyncio.sleep(0.03)
+    bound.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(bound)
 
-    event2, done2 = runner._process_interactive_partial(meta=m, text="你好\n__TGCLI_DONE__\x1bt4\n")
-    assert done2 is True
-    assert event2 is not None
-    assert event2.content in {"\n你好\n", "t4\n你好\n", " t4\n你好\n"}
+    events = await task
+
+    assert meta.claude_session_id == claude_session
+    assert [event.type for event in events] == [EventType.EXITED]
 
 
-def test_process_interactive_text_filters_tmux_ui_noise() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
-        session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
+@pytest.mark.asyncio
+async def test_watch_task_uses_bound_claude_session_for_second_turn(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x2.exit",
         task_id="t5",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=claude_session,
         persistent_terminal=True,
         interactive=True,
-        begin_marker="__TGCLI_BEGIN__",
-        done_marker="__TGCLI_DONE__",
     )
 
-    text = (
-        "__TGCLI_BEGIN__\n"
-        "冒泡排序说明\n"
-        "────────────────────────\n"
-        "❯\n"
-        "esc to interrupt Update available! Run: brew upgrade claude-code\n"
-        "__TGCLI_DONE__\n"
-    )
-    event, done = runner._process_interactive_partial(meta=m, text=text)
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    state = runner._session_store.get(claude_session)
+    assert state is not None
+    assert state.phase == SessionPhase.PROCESSING
+    runner._session_store._persist(state)
+    await asyncio.sleep(0.03)
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
 
-    assert done is True
-    assert event is not None
-    assert event.content == "\n冒泡排序说明\n"
+    events = await task
 
-
-def test_process_interactive_text_filters_marker_artifacts() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
-        session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
-        task_id="t6",
-        persistent_terminal=True,
-        interactive=True,
-        begin_marker="__TGCLI_BEGIN__",
-        done_marker="__TGCLI_DONE__",
-    )
-
-    text = "__TGCLI_BEGIN__\nTGCLI_BEGIN\n你好\nTGCLI_DONE\n__TGCLI_DONE__\n"
-    event, done = runner._process_interactive_partial(meta=m, text=text)
-
-    assert done is True
-    assert event is not None
-    assert event.content == "\n你好\n"
-
-
-def test_extract_assistant_reply_chunk_finds_body_between_assistant_and_prompt() -> None:
-    runner = TmuxRunner()
-    chunk, consumed, completed = runner._extract_assistant_reply_chunk(
-        "header\n⏺ 你好，Jack！\n❯ \nfooter\n"
-    )
-
-    assert chunk == "你好，Jack！"
-    assert consumed > 0
-    assert completed is True
-
-
-def test_extract_assistant_reply_chunk_without_boundary_waits_for_more() -> None:
-    runner = TmuxRunner()
-    chunk, consumed, completed = runner._extract_assistant_reply_chunk("⏺ 你好，Jack！")
-
-    assert chunk == ""
-    assert consumed == 0
-    assert completed is False
-
-
-def test_extract_assistant_reply_chunk_uses_next_assistant_start_as_boundary() -> None:
-    runner = TmuxRunner()
-    text = "⏺ 你好，Jack！\n⏺ 你好，Jack！\n"
-    chunk, consumed, completed = runner._extract_assistant_reply_chunk(text)
-
-    assert chunk.strip() == "你好，Jack！"
-    assert consumed > 0
-    assert completed is True
-
-
-def test_process_interactive_text_emits_clean_chunk_without_done_marker() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
-        session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
-        task_id="t7",
-        persistent_terminal=True,
-        interactive=True,
-        begin_marker="TGCLI_BEGIN",
-        done_marker="TGCLI_DONE",
-        in_reply_block=True,
-        prompt_text="你好啊",
-    )
-
-    event, done = runner._process_interactive_partial(meta=m, text="⏺ 你好，Jack！\n❯ ")
-
-    assert done is True
-    assert event is not None
-    assert event.content == "\n你好，Jack！\n"
-
-
-def test_process_interactive_text_skips_only_noise_without_done_marker() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
-        session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
-        task_id="t8",
-        persistent_terminal=True,
-        interactive=True,
-        begin_marker="TGCLI_BEGIN",
-        done_marker="TGCLI_DONE",
-        in_reply_block=True,
-    )
-
-    event, done = runner._process_interactive_partial(meta=m, text="✢ Forging…\n⎿  Tip: Use /config\n")
-
-    assert done is False
-    assert event is None
-
-
-def test_process_interactive_text_does_not_emit_short_fragment_in_marker_mode() -> None:
-    runner = TmuxRunner()
-    m = _TmuxTaskMeta(
-        session_name="tgcli_user_1",
-        log_file=Path("/tmp/x.log"),
-        exit_file=Path("/tmp/x.exit"),
-        task_id="t9",
-        persistent_terminal=True,
-        interactive=True,
-        begin_marker="__TGCLI_BEGIN__",
-        done_marker="__TGCLI_DONE__",
-    )
-
-    event1, done1 = runner._process_interactive_partial(meta=m, text="__TGCLI_BEGIN__\n你")
-    assert done1 is False
-    assert event1 is None
-
-    event2, done2 = runner._process_interactive_partial(meta=m, text="好\n__TGCLI_DONE__")
-    assert done2 is True
-    assert event2 is not None
-    assert event2.content == "\n你好\n"
+    assert [event.type for event in events] == [EventType.EXITED]
 
 
 @pytest.mark.asyncio

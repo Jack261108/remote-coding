@@ -1,20 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 
+from app.adapters.claude.hook_installer import HookInstaller
+from app.adapters.claude.hook_socket_server import HookSocketServer
+from app.adapters.claude.paths import ClaudePaths
+from app.domain.models import SessionContext
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.process.subprocess_runner import SubprocessRunner
 from app.adapters.process.tmux_runner import TmuxRunner
+from app.adapters.process.transcript_writer import TranscriptWriter
+from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
 from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.router import create_router
 from app.config.settings import Settings
+from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.session_service import SessionService
+from app.services.session_store import SessionStore
+from app.domain.hook_models import HookEvent
+from app.domain.session_models import SessionEvent, SessionEventType
 from app.services.task_service import TaskService
+
+logger = logging.getLogger(__name__)
 
 
 class AppContainer:
@@ -42,10 +56,24 @@ class AppContainer:
         self.session_store = MemorySessionStore()
 
         self.runner = SubprocessRunner()
+        self.claude_paths = ClaudePaths.resolve(settings.claude_config_dir)
+        self.hook_installer = HookInstaller(
+            paths=self.claude_paths,
+            socket_path=settings.claude_hook_socket_path,
+            claude_bin=settings.claude_cli_bin,
+        )
+        self.hook_socket_server = HookSocketServer(settings.claude_hook_socket_path)
+        self.file_session_store = FileSessionStore(settings.tmux_data_dir)
+        self.transcript_writer = TranscriptWriter(self.file_session_store)
+        self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
+        self.structured_session_store = SessionStore(self.file_session_store)
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
             data_dir=settings.tmux_data_dir,
             claude_cli_bin=settings.claude_cli_bin,
+            file_store=self.file_session_store,
+            transcript_writer=self.transcript_writer,
+            session_store=self.structured_session_store,
         )
         self.cli_factory = CLIAdapterFactory(
             settings=settings,
@@ -60,7 +88,143 @@ class AppContainer:
             session_service=self.session_service,
             cli_factory=self.cli_factory,
             semaphore=asyncio.Semaphore(settings.max_concurrent_tasks),
+            structured_session_store=self.structured_session_store,
+            hook_socket_server=self.hook_socket_server,
         )
+        self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
+        self._started = False
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        if self.settings.claude_install_hooks:
+            self.hook_installer.install()
+        await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
+        self._started = True
+
+    async def stop(self) -> None:
+        if not self._started:
+            await self.bot.session.close()
+            return
+        await self._stop_jsonl_sync_tasks()
+        await self.hook_socket_server.stop()
+        await self.bot.session.close()
+        self._started = False
+
+    async def sync_claude_session(self, session_id: str, cwd: str) -> None:
+        snapshot = self.claude_jsonl_parser.parse_incremental(session_id=session_id, cwd=cwd)
+        self.structured_session_store.process(
+            SessionEvent(
+                session_id=session_id,
+                type=SessionEventType.FILE_SYNCED,
+                payload=snapshot.to_payload(),
+            )
+        )
+
+    async def _stop_jsonl_sync_tasks(self) -> None:
+        tasks = list(self._jsonl_sync_tasks.values())
+        self._jsonl_sync_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+
+    def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
+        existing = self._jsonl_sync_tasks.get(session_id)
+        if existing is not None:
+            existing.cancel()
+        self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id, cwd))
+
+    async def _debounced_sync_claude_session(self, session_id: str, cwd: str) -> None:
+        try:
+            await asyncio.sleep(self.settings.claude_jsonl_sync_debounce_ms / 1000)
+            await self.sync_claude_session(session_id, cwd)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current = self._jsonl_sync_tasks.get(session_id)
+            if current is asyncio.current_task():
+                self._jsonl_sync_tasks.pop(session_id, None)
+
+    async def _handle_hook_event(self, event: HookEvent) -> None:
+        logger.debug(
+            "hook event received",
+            extra={
+                "session_id": event.session_id,
+                "event": event.event,
+                "status": event.status,
+                "tool": event.tool,
+            },
+        )
+        self.structured_session_store.get_or_create(
+            session_id=event.session_id,
+            provider="claude_code",
+            workdir=event.cwd,
+        )
+        self.structured_session_store.process(
+            SessionEvent(
+                session_id=event.session_id,
+                type=SessionEventType.HOOK_RECEIVED,
+                payload=event.to_dict(),
+            )
+        )
+        await self._bind_hook_session(event)
+        self._schedule_jsonl_sync(event.session_id, event.cwd)
+
+    async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
+        logger.warning(
+            "permission response failed",
+            extra={"session_id": session_id, "tool_use_id": tool_use_id},
+        )
+        self.structured_session_store.process(
+            SessionEvent(
+                session_id=session_id,
+                type=SessionEventType.PERMISSION_RESPONSE_FAILED,
+                payload={"tool_use_id": tool_use_id},
+            )
+        )
+
+    async def _bind_hook_session(self, event: HookEvent) -> None:
+        if not event.session_id:
+            return
+        if event.event == "SessionEnd":
+            task = self._jsonl_sync_tasks.pop(event.session_id, None)
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        matched = await self._match_session_context(event)
+        if matched is None:
+            return
+        await self.task_service.bind_claude_session(
+            user_id=matched.user_id,
+            claude_session_id=event.session_id,
+            workdir=event.cwd or matched.workdir,
+        )
+        state = self.structured_session_store.get_or_create(
+            session_id=event.session_id,
+            provider="claude_code",
+            workdir=event.cwd or matched.workdir,
+            terminal_id=matched.terminal_id,
+            user_id=matched.user_id,
+        )
+        state.terminal_id = matched.terminal_id
+        state.user_id = matched.user_id
+        self.structured_session_store._persist(state)
+
+    async def _match_session_context(self, event: HookEvent) -> SessionContext | None:
+        sessions = await self.session_service.list_all()
+        for session in sessions:
+            if session.claude_session_id == event.session_id:
+                return session
+        for session in sessions:
+            if session.provider != "claude_code" or not session.claude_chat_active:
+                continue
+            if event.cwd and session.workdir != event.cwd:
+                continue
+            return session
+        return None
 
     def wire(self) -> None:
         self.dispatcher.message.middleware(

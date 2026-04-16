@@ -1,0 +1,264 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from app.bot.handlers.command_run import run_prompt_and_stream
+from app.bot.presenters.chunk_sender import ChunkSender
+from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
+from app.domain.session_models import ConversationTurn, SessionPhase
+
+
+class DummyMessage:
+    def __init__(self, user_id: int = 1) -> None:
+        self.from_user = SimpleNamespace(id=user_id)
+        self.answers: list[str] = []
+
+    async def answer(self, text: str) -> None:
+        self.answers.append(text)
+
+
+class DummyTaskService:
+    def __init__(self, events: list[CLIEvent], status: TaskRecord | None = None, *, interactive: bool = False, structured_reply: str = "", structured_turns: list[ConversationTurn] | None = None, event_delays: list[float] | None = None) -> None:
+        self._events = events
+        self._status = status
+        self._interactive = interactive
+        self._structured_reply = structured_reply
+        self._structured_turns = structured_turns
+        self._event_delays = event_delays or [0.0] * len(events)
+
+    async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+        task = SimpleNamespace(task_id="t1", provider="claude_code", session_id="s1")
+        return SimpleNamespace(task=task, events=self._stream(), interactive=self._interactive)
+
+    async def get_status(self, task_id: str, user_id: int):
+        return self._status
+
+    async def get_structured_session(self, user_id: int):
+        if self._structured_turns is not None:
+            return SimpleNamespace(
+                phase=SessionPhase.WAITING_FOR_INPUT,
+                turns=self._structured_turns,
+            )
+        if not self._structured_reply:
+            return None
+        return SimpleNamespace(
+            phase=SessionPhase.WAITING_FOR_INPUT,
+            turns=[ConversationTurn(turn_id="turn-1", role="assistant", text=self._structured_reply, is_complete=True)],
+        )
+
+    async def _stream(self):
+        for delay, event in zip(self._event_delays, self._events, strict=False):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            yield event
+
+
+async def _run_and_wait(*, message: DummyMessage, task_service: DummyTaskService, wait_sec: float = 0.05) -> None:
+    await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+    await asyncio.sleep(wait_sec)
+
+
+def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
+    started_at = utc_now() - timedelta(seconds=2)
+    ended_at = utc_now()
+    return TaskRecord(
+        task_id="t1",
+        session_id="s1",
+        user_id=1,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+        timeout_sec=30,
+        status=task_status,
+        started_at=started_at,
+        ended_at=ended_at,
+        output_truncated=truncated,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_reports_started_output_and_success() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="hello\nworld\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+    )
+
+    await _run_and_wait(message=message, task_service=task_service)
+
+    assert message.answers[0] == (
+        "任务已接收\n"
+        "task_id: t1\n"
+        "provider: claude_code\n"
+        "session_id: s1\n"
+        "status: 等待启动"
+    )
+    assert message.answers[1] == (
+        "任务开始执行\n"
+        "task_id: t1\n"
+        "status: 正在处理"
+    )
+    assert message.answers[2] == "hello\nworld"
+    assert message.answers[3].startswith("任务执行完成\ntask_id: t1\nstatus: 成功\nexit_code: 0\nduration: ")
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="TGCLI_BEGIN\n正文\nTGCLI_DONE\n"),
+            CLIEvent(type=EventType.STDERR, task_id="t1", content="boom\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+    )
+
+    await _run_and_wait(message=message, task_service=task_service)
+
+    assert "TGCLI_BEGIN" not in "\n".join(message.answers)
+    assert "TGCLI_DONE" not in "\n".join(message.answers)
+    assert "正文" in message.answers[1]
+    assert "[stderr] boom" in message.answers[1]
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_reports_failed_with_hint_and_truncation() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.FAILED, task_id="t1", error="tmux session lost"),
+        ],
+        _status(task_status=TaskStatus.FAILED, truncated=True),
+    )
+
+    await _run_and_wait(message=message, task_service=task_service)
+
+    assert message.answers[1].startswith("任务执行失败\ntask_id: t1\nstatus: 失败\nerror: tmux session lost\nduration: ")
+    assert message.answers[1].endswith("output: truncated")
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_reports_timeout() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.TIMEOUT, task_id="t1", error="deadline exceeded"),
+        ],
+        _status(task_status=TaskStatus.TIMEOUT),
+    )
+
+    await _run_and_wait(message=message, task_service=task_service)
+
+    assert message.answers[1].startswith("任务执行超时\ntask_id: t1\nstatus: 超时\nerror: deadline exceeded\nduration: ")
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_reports_canceled() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.CANCELED, task_id="t1", error="user canceled"),
+        ],
+        _status(task_status=TaskStatus.CANCELED),
+    )
+
+    await _run_and_wait(message=message, task_service=task_service)
+
+    assert message.answers[1].startswith("任务已取消\ntask_id: t1\nstatus: 已取消\nerror: user canceled\nduration: ")
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mode() -> None:
+    message = DummyMessage()
+    turns: list[ConversationTurn] = []
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="噪音\nTGCLI_BEGIN\n正文\nTGCLI_DONE\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.03, 0.1],
+    )
+
+    async def append_new_turn() -> None:
+        await asyncio.sleep(0.02)
+        turns.append(ConversationTurn(turn_id="turn-1", role="assistant", text="\n干净正文\n", is_complete=True))
+
+    updater = asyncio.create_task(append_new_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2)
+    await updater
+
+    assert "噪音" not in "\n".join(message.answers)
+    assert message.answers[2] == "干净正文"
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_ignores_old_turn_and_emits_new_completed_turn() -> None:
+    message = DummyMessage()
+    turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="tmux 噪音\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.03, 0.12],
+    )
+
+    async def append_new_turn() -> None:
+        await asyncio.sleep(0.02)
+        turns.append(ConversationTurn(turn_id="turn-new", role="assistant", text="\n新回复\n", is_complete=True))
+
+    updater = asyncio.create_task(append_new_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25)
+    await updater
+
+    assert "旧回复" not in "\n".join(message.answers)
+    assert "tmux 噪音" not in "\n".join(message.answers)
+    assert message.answers[2] == "新回复"
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn() -> None:
+    message = DummyMessage()
+    turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n半截回复\n", is_complete=False)]
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="tmux 噪音\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.03, 0.08],
+    )
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12)
+
+    assert all("半截回复" not in item for item in message.answers)
+    assert all("tmux 噪音" not in item for item in message.answers)
+    assert message.answers[-1].startswith("任务执行完成")

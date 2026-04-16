@@ -24,6 +24,7 @@ class SubprocessRunner:
         env: dict[str, str] | None = None,
         terminal_key: str | None = None,
         interactive: bool = False,
+        claude_session_id: str | None = None,
     ) -> AsyncIterator[CLIEvent]:
         if not argv:
             yield CLIEvent(type=EventType.FAILED, task_id=task_id, error="命令参数为空")

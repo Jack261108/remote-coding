@@ -7,6 +7,7 @@ from app.adapters.cli.gemini_cli import GeminiCLIAdapter
 from app.adapters.process.subprocess_runner import SubprocessRunner
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.config.settings import Settings
+from app.domain.session_models import SessionState
 
 
 class CLIAdapterFactory:
@@ -71,3 +72,13 @@ class CLIAdapterFactory:
         if not self._claude_tmux_enabled or self._tmux_runner is None:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
         return await self._tmux_runner.reveal_terminal(terminal_key)
+
+    def get_session_state(self, terminal_key: str) -> SessionState | None:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return None
+        return self._tmux_runner.get_session_state(terminal_key)
+
+    def get_claude_session_state(self, session_id: str) -> SessionState | None:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return None
+        return self._tmux_runner.get_session_state(session_id)
