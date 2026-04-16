@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -15,6 +17,8 @@ from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
+
+logger = logging.getLogger(__name__)
 
 
 def create_router(*, settings: Settings, task_service: TaskService, session_service: SessionService) -> Router:
@@ -73,11 +77,23 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
 
         user_id = message.from_user.id if message.from_user else 0
         session = await session_service.get(user_id)
+        logger.info(
+            "claude chat text received",
+            extra={
+                "user_id": user_id,
+                "text_len": len(text),
+                "has_session": session is not None,
+                "claude_chat_active": bool(session and session.claude_chat_active),
+                "session_provider": session.provider if session else None,
+                "session_workdir": session.workdir if session else None,
+                "session_claude_session_id": session.claude_session_id if session else None,
+            },
+        )
         if session is None or not session.claude_chat_active:
             await message.answer("请先发送 /claude")
             return
 
-        await run_prompt_and_stream(
+        stream_task = await run_prompt_and_stream(
             message=message,
             task_service=task_service,
             sender_factory=sender_factory,
@@ -85,6 +101,15 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
             provider="claude_code",
             prompt=text,
             workdir=session.workdir,
+        )
+        logger.info(
+            "claude chat stream spawned",
+            extra={
+                "user_id": user_id,
+                "workdir": session.workdir,
+                "claude_session_id": session.claude_session_id,
+                "task_created": stream_task is not None,
+            },
         )
 
     return router

@@ -120,6 +120,19 @@ class AppContainer:
 
     async def sync_claude_session(self, session_id: str, cwd: str) -> None:
         snapshot = self.claude_jsonl_parser.parse_incremental(session_id=session_id, cwd=cwd)
+        logger.info(
+            "claude session synced",
+            extra={
+                "session_id": session_id,
+                "cwd": cwd,
+                "turn_count": len(snapshot.turns),
+                "tool_call_count": len(snapshot.tool_calls),
+                "last_reply": snapshot.last_reply,
+                "last_reply_role": snapshot.last_reply_role,
+                "last_offset": snapshot.last_offset,
+                "clear_detected": snapshot.clear_detected,
+            },
+        )
         self.structured_session_store.process(
             SessionEvent(
                 session_id=session_id,
@@ -161,12 +174,35 @@ class AppContainer:
             if session.provider != "claude_code" or not session.claude_chat_active:
                 continue
             if not session.claude_session_id:
+                logger.info("periodic recheck skipped", extra={"user_id": session.user_id, "reason": "no_claude_session_id"})
                 continue
             state = self.structured_session_store.get(session.claude_session_id)
             if state is None:
+                logger.info(
+                    "periodic recheck skipped",
+                    extra={"user_id": session.user_id, "claude_session_id": session.claude_session_id, "reason": "no_state"},
+                )
                 continue
             if state.phase not in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+                logger.info(
+                    "periodic recheck skipped",
+                    extra={
+                        "user_id": session.user_id,
+                        "claude_session_id": session.claude_session_id,
+                        "reason": "phase_not_active",
+                        "phase": state.phase.value,
+                    },
+                )
                 continue
+            logger.info(
+                "periodic recheck syncing",
+                extra={
+                    "user_id": session.user_id,
+                    "claude_session_id": session.claude_session_id,
+                    "phase": state.phase.value,
+                    "workdir": session.workdir,
+                },
+            )
             await self.sync_claude_session(session.claude_session_id, session.workdir)
 
     async def _restore_session_bindings(self) -> None:
@@ -257,6 +293,19 @@ class AppContainer:
                 with suppress(asyncio.CancelledError):
                     await task
         matched = await self._match_session_context(event)
+        logger.info(
+            "hook session match result",
+            extra={
+                "hook_session_id": event.session_id,
+                "hook_event": event.event,
+                "hook_status": event.status,
+                "hook_cwd": event.cwd,
+                "matched_user_id": matched.user_id if matched is not None else None,
+                "matched_workdir": matched.workdir if matched is not None else None,
+                "matched_terminal_id": matched.terminal_id if matched is not None else None,
+                "matched_claude_session_id": matched.claude_session_id if matched is not None else None,
+            },
+        )
         if matched is None:
             return
         await self.task_service.bind_claude_session(
@@ -277,17 +326,60 @@ class AppContainer:
 
     async def _match_session_context(self, event: HookEvent) -> SessionContext | None:
         sessions = await self.session_service.list_all()
+        logger.info(
+            "matching hook session context",
+            extra={
+                "hook_session_id": event.session_id,
+                "hook_cwd": event.cwd,
+                "session_count": len(sessions),
+            },
+        )
         for session in sessions:
             if session.claude_session_id == event.session_id:
+                logger.info(
+                    "matched hook session by claude_session_id",
+                    extra={
+                        "hook_session_id": event.session_id,
+                        "user_id": session.user_id,
+                        "workdir": session.workdir,
+                        "terminal_id": session.terminal_id,
+                    },
+                )
                 return session
         event_workdir = str(Path(event.cwd).resolve()) if event.cwd else None
         for session in sessions:
+            session_workdir = str(Path(session.workdir).resolve()) if session.workdir else None
+            logger.info(
+                "evaluating hook session candidate",
+                extra={
+                    "hook_session_id": event.session_id,
+                    "user_id": session.user_id,
+                    "provider": session.provider,
+                    "claude_chat_active": session.claude_chat_active,
+                    "session_workdir": session.workdir,
+                    "resolved_session_workdir": session_workdir,
+                    "resolved_event_workdir": event_workdir,
+                    "session_claude_session_id": session.claude_session_id,
+                },
+            )
             if session.provider != "claude_code" or not session.claude_chat_active:
                 continue
-            session_workdir = str(Path(session.workdir).resolve()) if session.workdir else None
             if event_workdir and session_workdir != event_workdir:
                 continue
+            logger.info(
+                "matched hook session by workdir",
+                extra={
+                    "hook_session_id": event.session_id,
+                    "user_id": session.user_id,
+                    "resolved_event_workdir": event_workdir,
+                    "resolved_session_workdir": session_workdir,
+                },
+            )
             return session
+        logger.warning(
+            "failed to match hook session context",
+            extra={"hook_session_id": event.session_id, "hook_cwd": event.cwd},
+        )
         return None
 
     def wire(self) -> None:

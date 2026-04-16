@@ -179,16 +179,53 @@ class TaskService:
 
     async def get_structured_session(self, user_id: int) -> SessionState | None:
         session = await self._session_service.get(user_id)
-        if session is None or not session.claude_session_id:
+        if session is None:
+            logger.info("structured session lookup failed", extra={"user_id": user_id, "reason": "no_session"})
+            return None
+        if not session.claude_session_id:
+            logger.info(
+                "structured session lookup failed",
+                extra={
+                    "user_id": user_id,
+                    "reason": "no_claude_session_id",
+                    "provider": session.provider,
+                    "workdir": session.workdir,
+                    "claude_chat_active": session.claude_chat_active,
+                },
+            )
             return None
         if self._structured_session_store is not None:
             state = self._structured_session_store.get(session.claude_session_id)
             if state is not None:
+                logger.info(
+                    "structured session lookup hit store",
+                    extra={
+                        "user_id": user_id,
+                        "claude_session_id": session.claude_session_id,
+                        "phase": state.phase.value,
+                        "turn_count": len(state.turns),
+                    },
+                )
                 return state
         getter = getattr(self._cli_factory, "get_claude_session_state", None) or getattr(self._cli_factory, "get_session_state", None)
         if getter is None:
+            logger.info(
+                "structured session lookup failed",
+                extra={"user_id": user_id, "claude_session_id": session.claude_session_id, "reason": "no_getter"},
+            )
             return None
-        return getter(session.claude_session_id)
+        state = getter(session.claude_session_id)
+        logger.info(
+            "structured session lookup fallback",
+            extra={
+                "user_id": user_id,
+                "claude_session_id": session.claude_session_id,
+                "state_found": state is not None,
+                "phase": state.phase.value if state is not None else None,
+                "turn_count": len(state.turns) if state is not None else 0,
+            },
+        )
+        return state
 
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)

@@ -87,12 +87,34 @@ async def _load_status_summary(task_service: TaskService, task_id: str, user_id:
 
 async def _load_structured_reply(task_service: TaskService, user_id: int) -> tuple[str | None, str]:
     session = await task_service.get_structured_session(user_id)
-    if session is None or not session.turns:
+    if session is None:
+        logger.info("structured reply unavailable", extra={"user_id": user_id, "reason": "no_structured_session"})
+        return None, ""
+    if not session.turns:
+        logger.info(
+            "structured reply unavailable",
+            extra={"user_id": user_id, "reason": "no_turns", "phase": session.phase.value},
+        )
         return None, ""
     for turn in reversed(session.turns):
         if turn.role != "assistant" or not turn.is_complete:
             continue
-        return turn.turn_id, _preview_stream_text(turn.text)
+        preview = _preview_stream_text(turn.text)
+        logger.info(
+            "structured reply loaded",
+            extra={
+                "user_id": user_id,
+                "turn_id": turn.turn_id,
+                "phase": session.phase.value,
+                "turn_count": len(session.turns),
+                "preview_len": len(preview),
+            },
+        )
+        return turn.turn_id, preview
+    logger.info(
+        "structured reply unavailable",
+        extra={"user_id": user_id, "reason": "no_completed_assistant_turn", "phase": session.phase.value, "turn_count": len(session.turns)},
+    )
     return None, ""
 
 
@@ -156,6 +178,15 @@ async def run_prompt_and_stream(
     prompt: str,
     workdir: str | None = None,
 ) -> asyncio.Task | None:
+    logger.info(
+        "run prompt requested",
+        extra={
+            "user_id": user_id,
+            "provider": provider,
+            "prompt_len": len(prompt),
+            "workdir": workdir,
+        },
+    )
     try:
         start = await task_service.create_and_run(
             user_id=user_id,
@@ -178,6 +209,16 @@ async def run_prompt_and_stream(
         await message.answer(f"创建任务失败: {exc}")
         return
 
+    logger.info(
+        "run prompt created task",
+        extra={
+            "user_id": user_id,
+            "task_id": start.task.task_id,
+            "provider": start.task.provider,
+            "session_id": start.task.session_id,
+            "interactive": start.interactive,
+        },
+    )
     await message.answer(
         _build_created_message(
             task_id=start.task.task_id,
@@ -199,7 +240,14 @@ async def run_prompt_and_stream(
     async def emit_structured_reply() -> None:
         nonlocal last_structured_turn_id
         turn_id, structured_reply = await _load_structured_reply(task_service, user_id)
-        if not turn_id or not structured_reply or turn_id == last_structured_turn_id:
+        if not turn_id:
+            logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "reason": "no_turn_id"})
+            return
+        if not structured_reply:
+            logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": turn_id, "reason": "empty_preview"})
+            return
+        if turn_id == last_structured_turn_id:
+            logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": turn_id, "reason": "duplicate_turn"})
             return
         last_structured_turn_id = turn_id
         logger.info("[task %s][structured] %s", start.task.task_id, structured_reply.rstrip("\n"))
@@ -296,6 +344,15 @@ async def run_prompt_and_stream(
 
     task = asyncio.create_task(stream_events())
     _ACTIVE_STREAM_TASKS.add(task)
+    logger.info(
+        "task stream spawned",
+        extra={
+            "task_id": start.task.task_id,
+            "user_id": user_id,
+            "interactive": start.interactive,
+            "active_stream_tasks": len(_ACTIVE_STREAM_TASKS),
+        },
+    )
 
     def _on_done(done_task: asyncio.Task) -> None:
         _ACTIVE_STREAM_TASKS.discard(done_task)
