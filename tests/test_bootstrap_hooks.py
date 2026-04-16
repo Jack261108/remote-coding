@@ -11,6 +11,14 @@ from app.domain.hook_models import HookEvent
 from app.domain.session_models import SessionPhase
 
 
+async def wait_for_jsonl_sync_idle(container: AppContainer, session_id: str) -> None:
+    while True:
+        task = container._jsonl_sync_tasks.get(session_id)
+        if task is None:
+            return
+        await task
+
+
 def make_settings(tmp_path, *, install_hooks: bool = True) -> Settings:
     return Settings.model_validate(
         {
@@ -140,7 +148,7 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
             status="starting",
         )
     )
-    await asyncio.sleep(0.03)
+    await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
     session = await container.session_service.get(1)
     assert session is not None
@@ -183,7 +191,7 @@ async def test_handle_hook_event_matches_resolved_workdir_path(tmp_path, monkeyp
             status="starting",
         )
     )
-    await asyncio.sleep(0.03)
+    await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
     session = await container.session_service.get(1)
     assert session is not None
@@ -206,7 +214,7 @@ async def test_handle_hook_event_debounces_jsonl_sync(tmp_path, monkeypatch: pyt
     await container._handle_hook_event(
         HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running")
     )
-    await asyncio.sleep(0.03)
+    await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
     assert seen == [("claude-session-1", str(tmp_path))]
 
@@ -240,8 +248,10 @@ async def test_sync_claude_session_uses_per_session_lock(tmp_path, monkeypatch: 
 
     first = asyncio.create_task(container.sync_claude_session("claude-session-1", str(tmp_path)))
     second = asyncio.create_task(container.sync_claude_session("claude-session-1", str(tmp_path)))
-    await asyncio.sleep(0.02)
+    await asyncio.sleep(0)
     assert seen == []
+    assert first.done() is False
+    assert second.done() is False
 
     lock.release()
     await first
@@ -276,7 +286,8 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
 
     await container.start()
     container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
-    assert "claude-session-1" in container._jsonl_sync_tasks
+    task = container._jsonl_sync_tasks.get("claude-session-1")
+    assert task is not None
 
     await container.stop()
 
@@ -284,6 +295,63 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
     assert container._jsonl_sync_requests == {}
     assert container._jsonl_sync_locks == {}
     assert container._periodic_recheck_task is None
+
+
+@pytest.mark.asyncio
+async def test_debounced_sync_keeps_request_added_during_sync(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    seen: list[tuple[str, str]] = []
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        seen.append((session_id, cwd))
+        if len(seen) == 1:
+            container._schedule_jsonl_sync(session_id, f"{cwd}-next")
+            first_started.set()
+            await release.wait()
+            return
+        second_started.set()
+
+    monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+
+    container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
+    await first_started.wait()
+    release.set()
+    await second_started.wait()
+    await wait_for_jsonl_sync_idle(container, "claude-session-1")
+
+    assert seen == [
+        ("claude-session-1", str(tmp_path)),
+        ("claude-session-1", f"{str(tmp_path)}-next"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_debounced_sync_requeues_request_after_failure(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    seen: list[tuple[str, str]] = []
+    attempts = 0
+
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        seen.append((session_id, cwd))
+        if attempts == 1:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+
+    container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
+    await wait_for_jsonl_sync_idle(container, "claude-session-1")
+
+    assert attempts == 2
+    assert seen == [
+        ("claude-session-1", str(tmp_path)),
+        ("claude-session-1", str(tmp_path)),
+    ]
+    assert container._jsonl_sync_requests == {}
 
 
 @pytest.mark.asyncio
@@ -307,7 +375,7 @@ async def test_session_end_keeps_pending_sync_until_flushed(tmp_path, monkeypatc
     await container._handle_hook_event(
         HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionEnd", status="ended")
     )
-    await asyncio.sleep(0.03)
+    await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
     assert seen == [("claude-session-1", str(tmp_path))]
 

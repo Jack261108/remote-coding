@@ -88,13 +88,20 @@ class SessionService:
             await self._store.save(session)
             return session
 
+        previous_workdir = current.workdir
         if provider is not None:
             current.provider = provider
         if workdir is not None:
             current.workdir = workdir
         if terminal_mode is not None:
             current.terminal_mode = terminal_mode
-            current.terminal_id = self._build_terminal_id(user_id=user_id, workdir=current.workdir) if terminal_mode else None
+        if current.terminal_mode:
+            if terminal_mode is not None or (workdir is not None and current.workdir != previous_workdir):
+                current.terminal_id = self._build_terminal_id(user_id=user_id, workdir=current.workdir)
+            elif not current.terminal_id:
+                current.terminal_id = self._build_terminal_id(user_id=user_id, workdir=current.workdir)
+        else:
+            current.terminal_id = None
         if claude_chat_active is not None:
             current.claude_chat_active = claude_chat_active
         if provider is not None and provider != "claude_code":

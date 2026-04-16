@@ -321,7 +321,8 @@ class SessionStore:
     def _process_file_synced(self, state: SessionState, event: SessionEvent) -> None:
         payload = event.payload
         last_offset = int(payload["last_offset"]) if payload.get("last_offset") is not None else None
-        if last_offset is not None and last_offset < state.checkpoint.last_offset:
+        reset_detected = bool(payload.get("reset_detected", False))
+        if last_offset is not None and last_offset < state.checkpoint.last_offset and not reset_detected:
             return
 
         turns_payload = payload.get("turns", [])

@@ -238,23 +238,31 @@ class AppContainer:
             self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
 
     async def _debounced_sync_claude_session(self, session_id: str) -> None:
+        current_cwd: str | None = None
         try:
             while True:
                 await asyncio.sleep(self.settings.claude_jsonl_sync_debounce_ms / 1000)
-                cwd = self._jsonl_sync_requests.get(session_id)
-                if cwd is None:
+                current_cwd = self._jsonl_sync_requests.pop(session_id, None)
+                if current_cwd is None:
                     return
-                self._jsonl_sync_requests.pop(session_id, None)
-                await self.sync_claude_session(session_id, cwd)
+                await self.sync_claude_session(session_id, current_cwd)
+                current_cwd = None
                 if session_id not in self._jsonl_sync_requests:
                     return
         except asyncio.CancelledError:
+            if current_cwd is not None and session_id not in self._jsonl_sync_requests:
+                self._jsonl_sync_requests[session_id] = current_cwd
             raise
+        except Exception:
+            if current_cwd is not None and session_id not in self._jsonl_sync_requests:
+                self._jsonl_sync_requests[session_id] = current_cwd
+            logger.exception("debounced jsonl sync failed", extra={"session_id": session_id})
         finally:
             current = self._jsonl_sync_tasks.get(session_id)
             if current is asyncio.current_task():
                 self._jsonl_sync_tasks.pop(session_id, None)
-                self._jsonl_sync_requests.pop(session_id, None)
+                if session_id in self._jsonl_sync_requests:
+                    self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
 
     async def _handle_hook_event(self, event: HookEvent) -> None:
         logger.debug(

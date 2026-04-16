@@ -22,6 +22,7 @@ class ClaudeJSONLSnapshot:
     last_reply_role: str | None = None
     last_tool_name: str | None = None
     clear_detected: bool = False
+    reset_detected: bool = False
     last_offset: int = 0
 
     def to_payload(self) -> dict[str, Any]:
@@ -34,6 +35,7 @@ class ClaudeJSONLSnapshot:
             "last_reply_role": self.last_reply_role,
             "last_tool_name": self.last_tool_name,
             "clear_detected": self.clear_detected,
+            "reset_detected": self.reset_detected,
             "last_offset": self.last_offset,
         }
 
@@ -59,15 +61,17 @@ class ClaudeJSONLParser:
         session_file = self.session_file_path(session_id=session_id, cwd=cwd)
         state = self._states.get(session_id) or _ParserState()
         state.clear_detected = False
+        reset_detected = False
 
         if not session_file.exists():
-            snapshot = self._snapshot(session_id=session_id, cwd=cwd, state=state)
+            snapshot = self._snapshot(session_id=session_id, cwd=cwd, state=state, reset_detected=reset_detected)
             self._states[session_id] = state
             return snapshot
 
         file_size = session_file.stat().st_size
         if file_size < state.last_offset:
             state = _ParserState()
+            reset_detected = True
 
         if file_size > state.last_offset:
             with session_file.open("rb") as fh:
@@ -89,7 +93,7 @@ class ClaudeJSONLParser:
             state.last_offset += consumed
 
         self._states[session_id] = state
-        return self._snapshot(session_id=session_id, cwd=cwd, state=state)
+        return self._snapshot(session_id=session_id, cwd=cwd, state=state, reset_detected=reset_detected)
 
     def reset_state(self, session_id: str) -> None:
         self._states.pop(session_id, None)
@@ -216,7 +220,7 @@ class ClaudeJSONLParser:
                 state.last_reply_role = "assistant"
                 state.last_tool_name = None
 
-    def _snapshot(self, *, session_id: str, cwd: str, state: _ParserState) -> ClaudeJSONLSnapshot:
+    def _snapshot(self, *, session_id: str, cwd: str, state: _ParserState, reset_detected: bool) -> ClaudeJSONLSnapshot:
         return ClaudeJSONLSnapshot(
             session_id=session_id,
             cwd=cwd,
@@ -227,6 +231,7 @@ class ClaudeJSONLParser:
             last_reply_role=state.last_reply_role,
             last_tool_name=state.last_tool_name,
             clear_detected=state.clear_detected,
+            reset_detected=reset_detected,
             last_offset=state.last_offset,
         )
 

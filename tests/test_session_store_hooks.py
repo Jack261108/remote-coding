@@ -259,3 +259,43 @@ def test_session_store_file_synced_ignores_older_snapshot(tmp_path) -> None:
     assert state.phase == SessionPhase.WAITING_FOR_INPUT
     assert state.last_reply == "最新回复"
     assert state.checkpoint.last_offset == 30
+
+
+def test_session_store_file_synced_accepts_reset_snapshot_with_smaller_offset(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-1", workdir="/tmp/project")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    state.checkpoint.last_offset = 30
+    state.last_reply = "最新回复"
+    state.turns.append(ConversationTurn(turn_id="a-current", role="assistant", text="\n最新回复\n", is_complete=True))
+    store._persist(state)
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-1",
+            type=SessionEventType.FILE_SYNCED,
+            payload={
+                "turns": [
+                    {
+                        "turn_id": "a-reset",
+                        "role": "assistant",
+                        "text": "\n重建后的回复\n",
+                        "source": "jsonl",
+                        "is_complete": True,
+                        "started_at": "2026-04-16T10:00:03+00:00",
+                        "ended_at": "2026-04-16T10:00:03+00:00",
+                    }
+                ],
+                "tool_calls": {},
+                "last_reply": "重建后的回复",
+                "last_reply_role": "assistant",
+                "last_offset": 12,
+                "reset_detected": True,
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+    assert state.last_reply == "重建后的回复"
+    assert state.checkpoint.last_offset == 12
+    assert [turn.turn_id for turn in state.turns] == ["a-reset"]

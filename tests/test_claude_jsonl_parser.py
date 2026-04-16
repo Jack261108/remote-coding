@@ -172,3 +172,43 @@ def test_claude_jsonl_parser_stops_before_invalid_complete_line(tmp_path) -> Non
     ).encode("utf-8")) + 1
     assert [turn.text for turn in snapshot.turns] == ["\n第一行\n"]
     assert snapshot.last_offset == first_line_size
+
+
+def test_claude_jsonl_parser_reports_reset_when_file_is_truncated(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+    session_file = parser.session_file_path(session_id="session-1", cwd="/tmp/project")
+
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:00Z",
+                "message": {"id": "a1", "content": [{"type": "text", "text": "第一行"}]},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:01Z",
+                "message": {"id": "a-extra", "content": [{"type": "text", "text": "第二行"}]},
+            },
+        ],
+    )
+    parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:02Z",
+                "message": {"id": "a2", "content": [{"type": "text", "text": "短"}]},
+            },
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    assert snapshot.reset_detected is True
+    assert [turn.text for turn in snapshot.turns] == ["\n短\n"]

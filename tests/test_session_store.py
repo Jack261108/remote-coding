@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.session_models import ParserCheckpoint, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_store import SessionStore
@@ -157,3 +159,37 @@ def test_file_session_store_writes_state_and_conversation_atomically(tmp_path) -
     assert json.loads(state_path.read_text(encoding="utf-8"))["session_id"] == "s1"
     assert json.loads(conversation_path.read_text(encoding="utf-8"))[0]["text"] == "\n你好\n"
     assert not list(state_path.parent.glob("tmp*"))
+
+
+@pytest.mark.asyncio
+async def test_session_service_switch_rebuilds_terminal_id_when_workdir_changes(tmp_path) -> None:
+    from app.services.session_service import SessionService
+
+    old_workdir = str(tmp_path / "one")
+    new_workdir = str(tmp_path / "two")
+
+    class _Store:
+        def __init__(self):
+            self.session = None
+
+        async def get(self, user_id: int):
+            return self.session
+
+        async def save(self, session):
+            self.session = session
+
+    store = _Store()
+    service = SessionService(store)
+
+    first = await service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=old_workdir,
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    first_terminal_id = first.terminal_id
+    second = await service.switch(user_id=1, workdir=new_workdir)
+
+    assert second.workdir == new_workdir
+    assert first_terminal_id != second.terminal_id
