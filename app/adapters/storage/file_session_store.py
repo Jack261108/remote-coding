@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from app.domain.models import SessionContext
@@ -14,6 +16,15 @@ class FileSessionStore:
         self._context_dir = root / "session_contexts"
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._context_dir.mkdir(parents=True, exist_ok=True)
+
+    def _write_json_atomic(self, path: Path, payload: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as fh:
+            tmp_path = Path(fh.name)
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp_path.replace(path)
 
     def session_dir(self, session_id: str) -> Path:
         path = self._base_dir / session_id
@@ -39,10 +50,7 @@ class FileSessionStore:
         return ParserCheckpoint.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def save_checkpoint(self, session_id: str, checkpoint: ParserCheckpoint) -> None:
-        self.cursor_path(session_id).write_text(
-            json.dumps(checkpoint.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._write_json_atomic(self.cursor_path(session_id), checkpoint.to_dict())
 
     def load_session_state(self, session_id: str) -> SessionState | None:
         path = self.state_path(session_id)
@@ -57,14 +65,8 @@ class FileSessionStore:
         return [ConversationTurn.from_dict(item) for item in json.loads(path.read_text(encoding="utf-8"))]
 
     def save_session_state(self, state: SessionState) -> None:
-        self.state_path(state.session_id).write_text(
-            json.dumps(state.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        self.conversation_path(state.session_id).write_text(
-            json.dumps([turn.to_dict() for turn in state.turns], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._write_json_atomic(self.state_path(state.session_id), state.to_dict())
+        self._write_json_atomic(self.conversation_path(state.session_id), [turn.to_dict() for turn in state.turns])
 
     def session_context_path(self, user_id: int) -> Path:
         return self._context_dir / f"{user_id}.json"
@@ -86,7 +88,4 @@ class FileSessionStore:
         return contexts
 
     def save_session_context(self, session: SessionContext) -> None:
-        self.session_context_path(session.user_id).write_text(
-            json.dumps(session.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._write_json_atomic(self.session_context_path(session.user_id), session.to_dict())

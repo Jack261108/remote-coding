@@ -41,11 +41,11 @@ class SessionStore:
         fallback_session_id: str | None = None,
         require_claude_session: bool = False,
     ) -> str | None:
+        if claude_session_id and claude_session_id.startswith("claude-session-"):
+            return claude_session_id
         bound = self.find_by_terminal_id(terminal_id)
         if bound is not None and bound.session_id.startswith("claude-session-"):
             return bound.session_id
-        if claude_session_id and claude_session_id.startswith("claude-session-"):
-            return claude_session_id
         if require_claude_session:
             return None
         return fallback_session_id or claude_session_id
@@ -320,6 +320,10 @@ class SessionStore:
 
     def _process_file_synced(self, state: SessionState, event: SessionEvent) -> None:
         payload = event.payload
+        last_offset = int(payload["last_offset"]) if payload.get("last_offset") is not None else None
+        if last_offset is not None and last_offset < state.checkpoint.last_offset:
+            return
+
         turns_payload = payload.get("turns", [])
         parsed_turns = [
             item if isinstance(item, ConversationTurn) else ConversationTurn.from_dict(item)
@@ -344,8 +348,8 @@ class SessionStore:
         state.last_reply = str(payload["last_reply"]) if payload.get("last_reply") is not None else state.last_reply
         state.last_reply_role = str(payload["last_reply_role"]) if payload.get("last_reply_role") is not None else state.last_reply_role
         state.last_tool_name = str(payload["last_tool_name"]) if payload.get("last_tool_name") is not None else state.last_tool_name
-        if payload.get("last_offset") is not None:
-            state.checkpoint.last_offset = int(payload["last_offset"])
+        if last_offset is not None:
+            state.checkpoint.last_offset = last_offset
         state.checkpoint.clear_pending = bool(payload.get("clear_detected", False))
         state.checkpoint.last_summary = state.summary or ""
         state.checkpoint.seen_tool_ids = list(state.tool_calls.keys())

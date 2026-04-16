@@ -627,6 +627,9 @@ class TmuxRunner:
     def _read_new_text(self, path: Path, position: int) -> tuple[str, int]:
         if not path.exists():
             return "", position
+        file_size = path.stat().st_size
+        if position > file_size:
+            position = 0
         with path.open("rb") as fh:
             fh.seek(position)
             data = fh.read()

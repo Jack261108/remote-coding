@@ -108,3 +108,67 @@ def test_claude_jsonl_parser_detects_clear_and_resets_state(tmp_path) -> None:
     assert len(snapshot.turns) == 1
     assert snapshot.turns[0].text == "\n新回复\n"
     assert snapshot.last_reply == "新回复"
+
+
+def test_claude_jsonl_parser_ignores_truncated_tail_until_line_is_complete(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+    session_file = parser.session_file_path(session_id="session-1", cwd="/tmp/project")
+
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:00Z",
+                "message": {"id": "a1", "content": [{"type": "text", "text": "第一行"}]},
+            }
+        ],
+    )
+    with session_file.open("ab") as fh:
+        fh.write(b'{"type":"assistant","message":')
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    assert [turn.text for turn in snapshot.turns] == ["\n第一行\n"]
+    assert snapshot.last_offset < session_file.stat().st_size
+
+    with session_file.open("ab") as fh:
+        fh.write('{"id":"a2","content":[{"type":"text","text":"第二行"}]}}\n'.encode("utf-8"))
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    assert [turn.text for turn in snapshot.turns] == ["\n第一行\n", "\n第二行\n"]
+    assert snapshot.last_offset == session_file.stat().st_size
+
+
+def test_claude_jsonl_parser_stops_before_invalid_complete_line(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+    session_file = parser.session_file_path(session_id="session-1", cwd="/tmp/project")
+
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:00Z",
+                "message": {"id": "a1", "content": [{"type": "text", "text": "第一行"}]},
+            }
+        ],
+    )
+    with session_file.open("ab") as fh:
+        fh.write(b'{"type": invalid}\n')
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    first_line_size = len(json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": "2026-04-16T10:00:00Z",
+            "message": {"id": "a1", "content": [{"type": "text", "text": "第一行"}]},
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")) + 1
+    assert [turn.text for turn in snapshot.turns] == ["\n第一行\n"]
+    assert snapshot.last_offset == first_line_size

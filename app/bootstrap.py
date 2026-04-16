@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
 from contextlib import suppress
 from pathlib import Path
 
@@ -92,6 +91,8 @@ class AppContainer:
             hook_socket_server=self.hook_socket_server,
         )
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
+        self._jsonl_sync_requests: dict[str, str] = {}
+        self._jsonl_sync_locks: dict[str, asyncio.Lock] = {}
         self._periodic_recheck_task: asyncio.Task[None] | None = None
         self._started = False
 
@@ -116,27 +117,29 @@ class AppContainer:
         self._started = False
 
     async def sync_claude_session(self, session_id: str, cwd: str) -> None:
-        snapshot = self.claude_jsonl_parser.parse_incremental(session_id=session_id, cwd=cwd)
-        logger.info(
-            "claude session synced",
-            extra={
-                "session_id": session_id,
-                "cwd": cwd,
-                "turn_count": len(snapshot.turns),
-                "tool_call_count": len(snapshot.tool_calls),
-                "last_reply": snapshot.last_reply,
-                "last_reply_role": snapshot.last_reply_role,
-                "last_offset": snapshot.last_offset,
-                "clear_detected": snapshot.clear_detected,
-            },
-        )
-        self.structured_session_store.process(
-            SessionEvent(
-                session_id=session_id,
-                type=SessionEventType.FILE_SYNCED,
-                payload=snapshot.to_payload(),
+        lock = self._jsonl_sync_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            snapshot = self.claude_jsonl_parser.parse_incremental(session_id=session_id, cwd=cwd)
+            logger.info(
+                "claude session synced",
+                extra={
+                    "session_id": session_id,
+                    "cwd": cwd,
+                    "turn_count": len(snapshot.turns),
+                    "tool_call_count": len(snapshot.tool_calls),
+                    "last_reply": snapshot.last_reply,
+                    "last_reply_role": snapshot.last_reply_role,
+                    "last_offset": snapshot.last_offset,
+                    "clear_detected": snapshot.clear_detected,
+                },
             )
-        )
+            self.structured_session_store.process(
+                SessionEvent(
+                    session_id=session_id,
+                    type=SessionEventType.FILE_SYNCED,
+                    payload=snapshot.to_payload(),
+                )
+            )
 
     async def _stop_periodic_recheck_task(self) -> None:
         task = self._periodic_recheck_task
@@ -150,6 +153,8 @@ class AppContainer:
     async def _stop_jsonl_sync_tasks(self) -> None:
         tasks = list(self._jsonl_sync_tasks.values())
         self._jsonl_sync_tasks.clear()
+        self._jsonl_sync_requests.clear()
+        self._jsonl_sync_locks.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -221,26 +226,35 @@ class AppContainer:
             if session_file.exists():
                 await self.sync_claude_session(claude_session_id, session.workdir)
                 continue
-            session.claude_session_id = None
-            session.updated_at = datetime.now(session.updated_at.tzinfo) if session.updated_at.tzinfo else datetime.now()
+            terminal_state = self.structured_session_store.find_by_terminal_id(session.terminal_id) if session.terminal_id else None
+            if terminal_state is not None and terminal_state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+                continue
             await self.session_service.clear_claude_session(user_id=session.user_id)
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
+        self._jsonl_sync_requests[session_id] = cwd
         existing = self._jsonl_sync_tasks.get(session_id)
-        if existing is not None:
-            existing.cancel()
-        self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id, cwd))
+        if existing is None or existing.done():
+            self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
 
-    async def _debounced_sync_claude_session(self, session_id: str, cwd: str) -> None:
+    async def _debounced_sync_claude_session(self, session_id: str) -> None:
         try:
-            await asyncio.sleep(self.settings.claude_jsonl_sync_debounce_ms / 1000)
-            await self.sync_claude_session(session_id, cwd)
+            while True:
+                await asyncio.sleep(self.settings.claude_jsonl_sync_debounce_ms / 1000)
+                cwd = self._jsonl_sync_requests.get(session_id)
+                if cwd is None:
+                    return
+                self._jsonl_sync_requests.pop(session_id, None)
+                await self.sync_claude_session(session_id, cwd)
+                if session_id not in self._jsonl_sync_requests:
+                    return
         except asyncio.CancelledError:
             raise
         finally:
             current = self._jsonl_sync_tasks.get(session_id)
             if current is asyncio.current_task():
                 self._jsonl_sync_tasks.pop(session_id, None)
+                self._jsonl_sync_requests.pop(session_id, None)
 
     async def _handle_hook_event(self, event: HookEvent) -> None:
         logger.debug(
@@ -283,12 +297,6 @@ class AppContainer:
     async def _bind_hook_session(self, event: HookEvent) -> None:
         if not event.session_id:
             return
-        if event.event == "SessionEnd":
-            task = self._jsonl_sync_tasks.pop(event.session_id, None)
-            if task is not None:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
         matched = await self._match_session_context(event)
         logger.info(
             "hook session match result",
@@ -344,6 +352,8 @@ class AppContainer:
                 )
                 return session
         event_workdir = str(Path(event.cwd).resolve()) if event.cwd else None
+        workdir_matches: list[SessionContext] = []
+        active_candidates: list[SessionContext] = []
         for session in sessions:
             session_workdir = str(Path(session.workdir).resolve()) if session.workdir else None
             logger.info(
@@ -361,15 +371,31 @@ class AppContainer:
             )
             if session.provider != "claude_code" or not session.claude_chat_active:
                 continue
-            if event_workdir and session_workdir != event_workdir:
+            if event_workdir and session_workdir == event_workdir:
+                workdir_matches.append(session)
                 continue
+            if event_workdir is None and session.claude_session_id is None:
+                active_candidates.append(session)
+        if len(workdir_matches) == 1:
+            session = workdir_matches[0]
             logger.info(
                 "matched hook session by workdir",
                 extra={
                     "hook_session_id": event.session_id,
                     "user_id": session.user_id,
                     "resolved_event_workdir": event_workdir,
-                    "resolved_session_workdir": session_workdir,
+                    "resolved_session_workdir": str(Path(session.workdir).resolve()) if session.workdir else None,
+                },
+            )
+            return session
+        if event_workdir is None and len(active_candidates) == 1:
+            session = active_candidates[0]
+            logger.info(
+                "matched hook session by single active candidate",
+                extra={
+                    "hook_session_id": event.session_id,
+                    "user_id": session.user_id,
+                    "workdir": session.workdir,
                 },
             )
             return session

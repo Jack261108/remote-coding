@@ -250,6 +250,17 @@ async def test_watch_task_flushes_partial_content(tmp_path: Path) -> None:
     assert events[-1].type == EventType.EXITED
 
 
+def test_read_new_text_recovers_after_log_truncation(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path))
+    log_file = tmp_path / "truncated.log"
+    log_file.write_text("new-output", encoding="utf-8")
+
+    text, position = runner._read_new_text(log_file, position=100)
+
+    assert text == "new-output"
+    assert position == len("new-output".encode("utf-8"))
+
+
 @pytest.mark.asyncio
 async def test_process_interactive_chunk_updates_checkpoint_without_structured_transcript(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01)

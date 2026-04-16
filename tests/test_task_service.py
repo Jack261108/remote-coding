@@ -14,6 +14,10 @@ from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 
 
+def expected_terminal_id(*, user_id: int, workdir: str) -> str:
+    return SessionService(store=None)._build_terminal_id(user_id=user_id, workdir=workdir)
+
+
 class StubAdapter(BaseCLIAdapter):
     provider = "stub"
 
@@ -279,9 +283,10 @@ async def test_tmux_mode_passes_terminal_key(tmp_path: Path) -> None:
     result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
     _ = [event async for event in result.events]
 
-    assert adapter.last_terminal_key == "user_1"
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+    assert adapter.last_terminal_key == expected
     assert adapter.last_interactive is False
-    assert factory._ensured_terminal_key == "user_1"
+    assert factory._ensured_terminal_key == expected
 
 
 @pytest.mark.asyncio
@@ -308,9 +313,10 @@ async def test_close_terminal_success(tmp_path: Path) -> None:
     closed, text = await service.close_terminal(1)
     session = await session_service.get(1)
 
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
     assert closed is True
     assert text == "终端已关闭"
-    assert factory._closed_terminal_key == "user_1"
+    assert factory._closed_terminal_key == expected
     assert session is not None
     assert session.terminal_mode is False
     assert session.terminal_id is None
@@ -341,19 +347,20 @@ async def test_open_claude_chat_session_rebuilds_terminal(tmp_path: Path) -> Non
     opened, text = await service.open_claude_chat_session(1)
     session = await session_service.get(1)
 
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
     assert opened is True
     assert text.startswith("Claude 会话已重建")
     assert "tmux_session" not in text
     assert "terminal_id" not in text
-    assert factory._closed_terminal_key == "user_1"
-    assert factory._ensured_interactive_terminal_key == "user_1"
+    assert factory._closed_terminal_key == expected
+    assert factory._ensured_interactive_terminal_key == expected
     assert factory._ensured_interactive_workdir == str(tmp_path.resolve())
-    assert factory._revealed_terminal_key == "user_1"
-    assert "已在桌面打开 Terminal 并附着到 tgcli_user_1" in text
+    assert factory._revealed_terminal_key == expected
+    assert f"已在桌面打开 Terminal 并附着到 tgcli_{expected}" in text
     assert session is not None
     assert session.provider == "claude_code"
     assert session.terminal_mode is True
-    assert session.terminal_id == "user_1"
+    assert session.terminal_id == expected
     assert session.claude_chat_active is True
 
 
@@ -373,15 +380,16 @@ async def test_open_claude_chat_session_creates_terminal_without_previous_sessio
     opened, text = await service.open_claude_chat_session(1)
     session = await session_service.get(1)
 
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
     assert opened is True
     assert text.startswith("Claude 会话已开启")
     assert "tmux_session" not in text
     assert "terminal_id" not in text
     assert factory._closed_terminal_key is None
-    assert factory._ensured_interactive_terminal_key == "user_1"
+    assert factory._ensured_interactive_terminal_key == expected
     assert factory._ensured_interactive_workdir == str(tmp_path.resolve())
-    assert factory._revealed_terminal_key == "user_1"
-    assert "已在桌面打开 Terminal 并附着到 tgcli_user_1" in text
+    assert factory._revealed_terminal_key == expected
+    assert f"已在桌面打开 Terminal 并附着到 tgcli_{expected}" in text
     assert session is not None
     assert session.claude_chat_active is True
 
@@ -414,11 +422,12 @@ async def test_create_and_run_claude_uses_claude_provider_in_chat_mode(tmp_path:
     )
     _ = [event async for event in result.events]
 
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
     assert result.task.provider == "claude_code"
-    assert adapter.last_terminal_key == "user_1"
+    assert adapter.last_terminal_key == expected
     assert adapter.last_interactive is True
     assert adapter.last_claude_session_id is None
-    assert factory._ensured_interactive_terminal_key == "user_1"
+    assert factory._ensured_interactive_terminal_key == expected
 
 
 @pytest.mark.asyncio
@@ -505,9 +514,10 @@ async def test_create_and_run_allows_unbound_first_turn_in_chat_mode(tmp_path: P
     )
     _ = [event async for event in result.events]
 
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
     assert result.interactive is True
     assert adapter.last_claude_session_id is None
-    assert adapter.last_terminal_key == "user_1"
+    assert adapter.last_terminal_key == expected
 
 
 @pytest.mark.asyncio
@@ -532,6 +542,28 @@ async def test_get_or_create_keeps_claude_chat_active_when_not_explicitly_set(tm
 
 
 @pytest.mark.asyncio
+async def test_session_service_terminal_id_changes_with_workdir(tmp_path: Path) -> None:
+    session_service = make_file_backed_session_service(tmp_path)
+    first = await session_service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path / "one"),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    second = await session_service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path / "two"),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    assert first.terminal_id != second.terminal_id
+
+
+@pytest.mark.asyncio
 async def test_file_backed_session_service_persists_context(tmp_path: Path) -> None:
     service = make_file_backed_session_service(tmp_path)
     session = await service.get_or_create(
@@ -546,9 +578,10 @@ async def test_file_backed_session_service_persists_context(tmp_path: Path) -> N
     reloaded = make_file_backed_session_service(tmp_path)
     restored = await reloaded.get(1)
 
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
     assert session.session_id
     assert restored is not None
     assert restored.session_id == session.session_id
-    assert restored.terminal_id == "user_1"
+    assert restored.terminal_id == expected
     assert restored.claude_chat_active is True
     assert restored.claude_session_id == "claude-session-1"

@@ -212,6 +212,48 @@ async def test_handle_hook_event_debounces_jsonl_sync(tmp_path, monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+async def test_sync_claude_session_uses_per_session_lock(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    class _Snapshot:
+        turns = []
+        tool_calls = {}
+        last_reply = None
+        last_reply_role = None
+        last_offset = 0
+        clear_detected = False
+
+        def to_payload(self):
+            return {"turns": [], "tool_calls": {}, "last_offset": 0}
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_parse_incremental(*, session_id: str, cwd: str):
+        seen.append((session_id, cwd))
+        return _Snapshot()
+
+    monkeypatch.setattr(container.claude_jsonl_parser, "parse_incremental", fake_parse_incremental)
+
+    lock = asyncio.Lock()
+    await lock.acquire()
+    container._jsonl_sync_locks["claude-session-1"] = lock
+
+    first = asyncio.create_task(container.sync_claude_session("claude-session-1", str(tmp_path)))
+    second = asyncio.create_task(container.sync_claude_session("claude-session-1", str(tmp_path)))
+    await asyncio.sleep(0.02)
+    assert seen == []
+
+    lock.release()
+    await first
+    await second
+
+    assert seen == [
+        ("claude-session-1", str(tmp_path)),
+        ("claude-session-1", str(tmp_path)),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
@@ -239,7 +281,93 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
     await container.stop()
 
     assert container._jsonl_sync_tasks == {}
+    assert container._jsonl_sync_requests == {}
+    assert container._jsonl_sync_locks == {}
     assert container._periodic_recheck_task is None
+
+
+@pytest.mark.asyncio
+async def test_session_end_keeps_pending_sync_until_flushed(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    seen: list[tuple[str, str]] = []
+
+    await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        seen.append((session_id, cwd))
+
+    monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+
+    await container._handle_hook_event(
+        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionEnd", status="ended")
+    )
+    await asyncio.sleep(0.03)
+
+    assert seen == [("claude-session-1", str(tmp_path))]
+
+
+@pytest.mark.asyncio
+async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await container.session_service.switch(
+        user_id=2,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    matched = await container._match_session_context(
+        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running")
+    )
+
+    assert matched is None
+
+
+@pytest.mark.asyncio
+async def test_restore_session_bindings_keeps_active_terminal_binding_when_snapshot_missing(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await container.session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="missing-session",
+        workdir=str(tmp_path),
+    )
+    terminal_state = container.structured_session_store.get_or_create(
+        session_id="tgcli_user_1",
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        user_id=1,
+    )
+    terminal_state.phase = SessionPhase.PROCESSING
+    container.structured_session_store._persist(terminal_state)
+
+    await container._restore_session_bindings()
+
+    restored_session = await container.session_service.get(1)
+    assert restored_session is not None
+    assert restored_session.claude_session_id == "missing-session"
 
 
 @pytest.mark.asyncio

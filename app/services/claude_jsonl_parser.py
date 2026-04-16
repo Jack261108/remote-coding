@@ -73,12 +73,20 @@ class ClaudeJSONLParser:
             with session_file.open("rb") as fh:
                 fh.seek(state.last_offset)
                 data = fh.read()
-                state.last_offset = fh.tell()
-            for raw_line in data.decode("utf-8", errors="replace").splitlines():
-                line = raw_line.strip()
+            consumed = 0
+            for raw_line in data.splitlines(keepends=True):
+                if not raw_line.endswith((b"\n", b"\r")):
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:
+                    consumed += len(raw_line)
                     continue
-                self._process_line(line, state)
+                try:
+                    self._process_line(line, state)
+                except json.JSONDecodeError:
+                    break
+                consumed += len(raw_line)
+            state.last_offset += consumed
 
         self._states[session_id] = state
         return self._snapshot(session_id=session_id, cwd=cwd, state=state)

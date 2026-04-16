@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, ToolStatus
+from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolStatus
 from app.services.session_store import SessionStore
 
 
@@ -201,7 +201,7 @@ def test_session_store_file_synced_replaces_old_state_and_interrupts_on_end(tmp_
 
 def test_session_store_file_synced_promotes_complete_turn_without_waiting_hook(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
-    state = store.get_or_create(session_id="claude-session-1", workdir="/tmp/project", terminal_id="user_1")
+    state = store.get_or_create(session_id="claude-session-1", workdir="/tmp/project", terminal_id="user_1_36d00faeb25f")
     state.phase = SessionPhase.PROCESSING
     store._persist(state)
 
@@ -231,3 +231,31 @@ def test_session_store_file_synced_promotes_complete_turn_without_waiting_hook(t
 
     assert state.phase == SessionPhase.WAITING_FOR_INPUT
     assert state.last_reply == "补同步后的回复"
+
+
+def test_session_store_file_synced_ignores_older_snapshot(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-1", workdir="/tmp/project")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    state.checkpoint.last_offset = 30
+    state.last_reply = "最新回复"
+    state.turns.append(ConversationTurn(turn_id="a-current", role="assistant", text="\n最新回复\n", is_complete=True))
+    store._persist(state)
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-1",
+            type=SessionEventType.FILE_SYNCED,
+            payload={
+                "turns": [],
+                "tool_calls": {},
+                "last_reply": "旧回复",
+                "last_reply_role": "assistant",
+                "last_offset": 18,
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+    assert state.last_reply == "最新回复"
+    assert state.checkpoint.last_offset == 30
