@@ -251,7 +251,7 @@ async def test_watch_task_flushes_partial_content(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_interactive_chunk_updates_checkpoint_without_project_jsonl(tmp_path: Path) -> None:
+async def test_process_interactive_chunk_updates_checkpoint_without_structured_transcript(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01)
     meta = _TmuxTaskMeta(
         session_name="tgcli_user_1",
@@ -272,17 +272,10 @@ async def test_process_interactive_chunk_updates_checkpoint_without_project_json
     text = "TGCLI_BEGIN\n冒泡排序说明\nTGCLI_DONE\n"
     meta.log_file.write_text(text, encoding="utf-8")
 
-    events = [
-        event
-        async for event in runner._process_interactive_chunk(
-            meta=meta,
-            text=text,
-            flush_partial=False,
-            offset=len(text.encode("utf-8")),
-        )
-    ]
-
-    assert events == []
+    runner._process_interactive_chunk(
+        meta=meta,
+        offset=len(text.encode("utf-8")),
+    )
 
     state = runner._session_store.get(meta.session_name)
     assert state is not None
@@ -292,7 +285,10 @@ async def test_process_interactive_chunk_updates_checkpoint_without_project_json
 
     raw_text = meta.log_file.read_text(encoding="utf-8")
     assert "冒泡排序说明" in raw_text
-    assert not (runner._file_store.session_dir(meta.session_name) / "transcript.events.jsonl").exists()
+    session_files = {path.name for path in runner._file_store.session_dir(meta.session_name).iterdir()}
+    assert "transcript.raw.log" in session_files
+    assert "parser.cursor.json" in session_files
+    assert "transcript.events.jsonl" not in session_files
 
 
 @pytest.mark.asyncio
@@ -324,17 +320,10 @@ async def test_process_interactive_chunk_uses_checkpoint_offset(tmp_path: Path) 
         interactive=True,
     )
 
-    events = [
-        event
-        async for event in runner._process_interactive_chunk(
-            meta=meta,
-            text=new_text,
-            flush_partial=False,
-            offset=len((old_text + new_text).encode("utf-8")),
-        )
-    ]
-
-    assert events == []
+    runner._process_interactive_chunk(
+        meta=meta,
+        offset=len((old_text + new_text).encode("utf-8")),
+    )
     state = runner._session_store.get(session_name)
     assert state is not None
     assert state.checkpoint.last_offset == len((old_text + new_text).encode("utf-8"))

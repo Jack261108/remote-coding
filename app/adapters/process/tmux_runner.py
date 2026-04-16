@@ -232,8 +232,7 @@ class TmuxRunner:
             if text:
                 position = new_position
                 if meta.interactive:
-                    async for out_event in self._process_interactive_chunk(meta=meta, text=text, flush_partial=False, offset=position):
-                        yield out_event
+                    self._process_interactive_chunk(meta=meta, offset=position)
                 else:
                     partial, events = self._split_to_events(task_id=meta.task_id, text=partial + text)
                     for event in events:
@@ -297,8 +296,7 @@ class TmuxRunner:
         if text:
             position = new_position
             if meta.interactive:
-                async for out_event in self._process_interactive_chunk(meta=meta, text=text, flush_partial=True, offset=position):
-                    yield out_event
+                self._process_interactive_chunk(meta=meta, offset=position)
             else:
                 partial, events = self._split_to_events(task_id=meta.task_id, text=partial + text)
                 for event in events:
@@ -320,7 +318,7 @@ class TmuxRunner:
         else:
             yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, exit_code=exit_code, error=f"进程退出码: {exit_code}")
 
-    async def _process_interactive_chunk(self, *, meta: _TmuxTaskMeta, text: str, flush_partial: bool, offset: int):
+    def _process_interactive_chunk(self, *, meta: _TmuxTaskMeta, offset: int) -> None:
         state = self._session_store.mark_interactive_turn_processing(
             terminal_id=meta.terminal_id,
             workdir=meta.workdir,
@@ -328,8 +326,6 @@ class TmuxRunner:
             fallback_session_id=meta.session_name,
         )
         if state is None:
-            if False:
-                yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content="")
             return
         session_id = state.session_id
         if session_id.startswith("claude-session-"):
@@ -337,8 +333,6 @@ class TmuxRunner:
         state.checkpoint.last_offset = offset
         self._session_store.save_checkpoint(session_id, state.checkpoint)
         self._session_store._persist(state)
-        if False:
-            yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content="")
 
     async def cancel(self, task_id: str) -> bool:
         async with self._lock:
