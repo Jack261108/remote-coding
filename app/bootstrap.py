@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import datetime
 from contextlib import suppress
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -279,10 +280,12 @@ class AppContainer:
         for session in sessions:
             if session.claude_session_id == event.session_id:
                 return session
+        event_workdir = str(Path(event.cwd).resolve()) if event.cwd else None
         for session in sessions:
             if session.provider != "claude_code" or not session.claude_chat_active:
                 continue
-            if event.cwd and session.workdir != event.cwd:
+            session_workdir = str(Path(session.workdir).resolve()) if session.workdir else None
+            if event_workdir and session_workdir != event_workdir:
                 continue
             return session
         return None

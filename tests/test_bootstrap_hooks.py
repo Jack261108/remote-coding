@@ -155,6 +155,42 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_handle_hook_event_matches_resolved_workdir_path(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    resolved = str(nested.resolve())
+    raw = str(nested.parent / "b" / ".")
+
+    await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=resolved,
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        return None
+
+    monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="claude-session-1",
+            cwd=raw,
+            event="SessionStart",
+            status="starting",
+        )
+    )
+    await asyncio.sleep(0.03)
+
+    session = await container.session_service.get(1)
+    assert session is not None
+    assert session.claude_session_id == "claude-session-1"
+
+
+@pytest.mark.asyncio
 async def test_handle_hook_event_debounces_jsonl_sync(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     seen: list[tuple[str, str]] = []
