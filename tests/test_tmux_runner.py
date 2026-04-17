@@ -369,6 +369,47 @@ async def test_interactive_timeout_keeps_session_alive(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_interactive_completion_does_not_end_terminal_session_state(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x.exit",
+        task_id="t3b",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=claude_session,
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    state = runner._session_store.get(claude_session)
+    assert state is not None
+    assert state.phase == SessionPhase.PROCESSING
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    events = await task
+
+    assert [event.type for event in events] == [EventType.EXITED]
+    terminal_state = runner._session_store.get(terminal_session)
+    assert terminal_state is not None
+    assert terminal_state.phase != SessionPhase.ENDED
+    state = runner._session_store.get(claude_session)
+    assert state is not None
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+
+
+@pytest.mark.asyncio
 async def test_watch_task_follows_late_bound_claude_session_on_first_turn(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"

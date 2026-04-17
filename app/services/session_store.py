@@ -425,14 +425,13 @@ class SessionStore:
         elif hook.event == "StopFailure":
             self._interrupt_session_tools(state, event.at)
             state.interrupted = True
-            self._move_to_next_phase(state, default=SessionPhase.IDLE)
-        elif hook.event == "SessionEnd" or hook.status == "ended":
-            self._interrupt_session_tools(state, event.at)
-            state.interrupted = True
-            state.phase = SessionPhase.ENDED
-        elif hook.status == "waiting_for_input":
             state.phase = SessionPhase.WAITING_FOR_INPUT
-            state.pending_permission = None
+        elif hook.event == "SessionEnd" or hook.status == "ended":
+            state.interrupted = self._interrupt_session_tools(state, event.at)
+            state.phase = SessionPhase.ENDED
+        elif hook.event in {"Stop", "SubagentStop"} or hook.status == "waiting_for_input":
+            state.interrupted = self._interrupt_session_tools(state, event.at)
+            state.phase = SessionPhase.WAITING_FOR_INPUT
         elif hook.status in {"running_tool", "processing", "starting"}:
             state.phase = SessionPhase.PROCESSING
 
@@ -558,12 +557,15 @@ class SessionStore:
         state.checkpoint.tool_id_to_name = {}
         state.phase = SessionPhase.WAITING_FOR_INPUT
 
-    def _interrupt_session_tools(self, state: SessionState, at) -> None:
+    def _interrupt_session_tools(self, state: SessionState, at) -> bool:
+        interrupted = False
         for tool in state.tool_calls.values():
             if tool.status in {ToolStatus.RUNNING, ToolStatus.WAITING_FOR_APPROVAL}:
                 tool.status = ToolStatus.INTERRUPTED
                 tool.completed_at = tool.completed_at or at
+                interrupted = True
         state.pending_permission = None
+        return interrupted
 
     def _persist(self, state: SessionState, *, publish: bool = True) -> None:
         if publish:

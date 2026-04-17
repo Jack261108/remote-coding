@@ -9,6 +9,7 @@ from app.bootstrap import AppContainer
 from app.config.settings import Settings
 from app.domain.hook_models import HookEvent
 from app.domain.session_models import SessionPhase, ToolCallRecord
+from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.interrupt_watcher import InterruptWatcher
 
 
@@ -702,5 +703,165 @@ async def test_start_clears_stale_claude_session_binding_when_snapshot_missing(t
         assert restored_session is not None
         assert restored_session.claude_session_id is None
         assert restored_session.claude_chat_active is True
+    finally:
+        await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_file_watcher_syncs_when_subagent_file_changes(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session_file = container.claude_jsonl_parser.session_file_path(session_id="claude-session-1", cwd=str(tmp_path))
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-04-16T10:00:00Z",
+                        "message": {
+                            "id": "a1",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "tool-task",
+                                    "name": "Task",
+                                    "input": {"description": "watch subagent"},
+                                }
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-04-16T10:00:01Z",
+                        "toolUseResult": {"agentId": "agent-1", "status": "running"},
+                        "message": {
+                            "id": "a2",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "tool-task",
+                                    "content": "running",
+                                    "is_error": False,
+                                }
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    await container.sync_claude_session("claude-session-1", str(tmp_path))
+
+    agent_file = container.claude_jsonl_parser.subagent_file_path(
+        session_id="claude-session-1",
+        agent_id="agent-1",
+        cwd=str(tmp_path),
+    )
+    agent_file.parent.mkdir(parents=True, exist_ok=True)
+    agent_file.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:02Z",
+                "message": {
+                    "id": "a3",
+                    "content": [
+                        {"type": "tool_use", "id": "nested-1", "name": "Bash", "input": {"command": "pwd"}}
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    seen_sync: list[tuple[str, str]] = []
+
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        seen_sync.append((session_id, cwd))
+        await container.sync_claude_session(session_id, cwd)
+
+    watcher = AgentFileWatcher(
+        session_store=container.structured_session_store,
+        claude_jsonl_parser=container.claude_jsonl_parser,
+        on_update=fake_sync,
+        poll_interval_sec=0.01,
+    )
+    watcher.watch(session_id="claude-session-1", workdir=str(tmp_path))
+    await asyncio.sleep(0.05)
+    await watcher.stop_all()
+    await asyncio.sleep(0)
+
+    assert seen_sync == [("claude-session-1", str(tmp_path))]
+    synced = container.structured_session_store.get("claude-session-1")
+    assert synced is not None
+    assert synced.tool_calls["tool-task"].subagent_tools
+    assert synced.tool_calls["tool-task"].subagent_tools[0].tool_use_id == "nested-1"
+    assert synced.tool_calls["tool-task"].subagent_tools[0].name == "Bash"
+
+
+@pytest.mark.asyncio
+async def test_start_restores_agent_file_watcher_for_existing_subagent_container(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = make_settings(tmp_path, install_hooks=False)
+    first = AppContainer(settings)
+    await first.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await first.session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="claude-session-1",
+        workdir=str(tmp_path),
+    )
+    state = first.structured_session_store.get_or_create(
+        session_id="claude-session-1",
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        user_id=1,
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    state.tool_calls["tool-task"] = ToolCallRecord(
+        tool_use_id="tool-task",
+        name="Task",
+        input={"description": "watch subagent"},
+        structured_result={"agentId": "agent-1"},
+    )
+    first.structured_session_store._persist(state)
+
+    second = AppContainer(settings)
+    seen_agent_watch: list[tuple[str, str]] = []
+
+    async def fake_start(handler, permission_failure_handler=None):
+        return None
+
+    async def fake_stop():
+        return None
+
+    async def fake_close():
+        return None
+
+    def fake_agent_watch(*, session_id: str, workdir: str) -> None:
+        seen_agent_watch.append((session_id, workdir))
+
+    monkeypatch.setattr(second.hook_socket_server, "start", fake_start)
+    monkeypatch.setattr(second.hook_socket_server, "stop", fake_stop)
+    monkeypatch.setattr(second.bot.session, "close", fake_close)
+    monkeypatch.setattr(second.agent_file_watcher, "watch", fake_agent_watch)
+
+    try:
+        await second.start()
+        assert ("claude-session-1", str(tmp_path)) in seen_agent_watch
     finally:
         await second.stop()

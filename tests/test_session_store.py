@@ -211,6 +211,61 @@ def test_session_store_interrupt_detected_marks_running_tool(tmp_path) -> None:
     assert state.phase == SessionPhase.WAITING_FOR_INPUT
 
 
+def test_session_store_stop_failure_moves_to_waiting_for_input(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.process(
+        SessionEvent(
+            session_id="claude-session-1",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-1",
+                "cwd": "/tmp",
+                "event": "PreToolUse",
+                "status": "processing",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+    )
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-1",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-1",
+                "cwd": "/tmp",
+                "event": "StopFailure",
+                "status": "failed",
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+    assert state.interrupted is True
+    assert state.tool_calls["tool-1"].status.value == "interrupted"
+
+
+def test_session_store_stop_without_running_tool_does_not_mark_interrupted(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-1",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-1",
+                "cwd": "/tmp",
+                "event": "Stop",
+                "status": "waiting_for_input",
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+    assert state.interrupted is False
+
+
 @pytest.mark.asyncio
 async def test_session_store_wait_for_publish_notifies_cursor(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))

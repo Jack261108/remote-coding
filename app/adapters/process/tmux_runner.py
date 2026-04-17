@@ -306,8 +306,7 @@ class TmuxRunner:
             yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=partial)
 
         canceled = await self._is_cancel_requested(meta.task_id)
-        should_end_session = (not meta.interactive) or exit_code is not None
-        if should_end_session and self._session_store.get(meta.session_name) is not None:
+        if not meta.interactive and self._session_store.get(meta.session_name) is not None:
             self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_ENDED))
         if timed_out:
             yield CLIEvent(type=EventType.TIMEOUT, task_id=meta.task_id, error=f"任务超时({timeout_sec}s)")

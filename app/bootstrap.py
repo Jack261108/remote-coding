@@ -22,6 +22,7 @@ from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.router import create_router
 from app.config.settings import Settings
+from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.interrupt_watcher import InterruptWatcher
 from app.services.session_service import SessionService
@@ -72,6 +73,11 @@ class AppContainer:
             session_store=self.structured_session_store,
             claude_jsonl_parser=self.claude_jsonl_parser,
         )
+        self.agent_file_watcher = AgentFileWatcher(
+            session_store=self.structured_session_store,
+            claude_jsonl_parser=self.claude_jsonl_parser,
+            on_update=self.sync_claude_session,
+        )
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
             data_dir=settings.tmux_data_dir,
@@ -110,6 +116,7 @@ class AppContainer:
         await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
         await self._restore_session_bindings()
         self._start_interrupt_watchers()
+        self._start_agent_file_watchers()
         self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
         self._started = True
 
@@ -119,6 +126,7 @@ class AppContainer:
             return
         await self._stop_periodic_recheck_task()
         await self._stop_jsonl_sync_tasks()
+        await self.agent_file_watcher.stop_all()
         await self.interrupt_watcher.stop_all()
         await self.hook_socket_server.stop()
         await self.bot.session.close()
@@ -231,21 +239,25 @@ class AppContainer:
             )
             if state.turns or state.tool_calls or state.pending_permission is not None:
                 self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
+                self.agent_file_watcher.watch(session_id=state.session_id, workdir=state.workdir)
                 continue
             session_file = self.claude_jsonl_parser.session_file_path(session_id=claude_session_id, cwd=session.workdir)
             if session_file.exists():
                 await self.sync_claude_session(claude_session_id, session.workdir)
                 self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
+                self.agent_file_watcher.watch(session_id=state.session_id, workdir=state.workdir)
                 continue
             terminal_state = self.structured_session_store.find_by_terminal_id(session.terminal_id) if session.terminal_id else None
             if terminal_state is not None and terminal_state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
                 self.interrupt_watcher.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
+                self.agent_file_watcher.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
                 continue
             await self.session_service.clear_claude_session(user_id=session.user_id)
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         self._jsonl_sync_requests[session_id] = cwd
         self._start_interrupt_watchers_by_session_id(session_id, cwd)
+        self._start_agent_file_watchers_by_session_id(session_id, cwd)
         existing = self._jsonl_sync_tasks.get(session_id)
         if existing is None or existing.done():
             self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
@@ -328,6 +340,23 @@ class AppContainer:
         if state.phase not in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
             return
         self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
+
+    def _start_agent_file_watchers(self) -> None:
+        sessions = self.structured_session_store._states.values()
+        for state in sessions:
+            self._start_agent_file_watcher(state)
+
+    def _start_agent_file_watchers_by_session_id(self, session_id: str, workdir: str) -> None:
+        state = self.structured_session_store.get(session_id)
+        if state is None:
+            self.agent_file_watcher.watch(session_id=session_id, workdir=workdir)
+            return
+        self._start_agent_file_watcher(state)
+
+    def _start_agent_file_watcher(self, state: SessionState) -> None:
+        if state.provider != "claude_code":
+            return
+        self.agent_file_watcher.watch(session_id=state.session_id, workdir=state.workdir)
 
     async def _bind_hook_session(self, event: HookEvent) -> None:
         if not event.session_id:
