@@ -8,8 +8,7 @@ import pytest
 from app.bootstrap import AppContainer
 from app.config.settings import Settings
 from app.domain.hook_models import HookEvent
-from app.domain.session_models import SessionPhase
-from app.services.claude_jsonl_parser import ClaudeJSONLSnapshot
+from app.domain.session_models import SessionPhase, ToolCallRecord
 from app.services.interrupt_watcher import InterruptWatcher
 
 
@@ -476,7 +475,7 @@ async def test_restore_session_bindings_keeps_active_terminal_binding_when_snaps
 
 
 @pytest.mark.asyncio
-async def test_interrupt_watcher_dispatches_interrupt_event(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_interrupt_watcher_dispatches_interrupt_event(tmp_path) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     state = container.structured_session_store.get_or_create(
         session_id="claude-session-1",
@@ -487,26 +486,45 @@ async def test_interrupt_watcher_dispatches_interrupt_event(tmp_path, monkeypatc
         claude_session_id="claude-session-1",
     )
     state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-1"] = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "sleep 10"},
+    )
     container.structured_session_store._persist(state)
 
-    snapshot = ClaudeJSONLSnapshot(
-        session_id="claude-session-1",
-        cwd=str(tmp_path),
-        turns=[],
-        tool_calls={},
-        interrupt_detected=True,
+    project_dir = str(tmp_path).replace("/", "-").replace(".", "-")
+    session_file = container.claude_paths.projects_dir / project_dir / "claude-session-1.jsonl"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:01Z",
+                "toolUseResult": {"stderr": "Interrupted by user"},
+                "message": {
+                    "id": "a1",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tool-1", "content": "Interrupted by user", "is_error": True}
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
     )
-    monkeypatch.setattr(container.claude_jsonl_parser, "parse_incremental", lambda *, session_id, cwd: snapshot)
 
     watcher = InterruptWatcher(session_store=container.structured_session_store, claude_jsonl_parser=container.claude_jsonl_parser)
     watcher.watch(session_id="claude-session-1", workdir=str(tmp_path))
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
     await watcher.stop_all()
+    await asyncio.sleep(0)
 
     state = container.structured_session_store.get("claude-session-1")
     assert state is not None
     assert state.interrupted is True
     assert state.phase == SessionPhase.WAITING_FOR_INPUT
+    assert state.tool_calls["tool-1"].status.value == "interrupted"
 
 
 @pytest.mark.asyncio

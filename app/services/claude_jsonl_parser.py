@@ -11,6 +11,13 @@ from app.domain.models import utc_now
 from app.domain.session_models import ConversationTurn, SubagentToolCall, ToolCallRecord, ToolStatus
 
 _SUBAGENT_TOOL_RESULT_KEYS = {"agentId", "status", "content", "prompt", "totalDurationMs", "totalTokens", "totalToolUseCount"}
+_INTERRUPT_PATTERNS = (
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+    "Interrupted by user",
+    "interrupted by user",
+    "user doesn't want to proceed",
+)
 
 
 @dataclass
@@ -55,6 +62,7 @@ class _ParserState:
     last_reply_role: str | None = None
     last_tool_name: str | None = None
     clear_detected: bool = False
+    interrupt_detected: bool = False
 
 
 class ClaudeJSONLParser:
@@ -66,6 +74,7 @@ class ClaudeJSONLParser:
         session_file = self.session_file_path(session_id=session_id, cwd=cwd)
         state = self._states.get(session_id) or _ParserState()
         state.clear_detected = False
+        state.interrupt_detected = False
         reset_detected = False
 
         if not session_file.exists():
@@ -208,6 +217,9 @@ class ClaudeJSONLParser:
             state.clear_detected = True
             return
 
+        if self._is_interrupt_payload(payload):
+            state.interrupt_detected = True
+
         if message_type not in {"user", "assistant"}:
             return
 
@@ -284,6 +296,9 @@ class ClaudeJSONLParser:
                 existing = state.tool_calls.get(tool_use_id)
                 tool_name = existing.name if existing is not None else "Tool"
                 status = ToolStatus.ERROR if bool(block.get("is_error", False)) else ToolStatus.SUCCESS
+                if status == ToolStatus.ERROR and self._is_interrupt_result(block, payload):
+                    status = ToolStatus.INTERRUPTED
+                    state.interrupt_detected = True
                 state.tool_calls[tool_use_id] = ToolCallRecord(
                     tool_use_id=tool_use_id,
                     name=tool_name,
@@ -324,7 +339,7 @@ class ClaudeJSONLParser:
             last_reply_role=state.last_reply_role,
             last_tool_name=state.last_tool_name,
             clear_detected=state.clear_detected,
-            interrupt_detected=any(tool.status == ToolStatus.INTERRUPTED for tool in state.tool_calls.values()),
+            interrupt_detected=state.interrupt_detected or any(tool.status == ToolStatus.INTERRUPTED for tool in state.tool_calls.values()),
             reset_detected=reset_detected,
             last_offset=state.last_offset,
         )
@@ -395,6 +410,40 @@ class ClaudeJSONLParser:
         if isinstance(content, str):
             return "<command-name>/clear</command-name>" in content
         return False
+
+    def _is_interrupt_payload(self, payload: dict[str, Any]) -> bool:
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            return False
+        content = message.get("content")
+        if isinstance(content, str):
+            return any(pattern in content for pattern in _INTERRUPT_PATTERNS)
+        if not isinstance(content, list):
+            return False
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and any(pattern in str(block.get("text") or "") for pattern in _INTERRUPT_PATTERNS):
+                return True
+            if block.get("type") == "tool_result" and self._is_interrupt_result(block, payload):
+                return True
+        return False
+
+    def _is_interrupt_result(self, block: dict[str, Any], payload: dict[str, Any]) -> bool:
+        texts: list[str] = []
+        content = block.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        result = payload.get("toolUseResult")
+        if isinstance(result, dict):
+            for key in ("stdout", "stderr", "output", "content"):
+                value = result.get(key)
+                if isinstance(value, str):
+                    texts.append(value)
+            interrupted = result.get("interrupted")
+            if interrupted is True:
+                return True
+        return any(pattern in text for text in texts for pattern in _INTERRUPT_PATTERNS)
 
     def _parse_timestamp(self, value: Any) -> datetime:
         if not value:

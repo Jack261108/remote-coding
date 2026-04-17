@@ -253,16 +253,20 @@ class SessionStore:
         state = self.get(session_id)
         if state is None:
             state = self.get_or_create(session_id=session_id)
+        if state.structured_reply_turn_id == turn_id:
+            return state
         state.structured_reply_turn_id = turn_id
-        self._persist(state)
+        self._persist(state, publish=False)
         return state
 
     def mark_structured_permission_emitted(self, session_id: str, *, permission_key: str) -> SessionState:
         state = self.get(session_id)
         if state is None:
             state = self.get_or_create(session_id=session_id)
+        if state.structured_permission_key == permission_key:
+            return state
         state.structured_permission_key = permission_key
-        self._persist(state)
+        self._persist(state, publish=False)
         return state
 
     async def wait_for_publish(self, session_id: str, *, since_cursor: int, timeout_sec: float) -> bool:
@@ -561,11 +565,13 @@ class SessionStore:
                 tool.completed_at = tool.completed_at or at
         state.pending_permission = None
 
-    def _persist(self, state: SessionState) -> None:
-        state.revision += 1
+    def _persist(self, state: SessionState, *, publish: bool = True) -> None:
+        if publish:
+            state.revision += 1
         self._file_store.save_checkpoint(state.session_id, state.checkpoint)
         self._file_store.save_session_state(state)
-        self._publish(state.session_id)
+        if publish:
+            self._publish(state.session_id)
 
     def _publish(self, session_id: str) -> None:
         condition = self._revision_conditions.get(session_id)

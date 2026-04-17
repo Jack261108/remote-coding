@@ -243,7 +243,7 @@ class SubagentState:
 
     @property
     def has_active_subagent(self) -> bool:
-        return bool(self.active_tasks)
+        return any(task.is_active for task in self.active_tasks.values())
 
     def start_task(self, *, task_tool_id: str, description: str | None = None) -> None:
         self.active_tasks[task_tool_id] = SubagentTaskState(task_tool_id=task_tool_id, description=description)
@@ -252,6 +252,7 @@ class SubagentState:
         task = self.active_tasks.get(task_tool_id)
         if task is not None:
             task.is_active = False
+            self.active_tasks.pop(task_tool_id, None)
 
     def current_task(self) -> SubagentTaskState | None:
         if not self.active_tasks:

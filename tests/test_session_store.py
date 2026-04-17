@@ -225,6 +225,18 @@ async def test_session_store_wait_for_publish_notifies_cursor(tmp_path) -> None:
     assert store.get_cursor("claude-session-1") > cursor
 
 
+def test_session_store_ack_updates_do_not_advance_cursor(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="claude-session-1")
+    cursor = store.get_cursor("claude-session-1")
+
+    store.mark_structured_reply_emitted("claude-session-1", turn_id="turn-1")
+    assert store.get_cursor("claude-session-1") == cursor
+
+    store.mark_structured_permission_emitted("claude-session-1", permission_key="tool-1:Bash")
+    assert store.get_cursor("claude-session-1") == cursor
+
+
 def test_file_session_store_writes_checkpoint_atomically(tmp_path) -> None:
     storage = FileSessionStore(str(tmp_path))
     checkpoint = ParserCheckpoint(last_offset=7, pending_buffer="abc")

@@ -214,6 +214,49 @@ def test_claude_jsonl_parser_reports_reset_when_file_is_truncated(tmp_path) -> N
     assert [turn.text for turn in snapshot.turns] == ["\n短\n"]
 
 
+def test_claude_jsonl_parser_detects_interrupt_from_user_message_and_tool_result(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+    session_file = parser.session_file_path(session_id="session-1", cwd="/tmp/project")
+
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:00Z",
+                "message": {
+                    "id": "a1",
+                    "content": [
+                        {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "sleep 10"}},
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:01Z",
+                "toolUseResult": {"stderr": "Interrupted by user"},
+                "message": {
+                    "id": "a2",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tool-1", "content": "Interrupted by user", "is_error": True}
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-04-16T10:00:02Z",
+                "message": {"id": "u1", "content": "[Request interrupted by user]"},
+            },
+        ],
+    )
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    assert snapshot.interrupt_detected is True
+    assert snapshot.tool_calls["tool-1"].status.value == "interrupted"
+
+
 def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) -> None:
     paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
     parser = ClaudeJSONLParser(paths)
