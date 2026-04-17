@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 
 from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
@@ -13,11 +15,16 @@ from app.domain.session_models import ConversationTurn, SessionPhase
 
 
 class DummyMessage:
-    def __init__(self, user_id: int = 1) -> None:
+    def __init__(self, user_id: int = 1, *, fail_on_calls: set[int] | None = None) -> None:
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
+        self._answer_calls = 0
+        self._fail_on_calls = fail_on_calls or set()
 
     async def answer(self, text: str) -> None:
+        self._answer_calls += 1
+        if self._answer_calls in self._fail_on_calls:
+            raise TelegramBadRequest(method="sendMessage", message="chat not found")
         self.answers.append(text)
 
 
@@ -37,7 +44,7 @@ class DummyTaskService:
     async def get_status(self, task_id: str, user_id: int):
         return self._status
 
-    async def get_structured_session(self, user_id: int):
+    async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
         if self._structured_turns is not None:
             return SimpleNamespace(
                 phase=SessionPhase.WAITING_FOR_INPUT,
@@ -70,6 +77,30 @@ async def _run_and_wait(*, message: DummyMessage, task_service: DummyTaskService
     await asyncio.sleep(wait_sec)
     if task is not None:
         await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_pump_silences_missing_structured_logs() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+    )
+    task_service.get_structured_session = AsyncMock(return_value=None)
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12)
+
+    assert task_service.get_structured_session.await_count >= 2
+    initial_call = task_service.get_structured_session.await_args_list[0]
+    repeated_calls = task_service.get_structured_session.await_args_list[1:]
+    assert initial_call.kwargs == {"log_missing": True}
+    assert repeated_calls
+    assert any(call.kwargs.get("log_missing") is False for call in repeated_calls)
+    assert repeated_calls[-1].kwargs == {"log_missing": True}
 
 
 def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
@@ -291,7 +322,48 @@ async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn()
 
     assert all("半截回复" not in item for item in message.answers)
     assert all("tmux 噪音" not in item for item in message.answers)
-    assert message.answers[-1].startswith("任务执行完成")
+    assert "结构化回复暂不可用，已回退为原始输出。" in message.answers
+    assert message.answers[-2].startswith("任务执行完成")
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_structured_session() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="原始输出\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        event_delays=[0.0, 0.03, 0.08],
+    )
+    task_service.get_structured_session = AsyncMock(return_value=None)
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12)
+
+    assert "原始输出" in "\n".join(message.answers)
+    assert "结构化回复暂不可用，已回退为原始输出。" not in message.answers
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_continues_after_message_send_failure() -> None:
+    message = DummyMessage(fail_on_calls={2})
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="hello\nworld\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+    )
+
+    await _run_and_wait(message=message, task_service=task_service)
+
+    assert message.answers[0].startswith("任务已接收")
+    assert "hello\nworld" in message.answers
+    assert any(item.startswith("任务执行完成") for item in message.answers)
 
 
 @pytest.mark.asyncio

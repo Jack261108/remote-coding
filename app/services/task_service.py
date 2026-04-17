@@ -177,22 +177,24 @@ class TaskService:
     def is_claude_tmux_enabled(self) -> bool:
         return self._settings.claude_tmux_mode
 
-    async def get_structured_session(self, user_id: int) -> SessionState | None:
+    async def get_structured_session(self, user_id: int, *, log_missing: bool = True) -> SessionState | None:
         session = await self._session_service.get(user_id)
         if session is None:
-            logger.info("structured session lookup failed", extra={"user_id": user_id, "reason": "no_session"})
+            if log_missing:
+                logger.info("structured session lookup failed", extra={"user_id": user_id, "reason": "no_session"})
             return None
         if not session.claude_session_id:
-            logger.info(
-                "structured session lookup failed",
-                extra={
-                    "user_id": user_id,
-                    "reason": "no_claude_session_id",
-                    "provider": session.provider,
-                    "workdir": session.workdir,
-                    "claude_chat_active": session.claude_chat_active,
-                },
-            )
+            if log_missing:
+                logger.info(
+                    "structured session lookup failed",
+                    extra={
+                        "user_id": user_id,
+                        "reason": "no_claude_session_id",
+                        "provider": session.provider,
+                        "workdir": session.workdir,
+                        "claude_chat_active": session.claude_chat_active,
+                    },
+                )
             return None
         if self._structured_session_store is not None:
             state = self._structured_session_store.get(session.claude_session_id)
@@ -209,10 +211,11 @@ class TaskService:
                 return state
         getter = getattr(self._cli_factory, "get_claude_session_state", None) or getattr(self._cli_factory, "get_session_state", None)
         if getter is None:
-            logger.info(
-                "structured session lookup failed",
-                extra={"user_id": user_id, "claude_session_id": session.claude_session_id, "reason": "no_getter"},
-            )
+            if log_missing:
+                logger.info(
+                    "structured session lookup failed",
+                    extra={"user_id": user_id, "claude_session_id": session.claude_session_id, "reason": "no_getter"},
+                )
             return None
         state = getter(session.claude_session_id)
         logger.info(

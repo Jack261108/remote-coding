@@ -85,17 +85,18 @@ async def _load_status_summary(task_service: TaskService, task_id: str, user_id:
     return duration, truncated
 
 
-async def _load_structured_reply(task_service: TaskService, user_id: int) -> tuple[str | None, str]:
-    session = await task_service.get_structured_session(user_id)
+async def _load_structured_reply(task_service: TaskService, user_id: int, *, log_missing: bool = True) -> tuple[str | None, str, bool]:
+    session = await task_service.get_structured_session(user_id, log_missing=log_missing)
     if session is None:
-        logger.info("structured reply unavailable", extra={"user_id": user_id, "reason": "no_structured_session"})
-        return None, ""
+        if log_missing:
+            logger.info("structured reply unavailable", extra={"user_id": user_id, "reason": "no_structured_session"})
+        return None, "", False
     if not session.turns:
         logger.info(
             "structured reply unavailable",
             extra={"user_id": user_id, "reason": "no_turns", "phase": session.phase.value},
         )
-        return None, ""
+        return None, "", True
     for turn in reversed(session.turns):
         if turn.role != "assistant" or not turn.is_complete:
             continue
@@ -110,12 +111,12 @@ async def _load_structured_reply(task_service: TaskService, user_id: int) -> tup
                 "preview_len": len(preview),
             },
         )
-        return turn.turn_id, preview
+        return turn.turn_id, preview, True
     logger.info(
         "structured reply unavailable",
         extra={"user_id": user_id, "reason": "no_completed_assistant_turn", "phase": session.phase.value, "turn_count": len(session.turns)},
     )
-    return None, ""
+    return None, "", True
 
 
 def _build_created_message(*, task_id: str, provider: str, session_id: str) -> str:
@@ -219,7 +220,20 @@ async def run_prompt_and_stream(
             "interactive": start.interactive,
         },
     )
-    await message.answer(
+    async def answer_safely(text: str) -> bool:
+        if not text:
+            return False
+        try:
+            await message.answer(text)
+            return True
+        except Exception:
+            logger.exception(
+                "telegram answer failed",
+                extra={"task_id": start.task.task_id, "user_id": user_id, "provider": start.task.provider},
+            )
+            return False
+
+    await answer_safely(
         _build_created_message(
             task_id=start.task.task_id,
             provider=start.task.provider,
@@ -228,35 +242,42 @@ async def run_prompt_and_stream(
     )
 
     sender: ChunkSender = sender_factory()
-    last_structured_turn_id, _ = await _load_structured_reply(task_service, user_id)
+    last_structured_turn_id, _, structured_session_available = await _load_structured_reply(task_service, user_id)
     interactive_pump: asyncio.Task | None = None
+    structured_reply_emitted = False
 
     async def send_text(text: str) -> None:
         preview = _preview_stream_text(text)
         if not preview:
             return
-        await message.answer(preview)
+        await answer_safely(preview)
 
-    async def emit_structured_reply() -> None:
-        nonlocal last_structured_turn_id
-        turn_id, structured_reply = await _load_structured_reply(task_service, user_id)
+    async def emit_structured_reply(*, log_missing: bool) -> bool:
+        nonlocal last_structured_turn_id, structured_reply_emitted, structured_session_available
+        turn_id, structured_reply, session_available = await _load_structured_reply(task_service, user_id, log_missing=log_missing)
+        structured_session_available = structured_session_available or session_available
         if not turn_id:
-            logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "reason": "no_turn_id"})
-            return
+            if log_missing:
+                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "reason": "no_turn_id"})
+            return False
         if not structured_reply:
-            logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": turn_id, "reason": "empty_preview"})
-            return
+            if log_missing:
+                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": turn_id, "reason": "empty_preview"})
+            return False
         if turn_id == last_structured_turn_id:
-            logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": turn_id, "reason": "duplicate_turn"})
-            return
+            if log_missing:
+                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": turn_id, "reason": "duplicate_turn"})
+            return False
         last_structured_turn_id = turn_id
+        structured_reply_emitted = True
         logger.info("[task %s][structured] %s", start.task.task_id, structured_reply.rstrip("\n"))
         await sender.push(structured_reply, send_text)
+        return True
 
     async def pump_structured_reply() -> None:
         try:
             while True:
-                await emit_structured_reply()
+                await emit_structured_reply(log_missing=False)
                 await asyncio.sleep(0.05)
         except asyncio.CancelledError:
             raise
@@ -267,9 +288,9 @@ async def run_prompt_and_stream(
         try:
             async for event in start.events:
                 if event.type in {EventType.STDOUT, EventType.STDERR}:
-                    if start.interactive:
-                        continue
                     if not event.content:
+                        continue
+                    if start.interactive and structured_session_available:
                         continue
                     logger.info(
                         "[task %s][%s] %s",
@@ -288,19 +309,19 @@ async def run_prompt_and_stream(
                         start.task.provider,
                         user_id,
                     )
-                    await message.answer(_build_started_message(task_id=start.task.task_id))
+                    await answer_safely(_build_started_message(task_id=start.task.task_id))
                     if start.interactive and interactive_pump is None:
                         interactive_pump = asyncio.create_task(pump_structured_reply())
                     continue
 
                 if start.interactive:
-                    await emit_structured_reply()
+                    await emit_structured_reply(log_missing=True)
                 await sender.flush(send_text)
                 duration, truncated = await _load_status_summary(task_service, start.task.task_id, user_id)
 
                 if event.type == EventType.EXITED:
                     saw_exit = True
-                    await message.answer(
+                    await answer_safely(
                         _build_success_message(
                             task_id=start.task.task_id,
                             exit_code=event.exit_code,
@@ -321,7 +342,7 @@ async def run_prompt_and_stream(
                             "duration": duration,
                         },
                     )
-                    await message.answer(
+                    await answer_safely(
                         _build_error_message(
                             event_type=event.type,
                             task_id=start.task.task_id,
@@ -333,8 +354,10 @@ async def run_prompt_and_stream(
         finally:
             if saw_exit and start.interactive:
                 await asyncio.sleep(0.1)
-                await emit_structured_reply()
+                await emit_structured_reply(log_missing=True)
                 await sender.flush(send_text)
+                if structured_session_available and not structured_reply_emitted:
+                    await answer_safely("结构化回复暂不可用，已回退为原始输出。")
             if interactive_pump is not None:
                 interactive_pump.cancel()
                 try:
@@ -373,7 +396,7 @@ async def run_prompt_and_stream(
         )
 
         async def _notify_error() -> None:
-            await message.answer(f"任务处理异常: {exc}")
+            await answer_safely(f"任务处理异常: {exc}")
 
         asyncio.get_running_loop().create_task(_notify_error())
 
