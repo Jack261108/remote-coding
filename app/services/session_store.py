@@ -174,7 +174,7 @@ class SessionStore:
             if terminal_id is not None:
                 state.terminal_id = terminal_id
             state.claude_session_id = resolved_claude_session_id or state.claude_session_id or state.session_id
-            self._persist(state)
+            self._persist(state, publish=False)
             return state
 
         loaded = self._file_store.load_session_state(session_id)
@@ -213,7 +213,7 @@ class SessionStore:
 
         state.history_loaded = bool(state.turns or state.tool_calls or state.pending_permission is not None)
         self._states[session_id] = state
-        self._persist(state)
+        self._persist(state, publish=False)
         return state
 
     def get(self, session_id: str) -> SessionState | None:
@@ -288,7 +288,7 @@ class SessionStore:
     def save_checkpoint(self, session_id: str, checkpoint: ParserCheckpoint) -> SessionState:
         state = self._states[session_id]
         state.checkpoint = checkpoint
-        self._persist(state)
+        self._persist(state, publish=False)
         return state
 
     def process(self, event: SessionEvent) -> SessionState:

@@ -292,6 +292,37 @@ def test_session_store_ack_updates_do_not_advance_cursor(tmp_path) -> None:
     assert store.get_cursor("claude-session-1") == cursor
 
 
+def test_session_store_get_or_create_existing_state_does_not_advance_cursor(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="claude-session-1", workdir="/tmp/one")
+    cursor = store.get_cursor("claude-session-1")
+
+    store.get_or_create(session_id="claude-session-1", workdir="/tmp/two", terminal_id="term-1")
+
+    assert store.get_cursor("claude-session-1") == cursor
+
+
+def test_session_store_save_checkpoint_does_not_advance_cursor(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="claude-session-1")
+    cursor = store.get_cursor("claude-session-1")
+
+    store.save_checkpoint("claude-session-1", ParserCheckpoint(last_offset=7))
+
+    assert store.get_cursor("claude-session-1") == cursor
+
+
+def test_session_store_reload_does_not_advance_cursor(tmp_path) -> None:
+    first = SessionStore(FileSessionStore(str(tmp_path)))
+    first.get_or_create(session_id="claude-session-1", workdir="/tmp")
+    cursor = first.get_cursor("claude-session-1")
+
+    second = SessionStore(FileSessionStore(str(tmp_path)))
+    second.get_or_create(session_id="claude-session-1", workdir="/tmp")
+
+    assert second.get_cursor("claude-session-1") == cursor
+
+
 def test_file_session_store_writes_checkpoint_atomically(tmp_path) -> None:
     storage = FileSessionStore(str(tmp_path))
     checkpoint = ParserCheckpoint(last_offset=7, pending_buffer="abc")

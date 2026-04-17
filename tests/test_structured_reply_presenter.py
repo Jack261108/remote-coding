@@ -11,7 +11,7 @@ from app.bot.presenters.structured_reply_presenter import (
     strip_bridge_markers,
 )
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.domain.session_models import ConversationTurn, PendingPermission, SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_store import SessionStore
 
 
@@ -60,7 +60,7 @@ class PersistentTaskService:
             self._store.mark_structured_permission_emitted("claude-session-1", permission_key=permission_key)
 
     async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
-        return True
+        return await self._store.wait_for_publish("claude-session-1", since_cursor=since_cursor, timeout_sec=timeout_sec)
 
 
 def _session(*, phase: SessionPhase, turns: list[ConversationTurn] | None = None, pending: PendingPermission | None = None):
@@ -177,3 +177,19 @@ async def test_presenter_persists_reply_cursor_across_restarts(tmp_path) -> None
     second = await presenter.poll(task_id="task-1")
 
     assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_wait_for_update_ignores_checkpoint_only_persist(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")
+    presenter = StructuredReplyPresenter(task_service=PersistentTaskService(store), user_id=1)
+    await presenter.prime()
+
+    assert await presenter.poll(task_id="task-1") == []
+
+    store.save_checkpoint("claude-session-1", ParserCheckpoint(last_offset=5))
+
+    changed = await presenter.wait_for_update(timeout_sec=0.01)
+    assert changed is False
+    assert await presenter.poll(task_id="task-1") == []

@@ -10,7 +10,7 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
 from app.domain.models import CLIEvent, EventType, ExecutionTask, TaskRecord, TaskStatus
-from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
@@ -556,6 +556,40 @@ async def test_wait_for_structured_session_update_uses_store_cursor(tmp_path: Pa
 
     assert await waiter is True
     assert await service.get_structured_session_cursor(1) > cursor
+
+
+@pytest.mark.asyncio
+async def test_structured_session_cursor_ignores_checkpoint_only_updates(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+    structured_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), claude_session_id="claude-session-1")
+    cursor = await service.get_structured_session_cursor(1)
+
+    structured_store.save_checkpoint("claude-session-1", ParserCheckpoint(last_offset=9))
+
+    assert await service.get_structured_session_cursor(1) == cursor
+
+    waiter = asyncio.create_task(service.wait_for_structured_session_update(user_id=1, since_cursor=cursor, timeout_sec=0.01))
+    assert await waiter is False
 
 
 @pytest.mark.asyncio
