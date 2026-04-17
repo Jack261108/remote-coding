@@ -10,7 +10,7 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
 from app.domain.models import CLIEvent, EventType, ExecutionTask, TaskRecord, TaskStatus
-from app.domain.session_models import ConversationTurn, SessionPhase
+from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
@@ -522,6 +522,40 @@ async def test_create_and_run_allows_unbound_first_turn_in_chat_mode(tmp_path: P
     assert adapter.last_claude_session_id is None
     assert result.task.claude_session_id is None
     assert adapter.last_terminal_key == expected
+
+
+@pytest.mark.asyncio
+async def test_wait_for_structured_session_change_uses_store_revision(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+    structured_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), claude_session_id="claude-session-1")
+    revision = await service.get_structured_session_revision(1)
+
+    waiter = asyncio.create_task(service.wait_for_structured_session_change(user_id=1, since_revision=revision, timeout_sec=0.2))
+    await asyncio.sleep(0)
+    structured_store.process(SessionEvent(session_id="claude-session-1", type=SessionEventType.SESSION_STARTED))
+
+    assert await waiter is True
+    assert await service.get_structured_session_revision(1) > revision
 
 
 @pytest.mark.asyncio

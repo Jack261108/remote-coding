@@ -184,8 +184,10 @@ async def run_prompt_and_stream(
     async def pump_structured_reply() -> None:
         try:
             while True:
+                changed = await presenter.wait_for_update(timeout_sec=0.05)
+                if not changed:
+                    continue
                 await emit_presenter_messages(log_missing=False)
-                await asyncio.sleep(0.05)
         except asyncio.CancelledError:
             raise
 

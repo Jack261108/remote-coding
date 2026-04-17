@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -77,6 +78,7 @@ class StructuredReplyPresenter:
         self._structured_session_available = False
         self._structured_reply_emitted = False
         self._fallback_announced = False
+        self._revision = 0
 
     @property
     def structured_session_available(self) -> bool:
@@ -86,6 +88,26 @@ class StructuredReplyPresenter:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._last_structured_turn_id = snapshot.turn_id
         self._structured_session_available = snapshot.session_available
+        revision_getter = getattr(self._task_service, "get_structured_session_revision", None)
+        if revision_getter is None:
+            self._revision = 0
+            return
+        self._revision = await revision_getter(self._user_id)
+
+    async def wait_for_update(self, *, timeout_sec: float) -> bool:
+        wait_for_change = getattr(self._task_service, "wait_for_structured_session_change", None)
+        revision_getter = getattr(self._task_service, "get_structured_session_revision", None)
+        if wait_for_change is None or revision_getter is None:
+            await asyncio.sleep(timeout_sec)
+            return True
+        changed = await wait_for_change(
+            user_id=self._user_id,
+            since_revision=self._revision,
+            timeout_sec=timeout_sec,
+        )
+        if changed:
+            self._revision = await revision_getter(self._user_id)
+        return changed
 
     async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str]:
         snapshot = await self._load_snapshot(log_missing=log_missing)

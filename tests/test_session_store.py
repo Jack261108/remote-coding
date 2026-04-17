@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -208,6 +209,20 @@ def test_session_store_interrupt_detected_marks_running_tool(tmp_path) -> None:
     assert state.pending_permission is None
     assert state.tool_calls["tool-1"].status.value == "interrupted"
     assert state.phase == SessionPhase.WAITING_FOR_INPUT
+
+
+@pytest.mark.asyncio
+async def test_session_store_wait_for_change_notifies_revision(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="claude-session-1")
+    revision = store.get_revision("claude-session-1")
+
+    waiter = asyncio.create_task(store.wait_for_change("claude-session-1", since_revision=revision, timeout_sec=0.2))
+    await asyncio.sleep(0)
+    store.process(SessionEvent(session_id="claude-session-1", type=SessionEventType.SESSION_STARTED))
+
+    assert await waiter is True
+    assert store.get_revision("claude-session-1") > revision
 
 
 def test_file_session_store_writes_checkpoint_atomically(tmp_path) -> None:

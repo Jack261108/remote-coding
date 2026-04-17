@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.hook_models import HookEvent
 from app.domain.session_models import (
@@ -22,6 +24,8 @@ class SessionStore:
     def __init__(self, file_store: FileSessionStore) -> None:
         self._file_store = file_store
         self._states: dict[str, SessionState] = {}
+        self._revisions: dict[str, int] = {}
+        self._revision_conditions: dict[str, asyncio.Condition] = {}
 
     def _is_claude_session_id(self, session_id: str | None) -> bool:
         return bool(session_id and session_id.startswith(CLAUDE_SESSION_PREFIX))
@@ -223,7 +227,24 @@ class SessionStore:
             loaded.turns = self._file_store.load_conversation(session_id)
         loaded.history_loaded = bool(loaded.turns or loaded.tool_calls or loaded.pending_permission is not None)
         self._states[session_id] = loaded
+        self._revisions.setdefault(session_id, 0)
         return loaded
+
+    def get_revision(self, session_id: str) -> int:
+        return self._revisions.get(session_id, 0)
+
+    async def wait_for_change(self, session_id: str, *, since_revision: int, timeout_sec: float) -> bool:
+        if self.get_revision(session_id) > since_revision:
+            return True
+        condition = self._revision_conditions.setdefault(session_id, asyncio.Condition())
+        async with condition:
+            if self.get_revision(session_id) > since_revision:
+                return True
+            try:
+                await asyncio.wait_for(condition.wait_for(lambda: self.get_revision(session_id) > since_revision), timeout=timeout_sec)
+            except asyncio.TimeoutError:
+                return False
+        return True
 
     def save_checkpoint(self, session_id: str, checkpoint: ParserCheckpoint) -> SessionState:
         state = self._states[session_id]
@@ -472,3 +493,20 @@ class SessionStore:
     def _persist(self, state: SessionState) -> None:
         self._file_store.save_checkpoint(state.session_id, state.checkpoint)
         self._file_store.save_session_state(state)
+        self._mark_updated(state.session_id)
+
+    def _mark_updated(self, session_id: str) -> None:
+        self._revisions[session_id] = self._revisions.get(session_id, 0) + 1
+        condition = self._revision_conditions.get(session_id)
+        if condition is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _notify() -> None:
+            async with condition:
+                condition.notify_all()
+
+        loop.create_task(_notify())
