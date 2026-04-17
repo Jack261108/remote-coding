@@ -135,6 +135,81 @@ def test_session_store_returns_latest_completed_assistant_turn_id(tmp_path) -> N
     assert turn_id == "a1"
 
 
+def test_session_store_file_synced_records_claude_identity_and_history(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-1",
+            type=SessionEventType.HISTORY_LOADED,
+            payload={
+                "cwd": "/tmp/project",
+                "claude_session_id": "claude-session-1",
+                "turns": [
+                    {
+                        "turn_id": "a1",
+                        "role": "assistant",
+                        "text": "\n恢复后的回复\n",
+                        "source": "jsonl",
+                        "is_complete": True,
+                        "started_at": "2026-04-16T10:00:01+00:00",
+                        "ended_at": "2026-04-16T10:00:01+00:00",
+                    }
+                ],
+                "tool_calls": {},
+                "last_reply": "恢复后的回复",
+                "last_reply_role": "assistant",
+                "last_offset": 12,
+            },
+        )
+    )
+
+    assert state.claude_session_id == "claude-session-1"
+    assert state.workdir == "/tmp/project"
+    assert state.history_loaded is True
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+
+
+def test_session_store_clear_detected_resets_runtime_state(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.process(SessionEvent(session_id="s1", type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"}))
+    store.process(SessionEvent(session_id="s1", type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}))
+
+    state = store.process(SessionEvent(session_id="s1", type=SessionEventType.CLEAR_DETECTED))
+
+    assert state.turns == []
+    assert state.tool_calls == {}
+    assert state.pending_permission is None
+    assert state.clear_detected is True
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+
+
+def test_session_store_interrupt_detected_marks_running_tool(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.process(
+        SessionEvent(
+            session_id="claude-session-1",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-1",
+                "cwd": "/tmp",
+                "event": "PreToolUse",
+                "status": "processing",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+    )
+
+    state = store.process(SessionEvent(session_id="claude-session-1", type=SessionEventType.INTERRUPT_DETECTED))
+
+    assert state.interrupted is True
+    assert state.pending_permission is None
+    assert state.tool_calls["tool-1"].status.value == "interrupted"
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
+
+
 def test_file_session_store_writes_checkpoint_atomically(tmp_path) -> None:
     storage = FileSessionStore(str(tmp_path))
     checkpoint = ParserCheckpoint(last_offset=7, pending_buffer="abc")

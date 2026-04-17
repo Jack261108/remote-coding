@@ -15,10 +15,21 @@ from app.domain.session_models import (
 )
 
 
+CLAUDE_SESSION_PREFIX = "claude-session-"
+
+
 class SessionStore:
     def __init__(self, file_store: FileSessionStore) -> None:
         self._file_store = file_store
         self._states: dict[str, SessionState] = {}
+
+    def _is_claude_session_id(self, session_id: str | None) -> bool:
+        return bool(session_id and session_id.startswith(CLAUDE_SESSION_PREFIX))
+
+    def _is_claude_state(self, state: SessionState | None) -> bool:
+        if state is None:
+            return False
+        return self._is_claude_session_id(state.claude_session_id) or self._is_claude_session_id(state.session_id)
 
     def find_by_terminal_id(self, terminal_id: str | None) -> SessionState | None:
         if not terminal_id:
@@ -27,7 +38,7 @@ class SessionStore:
         for state in self._states.values():
             if state.terminal_id != terminal_id:
                 continue
-            if state.session_id.startswith("claude-session-"):
+            if self._is_claude_state(state):
                 return state
             if fallback is None:
                 fallback = state
@@ -41,10 +52,10 @@ class SessionStore:
         fallback_session_id: str | None = None,
         require_claude_session: bool = False,
     ) -> str | None:
-        if claude_session_id and claude_session_id.startswith("claude-session-"):
+        if self._is_claude_session_id(claude_session_id):
             return claude_session_id
         bound = self.find_by_terminal_id(terminal_id)
-        if bound is not None and bound.session_id.startswith("claude-session-"):
+        if self._is_claude_state(bound):
             return bound.session_id
         if require_claude_session:
             return None
@@ -146,14 +157,17 @@ class SessionStore:
         provider: str = "claude_code",
         workdir: str = ".",
         terminal_id: str | None = None,
+        claude_session_id: str | None = None,
     ) -> SessionState:
         state = self._states.get(session_id)
+        resolved_claude_session_id = claude_session_id or (session_id if self._is_claude_session_id(session_id) else None)
         if state is not None:
             if user_id is not None:
                 state.user_id = user_id
             state.provider = provider
             state.workdir = workdir
             state.terminal_id = terminal_id
+            state.claude_session_id = resolved_claude_session_id or state.claude_session_id or state.session_id
             self._persist(state)
             return state
 
@@ -168,6 +182,7 @@ class SessionStore:
             state.provider = provider
             state.workdir = workdir
             state.terminal_id = terminal_id
+            state.claude_session_id = resolved_claude_session_id or state.claude_session_id or state.session_id
         else:
             state = SessionState(
                 session_id=session_id,
@@ -175,6 +190,7 @@ class SessionStore:
                 provider=provider,
                 workdir=workdir,
                 terminal_id=terminal_id,
+                claude_session_id=resolved_claude_session_id or session_id,
             )
             checkpoint = self._file_store.load_checkpoint(session_id)
             state.checkpoint = checkpoint
@@ -188,6 +204,7 @@ class SessionStore:
                     state.last_reply = current.text.strip() or None
                     state.last_reply_role = current.role
 
+        state.history_loaded = bool(state.turns or state.tool_calls or state.pending_permission is not None)
         self._states[session_id] = state
         self._persist(state)
         return state
@@ -202,6 +219,7 @@ class SessionStore:
         loaded.checkpoint = self._file_store.load_checkpoint(session_id)
         if not loaded.turns:
             loaded.turns = self._file_store.load_conversation(session_id)
+        loaded.history_loaded = bool(loaded.turns or loaded.tool_calls or loaded.pending_permission is not None)
         self._states[session_id] = loaded
         return loaded
 
@@ -219,11 +237,13 @@ class SessionStore:
 
         if event.type == SessionEventType.SESSION_STARTED:
             state.phase = SessionPhase.PROCESSING
+            state.interrupted = False
         elif event.type == SessionEventType.TURN_STARTED:
             turn = ConversationTurn(turn_id=str(event.payload["turn_id"]), role=str(event.payload.get("role", "assistant")))
             state.turns.append(turn)
             state.current_turn_id = turn.turn_id
             state.phase = SessionPhase.PROCESSING
+            state.interrupted = False
         elif event.type == SessionEventType.PARSER_UPDATED:
             turn = state.current_turn()
             if turn is not None:
@@ -247,14 +267,21 @@ class SessionStore:
             state.pending_permission = None
         elif event.type == SessionEventType.HOOK_RECEIVED:
             self._process_hook_event(state, event)
-        elif event.type == SessionEventType.FILE_SYNCED:
+        elif event.type in {SessionEventType.FILE_SYNCED, SessionEventType.HISTORY_LOADED}:
             self._process_file_synced(state, event)
+        elif event.type == SessionEventType.CLEAR_DETECTED:
+            self._clear_state(state)
+        elif event.type == SessionEventType.INTERRUPT_DETECTED:
+            self._interrupt_session_tools(state, event.at)
+            state.interrupted = True
+            self._move_to_next_phase(state, default=SessionPhase.WAITING_FOR_INPUT)
         elif event.type == SessionEventType.PERMISSION_APPROVED:
             self._process_permission_decision(state, event, approved=True)
         elif event.type == SessionEventType.PERMISSION_DENIED:
             self._process_permission_decision(state, event, approved=False)
         elif event.type == SessionEventType.PERMISSION_RESPONSE_FAILED:
             self._interrupt_session_tools(state, event.at)
+            state.interrupted = True
 
         self._persist(state)
         return state
@@ -263,6 +290,8 @@ class SessionStore:
         raw = event.payload.get("hook") if isinstance(event.payload.get("hook"), dict) else event.payload
         hook = HookEvent.from_dict(raw)
         state.workdir = hook.cwd or state.workdir
+        state.claude_session_id = hook.session_id or state.claude_session_id or state.session_id
+        state.interrupted = False
 
         if hook.event == "PreToolUse" and hook.tool_use_id:
             existing = state.tool_calls.get(hook.tool_use_id)
@@ -308,9 +337,11 @@ class SessionStore:
             state.phase = SessionPhase.COMPACTING
         elif hook.event == "StopFailure":
             self._interrupt_session_tools(state, event.at)
+            state.interrupted = True
             self._move_to_next_phase(state, default=SessionPhase.IDLE)
         elif hook.event == "SessionEnd" or hook.status == "ended":
             self._interrupt_session_tools(state, event.at)
+            state.interrupted = True
             state.phase = SessionPhase.ENDED
         elif hook.status == "waiting_for_input":
             state.phase = SessionPhase.WAITING_FOR_INPUT
@@ -320,6 +351,8 @@ class SessionStore:
 
     def _process_file_synced(self, state: SessionState, event: SessionEvent) -> None:
         payload = event.payload
+        state.workdir = str(payload.get("cwd", state.workdir))
+        state.claude_session_id = str(payload.get("claude_session_id") or state.claude_session_id or state.session_id)
         last_offset = int(payload["last_offset"]) if payload.get("last_offset") is not None else None
         reset_detected = bool(payload.get("reset_detected", False))
         if last_offset is not None and last_offset < state.checkpoint.last_offset and not reset_detected:
@@ -349,9 +382,12 @@ class SessionStore:
         state.last_reply = str(payload["last_reply"]) if payload.get("last_reply") is not None else state.last_reply
         state.last_reply_role = str(payload["last_reply_role"]) if payload.get("last_reply_role") is not None else state.last_reply_role
         state.last_tool_name = str(payload["last_tool_name"]) if payload.get("last_tool_name") is not None else state.last_tool_name
+        state.history_loaded = True
+        state.clear_detected = bool(payload.get("clear_detected", False))
+        state.interrupted = bool(payload.get("interrupt_detected", False))
         if last_offset is not None:
             state.checkpoint.last_offset = last_offset
-        state.checkpoint.clear_pending = bool(payload.get("clear_detected", False))
+        state.checkpoint.clear_pending = state.clear_detected
         state.checkpoint.last_summary = state.summary or ""
         state.checkpoint.seen_tool_ids = list(state.tool_calls.keys())
         state.checkpoint.completed_tool_ids = [
@@ -374,6 +410,7 @@ class SessionStore:
                 tool.completed_at = event.at
         if state.pending_permission and state.pending_permission.tool_use_id == tool_use_id:
             state.pending_permission = None
+        state.interrupted = not approved
         self._move_to_next_phase(state, default=SessionPhase.PROCESSING if approved else SessionPhase.IDLE)
 
     def _move_to_next_phase(self, state: SessionState, *, default: SessionPhase) -> None:
@@ -404,6 +441,24 @@ class SessionStore:
             state.phase = SessionPhase.WAITING_FOR_INPUT
             return
         state.phase = default
+
+    def _clear_state(self, state: SessionState) -> None:
+        state.turns = []
+        state.tool_calls = {}
+        state.pending_permission = None
+        state.current_turn_id = None
+        state.summary = None
+        state.last_reply = None
+        state.last_reply_role = None
+        state.last_tool_name = None
+        state.history_loaded = True
+        state.clear_detected = True
+        state.interrupted = False
+        state.checkpoint.clear_pending = True
+        state.checkpoint.seen_tool_ids = []
+        state.checkpoint.completed_tool_ids = []
+        state.checkpoint.tool_id_to_name = {}
+        state.phase = SessionPhase.WAITING_FOR_INPUT
 
     def _interrupt_session_tools(self, state: SessionState, at) -> None:
         for tool in state.tool_calls.values():

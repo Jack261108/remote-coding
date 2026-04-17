@@ -26,6 +26,9 @@ class SessionEventType(str, Enum):
     SESSION_ENDED = "session_ended"
     HOOK_RECEIVED = "hook_received"
     FILE_SYNCED = "file_synced"
+    HISTORY_LOADED = "history_loaded"
+    CLEAR_DETECTED = "clear_detected"
+    INTERRUPT_DETECTED = "interrupt_detected"
     PERMISSION_APPROVED = "permission_approved"
     PERMISSION_DENIED = "permission_denied"
     PERMISSION_RESPONSE_FAILED = "permission_response_failed"
@@ -215,6 +218,7 @@ class SessionState:
     provider: str = "claude_code"
     workdir: str = "."
     terminal_id: str | None = None
+    claude_session_id: str | None = None
     phase: SessionPhase = SessionPhase.IDLE
     current_turn_id: str | None = None
     turns: list[ConversationTurn] = field(default_factory=list)
@@ -225,6 +229,9 @@ class SessionState:
     last_tool_name: str | None = None
     tool_calls: dict[str, ToolCallRecord] = field(default_factory=dict)
     pending_permission: PendingPermission | None = None
+    history_loaded: bool = False
+    clear_detected: bool = False
+    interrupted: bool = False
     created_at: datetime = field(default_factory=utc_now)
     last_activity: datetime = field(default_factory=utc_now)
 
@@ -243,6 +250,7 @@ class SessionState:
             "provider": self.provider,
             "workdir": self.workdir,
             "terminal_id": self.terminal_id,
+            "claude_session_id": self.claude_session_id,
             "phase": self.phase.value,
             "current_turn_id": self.current_turn_id,
             "turns": [turn.to_dict() for turn in self.turns],
@@ -253,18 +261,23 @@ class SessionState:
             "last_tool_name": self.last_tool_name,
             "tool_calls": {key: value.to_dict() for key, value in self.tool_calls.items()},
             "pending_permission": self.pending_permission.to_dict() if self.pending_permission else None,
+            "history_loaded": self.history_loaded,
+            "clear_detected": self.clear_detected,
+            "interrupted": self.interrupted,
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SessionState":
+        session_id = str(data["session_id"])
         return cls(
-            session_id=str(data["session_id"]),
+            session_id=session_id,
             user_id=data.get("user_id"),
             provider=str(data.get("provider", "claude_code")),
             workdir=str(data.get("workdir", ".")),
             terminal_id=data.get("terminal_id"),
+            claude_session_id=str(data["claude_session_id"]) if data.get("claude_session_id") is not None else session_id,
             phase=SessionPhase(data.get("phase", SessionPhase.IDLE.value)),
             current_turn_id=data.get("current_turn_id"),
             turns=[ConversationTurn.from_dict(item) for item in data.get("turns", [])],
@@ -275,6 +288,9 @@ class SessionState:
             last_tool_name=str(data["last_tool_name"]) if data.get("last_tool_name") is not None else None,
             tool_calls={str(key): ToolCallRecord.from_dict(value) for key, value in dict(data.get("tool_calls", {})).items()},
             pending_permission=PendingPermission.from_dict(data.get("pending_permission")),
+            history_loaded=bool(data.get("history_loaded", False)),
+            clear_detected=bool(data.get("clear_detected", False)),
+            interrupted=bool(data.get("interrupted", False)),
             created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else utc_now(),
             last_activity=datetime.fromisoformat(data["last_activity"]) if data.get("last_activity") else utc_now(),
         )

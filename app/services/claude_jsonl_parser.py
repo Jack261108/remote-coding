@@ -22,6 +22,7 @@ class ClaudeJSONLSnapshot:
     last_reply_role: str | None = None
     last_tool_name: str | None = None
     clear_detected: bool = False
+    interrupt_detected: bool = False
     reset_detected: bool = False
     last_offset: int = 0
 
@@ -34,7 +35,9 @@ class ClaudeJSONLSnapshot:
             "last_reply": self.last_reply,
             "last_reply_role": self.last_reply_role,
             "last_tool_name": self.last_tool_name,
+            "claude_session_id": self.session_id,
             "clear_detected": self.clear_detected,
+            "interrupt_detected": self.interrupt_detected,
             "reset_detected": self.reset_detected,
             "last_offset": self.last_offset,
         }
@@ -231,6 +234,7 @@ class ClaudeJSONLParser:
             last_reply_role=state.last_reply_role,
             last_tool_name=state.last_tool_name,
             clear_detected=state.clear_detected,
+            interrupt_detected=any(tool.status == ToolStatus.INTERRUPTED for tool in state.tool_calls.values()),
             reset_detected=reset_detected,
             last_offset=state.last_offset,
         )
