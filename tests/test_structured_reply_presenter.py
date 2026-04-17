@@ -180,6 +180,21 @@ async def test_presenter_persists_reply_cursor_across_restarts(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_presenter_restart_with_ack_only_persist_does_not_emit(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")
+    store.process(SessionEvent(session_id=state.session_id, type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"}))
+    store.process(SessionEvent(session_id=state.session_id, type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}))
+    store.mark_structured_reply_emitted("claude-session-1", turn_id="turn-1")
+
+    reloaded = SessionStore(FileSessionStore(str(tmp_path)))
+    presenter = StructuredReplyPresenter(task_service=PersistentTaskService(reloaded), user_id=1)
+    await presenter.prime()
+
+    assert await presenter.poll(task_id="task-1") == []
+
+
+@pytest.mark.asyncio
 async def test_presenter_wait_for_update_ignores_checkpoint_only_persist(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")

@@ -280,6 +280,20 @@ async def test_session_store_wait_for_publish_notifies_cursor(tmp_path) -> None:
     assert store.get_cursor("claude-session-1") > cursor
 
 
+@pytest.mark.asyncio
+async def test_session_store_ack_only_does_not_wake_wait_for_publish(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="claude-session-1")
+    cursor = store.get_cursor("claude-session-1")
+
+    waiter = asyncio.create_task(store.wait_for_publish("claude-session-1", since_cursor=cursor, timeout_sec=0.01))
+    await asyncio.sleep(0)
+    store.mark_structured_reply_emitted("claude-session-1", turn_id="turn-1")
+
+    assert await waiter is False
+    assert store.get_cursor("claude-session-1") == cursor
+
+
 def test_session_store_ack_updates_do_not_advance_cursor(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     store.get_or_create(session_id="claude-session-1")
