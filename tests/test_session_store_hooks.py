@@ -233,6 +233,84 @@ def test_session_store_file_synced_promotes_complete_turn_without_waiting_hook(t
     assert state.last_reply == "补同步后的回复"
 
 
+def test_session_store_tracks_subagent_tools_from_hook_and_snapshot(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="s1", workdir="/tmp/project")
+
+    state = store.process(
+        SessionEvent(
+            session_id="s1",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Task",
+                "tool_input": {"description": "do thing"},
+                "tool_use_id": "task-1",
+            },
+        )
+    )
+    state = store.process(
+        SessionEvent(
+            session_id="s1",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Read",
+                "tool_input": {"file_path": "/tmp/a.py"},
+                "tool_use_id": "sub-1",
+            },
+        )
+    )
+
+    assert state.subagent_state.has_active_subagent is True
+    assert state.tool_calls["task-1"].subagent_tools[0].tool_use_id == "sub-1"
+    assert state.tool_calls["task-1"].subagent_tools[0].status == ToolStatus.RUNNING
+
+    state = store.process(
+        SessionEvent(
+            session_id="s1",
+            type=SessionEventType.FILE_SYNCED,
+            payload={
+                "turns": [],
+                "tool_calls": {
+                    "task-1": {
+                        "tool_use_id": "task-1",
+                        "name": "Task",
+                        "input": {"description": "do thing"},
+                        "status": "success",
+                        "result": "done",
+                        "structured_result": {"agentId": "agent-1", "status": "completed", "content": "done"},
+                        "subagent_tools": [
+                            {
+                                "tool_use_id": "sub-1",
+                                "name": "Read",
+                                "input": {"file_path": "/tmp/a.py"},
+                                "status": "success",
+                                "result": "done",
+                                "structured_result": {"stdout": "done"},
+                                "started_at": "2026-04-16T10:00:01+00:00",
+                                "completed_at": "2026-04-16T10:00:02+00:00"
+                            }
+                        ],
+                        "started_at": "2026-04-16T10:00:00+00:00",
+                        "completed_at": "2026-04-16T10:00:03+00:00"
+                    }
+                },
+                "last_offset": 18,
+            },
+        )
+    )
+
+    assert state.tool_calls["task-1"].subagent_tools[0].status == ToolStatus.SUCCESS
+    assert state.subagent_state.active_tasks["task-1"].subagent_tools[0].status == ToolStatus.SUCCESS
+
+
 def test_session_store_file_synced_ignores_older_snapshot(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     state = store.get_or_create(session_id="claude-session-1", workdir="/tmp/project")

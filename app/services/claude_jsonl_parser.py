@@ -8,7 +8,9 @@ from typing import Any
 
 from app.adapters.claude.paths import ClaudePaths
 from app.domain.models import utc_now
-from app.domain.session_models import ConversationTurn, ToolCallRecord, ToolStatus
+from app.domain.session_models import ConversationTurn, SubagentToolCall, ToolCallRecord, ToolStatus
+
+_SUBAGENT_TOOL_RESULT_KEYS = {"agentId", "status", "content", "prompt", "totalDurationMs", "totalTokens", "totalToolUseCount"}
 
 
 @dataclass
@@ -89,7 +91,7 @@ class ClaudeJSONLParser:
                     consumed += len(raw_line)
                     continue
                 try:
-                    self._process_line(line, state)
+                    self._process_line(line, state, session_id=session_id, cwd=cwd)
                 except json.JSONDecodeError:
                     break
                 consumed += len(raw_line)
@@ -105,7 +107,89 @@ class ClaudeJSONLParser:
         project_dir = cwd.replace("/", "-").replace(".", "-")
         return self._paths.projects_dir / project_dir / f"{session_id}.jsonl"
 
-    def _process_line(self, line: str, state: _ParserState) -> None:
+    def subagent_file_path(self, *, session_id: str, agent_id: str, cwd: str) -> Path:
+        project_dir = cwd.replace("/", "-").replace(".", "-")
+        nested = self._paths.projects_dir / project_dir / session_id / "subagents" / f"agent-{agent_id}.jsonl"
+        flat = self._paths.projects_dir / project_dir / f"agent-{agent_id}.jsonl"
+        return nested if nested.exists() else flat
+
+    def parse_subagent_tools(self, *, session_id: str, agent_id: str, cwd: str) -> list[SubagentToolCall]:
+        if not agent_id:
+            return []
+        agent_file = self.subagent_file_path(session_id=session_id, agent_id=agent_id, cwd=cwd)
+        if not agent_file.exists():
+            return []
+
+        tools: list[SubagentToolCall] = []
+        seen_tool_ids: set[str] = set()
+        completed_tool_ids: set[str] = set()
+        results_by_tool_id: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+
+        for raw_line in agent_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or "\"tool_result\"" not in line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tool_use_id = str(block.get("tool_use_id") or "")
+                if not tool_use_id:
+                    continue
+                completed_tool_ids.add(tool_use_id)
+                results_by_tool_id[tool_use_id] = (
+                    self._tool_result_text(block, payload),
+                    self._tool_result_payload(block, payload),
+                )
+
+        for raw_line in agent_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or "\"tool_use\"" not in line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            timestamp = self._parse_timestamp(payload.get("timestamp"))
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                tool_id = str(block.get("id") or "")
+                if not tool_id or tool_id in seen_tool_ids:
+                    continue
+                seen_tool_ids.add(tool_id)
+                result_text, structured_result = results_by_tool_id.get(tool_id, (None, None))
+                tools.append(
+                    SubagentToolCall(
+                        tool_use_id=tool_id,
+                        name=str(block.get("name") or "Tool"),
+                        input=dict(block.get("input", {})) if isinstance(block.get("input"), dict) else {},
+                        status=ToolStatus.SUCCESS if tool_id in completed_tool_ids else ToolStatus.RUNNING,
+                        result=result_text,
+                        structured_result=structured_result,
+                        started_at=timestamp,
+                        completed_at=timestamp if tool_id in completed_tool_ids else None,
+                    )
+                )
+
+        return tools
+
+    def _process_line(self, line: str, state: _ParserState, *, session_id: str, cwd: str) -> None:
         payload = json.loads(line)
         message_type = str(payload.get("type", ""))
 
@@ -125,6 +209,12 @@ class ClaudeJSONLParser:
             return
 
         if message_type not in {"user", "assistant"}:
+            return
+
+        payload.setdefault("sessionId", session_id)
+        payload.setdefault("session_id", session_id)
+        payload.setdefault("cwd", cwd)
+        if self._process_subagent_payload(payload, state):
             return
 
         if payload.get("isMeta"):
@@ -238,6 +328,62 @@ class ClaudeJSONLParser:
             reset_detected=reset_detected,
             last_offset=state.last_offset,
         )
+
+    def _process_subagent_payload(self, payload: dict[str, Any], state: _ParserState) -> bool:
+        tool_result = payload.get("toolUseResult")
+        if not isinstance(tool_result, dict):
+            return False
+        if not _SUBAGENT_TOOL_RESULT_KEYS.intersection(tool_result.keys()):
+            return False
+
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            return False
+        content = message.get("content")
+        if not isinstance(content, list):
+            return False
+
+        timestamp = self._parse_timestamp(payload.get("timestamp"))
+        updated = False
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tool_use_id = str(block.get("tool_use_id") or "")
+            if not tool_use_id:
+                continue
+            existing = state.tool_calls.get(tool_use_id)
+            if existing is None:
+                tool_use_block = next(
+                    (
+                        item for item in content
+                        if isinstance(item, dict) and item.get("type") == "tool_use" and str(item.get("id") or "") == tool_use_id
+                    ),
+                    None,
+                )
+                if tool_use_block is None:
+                    continue
+                existing = ToolCallRecord(
+                    tool_use_id=tool_use_id,
+                    name=str(tool_use_block.get("name") or "Tool"),
+                    input=dict(tool_use_block.get("input", {})) if isinstance(tool_use_block.get("input"), dict) else {},
+                    started_at=timestamp,
+                )
+                state.tool_calls[tool_use_id] = existing
+            existing.status = ToolStatus.ERROR if bool(block.get("is_error", False)) else ToolStatus.SUCCESS
+            existing.result = self._tool_result_text(block, payload)
+            existing.structured_result = self._tool_result_payload(block, payload)
+            existing.completed_at = timestamp
+            agent_id = ""
+            if isinstance(existing.structured_result, dict):
+                agent_id = str(existing.structured_result.get("agentId") or "")
+            if existing.is_subagent_container and agent_id:
+                existing.subagent_tools = self.parse_subagent_tools(
+                    session_id=payload.get("sessionId") or payload.get("session_id") or "",
+                    agent_id=agent_id,
+                    cwd=payload.get("cwd") or "",
+                )
+            updated = True
+        return updated
 
     def _is_clear_command(self, payload: dict[str, Any]) -> bool:
         if payload.get("type") != "user" or payload.get("isMeta"):

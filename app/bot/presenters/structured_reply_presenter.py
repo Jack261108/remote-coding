@@ -86,27 +86,36 @@ class StructuredReplyPresenter:
 
     async def prime(self, *, log_missing: bool = True) -> None:
         snapshot = await self._load_snapshot(log_missing=log_missing)
-        self._last_structured_turn_id = snapshot.turn_id
         self._structured_session_available = snapshot.session_available
-        revision_getter = getattr(self._task_service, "get_structured_session_revision", None)
+
+        cursor_getter = getattr(self._task_service, "get_structured_reply_cursor", None)
+        if cursor_getter is not None:
+            persisted_turn_id, persisted_permission_key = await cursor_getter(self._user_id)
+            self._last_structured_turn_id = persisted_turn_id
+            self._last_pending_permission_key = persisted_permission_key
+            self._structured_reply_emitted = persisted_turn_id is not None
+        else:
+            self._last_structured_turn_id = snapshot.turn_id
+
+        revision_getter = getattr(self._task_service, "get_structured_session_cursor", None)
         if revision_getter is None:
             self._revision = 0
             return
         self._revision = await revision_getter(self._user_id)
 
     async def wait_for_update(self, *, timeout_sec: float) -> bool:
-        wait_for_change = getattr(self._task_service, "wait_for_structured_session_change", None)
-        revision_getter = getattr(self._task_service, "get_structured_session_revision", None)
-        if wait_for_change is None or revision_getter is None:
+        wait_for_update = getattr(self._task_service, "wait_for_structured_session_update", None)
+        cursor_getter = getattr(self._task_service, "get_structured_session_cursor", None)
+        if wait_for_update is None or cursor_getter is None:
             await asyncio.sleep(timeout_sec)
             return True
-        changed = await wait_for_change(
+        changed = await wait_for_update(
             user_id=self._user_id,
-            since_revision=self._revision,
+            since_cursor=self._revision,
             timeout_sec=timeout_sec,
         )
         if changed:
-            self._revision = await revision_getter(self._user_id)
+            self._revision = await cursor_getter(self._user_id)
         return changed
 
     async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str]:
@@ -114,13 +123,19 @@ class StructuredReplyPresenter:
         self._structured_session_available = self._structured_session_available or snapshot.session_available
 
         messages: list[str] = []
+        acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
         if snapshot.phase == "waiting_for_approval" and snapshot.pending_permission_key and snapshot.pending_permission_key != self._last_pending_permission_key:
             self._last_pending_permission_key = snapshot.pending_permission_key
             messages.append(_PERMISSION_PROMPT)
+            if acknowledger is not None:
+                await acknowledger(
+                    self._user_id,
+                    permission_key=snapshot.pending_permission_key,
+                )
         elif snapshot.phase != "waiting_for_approval":
             self._last_pending_permission_key = snapshot.pending_permission_key
 
-        reply = self._collect_reply(task_id=task_id, snapshot=snapshot, log_missing=log_missing)
+        reply = await self._collect_reply(task_id=task_id, snapshot=snapshot, log_missing=log_missing)
         if reply:
             messages.append(reply)
 
@@ -130,7 +145,7 @@ class StructuredReplyPresenter:
 
         return messages
 
-    def _collect_reply(self, *, task_id: str, snapshot: _StructuredSnapshot, log_missing: bool) -> str | None:
+    async def _collect_reply(self, *, task_id: str, snapshot: _StructuredSnapshot, log_missing: bool) -> str | None:
         if not snapshot.turn_id:
             if log_missing:
                 logger.info("structured reply skipped", extra={"task_id": task_id, "user_id": self._user_id, "reason": "no_turn_id"})
@@ -152,6 +167,9 @@ class StructuredReplyPresenter:
 
         self._last_structured_turn_id = snapshot.turn_id
         self._structured_reply_emitted = True
+        acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
+        if acknowledger is not None:
+            await acknowledger(self._user_id, turn_id=snapshot.turn_id)
         logger.info("[task %s][structured] %s", task_id, snapshot.reply.rstrip("\n"))
         return snapshot.reply
 

@@ -525,7 +525,7 @@ async def test_create_and_run_allows_unbound_first_turn_in_chat_mode(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_wait_for_structured_session_change_uses_store_revision(tmp_path: Path) -> None:
+async def test_wait_for_structured_session_update_uses_store_cursor(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
     session_service = make_file_backed_session_service(tmp_path)
@@ -548,14 +548,14 @@ async def test_wait_for_structured_session_change_uses_store_revision(tmp_path: 
     )
     await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
     structured_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), claude_session_id="claude-session-1")
-    revision = await service.get_structured_session_revision(1)
+    cursor = await service.get_structured_session_cursor(1)
 
-    waiter = asyncio.create_task(service.wait_for_structured_session_change(user_id=1, since_revision=revision, timeout_sec=0.2))
+    waiter = asyncio.create_task(service.wait_for_structured_session_update(user_id=1, since_cursor=cursor, timeout_sec=0.2))
     await asyncio.sleep(0)
     structured_store.process(SessionEvent(session_id="claude-session-1", type=SessionEventType.SESSION_STARTED))
 
     assert await waiter is True
-    assert await service.get_structured_session_revision(1) > revision
+    assert await service.get_structured_session_cursor(1) > cursor
 
 
 @pytest.mark.asyncio

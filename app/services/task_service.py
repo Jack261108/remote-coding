@@ -315,23 +315,48 @@ class TaskService:
     def _is_claude_session_id(self, session_id: str | None) -> bool:
         return bool(session_id and session_id.startswith(CLAUDE_SESSION_PREFIX))
 
-    async def get_structured_session_revision(self, user_id: int) -> int:
+    async def get_structured_session_cursor(self, user_id: int) -> int:
         if self._structured_session_store is None:
             return 0
         state = await self.get_structured_session(user_id, log_missing=False)
         if state is None:
             return 0
-        return self._structured_session_store.get_revision(state.session_id)
+        return self._structured_session_store.get_cursor(state.session_id)
+
+    async def get_structured_session_revision(self, user_id: int) -> int:
+        return await self.get_structured_session_cursor(user_id)
+
+    async def get_structured_reply_cursor(self, user_id: int) -> tuple[str | None, str | None]:
+        if self._structured_session_store is None:
+            return None, None
+        state = await self.get_structured_session(user_id, log_missing=False)
+        if state is None:
+            return None, None
+        return self._structured_session_store.get_structured_reply_cursor(state.session_id)
+
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+        if self._structured_session_store is None:
+            return
+        state = await self.get_structured_session(user_id, log_missing=False)
+        if state is None:
+            return
+        if turn_id is not None:
+            self._structured_session_store.mark_structured_reply_emitted(state.session_id, turn_id=turn_id)
+        if permission_key is not None:
+            self._structured_session_store.mark_structured_permission_emitted(state.session_id, permission_key=permission_key)
+
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+        if self._structured_session_store is None:
+            await asyncio.sleep(timeout_sec)
+            return True
+        state = await self.get_structured_session(user_id, log_missing=False)
+        if state is None:
+            await asyncio.sleep(timeout_sec)
+            return True
+        return await self._structured_session_store.wait_for_publish(state.session_id, since_cursor=since_cursor, timeout_sec=timeout_sec)
 
     async def wait_for_structured_session_change(self, *, user_id: int, since_revision: int, timeout_sec: float) -> bool:
-        if self._structured_session_store is None:
-            await asyncio.sleep(timeout_sec)
-            return True
-        state = await self.get_structured_session(user_id, log_missing=False)
-        if state is None:
-            await asyncio.sleep(timeout_sec)
-            return True
-        return await self._structured_session_store.wait_for_change(state.session_id, since_revision=since_revision, timeout_sec=timeout_sec)
+        return await self.wait_for_structured_session_update(user_id=user_id, since_cursor=since_revision, timeout_sec=timeout_sec)
 
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)

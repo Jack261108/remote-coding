@@ -12,6 +12,8 @@ from app.domain.session_models import (
     SessionEventType,
     SessionPhase,
     SessionState,
+    SubagentState,
+    SubagentToolCall,
     ToolCallRecord,
     ToolStatus,
 )
@@ -24,7 +26,6 @@ class SessionStore:
     def __init__(self, file_store: FileSessionStore) -> None:
         self._file_store = file_store
         self._states: dict[str, SessionState] = {}
-        self._revisions: dict[str, int] = {}
         self._revision_conditions: dict[str, asyncio.Condition] = {}
 
     def _is_claude_session_id(self, session_id: str | None) -> bool:
@@ -227,24 +228,58 @@ class SessionStore:
             loaded.turns = self._file_store.load_conversation(session_id)
         loaded.history_loaded = bool(loaded.turns or loaded.tool_calls or loaded.pending_permission is not None)
         self._states[session_id] = loaded
-        self._revisions.setdefault(session_id, 0)
         return loaded
 
-    def get_revision(self, session_id: str) -> int:
-        return self._revisions.get(session_id, 0)
+    def get_cursor(self, session_id: str) -> int:
+        state = self._states.get(session_id)
+        if state is not None:
+            return state.revision
+        loaded = self._file_store.load_session_state(session_id)
+        if loaded is None:
+            return 0
+        self._states[session_id] = loaded
+        return loaded.revision
 
-    async def wait_for_change(self, session_id: str, *, since_revision: int, timeout_sec: float) -> bool:
-        if self.get_revision(session_id) > since_revision:
+    def get_revision(self, session_id: str) -> int:
+        return self.get_cursor(session_id)
+
+    def get_structured_reply_cursor(self, session_id: str) -> tuple[str | None, str | None]:
+        state = self.get(session_id)
+        if state is None:
+            return None, None
+        return state.structured_reply_turn_id, state.structured_permission_key
+
+    def mark_structured_reply_emitted(self, session_id: str, *, turn_id: str) -> SessionState:
+        state = self.get(session_id)
+        if state is None:
+            state = self.get_or_create(session_id=session_id)
+        state.structured_reply_turn_id = turn_id
+        self._persist(state)
+        return state
+
+    def mark_structured_permission_emitted(self, session_id: str, *, permission_key: str) -> SessionState:
+        state = self.get(session_id)
+        if state is None:
+            state = self.get_or_create(session_id=session_id)
+        state.structured_permission_key = permission_key
+        self._persist(state)
+        return state
+
+    async def wait_for_publish(self, session_id: str, *, since_cursor: int, timeout_sec: float) -> bool:
+        if self.get_cursor(session_id) > since_cursor:
             return True
         condition = self._revision_conditions.setdefault(session_id, asyncio.Condition())
         async with condition:
-            if self.get_revision(session_id) > since_revision:
+            if self.get_cursor(session_id) > since_cursor:
                 return True
             try:
-                await asyncio.wait_for(condition.wait_for(lambda: self.get_revision(session_id) > since_revision), timeout=timeout_sec)
+                await asyncio.wait_for(condition.wait_for(lambda: self.get_cursor(session_id) > since_cursor), timeout=timeout_sec)
             except asyncio.TimeoutError:
                 return False
         return True
+
+    async def wait_for_change(self, session_id: str, *, since_revision: int, timeout_sec: float) -> bool:
+        return await self.wait_for_publish(session_id, since_cursor=since_revision, timeout_sec=timeout_sec)
 
     def save_checkpoint(self, session_id: str, checkpoint: ParserCheckpoint) -> SessionState:
         state = self._states[session_id]
@@ -325,9 +360,25 @@ class SessionStore:
                 status=existing.status if existing is not None else ToolStatus.RUNNING,
                 result=existing.result if existing is not None else None,
                 structured_result=existing.structured_result if existing is not None else None,
+                subagent_tools=existing.subagent_tools if existing is not None else [],
                 started_at=existing.started_at if existing is not None else event.at,
                 completed_at=existing.completed_at if existing is not None else None,
             )
+            if state.subagent_state.has_active_subagent and not state.tool_calls[hook.tool_use_id].is_subagent_container:
+                current_task = state.subagent_state.current_task()
+                if current_task is not None:
+                    tool = SubagentToolCall(
+                        tool_use_id=hook.tool_use_id,
+                        name=hook.tool or "Tool",
+                        input=hook.tool_input or {},
+                        status=ToolStatus.RUNNING,
+                        started_at=event.at,
+                    )
+                    state.subagent_state.add_subagent_tool(current_task.task_tool_id, tool)
+                    state.tool_calls[current_task.task_tool_id].subagent_tools = current_task.subagent_tools
+            elif state.tool_calls[hook.tool_use_id].is_subagent_container:
+                description = hook.tool_input.get("description") if isinstance(hook.tool_input, dict) else None
+                state.subagent_state.start_task(task_tool_id=hook.tool_use_id, description=str(description) if description is not None else None)
             state.phase = SessionPhase.PROCESSING
         elif hook.event == "PermissionRequest" and hook.tool_use_id:
             existing = state.tool_calls.get(hook.tool_use_id)
@@ -355,6 +406,15 @@ class SessionStore:
                 existing.completed_at = event.at
             if state.pending_permission and state.pending_permission.tool_use_id == hook.tool_use_id:
                 state.pending_permission = None
+            if existing is not None and existing.is_subagent_container:
+                state.subagent_state.stop_task(task_tool_id=hook.tool_use_id)
+            elif state.subagent_state.has_active_subagent:
+                current_task = state.subagent_state.current_task()
+                if current_task is not None:
+                    state.subagent_state.update_subagent_tool_status(current_task.task_tool_id, hook.tool_use_id, ToolStatus.SUCCESS if hook.event == "PostToolUse" else ToolStatus.ERROR)
+                    container = state.tool_calls.get(current_task.task_tool_id)
+                    if container is not None:
+                        container.subagent_tools = current_task.subagent_tools
             self._move_to_next_phase(state, default=SessionPhase.PROCESSING)
         elif hook.event == "PreCompact":
             state.phase = SessionPhase.COMPACTING
@@ -399,6 +459,16 @@ class SessionStore:
         elif payload.get("turns") is not None:
             state.turns = parsed_turns
             state.tool_calls = parsed_tool_calls
+
+        for task_tool_id, container in state.tool_calls.items():
+            if container.subagent_tools:
+                state.subagent_state.populate_from_container(task_tool_id, container.subagent_tools)
+
+        if state.subagent_state.has_active_subagent:
+            for task_tool_id, task in state.subagent_state.active_tasks.items():
+                container = state.tool_calls.get(task_tool_id)
+                if container is not None and not container.subagent_tools:
+                    container.subagent_tools = task.subagent_tools
 
         state.current_turn_id = None
         state.summary = str(payload["summary"]) if payload.get("summary") is not None else state.summary
@@ -474,6 +544,7 @@ class SessionStore:
         state.last_reply = None
         state.last_reply_role = None
         state.last_tool_name = None
+        state.subagent_state = SubagentState()
         state.history_loaded = True
         state.clear_detected = True
         state.interrupted = False
@@ -491,12 +562,12 @@ class SessionStore:
         state.pending_permission = None
 
     def _persist(self, state: SessionState) -> None:
+        state.revision += 1
         self._file_store.save_checkpoint(state.session_id, state.checkpoint)
         self._file_store.save_session_state(state)
-        self._mark_updated(state.session_id)
+        self._publish(state.session_id)
 
-    def _mark_updated(self, session_id: str) -> None:
-        self._revisions[session_id] = self._revisions.get(session_id, 0) + 1
+    def _publish(self, session_id: str) -> None:
         condition = self._revision_conditions.get(session_id)
         if condition is None:
             return

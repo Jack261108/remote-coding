@@ -23,10 +23,11 @@ from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.router import create_router
 from app.config.settings import Settings
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
+from app.services.interrupt_watcher import InterruptWatcher
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.domain.hook_models import HookEvent
-from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,10 @@ class AppContainer:
         self.session_context_store = FileSessionContextStore(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
         self.structured_session_store = SessionStore(self.file_session_store)
+        self.interrupt_watcher = InterruptWatcher(
+            session_store=self.structured_session_store,
+            claude_jsonl_parser=self.claude_jsonl_parser,
+        )
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
             data_dir=settings.tmux_data_dir,
@@ -104,6 +109,7 @@ class AppContainer:
             self.hook_installer.install()
         await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
         await self._restore_session_bindings()
+        self._start_interrupt_watchers()
         self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
         self._started = True
 
@@ -113,6 +119,7 @@ class AppContainer:
             return
         await self._stop_periodic_recheck_task()
         await self._stop_jsonl_sync_tasks()
+        await self.interrupt_watcher.stop_all()
         await self.hook_socket_server.stop()
         await self.bot.session.close()
         self._started = False
@@ -223,18 +230,22 @@ class AppContainer:
                 claude_session_id=claude_session_id,
             )
             if state.turns or state.tool_calls or state.pending_permission is not None:
+                self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
                 continue
             session_file = self.claude_jsonl_parser.session_file_path(session_id=claude_session_id, cwd=session.workdir)
             if session_file.exists():
                 await self.sync_claude_session(claude_session_id, session.workdir)
+                self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
                 continue
             terminal_state = self.structured_session_store.find_by_terminal_id(session.terminal_id) if session.terminal_id else None
             if terminal_state is not None and terminal_state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+                self.interrupt_watcher.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
                 continue
             await self.session_service.clear_claude_session(user_id=session.user_id)
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         self._jsonl_sync_requests[session_id] = cwd
+        self._start_interrupt_watchers_by_session_id(session_id, cwd)
         existing = self._jsonl_sync_tasks.get(session_id)
         if existing is None or existing.done():
             self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
@@ -298,6 +309,25 @@ class AppContainer:
                 payload={"tool_use_id": tool_use_id},
             )
         )
+
+    def _start_interrupt_watchers(self) -> None:
+        sessions = self.structured_session_store._states.values()
+        for state in sessions:
+            self._start_interrupt_watcher(state)
+
+    def _start_interrupt_watchers_by_session_id(self, session_id: str, workdir: str) -> None:
+        state = self.structured_session_store.get(session_id)
+        if state is None:
+            self.interrupt_watcher.watch(session_id=session_id, workdir=workdir)
+            return
+        self._start_interrupt_watcher(state)
+
+    def _start_interrupt_watcher(self, state: SessionState) -> None:
+        if state.provider != "claude_code":
+            return
+        if state.phase not in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+            return
+        self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
 
     async def _bind_hook_session(self, event: HookEvent) -> None:
         if not event.session_id:

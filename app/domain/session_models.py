@@ -130,7 +130,7 @@ class ConversationTurn:
 
 
 @dataclass
-class ToolCallRecord:
+class SubagentToolCall:
     tool_use_id: str
     name: str
     input: dict[str, Any] = field(default_factory=dict)
@@ -153,7 +153,7 @@ class ToolCallRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ToolCallRecord":
+    def from_dict(cls, data: dict[str, Any]) -> "SubagentToolCall":
         completed_at = data.get("completed_at")
         return cls(
             tool_use_id=str(data["tool_use_id"]),
@@ -164,6 +164,128 @@ class ToolCallRecord:
             structured_result=dict(data.get("structured_result", {})) if data.get("structured_result") is not None else None,
             started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else utc_now(),
             completed_at=datetime.fromisoformat(completed_at) if completed_at else None,
+        )
+
+
+@dataclass
+class ToolCallRecord:
+    tool_use_id: str
+    name: str
+    input: dict[str, Any] = field(default_factory=dict)
+    status: ToolStatus = ToolStatus.RUNNING
+    result: str | None = None
+    structured_result: dict[str, Any] | None = None
+    subagent_tools: list[SubagentToolCall] = field(default_factory=list)
+    started_at: datetime = field(default_factory=utc_now)
+    completed_at: datetime | None = None
+
+    @property
+    def is_subagent_container(self) -> bool:
+        return self.name in {"Task", "Agent"}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tool_use_id": self.tool_use_id,
+            "name": self.name,
+            "input": self.input,
+            "status": self.status.value,
+            "result": self.result,
+            "structured_result": self.structured_result,
+            "subagent_tools": [tool.to_dict() for tool in self.subagent_tools],
+            "started_at": self.started_at.isoformat(),
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ToolCallRecord":
+        completed_at = data.get("completed_at")
+        return cls(
+            tool_use_id=str(data["tool_use_id"]),
+            name=str(data.get("name", "")),
+            input=dict(data.get("input", {})),
+            status=ToolStatus(data.get("status", ToolStatus.RUNNING.value)),
+            result=str(data["result"]) if data.get("result") is not None else None,
+            structured_result=dict(data.get("structured_result", {})) if data.get("structured_result") is not None else None,
+            subagent_tools=[SubagentToolCall.from_dict(item) for item in data.get("subagent_tools", [])],
+            started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else utc_now(),
+            completed_at=datetime.fromisoformat(completed_at) if completed_at else None,
+        )
+
+
+@dataclass
+class SubagentTaskState:
+    task_tool_id: str
+    description: str | None = None
+    subagent_tools: list[SubagentToolCall] = field(default_factory=list)
+    is_active: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_tool_id": self.task_tool_id,
+            "description": self.description,
+            "subagent_tools": [tool.to_dict() for tool in self.subagent_tools],
+            "is_active": self.is_active,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SubagentTaskState":
+        return cls(
+            task_tool_id=str(data["task_tool_id"]),
+            description=str(data["description"]) if data.get("description") is not None else None,
+            subagent_tools=[SubagentToolCall.from_dict(item) for item in data.get("subagent_tools", [])],
+            is_active=bool(data.get("is_active", True)),
+        )
+
+
+@dataclass
+class SubagentState:
+    active_tasks: dict[str, SubagentTaskState] = field(default_factory=dict)
+
+    @property
+    def has_active_subagent(self) -> bool:
+        return bool(self.active_tasks)
+
+    def start_task(self, *, task_tool_id: str, description: str | None = None) -> None:
+        self.active_tasks[task_tool_id] = SubagentTaskState(task_tool_id=task_tool_id, description=description)
+
+    def stop_task(self, *, task_tool_id: str) -> None:
+        task = self.active_tasks.get(task_tool_id)
+        if task is not None:
+            task.is_active = False
+
+    def current_task(self) -> SubagentTaskState | None:
+        if not self.active_tasks:
+            return None
+        task_tool_id = next(reversed(self.active_tasks))
+        return self.active_tasks[task_tool_id]
+
+    def add_subagent_tool(self, task_tool_id: str, tool: SubagentToolCall) -> None:
+        self.active_tasks.setdefault(task_tool_id, SubagentTaskState(task_tool_id=task_tool_id)).subagent_tools.append(tool)
+
+    def update_subagent_tool_status(self, task_tool_id: str, tool_id: str, status: ToolStatus) -> None:
+        task = self.active_tasks.get(task_tool_id)
+        if task is None:
+            return
+        for tool in task.subagent_tools:
+            if tool.tool_use_id == tool_id:
+                tool.status = status
+                return
+
+    def populate_from_container(self, task_tool_id: str, tools: list[SubagentToolCall]) -> None:
+        task = self.active_tasks.setdefault(task_tool_id, SubagentTaskState(task_tool_id=task_tool_id))
+        if tools:
+            task.subagent_tools = tools
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"active_tasks": {key: value.to_dict() for key, value in self.active_tasks.items()}}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "SubagentState":
+        if not data:
+            return cls()
+        active_tasks = data.get("active_tasks", {})
+        return cls(
+            active_tasks={str(key): SubagentTaskState.from_dict(value) for key, value in dict(active_tasks).items()},
         )
 
 
@@ -229,6 +351,10 @@ class SessionState:
     last_tool_name: str | None = None
     tool_calls: dict[str, ToolCallRecord] = field(default_factory=dict)
     pending_permission: PendingPermission | None = None
+    subagent_state: SubagentState = field(default_factory=SubagentState)
+    structured_reply_turn_id: str | None = None
+    structured_permission_key: str | None = None
+    revision: int = 0
     history_loaded: bool = False
     clear_detected: bool = False
     interrupted: bool = False
@@ -261,6 +387,10 @@ class SessionState:
             "last_tool_name": self.last_tool_name,
             "tool_calls": {key: value.to_dict() for key, value in self.tool_calls.items()},
             "pending_permission": self.pending_permission.to_dict() if self.pending_permission else None,
+            "subagent_state": self.subagent_state.to_dict(),
+            "structured_reply_turn_id": self.structured_reply_turn_id,
+            "structured_permission_key": self.structured_permission_key,
+            "revision": self.revision,
             "history_loaded": self.history_loaded,
             "clear_detected": self.clear_detected,
             "interrupted": self.interrupted,
@@ -288,6 +418,10 @@ class SessionState:
             last_tool_name=str(data["last_tool_name"]) if data.get("last_tool_name") is not None else None,
             tool_calls={str(key): ToolCallRecord.from_dict(value) for key, value in dict(data.get("tool_calls", {})).items()},
             pending_permission=PendingPermission.from_dict(data.get("pending_permission")),
+            subagent_state=SubagentState.from_dict(data.get("subagent_state")),
+            structured_reply_turn_id=str(data["structured_reply_turn_id"]) if data.get("structured_reply_turn_id") is not None else None,
+            structured_permission_key=str(data["structured_permission_key"]) if data.get("structured_permission_key") is not None else None,
+            revision=int(data.get("revision", 0)),
             history_loaded=bool(data.get("history_loaded", False)),
             clear_detected=bool(data.get("clear_detected", False)),
             interrupted=bool(data.get("interrupted", False)),

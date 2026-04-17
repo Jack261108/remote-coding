@@ -10,7 +10,9 @@ from app.bot.presenters.structured_reply_presenter import (
     preview_stream_text,
     strip_bridge_markers,
 )
-from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase
+from app.adapters.storage.file_session_store import FileSessionStore
+from app.domain.session_models import ConversationTurn, PendingPermission, SessionEvent, SessionEventType, SessionPhase
+from app.services.session_store import SessionStore
 
 
 class DummyTaskService:
@@ -24,6 +26,41 @@ class DummyTaskService:
         session = self._sessions[self._index]
         self._index += 1
         return session
+
+    async def get_structured_session_cursor(self, user_id: int) -> int:
+        return self._index
+
+    async def get_structured_reply_cursor(self, user_id: int):
+        return None, None
+
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+        return None
+
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+        return True
+
+
+class PersistentTaskService:
+    def __init__(self, store: SessionStore) -> None:
+        self._store = store
+
+    async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
+        return self._store.get("claude-session-1")
+
+    async def get_structured_session_cursor(self, user_id: int) -> int:
+        return self._store.get_cursor("claude-session-1")
+
+    async def get_structured_reply_cursor(self, user_id: int):
+        return self._store.get_structured_reply_cursor("claude-session-1")
+
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+        if turn_id is not None:
+            self._store.mark_structured_reply_emitted("claude-session-1", turn_id=turn_id)
+        if permission_key is not None:
+            self._store.mark_structured_permission_emitted("claude-session-1", permission_key=permission_key)
+
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+        return True
 
 
 def _session(*, phase: SessionPhase, turns: list[ConversationTurn] | None = None, pending: PendingPermission | None = None):
@@ -120,3 +157,23 @@ def test_stream_text_helpers_strip_and_preview() -> None:
     assert strip_bridge_markers(raw) == "正文\n\n\n"
     assert normalize_stream_text(raw) == "正文"
     assert preview_stream_text(raw) == "正文"
+
+
+@pytest.mark.asyncio
+async def test_presenter_persists_reply_cursor_across_restarts(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")
+    store.process(SessionEvent(session_id=state.session_id, type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"}))
+    store.process(SessionEvent(session_id=state.session_id, type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}))
+
+    presenter = StructuredReplyPresenter(task_service=PersistentTaskService(store), user_id=1)
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    assert first == ["你好"]
+
+    reloaded = SessionStore(FileSessionStore(str(tmp_path)))
+    presenter = StructuredReplyPresenter(task_service=PersistentTaskService(reloaded), user_id=1)
+    await presenter.prime()
+    second = await presenter.poll(task_id="task-1")
+
+    assert second == []

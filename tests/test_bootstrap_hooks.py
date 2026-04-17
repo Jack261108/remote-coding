@@ -9,6 +9,8 @@ from app.bootstrap import AppContainer
 from app.config.settings import Settings
 from app.domain.hook_models import HookEvent
 from app.domain.session_models import SessionPhase
+from app.services.claude_jsonl_parser import ClaudeJSONLSnapshot
+from app.services.interrupt_watcher import InterruptWatcher
 
 
 async def wait_for_jsonl_sync_idle(container: AppContainer, session_id: str) -> None:
@@ -471,6 +473,40 @@ async def test_restore_session_bindings_keeps_active_terminal_binding_when_snaps
     restored_session = await container.session_service.get(1)
     assert restored_session is not None
     assert restored_session.claude_session_id == "missing-session"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_watcher_dispatches_interrupt_event(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    state = container.structured_session_store.get_or_create(
+        session_id="claude-session-1",
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        user_id=1,
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    container.structured_session_store._persist(state)
+
+    snapshot = ClaudeJSONLSnapshot(
+        session_id="claude-session-1",
+        cwd=str(tmp_path),
+        turns=[],
+        tool_calls={},
+        interrupt_detected=True,
+    )
+    monkeypatch.setattr(container.claude_jsonl_parser, "parse_incremental", lambda *, session_id, cwd: snapshot)
+
+    watcher = InterruptWatcher(session_store=container.structured_session_store, claude_jsonl_parser=container.claude_jsonl_parser)
+    watcher.watch(session_id="claude-session-1", workdir=str(tmp_path))
+    await asyncio.sleep(0)
+    await watcher.stop_all()
+
+    state = container.structured_session_store.get("claude-session-1")
+    assert state is not None
+    assert state.interrupted is True
+    assert state.phase == SessionPhase.WAITING_FOR_INPUT
 
 
 @pytest.mark.asyncio

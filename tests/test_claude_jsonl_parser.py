@@ -212,3 +212,68 @@ def test_claude_jsonl_parser_reports_reset_when_file_is_truncated(tmp_path) -> N
 
     assert snapshot.reset_detected is True
     assert [turn.text for turn in snapshot.turns] == ["\n短\n"]
+
+
+def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+    cwd = "/tmp/project"
+    session_file = parser.session_file_path(session_id="session-1", cwd=cwd)
+    agent_file = parser.subagent_file_path(session_id="session-1", agent_id="agent-1", cwd=cwd)
+
+    _write_jsonl(
+        agent_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:01Z",
+                "message": {
+                    "id": "a-tool-1",
+                    "content": [
+                        {"type": "tool_use", "id": "sub-tool-1", "name": "Read", "input": {"file_path": "/tmp/a.py"}}
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:02Z",
+                "toolUseResult": {"stdout": "done"},
+                "message": {
+                    "id": "a-tool-2",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "sub-tool-1", "content": "done", "is_error": False}
+                    ],
+                },
+            },
+        ],
+    )
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:03Z",
+                "toolUseResult": {
+                    "agentId": "agent-1",
+                    "status": "completed",
+                    "content": "subagent done"
+                },
+                "message": {
+                    "id": "a-main",
+                    "content": [
+                        {"type": "tool_use", "id": "task-tool-1", "name": "Task", "input": {"description": "do thing"}},
+                        {"type": "tool_result", "tool_use_id": "task-tool-1", "content": "subagent done", "is_error": False}
+                    ],
+                },
+            },
+        ],
+    )
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd=cwd)
+
+    tool = snapshot.tool_calls["task-tool-1"]
+    assert tool.structured_result == {"agentId": "agent-1", "status": "completed", "content": "subagent done"}
+    assert len(tool.subagent_tools) == 1
+    assert tool.subagent_tools[0].tool_use_id == "sub-tool-1"
+    assert tool.subagent_tools[0].name == "Read"
+    assert tool.subagent_tools[0].status.value == "success"
