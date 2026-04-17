@@ -2,32 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
-from dataclasses import dataclass
 
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from app.bot.presenters.chunk_sender import ChunkSender
+from app.bot.presenters.structured_reply_presenter import (
+    StructuredReplyPresenter,
+    _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
+    normalize_stream_text,
+    preview_stream_text,
+)
 from app.domain.models import EventType
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 
-_MARKER_LINE_RE = re.compile(r"^\s*_*(?:TGCLI_BEGIN|TGCLI_DONE)_*(?:\s*[:：]?\s*[A-Za-z0-9_-]+)?\s*$", re.IGNORECASE)
-_BLANK_LINE_BURST_RE = re.compile(r"\n{3,}")
-_STREAM_PREVIEW_CHAR_LIMIT = 1800
-_STREAM_PREVIEW_LINE_LIMIT = 60
+_MARKER_LINE_RE = _PRESENTER_MARKER_LINE_RE
 _ACTIVE_STREAM_TASKS: set[asyncio.Task] = set()
-
-
-@dataclass
-class _StructuredSnapshot:
-    turn_id: str | None
-    reply: str
-    session_available: bool
-    phase: str | None = None
-    pending_permission_key: str | None = None
 
 
 def parse_run_args(text: str | None) -> tuple[str | None, str]:
@@ -45,103 +37,11 @@ def parse_run_args(text: str | None) -> tuple[str | None, str]:
     return provider, prompt
 
 
-def _strip_bridge_markers(text: str) -> str:
-    if not text:
-        return ""
-    lines = text.split("\n")
-    kept: list[str] = []
-    for raw_line in lines:
-        if _MARKER_LINE_RE.match(raw_line):
-            continue
-        kept.append(raw_line)
-    return "\n".join(kept)
-
-
-def _normalize_stream_text(text: str) -> str:
-    cleaned = _strip_bridge_markers(text).replace("\r\n", "\n").replace("\r", "\n")
-    if not cleaned.strip():
-        return ""
-
-    normalized_lines = [line.rstrip() for line in cleaned.split("\n")]
-    normalized = "\n".join(normalized_lines).strip("\n")
-    normalized = _BLANK_LINE_BURST_RE.sub("\n\n", normalized)
-    return normalized.strip()
-
-
-def _preview_stream_text(text: str) -> str:
-    normalized = _normalize_stream_text(text)
-    if not normalized:
-        return ""
-
-    lines = normalized.split("\n")
-    needs_line_truncation = len(lines) > _STREAM_PREVIEW_LINE_LIMIT
-    preview_lines = lines[:_STREAM_PREVIEW_LINE_LIMIT]
-    preview = "\n".join(preview_lines)
-
-    needs_char_truncation = len(preview) > _STREAM_PREVIEW_CHAR_LIMIT
-    if needs_char_truncation:
-        preview = preview[:_STREAM_PREVIEW_CHAR_LIMIT].rstrip()
-
-    if needs_line_truncation or needs_char_truncation:
-        preview = f"{preview}\n...[输出片段过长，已截断本条消息]"
-
-    return preview
-
-
 async def _load_status_summary(task_service: TaskService, task_id: str, user_id: int) -> tuple[str, bool]:
     status = await task_service.get_status(task_id, user_id)
     duration = f"{status.duration_sec:.2f}s" if status and status.duration_sec is not None else "-"
     truncated = bool(status and status.output_truncated)
     return duration, truncated
-
-
-async def _load_structured_reply(task_service: TaskService, user_id: int, *, log_missing: bool = True) -> _StructuredSnapshot:
-    session = await task_service.get_structured_session(user_id, log_missing=log_missing)
-    if session is None:
-        if log_missing:
-            logger.info("structured reply unavailable", extra={"user_id": user_id, "reason": "no_structured_session"})
-        return _StructuredSnapshot(turn_id=None, reply="", session_available=False)
-
-    phase = session.phase.value
-    pending = getattr(session, "pending_permission", None)
-    pending_permission_key = None
-    if pending is not None:
-        pending_permission_key = f"{pending.tool_use_id}:{pending.tool_name}"
-
-    if not session.turns:
-        logger.info(
-            "structured reply unavailable",
-            extra={"user_id": user_id, "reason": "no_turns", "phase": phase},
-        )
-        return _StructuredSnapshot(turn_id=None, reply="", session_available=True, phase=phase, pending_permission_key=pending_permission_key)
-
-    for turn in reversed(session.turns):
-        if turn.role != "assistant" or not turn.is_complete:
-            continue
-        preview = _preview_stream_text(turn.text)
-        logger.info(
-            "structured reply loaded",
-            extra={
-                "user_id": user_id,
-                "turn_id": turn.turn_id,
-                "phase": phase,
-                "turn_count": len(session.turns),
-                "preview_len": len(preview),
-            },
-        )
-        return _StructuredSnapshot(
-            turn_id=turn.turn_id,
-            reply=preview,
-            session_available=True,
-            phase=phase,
-            pending_permission_key=pending_permission_key,
-        )
-
-    logger.info(
-        "structured reply unavailable",
-        extra={"user_id": user_id, "reason": "no_completed_assistant_turn", "phase": phase, "turn_count": len(session.turns)},
-    )
-    return _StructuredSnapshot(turn_id=None, reply="", session_available=True, phase=phase, pending_permission_key=pending_permission_key)
 
 
 def _build_created_message(*, task_id: str, provider: str, session_id: str) -> str:
@@ -267,50 +167,24 @@ async def run_prompt_and_stream(
     )
 
     sender: ChunkSender = sender_factory()
-    initial_snapshot = await _load_structured_reply(task_service, user_id)
-    last_structured_turn_id = initial_snapshot.turn_id
-    structured_session_available = initial_snapshot.session_available
-    last_pending_permission_key: str | None = None
+    presenter = StructuredReplyPresenter(task_service=task_service, user_id=user_id)
+    await presenter.prime()
     interactive_pump: asyncio.Task | None = None
-    structured_reply_emitted = False
 
     async def send_text(text: str) -> None:
-        preview = _preview_stream_text(text)
+        preview = preview_stream_text(text)
         if not preview:
             return
         await answer_safely(preview)
 
-    async def emit_structured_reply(*, log_missing: bool) -> bool:
-        nonlocal last_structured_turn_id, structured_reply_emitted, structured_session_available, last_pending_permission_key
-        snapshot = await _load_structured_reply(task_service, user_id, log_missing=log_missing)
-        structured_session_available = structured_session_available or snapshot.session_available
-        if snapshot.phase == "waiting_for_approval" and snapshot.pending_permission_key and snapshot.pending_permission_key != last_pending_permission_key:
-            last_pending_permission_key = snapshot.pending_permission_key
-            await answer_safely("检测到权限请求，请发送 /approve 或 /deny [reason]。")
-        elif snapshot.phase != "waiting_for_approval":
-            last_pending_permission_key = snapshot.pending_permission_key
-        if not snapshot.turn_id:
-            if log_missing:
-                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "reason": "no_turn_id"})
-            return False
-        if not snapshot.reply:
-            if log_missing:
-                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": snapshot.turn_id, "reason": "empty_preview"})
-            return False
-        if snapshot.turn_id == last_structured_turn_id:
-            if log_missing:
-                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": snapshot.turn_id, "reason": "duplicate_turn"})
-            return False
-        last_structured_turn_id = snapshot.turn_id
-        structured_reply_emitted = True
-        logger.info("[task %s][structured] %s", start.task.task_id, snapshot.reply.rstrip("\n"))
-        await sender.push(snapshot.reply, send_text)
-        return True
+    async def emit_presenter_messages(*, final: bool = False, log_missing: bool) -> None:
+        for output in await presenter.poll(task_id=start.task.task_id, final=final, log_missing=log_missing):
+            await sender.push(output, send_text)
 
     async def pump_structured_reply() -> None:
         try:
             while True:
-                await emit_structured_reply(log_missing=False)
+                await emit_presenter_messages(log_missing=False)
                 await asyncio.sleep(0.05)
         except asyncio.CancelledError:
             raise
@@ -323,7 +197,7 @@ async def run_prompt_and_stream(
                 if event.type in {EventType.STDOUT, EventType.STDERR}:
                     if not event.content:
                         continue
-                    if start.interactive and structured_session_available:
+                    if start.interactive and presenter.structured_session_available:
                         continue
                     logger.info(
                         "[task %s][%s] %s",
@@ -348,7 +222,7 @@ async def run_prompt_and_stream(
                     continue
 
                 if start.interactive:
-                    await emit_structured_reply(log_missing=True)
+                    await emit_presenter_messages(log_missing=True)
                 await sender.flush(send_text)
                 duration, truncated = await _load_status_summary(task_service, start.task.task_id, user_id)
 
@@ -363,7 +237,7 @@ async def run_prompt_and_stream(
                         )
                     )
                 elif event.type in {EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
-                    error_text = _normalize_stream_text(event.error or "") or "-"
+                    error_text = normalize_stream_text(event.error or "") or "-"
                     logger.error(
                         "task event error",
                         extra={
@@ -387,10 +261,8 @@ async def run_prompt_and_stream(
         finally:
             if saw_exit and start.interactive:
                 await asyncio.sleep(0.1)
-                await emit_structured_reply(log_missing=True)
+                await emit_presenter_messages(final=True, log_missing=True)
                 await sender.flush(send_text)
-                if structured_session_available and not structured_reply_emitted:
-                    await answer_safely("结构化回复暂不可用，已回退为原始输出。")
             if interactive_pump is not None:
                 interactive_pump.cancel()
                 try:
