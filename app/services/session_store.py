@@ -166,7 +166,8 @@ class SessionStore:
                 state.user_id = user_id
             state.provider = provider
             state.workdir = workdir
-            state.terminal_id = terminal_id
+            if terminal_id is not None:
+                state.terminal_id = terminal_id
             state.claude_session_id = resolved_claude_session_id or state.claude_session_id or state.session_id
             self._persist(state)
             return state
@@ -181,7 +182,8 @@ class SessionStore:
                 state.user_id = user_id
             state.provider = provider
             state.workdir = workdir
-            state.terminal_id = terminal_id
+            if terminal_id is not None:
+                state.terminal_id = terminal_id
             state.claude_session_id = resolved_claude_session_id or state.claude_session_id or state.session_id
         else:
             state = SessionState(

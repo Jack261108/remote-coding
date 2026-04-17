@@ -114,11 +114,13 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
     )
 
     async def fake_sync(session_id: str, cwd: str) -> None:
-        container.structured_session_store.process(
+        await container._dispatch_session_event(
             container.structured_session_store.process.__globals__["SessionEvent"](
                 session_id=session_id,
                 type=container.structured_session_store.process.__globals__["SessionEventType"].FILE_SYNCED,
                 payload={
+                    "cwd": cwd,
+                    "claude_session_id": session_id,
                     "turns": [
                         {
                             "turn_id": "a1",
@@ -412,6 +414,34 @@ async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_
 
 
 @pytest.mark.asyncio
+async def test_match_session_context_prefers_terminal_binding(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session = await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    state = container.structured_session_store.get_or_create(
+        session_id="claude-session-1",
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id=session.terminal_id,
+        user_id=1,
+        claude_session_id="claude-session-1",
+    )
+    container.structured_session_store._persist(state)
+
+    matched = await container._match_session_context(
+        HookEvent(session_id="claude-session-1", cwd="/other", event="Notification", status="running")
+    )
+
+    assert matched is not None
+    assert matched.user_id == 1
+
+
+@pytest.mark.asyncio
 async def test_restore_session_bindings_keeps_active_terminal_binding_when_snapshot_missing(tmp_path) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     session = await container.session_service.switch(
@@ -530,11 +560,13 @@ async def test_start_restores_persisted_claude_session_snapshot(tmp_path, monkey
         return None
 
     async def fake_sync(session_id: str, cwd: str) -> None:
-        second.structured_session_store.process(
+        await second._dispatch_session_event(
             second.structured_session_store.process.__globals__["SessionEvent"](
                 session_id=session_id,
                 type=second.structured_session_store.process.__globals__["SessionEventType"].FILE_SYNCED,
                 payload={
+                    "cwd": cwd,
+                    "claude_session_id": session_id,
                     "turns": [
                         {
                             "turn_id": "a1",

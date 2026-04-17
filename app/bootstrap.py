@@ -93,6 +93,7 @@ class AppContainer:
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
         self._jsonl_sync_requests: dict[str, str] = {}
         self._jsonl_sync_locks: dict[str, asyncio.Lock] = {}
+        self._session_event_locks: dict[str, asyncio.Lock] = {}
         self._periodic_recheck_task: asyncio.Task[None] | None = None
         self._started = False
 
@@ -133,7 +134,7 @@ class AppContainer:
                     "clear_detected": snapshot.clear_detected,
                 },
             )
-            self.structured_session_store.process(
+            await self._dispatch_session_event(
                 SessionEvent(
                     session_id=session_id,
                     type=SessionEventType.FILE_SYNCED,
@@ -219,6 +220,7 @@ class AppContainer:
                 workdir=session.workdir,
                 terminal_id=session.terminal_id,
                 user_id=session.user_id,
+                claude_session_id=claude_session_id,
             )
             if state.turns or state.tool_calls or state.pending_permission is not None:
                 continue
@@ -274,12 +276,7 @@ class AppContainer:
                 "tool": event.tool,
             },
         )
-        self.structured_session_store.get_or_create(
-            session_id=event.session_id,
-            provider="claude_code",
-            workdir=event.cwd,
-        )
-        self.structured_session_store.process(
+        await self._dispatch_session_event(
             SessionEvent(
                 session_id=event.session_id,
                 type=SessionEventType.HOOK_RECEIVED,
@@ -294,7 +291,7 @@ class AppContainer:
             "permission response failed",
             extra={"session_id": session_id, "tool_use_id": tool_use_id},
         )
-        self.structured_session_store.process(
+        await self._dispatch_session_event(
             SessionEvent(
                 session_id=session_id,
                 type=SessionEventType.PERMISSION_RESPONSE_FAILED,
@@ -321,20 +318,24 @@ class AppContainer:
         )
         if matched is None:
             return
+        workdir = event.cwd or matched.workdir
         await self.task_service.bind_claude_session(
             user_id=matched.user_id,
             claude_session_id=event.session_id,
-            workdir=event.cwd or matched.workdir,
+            workdir=workdir,
         )
         state = self.structured_session_store.get_or_create(
             session_id=event.session_id,
             provider="claude_code",
-            workdir=event.cwd or matched.workdir,
+            workdir=workdir,
             terminal_id=matched.terminal_id,
             user_id=matched.user_id,
+            claude_session_id=event.session_id,
         )
         state.terminal_id = matched.terminal_id
         state.user_id = matched.user_id
+        state.workdir = workdir
+        state.claude_session_id = event.session_id
         self.structured_session_store._persist(state)
 
     async def _match_session_context(self, event: HookEvent) -> SessionContext | None:
@@ -359,9 +360,26 @@ class AppContainer:
                     },
                 )
                 return session
+
+        state = self.structured_session_store.get(event.session_id)
+        if state is not None:
+            for session in sessions:
+                if session.user_id != state.user_id:
+                    continue
+                if session.terminal_id and state.terminal_id and session.terminal_id == state.terminal_id:
+                    logger.info(
+                        "matched hook session by terminal_id",
+                        extra={
+                            "hook_session_id": event.session_id,
+                            "user_id": session.user_id,
+                            "terminal_id": session.terminal_id,
+                        },
+                    )
+                    return session
+
         event_workdir = str(Path(event.cwd).resolve()) if event.cwd else None
+        eligible_sessions: list[SessionContext] = []
         workdir_matches: list[SessionContext] = []
-        active_candidates: list[SessionContext] = []
         for session in sessions:
             session_workdir = str(Path(session.workdir).resolve()) if session.workdir else None
             logger.info(
@@ -375,43 +393,60 @@ class AppContainer:
                     "resolved_session_workdir": session_workdir,
                     "resolved_event_workdir": event_workdir,
                     "session_claude_session_id": session.claude_session_id,
+                    "session_terminal_id": session.terminal_id,
                 },
             )
             if session.provider != "claude_code" or not session.claude_chat_active:
                 continue
+            eligible_sessions.append(session)
             if event_workdir and session_workdir == event_workdir:
                 workdir_matches.append(session)
-                continue
-            if event_workdir is None and session.claude_session_id is None:
-                active_candidates.append(session)
+
         if len(workdir_matches) == 1:
             session = workdir_matches[0]
             logger.info(
-                "matched hook session by workdir",
+                "matched hook session by unique workdir",
                 extra={
                     "hook_session_id": event.session_id,
                     "user_id": session.user_id,
                     "resolved_event_workdir": event_workdir,
-                    "resolved_session_workdir": str(Path(session.workdir).resolve()) if session.workdir else None,
                 },
             )
             return session
-        if event_workdir is None and len(active_candidates) == 1:
-            session = active_candidates[0]
-            logger.info(
-                "matched hook session by single active candidate",
+
+        if len(workdir_matches) > 1:
+            logger.warning(
+                "failed to match hook session context",
                 extra={
                     "hook_session_id": event.session_id,
-                    "user_id": session.user_id,
-                    "workdir": session.workdir,
+                    "hook_cwd": event.cwd,
+                    "reason": "ambiguous_workdir",
+                    "candidate_user_ids": [session.user_id for session in workdir_matches],
                 },
             )
-            return session
+            return None
+
         logger.warning(
             "failed to match hook session context",
-            extra={"hook_session_id": event.session_id, "hook_cwd": event.cwd},
+            extra={
+                "hook_session_id": event.session_id,
+                "hook_cwd": event.cwd,
+                "reason": "no_match",
+                "eligible_user_ids": [session.user_id for session in eligible_sessions],
+            },
         )
         return None
+
+    async def _dispatch_session_event(self, event: SessionEvent) -> None:
+        lock = self._session_event_locks.setdefault(event.session_id, asyncio.Lock())
+        async with lock:
+            self.structured_session_store.get_or_create(
+                session_id=event.session_id,
+                provider="claude_code",
+                workdir=str(event.payload.get("cwd", ".")),
+                claude_session_id=event.session_id,
+            )
+            self.structured_session_store.process(event)
 
     def wire(self) -> None:
         self.dispatcher.message.middleware(
