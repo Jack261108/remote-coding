@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
-from app.domain.session_models import ConversationTurn, SessionPhase
+from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase
 
 
 class DummyMessage:
@@ -49,12 +49,14 @@ class DummyTaskService:
             return SimpleNamespace(
                 phase=SessionPhase.WAITING_FOR_INPUT,
                 turns=self._structured_turns,
+                pending_permission=None,
             )
         if not self._structured_reply:
             return None
         return SimpleNamespace(
             phase=SessionPhase.WAITING_FOR_INPUT,
             turns=[ConversationTurn(turn_id="turn-1", role="assistant", text=self._structured_reply, is_complete=True)],
+            pending_permission=None,
         )
 
     async def _stream(self):
@@ -420,3 +422,33 @@ async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_
 
     assert "旧回复" not in "\n".join(message.answers)
     assert "退出后补到的回复" in "\n".join(message.answers)
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_reports_pending_permission_once() -> None:
+    message = DummyMessage()
+    pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已完成回复\n", is_complete=True)]
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    async def get_structured_session(user_id: int, *, log_missing: bool = True):
+        return SimpleNamespace(
+            phase=SessionPhase.WAITING_FOR_APPROVAL,
+            turns=turns,
+            pending_permission=pending,
+        )
+
+    task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+
+    assert message.answers.count("检测到权限请求，请发送 /approve 或 /deny [reason]。") == 1

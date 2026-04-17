@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
@@ -18,6 +19,15 @@ _BLANK_LINE_BURST_RE = re.compile(r"\n{3,}")
 _STREAM_PREVIEW_CHAR_LIMIT = 1800
 _STREAM_PREVIEW_LINE_LIMIT = 60
 _ACTIVE_STREAM_TASKS: set[asyncio.Task] = set()
+
+
+@dataclass
+class _StructuredSnapshot:
+    turn_id: str | None
+    reply: str
+    session_available: bool
+    phase: str | None = None
+    pending_permission_key: str | None = None
 
 
 def parse_run_args(text: str | None) -> tuple[str | None, str]:
@@ -85,18 +95,26 @@ async def _load_status_summary(task_service: TaskService, task_id: str, user_id:
     return duration, truncated
 
 
-async def _load_structured_reply(task_service: TaskService, user_id: int, *, log_missing: bool = True) -> tuple[str | None, str, bool]:
+async def _load_structured_reply(task_service: TaskService, user_id: int, *, log_missing: bool = True) -> _StructuredSnapshot:
     session = await task_service.get_structured_session(user_id, log_missing=log_missing)
     if session is None:
         if log_missing:
             logger.info("structured reply unavailable", extra={"user_id": user_id, "reason": "no_structured_session"})
-        return None, "", False
+        return _StructuredSnapshot(turn_id=None, reply="", session_available=False)
+
+    phase = session.phase.value
+    pending = getattr(session, "pending_permission", None)
+    pending_permission_key = None
+    if pending is not None:
+        pending_permission_key = f"{pending.tool_use_id}:{pending.tool_name}"
+
     if not session.turns:
         logger.info(
             "structured reply unavailable",
-            extra={"user_id": user_id, "reason": "no_turns", "phase": session.phase.value},
+            extra={"user_id": user_id, "reason": "no_turns", "phase": phase},
         )
-        return None, "", True
+        return _StructuredSnapshot(turn_id=None, reply="", session_available=True, phase=phase, pending_permission_key=pending_permission_key)
+
     for turn in reversed(session.turns):
         if turn.role != "assistant" or not turn.is_complete:
             continue
@@ -106,17 +124,24 @@ async def _load_structured_reply(task_service: TaskService, user_id: int, *, log
             extra={
                 "user_id": user_id,
                 "turn_id": turn.turn_id,
-                "phase": session.phase.value,
+                "phase": phase,
                 "turn_count": len(session.turns),
                 "preview_len": len(preview),
             },
         )
-        return turn.turn_id, preview, True
+        return _StructuredSnapshot(
+            turn_id=turn.turn_id,
+            reply=preview,
+            session_available=True,
+            phase=phase,
+            pending_permission_key=pending_permission_key,
+        )
+
     logger.info(
         "structured reply unavailable",
-        extra={"user_id": user_id, "reason": "no_completed_assistant_turn", "phase": session.phase.value, "turn_count": len(session.turns)},
+        extra={"user_id": user_id, "reason": "no_completed_assistant_turn", "phase": phase, "turn_count": len(session.turns)},
     )
-    return None, "", True
+    return _StructuredSnapshot(turn_id=None, reply="", session_available=True, phase=phase, pending_permission_key=pending_permission_key)
 
 
 def _build_created_message(*, task_id: str, provider: str, session_id: str) -> str:
@@ -242,7 +267,10 @@ async def run_prompt_and_stream(
     )
 
     sender: ChunkSender = sender_factory()
-    last_structured_turn_id, _, structured_session_available = await _load_structured_reply(task_service, user_id)
+    initial_snapshot = await _load_structured_reply(task_service, user_id)
+    last_structured_turn_id = initial_snapshot.turn_id
+    structured_session_available = initial_snapshot.session_available
+    last_pending_permission_key: str | None = None
     interactive_pump: asyncio.Task | None = None
     structured_reply_emitted = False
 
@@ -253,25 +281,30 @@ async def run_prompt_and_stream(
         await answer_safely(preview)
 
     async def emit_structured_reply(*, log_missing: bool) -> bool:
-        nonlocal last_structured_turn_id, structured_reply_emitted, structured_session_available
-        turn_id, structured_reply, session_available = await _load_structured_reply(task_service, user_id, log_missing=log_missing)
-        structured_session_available = structured_session_available or session_available
-        if not turn_id:
+        nonlocal last_structured_turn_id, structured_reply_emitted, structured_session_available, last_pending_permission_key
+        snapshot = await _load_structured_reply(task_service, user_id, log_missing=log_missing)
+        structured_session_available = structured_session_available or snapshot.session_available
+        if snapshot.phase == "waiting_for_approval" and snapshot.pending_permission_key and snapshot.pending_permission_key != last_pending_permission_key:
+            last_pending_permission_key = snapshot.pending_permission_key
+            await answer_safely("检测到权限请求，请发送 /approve 或 /deny [reason]。")
+        elif snapshot.phase != "waiting_for_approval":
+            last_pending_permission_key = snapshot.pending_permission_key
+        if not snapshot.turn_id:
             if log_missing:
                 logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "reason": "no_turn_id"})
             return False
-        if not structured_reply:
+        if not snapshot.reply:
             if log_missing:
-                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": turn_id, "reason": "empty_preview"})
+                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": snapshot.turn_id, "reason": "empty_preview"})
             return False
-        if turn_id == last_structured_turn_id:
+        if snapshot.turn_id == last_structured_turn_id:
             if log_missing:
-                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": turn_id, "reason": "duplicate_turn"})
+                logger.info("structured reply skipped", extra={"task_id": start.task.task_id, "user_id": user_id, "turn_id": snapshot.turn_id, "reason": "duplicate_turn"})
             return False
-        last_structured_turn_id = turn_id
+        last_structured_turn_id = snapshot.turn_id
         structured_reply_emitted = True
-        logger.info("[task %s][structured] %s", start.task.task_id, structured_reply.rstrip("\n"))
-        await sender.push(structured_reply, send_text)
+        logger.info("[task %s][structured] %s", start.task.task_id, snapshot.reply.rstrip("\n"))
+        await sender.push(snapshot.reply, send_text)
         return True
 
     async def pump_structured_reply() -> None:
