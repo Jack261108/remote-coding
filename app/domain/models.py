@@ -67,6 +67,7 @@ class TaskRecord:
     prompt: str
     workdir: str
     timeout_sec: int
+    claude_session_id: str | None = None
     status: TaskStatus = TaskStatus.PENDING
     created_at: datetime = field(default_factory=utc_now)
     started_at: datetime | None = None

@@ -21,7 +21,7 @@ from app.domain.models import (
 )
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState
 from app.services.session_service import SessionService
-from app.services.session_store import SessionStore
+from app.services.session_store import CLAUDE_SESSION_PREFIX, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,7 @@ class TaskService:
             prompt=prompt,
             workdir=selected_workdir,
             timeout_sec=selected_timeout,
+            claude_session_id=session.claude_session_id,
         )
         await self._task_store.add(record)
 
@@ -183,52 +184,136 @@ class TaskService:
             if log_missing:
                 logger.info("structured session lookup failed", extra={"user_id": user_id, "reason": "no_session"})
             return None
-        if not session.claude_session_id:
+        return self._lookup_structured_session(
+            user_id=user_id,
+            provider=session.provider,
+            workdir=session.workdir,
+            claude_session_id=session.claude_session_id,
+            terminal_id=session.terminal_id,
+            claude_chat_active=session.claude_chat_active,
+            log_missing=log_missing,
+        )
+
+    async def get_structured_session_for_task(self, *, task_id: str, user_id: int, log_missing: bool = True) -> SessionState | None:
+        task = await self.get_status(task_id, user_id)
+        if task is None:
+            if log_missing:
+                logger.info("structured session lookup failed", extra={"user_id": user_id, "task_id": task_id, "reason": "task_not_found"})
+            return None
+        session = await self._session_service.get(user_id)
+        terminal_id = None
+        claude_session_id = task.claude_session_id
+        claude_chat_active = False
+        if session is not None and session.provider == "claude_code" and session.workdir == task.workdir:
+            terminal_id = session.terminal_id
+            claude_session_id = claude_session_id or session.claude_session_id
+            claude_chat_active = session.claude_chat_active
+        return self._lookup_structured_session(
+            user_id=user_id,
+            provider=task.provider,
+            workdir=task.workdir,
+            claude_session_id=claude_session_id,
+            terminal_id=terminal_id,
+            claude_chat_active=claude_chat_active,
+            log_missing=log_missing,
+        )
+
+    def _lookup_structured_session(
+        self,
+        *,
+        user_id: int,
+        provider: str,
+        workdir: str,
+        claude_session_id: str | None,
+        terminal_id: str | None,
+        claude_chat_active: bool,
+        log_missing: bool,
+    ) -> SessionState | None:
+        if provider != "claude_code":
             if log_missing:
                 logger.info(
                     "structured session lookup failed",
-                    extra={
-                        "user_id": user_id,
-                        "reason": "no_claude_session_id",
-                        "provider": session.provider,
-                        "workdir": session.workdir,
-                        "claude_chat_active": session.claude_chat_active,
-                    },
+                    extra={"user_id": user_id, "provider": provider, "workdir": workdir, "reason": "not_claude_provider"},
                 )
             return None
+
+        explicit_claude_session_id = claude_session_id if self._is_claude_session_id(claude_session_id) else None
+
         if self._structured_session_store is not None:
-            state = self._structured_session_store.get(session.claude_session_id)
+            state = None
+            matched_by = None
+            if explicit_claude_session_id is not None:
+                state = self._structured_session_store.get(explicit_claude_session_id)
+                matched_by = "claude_session_id"
+            if state is None and terminal_id:
+                candidate = self._structured_session_store.find_by_terminal_id(terminal_id)
+                if candidate is not None and self._is_claude_session_id(candidate.claude_session_id or candidate.session_id):
+                    if candidate.workdir == workdir:
+                        state = candidate
+                        matched_by = "terminal_id"
+                    elif log_missing:
+                        logger.info(
+                            "structured session lookup skipped",
+                            extra={
+                                "user_id": user_id,
+                                "terminal_id": terminal_id,
+                                "workdir": workdir,
+                                "state_workdir": candidate.workdir,
+                                "reason": "terminal_workdir_mismatch",
+                            },
+                        )
             if state is not None:
                 logger.info(
                     "structured session lookup hit store",
                     extra={
                         "user_id": user_id,
-                        "claude_session_id": session.claude_session_id,
+                        "matched_by": matched_by,
+                        "claude_session_id": state.claude_session_id,
+                        "session_id": state.session_id,
                         "phase": state.phase.value,
                         "turn_count": len(state.turns),
                     },
                 )
                 return state
+
+        if explicit_claude_session_id is None:
+            if log_missing:
+                logger.info(
+                    "structured session lookup failed",
+                    extra={
+                        "user_id": user_id,
+                        "reason": "no_lookup_identity",
+                        "provider": provider,
+                        "workdir": workdir,
+                        "terminal_id": terminal_id,
+                        "claude_chat_active": claude_chat_active,
+                    },
+                )
+            return None
+
         getter = getattr(self._cli_factory, "get_claude_session_state", None) or getattr(self._cli_factory, "get_session_state", None)
         if getter is None:
             if log_missing:
                 logger.info(
                     "structured session lookup failed",
-                    extra={"user_id": user_id, "claude_session_id": session.claude_session_id, "reason": "no_getter"},
+                    extra={"user_id": user_id, "claude_session_id": explicit_claude_session_id, "reason": "no_getter"},
                 )
             return None
-        state = getter(session.claude_session_id)
+        state = getter(explicit_claude_session_id)
         logger.info(
             "structured session lookup fallback",
             extra={
                 "user_id": user_id,
-                "claude_session_id": session.claude_session_id,
+                "claude_session_id": explicit_claude_session_id,
                 "state_found": state is not None,
                 "phase": state.phase.value if state is not None else None,
                 "turn_count": len(state.turns) if state is not None else 0,
             },
         )
         return state
+
+    def _is_claude_session_id(self, session_id: str | None) -> bool:
+        return bool(session_id and session_id.startswith(CLAUDE_SESSION_PREFIX))
 
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)

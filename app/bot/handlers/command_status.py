@@ -40,7 +40,7 @@ def register_status_handler(router, *, task_service: TaskService):
                 return
             lines = [_render_task(task)]
             if task.provider == "claude_code":
-                structured = await task_service.get_structured_session(user_id)
+                structured = await task_service.get_structured_session_for_task(task_id=task.task_id, user_id=user_id)
                 if structured is not None:
                     lines.append("")
                     lines.append(_render_structured_session(structured))

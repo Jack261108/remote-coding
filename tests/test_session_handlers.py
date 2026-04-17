@@ -155,6 +155,7 @@ async def test_status_handler_renders_structured_snapshot(tmp_path) -> None:
         prompt="hi",
         workdir=str(tmp_path),
         timeout_sec=10,
+        claude_session_id="claude-session-1",
         status=TaskStatus.SUCCEEDED,
     )
     await service._task_store.add(record)
