@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from app.adapters.storage.file_session_context_store import FileSessionContextSt
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
-from app.domain.models import CLIEvent, EventType, ExecutionTask, TaskRecord, TaskStatus
+from app.domain.models import CLIEvent, EventType, ExecutionTask, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
@@ -787,6 +788,68 @@ async def test_get_structured_session_for_task_accepts_uuid_claude_session_id(tm
 
     assert structured is not None
     assert structured.session_id == uuid_session_id
+
+
+@pytest.mark.asyncio
+async def test_get_structured_session_prefers_pending_active_state_over_newer_idle_terminal_state(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    file_store = FileSessionStore(str(tmp_path))
+    structured_store = SessionStore(file_store)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    now = utc_now()
+    terminal_id = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+
+    pending_state = structured_store.get_or_create(
+        session_id="claude-session-pending",
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-pending",
+    )
+    pending_state.created_at = now - timedelta(minutes=10)
+    pending_state.last_activity = now
+    pending_state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    pending_state.pending_permission = PendingPermission(
+        tool_use_id="tool-1",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    structured_store._persist(pending_state)
+
+    idle_state = structured_store.get_or_create(
+        session_id="claude-session-idle",
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-idle",
+    )
+    idle_state.created_at = now
+    idle_state.last_activity = now - timedelta(seconds=30)
+    idle_state.phase = SessionPhase.WAITING_FOR_INPUT
+    structured_store._persist(idle_state)
+
+    structured = await service.get_structured_session(user_id=1)
+
+    assert structured is not None
+    assert structured.session_id == "claude-session-pending"
+    assert structured.pending_permission is not None
+    assert structured.pending_permission.tool_use_id == "tool-1"
 
 
 @pytest.mark.asyncio

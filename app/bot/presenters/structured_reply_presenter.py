@@ -19,6 +19,14 @@ _PERMISSION_INPUT_CHAR_LIMIT = 280
 _PERMISSION_INPUT_LINE_LIMIT = 8
 
 
+@dataclass(frozen=True)
+class _ToolStateSnapshot:
+    tool_use_id: str
+    tool_name: str | None
+    tool_input: dict | None
+    status: str | None
+
+
 @dataclass
 class _StructuredSnapshot:
     session_id: str | None
@@ -30,6 +38,7 @@ class _StructuredSnapshot:
     pending_permission_tool_use_id: str | None = None
     pending_permission_tool_name: str | None = None
     pending_permission_tool_input: dict | None = None
+    tool_states: tuple[_ToolStateSnapshot, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -37,6 +46,11 @@ class PermissionRequestOutput:
     text: str
     tool_use_id: str
     tool_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ProgressUpdateOutput:
+    text: str
 
 
 def strip_bridge_markers(text: str) -> str:
@@ -101,7 +115,7 @@ def _truncate_permission_text(text: str) -> str:
     return preview
 
 
-def _format_permission_input(tool_name: str | None, tool_input: dict | None) -> tuple[str, str] | None:
+def _format_tool_input_detail(tool_name: str | None, tool_input: dict | None) -> tuple[str, str] | None:
     if not tool_input:
         return None
 
@@ -116,7 +130,15 @@ def _format_permission_input(tool_name: str | None, tool_input: dict | None) -> 
         if url:
             return "目标", _truncate_permission_text(url)
 
+    if tool in {"task", "agent"}:
+        description = str(tool_input.get("description") or "").strip()
+        if description:
+            return "任务", _truncate_permission_text(description)
+
     for key, label in (
+        ("description", "任务"),
+        ("question", "问题"),
+        ("query", "搜索"),
         ("file_path", "文件"),
         ("path", "文件"),
         ("url", "目标"),
@@ -139,7 +161,7 @@ def build_permission_prompt(*, tool_name: str | None, tool_input: dict | None = 
     if tool_name:
         lines.append(f"工具: {tool_name}")
 
-    detail = _format_permission_input(tool_name, tool_input)
+    detail = _format_tool_input_detail(tool_name, tool_input)
     if detail is not None:
         label, value = detail
         lines.append(f"{label}: {value}")
@@ -147,6 +169,23 @@ def build_permission_prompt(*, tool_name: str | None, tool_input: dict | None = 
     lines.append("")
     lines.append("请点击下方按钮选择允许或拒绝。")
     return "\n".join(lines)
+
+
+def build_tool_progress_message(*, tool_name: str | None, tool_input: dict | None = None, resumed: bool = False) -> str:
+    lines = ["继续执行" if resumed else "执行中"]
+    if tool_name:
+        lines.append(f"工具: {tool_name}")
+
+    detail = _format_tool_input_detail(tool_name, tool_input)
+    if detail is not None:
+        label, value = detail
+        lines.append(f"{label}: {value}")
+
+    return "\n".join(lines)
+
+
+def build_compacting_progress_message() -> str:
+    return "执行进度\n正在整理上下文，稍后继续。"
 
 
 class StructuredReplyPresenter:
@@ -160,6 +199,8 @@ class StructuredReplyPresenter:
         self._fallback_announced = False
         self._revision = 0
         self._current_session_id: str | None = None
+        self._last_phase: str | None = None
+        self._tool_status_by_id: dict[str, str | None] = {}
 
     @property
     def structured_session_available(self) -> bool:
@@ -169,6 +210,7 @@ class StructuredReplyPresenter:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = snapshot.session_available
         self._current_session_id = snapshot.session_id
+        self._last_phase = snapshot.phase
 
         cursor_getter = getattr(self._task_service, "get_structured_reply_cursor", None)
         if cursor_getter is not None:
@@ -179,6 +221,11 @@ class StructuredReplyPresenter:
             self._last_pending_permission_key = persisted_permission_key
         else:
             self._last_structured_turn_id = snapshot.turn_id
+
+        if baseline_current_snapshot:
+            self._tool_status_by_id = {tool.tool_use_id: tool.status for tool in snapshot.tool_states}
+        else:
+            self._tool_status_by_id = {}
 
         revision_getter = getattr(self._task_service, "get_structured_session_cursor", None)
         if revision_getter is None:
@@ -196,6 +243,9 @@ class StructuredReplyPresenter:
         current_session_id = current_session.session_id if current_session is not None else None
         if current_session_id != self._current_session_id:
             self._current_session_id = current_session_id
+            self._last_phase = None
+            self._last_pending_permission_key = None
+            self._tool_status_by_id = {}
             self._revision = await cursor_getter(self._user_id)
             return True
         changed = await wait_for_update(
@@ -207,11 +257,12 @@ class StructuredReplyPresenter:
             self._revision = await cursor_getter(self._user_id)
         return changed
 
-    async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput]:
+    async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput | ProgressUpdateOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
 
-        messages: list[str | PermissionRequestOutput] = []
+        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput] = []
+        messages.extend(self._collect_progress_updates(snapshot=snapshot))
         acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
         if snapshot.phase == "waiting_for_approval" and snapshot.pending_permission_key and snapshot.pending_permission_key != self._last_pending_permission_key:
             self._last_pending_permission_key = snapshot.pending_permission_key
@@ -283,6 +334,32 @@ class StructuredReplyPresenter:
         logger.info("[task %s][structured] %s", task_id, snapshot.reply.rstrip("\n"))
         return snapshot.reply
 
+    def _collect_progress_updates(self, *, snapshot: _StructuredSnapshot) -> list[ProgressUpdateOutput]:
+        messages: list[ProgressUpdateOutput] = []
+        if snapshot.phase == "compacting" and self._last_phase != "compacting":
+            messages.append(ProgressUpdateOutput(text=build_compacting_progress_message()))
+        self._last_phase = snapshot.phase
+
+        current_status_by_id: dict[str, str | None] = {}
+        for tool in snapshot.tool_states:
+            current_status_by_id[tool.tool_use_id] = tool.status
+            if tool.status != "running":
+                continue
+            previous_status = self._tool_status_by_id.get(tool.tool_use_id)
+            if previous_status == "running":
+                continue
+            messages.append(
+                ProgressUpdateOutput(
+                    text=build_tool_progress_message(
+                        tool_name=tool.tool_name,
+                        tool_input=tool.tool_input,
+                        resumed=previous_status == "waiting_for_approval",
+                    )
+                )
+            )
+        self._tool_status_by_id = current_status_by_id
+        return messages
+
     async def _load_snapshot(self, *, log_missing: bool) -> _StructuredSnapshot:
         session = await self._task_service.get_structured_session(self._user_id, log_missing=log_missing)
         if session is None:
@@ -291,6 +368,7 @@ class StructuredReplyPresenter:
             return _StructuredSnapshot(session_id=None, turn_id=None, reply="", session_available=False)
 
         phase = session.phase.value
+        tool_states = tuple(self._collect_tool_states(session))
         pending = getattr(session, "pending_permission", None)
         pending_permission_key = None
         pending_permission_tool_use_id = None
@@ -317,6 +395,7 @@ class StructuredReplyPresenter:
                 pending_permission_tool_use_id=pending_permission_tool_use_id,
                 pending_permission_tool_name=pending_permission_tool_name,
                 pending_permission_tool_input=pending_permission_tool_input,
+                tool_states=tool_states,
             )
 
         for turn in reversed(session.turns):
@@ -343,6 +422,7 @@ class StructuredReplyPresenter:
                 pending_permission_tool_use_id=pending_permission_tool_use_id,
                 pending_permission_tool_name=pending_permission_tool_name,
                 pending_permission_tool_input=pending_permission_tool_input,
+                tool_states=tool_states,
             )
 
         logger.info(
@@ -364,4 +444,28 @@ class StructuredReplyPresenter:
             pending_permission_tool_use_id=pending_permission_tool_use_id,
             pending_permission_tool_name=pending_permission_tool_name,
             pending_permission_tool_input=pending_permission_tool_input,
+            tool_states=tool_states,
         )
+
+    def _collect_tool_states(self, session) -> list[_ToolStateSnapshot]:
+        tool_calls = getattr(session, "tool_calls", {}) or {}
+        if not isinstance(tool_calls, dict):
+            return []
+
+        states: list[_ToolStateSnapshot] = []
+        for tool_use_id, tool in tool_calls.items():
+            status = getattr(tool, "status", None)
+            status_value = getattr(status, "value", status)
+            tool_name = getattr(tool, "name", None)
+            tool_input = getattr(tool, "input", None)
+            if tool_input is not None and not isinstance(tool_input, dict):
+                tool_input = None
+            states.append(
+                _ToolStateSnapshot(
+                    tool_use_id=str(tool_use_id),
+                    tool_name=str(tool_name) if tool_name is not None else None,
+                    tool_input=tool_input,
+                    status=str(status_value) if status_value is not None else None,
+                )
+            )
+        return states

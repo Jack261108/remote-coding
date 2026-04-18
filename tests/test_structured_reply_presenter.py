@@ -6,14 +6,16 @@ import pytest
 
 from app.bot.presenters.structured_reply_presenter import (
     PermissionRequestOutput,
+    ProgressUpdateOutput,
     StructuredReplyPresenter,
     build_permission_prompt,
+    build_tool_progress_message,
     normalize_stream_text,
     preview_stream_text,
     strip_bridge_markers,
 )
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
 from app.services.session_store import SessionStore
 
 
@@ -70,6 +72,7 @@ def _session(
     phase: SessionPhase,
     turns: list[ConversationTurn] | None = None,
     pending: PendingPermission | None = None,
+    tool_calls: dict[str, ToolCallRecord] | None = None,
     session_id: str = "claude-session-1",
 ):
     return SimpleNamespace(
@@ -77,6 +80,7 @@ def _session(
         phase=phase,
         turns=turns or [],
         pending_permission=pending,
+        tool_calls=tool_calls or {},
     )
 
 
@@ -148,6 +152,92 @@ def test_build_permission_prompt_falls_back_to_compact_json_preview() -> None:
     assert "工具: Edit" in prompt
     assert "参数:" in prompt
     assert "..." in prompt
+
+
+def test_build_tool_progress_message_includes_specific_bash_command() -> None:
+    message = build_tool_progress_message(tool_name="Bash", tool_input={"command": "pytest -q"})
+
+    assert message == "执行中\n工具: Bash\n命令: pytest -q"
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_running_tool_progress_once() -> None:
+    tool_calls = {
+        "tool-1": ToolCallRecord(
+            tool_use_id="tool-1",
+            name="Bash",
+            input={"command": "pytest -q"},
+            status=ToolStatus.RUNNING,
+        )
+    }
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls=tool_calls),
+                _session(phase=SessionPhase.PROCESSING, tool_calls=tool_calls),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [ProgressUpdateOutput(text="执行中\n工具: Bash\n命令: pytest -q")]
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_compacting_progress_once() -> None:
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.PROCESSING),
+                _session(phase=SessionPhase.COMPACTING),
+                _session(phase=SessionPhase.COMPACTING),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [ProgressUpdateOutput(text="执行进度\n正在整理上下文，稍后继续。")]
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_resume_progress_after_permission() -> None:
+    waiting_tool = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.WAITING_FOR_APPROVAL,
+    )
+    resumed_tool = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.RUNNING,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-1": waiting_tool}),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-1": resumed_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime(baseline_current_snapshot=True)
+    messages = await presenter.poll(task_id="task-1")
+
+    assert messages == [ProgressUpdateOutput(text="继续执行\n工具: Bash\n命令: pytest -q")]
 
 
 @pytest.mark.asyncio

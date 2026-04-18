@@ -11,9 +11,9 @@ from aiogram.types import InlineKeyboardMarkup
 
 from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
-from app.bot.presenters.structured_reply_presenter import build_permission_prompt
+from app.bot.presenters.structured_reply_presenter import build_permission_prompt, build_tool_progress_message
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
-from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase
+from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
 
 
 class DummyMessage:
@@ -465,3 +465,54 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
     assert reply_markup is not None
     assert [button.text for button in reply_markup.inline_keyboard[0]] == ["允许", "拒绝"]
     assert [button.callback_data for button in reply_markup.inline_keyboard[0]] == ["perm:allow:tool-1", "perm:deny:tool-1"]
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_emits_progress_update_immediately() -> None:
+    message = DummyMessage()
+    turns: list[ConversationTurn] = []
+    tool_calls: dict[str, ToolCallRecord] = {}
+    current_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls=tool_calls,
+    )
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        event_delays=[0.0, 0.12],
+    )
+
+    async def get_structured_session(user_id: int, *, log_missing: bool = True):
+        return current_session
+
+    task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
+
+    async def publish_progress() -> None:
+        await asyncio.sleep(0.02)
+        tool_calls["tool-1"] = ToolCallRecord(
+            tool_use_id="tool-1",
+            name="Bash",
+            input={"command": "pytest -q"},
+            status=ToolStatus.RUNNING,
+        )
+        await asyncio.sleep(0.04)
+        turns.append(ConversationTurn(turn_id="turn-1", role="assistant", text="\n测试完成\n", is_complete=True))
+        current_session.phase = SessionPhase.WAITING_FOR_INPUT
+
+    updater = asyncio.create_task(publish_progress())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.24)
+    await updater
+
+    progress_message = build_tool_progress_message(tool_name="Bash", tool_input={"command": "pytest -q"})
+    assert message.answers.count(progress_message) == 1
+    progress_index = message.answers.index(progress_message)
+    assert progress_index == 2
+    assert message.reply_markups[progress_index] is None
+    assert "测试完成" in message.answers

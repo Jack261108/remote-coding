@@ -59,6 +59,71 @@ def test_session_store_tracks_permission_from_hook_events(tmp_path) -> None:
     assert state.tool_calls["tool-1"].status == ToolStatus.RUNNING
 
 
+def test_session_store_file_synced_preserves_pending_permission_from_hook(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="s1", workdir="/tmp/project")
+
+    store.process(
+        SessionEvent(
+            session_id="s1",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+    )
+    state = store.process(
+        SessionEvent(
+            session_id="s1",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+    )
+    assert state.phase == SessionPhase.WAITING_FOR_APPROVAL
+
+    state = store.process(
+        SessionEvent(
+            session_id="s1",
+            type=SessionEventType.FILE_SYNCED,
+            payload={
+                "turns": [],
+                "tool_calls": {
+                    "tool-1": {
+                        "tool_use_id": "tool-1",
+                        "name": "Bash",
+                        "input": {"command": "pwd"},
+                        "status": "running",
+                        "result": None,
+                        "structured_result": None,
+                        "started_at": "2026-04-16T10:00:01+00:00",
+                        "completed_at": None,
+                    }
+                },
+                "last_offset": 18,
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.WAITING_FOR_APPROVAL
+    assert state.pending_permission is not None
+    assert state.pending_permission.tool_use_id == "tool-1"
+    assert state.tool_calls["tool-1"].status == ToolStatus.WAITING_FOR_APPROVAL
+
+
 def test_session_store_applies_jsonl_snapshot(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     store.get_or_create(session_id="s1", workdir="/tmp/project")

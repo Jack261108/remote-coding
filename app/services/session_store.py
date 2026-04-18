@@ -50,12 +50,21 @@ class SessionStore:
             return False
         return self._is_claude_session_id(state.claude_session_id) or self._is_claude_session_id(state.session_id)
 
-    def _state_rank(self, state: SessionState) -> tuple[int, int, float, float, int]:
+    def _state_rank(self, state: SessionState) -> tuple[int, int, int, int, float, float, int]:
         has_content = int(bool(state.turns or state.tool_calls or state.pending_permission is not None))
+        has_pending_permission = int(state.pending_permission is not None or state.phase == SessionPhase.WAITING_FOR_APPROVAL)
+        is_active = int(state.phase in {SessionPhase.WAITING_FOR_APPROVAL, SessionPhase.PROCESSING, SessionPhase.COMPACTING})
         is_claude = int(self._is_claude_state(state))
         created_at = state.created_at.timestamp()
         last_activity = state.last_activity.timestamp()
-        return is_claude, has_content, created_at, last_activity, state.revision
+        return is_claude, has_pending_permission, is_active, has_content, last_activity, created_at, state.revision
+
+    def _explicit_resolution_rank(self, state: SessionState) -> tuple[int, int, float, float, int]:
+        has_content = int(bool(state.turns or state.tool_calls or state.pending_permission is not None))
+        has_pending_permission = int(state.pending_permission is not None or state.phase == SessionPhase.WAITING_FOR_APPROVAL)
+        created_at = state.created_at.timestamp()
+        last_activity = state.last_activity.timestamp()
+        return has_pending_permission, has_content, last_activity, created_at, state.revision
 
     def find_by_terminal_id(self, terminal_id: str | None) -> SessionState | None:
         if not terminal_id:
@@ -67,7 +76,7 @@ class SessionStore:
                 continue
             if best is None or self._state_rank(state) > self._state_rank(best):
                 best = state
-        if best is not None and self._state_rank(best)[:2] == (1, 1):
+        if best is not None and self._state_rank(best)[:4] == (1, 1, 1, 1):
             return best
 
         for state in self._file_store.list_session_states():
@@ -166,7 +175,7 @@ class SessionStore:
         if self._is_claude_session_id(claude_session_id):
             explicit = self.get(claude_session_id)
             if self._is_claude_state(bound) and bound is not None and bound.session_id != claude_session_id:
-                if explicit is None or self._state_rank(bound) > self._state_rank(explicit):
+                if explicit is None or self._explicit_resolution_rank(bound) > self._explicit_resolution_rank(explicit):
                     return bound.session_id
             return claude_session_id
         if self._is_claude_state(bound):
@@ -560,6 +569,7 @@ class SessionStore:
         if isinstance(tool_calls_payload, dict):
             for key, value in tool_calls_payload.items():
                 parsed_tool_calls[str(key)] = value if isinstance(value, ToolCallRecord) else ToolCallRecord.from_dict(value)
+        self._preserve_hook_only_runtime_state(state, parsed_tool_calls)
 
         if last_offset is not None and last_offset < state.checkpoint.last_offset and not reset_detected:
             has_newer_turns = len(parsed_turns) > len(state.turns)
@@ -606,6 +616,19 @@ class SessionStore:
         state.checkpoint.tool_id_to_name = {tool_id: tool.name for tool_id, tool in state.tool_calls.items()}
 
         self._move_to_next_phase(state, default=SessionPhase.IDLE)
+
+    def _preserve_hook_only_runtime_state(self, state: SessionState, parsed_tool_calls: dict[str, ToolCallRecord]) -> None:
+        for tool_id, existing in state.tool_calls.items():
+            if existing.status != ToolStatus.WAITING_FOR_APPROVAL:
+                continue
+            candidate = parsed_tool_calls.get(tool_id)
+            if candidate is None:
+                parsed_tool_calls[tool_id] = ToolCallRecord.from_dict(existing.to_dict())
+                continue
+            if candidate.status == ToolStatus.RUNNING:
+                candidate.status = ToolStatus.WAITING_FOR_APPROVAL
+                if not candidate.input and existing.input:
+                    candidate.input = dict(existing.input)
 
     def _process_permission_decision(self, state: SessionState, event: SessionEvent, *, approved: bool) -> None:
         tool_use_id = str(event.payload.get("tool_use_id", ""))

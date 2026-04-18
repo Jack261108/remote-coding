@@ -1,9 +1,12 @@
+from datetime import timedelta
+
 import asyncio
 import json
 
 import pytest
 
 from app.adapters.storage.file_session_store import FileSessionStore
+from app.domain.models import utc_now
 from app.domain.session_models import ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_store import SessionStore
 
@@ -175,6 +178,43 @@ def test_session_store_find_by_pending_tool_use_id_hits_disk_snapshot(tmp_path) 
 
     assert matched is not None
     assert matched.session_id == "claude-session-1"
+    assert matched.pending_permission is not None
+    assert matched.pending_permission.tool_use_id == "tool-1"
+
+
+def test_session_store_find_by_terminal_id_prefers_pending_active_state_over_newer_idle_state(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    now = utc_now()
+
+    pending_state = store.get_or_create(
+        session_id="claude-session-pending",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    pending_state.created_at = now - timedelta(minutes=10)
+    pending_state.last_activity = now
+    pending_state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    pending_state.pending_permission = PendingPermission(
+        tool_use_id="tool-1",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    store._persist(pending_state)
+
+    idle_state = store.get_or_create(
+        session_id="claude-session-idle",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    idle_state.created_at = now
+    idle_state.last_activity = now - timedelta(seconds=30)
+    idle_state.phase = SessionPhase.WAITING_FOR_INPUT
+    store._persist(idle_state)
+
+    matched = store.find_by_terminal_id("user_1_8c393341f536")
+
+    assert matched is not None
+    assert matched.session_id == "claude-session-pending"
     assert matched.pending_permission is not None
     assert matched.pending_permission.tool_use_id == "tool-1"
 

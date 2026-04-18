@@ -10,6 +10,7 @@ from app.bot.handlers.command_permission import build_permission_keyboard
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import (
     PermissionRequestOutput,
+    ProgressUpdateOutput,
     StructuredReplyPresenter,
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
     normalize_stream_text,
@@ -187,6 +188,10 @@ async def run_prompt_and_stream(
                     output.text,
                     reply_markup=build_permission_keyboard(tool_use_id=output.tool_use_id),
                 )
+                continue
+            if isinstance(output, ProgressUpdateOutput):
+                await sender.flush(send_text)
+                await answer_safely(output.text)
                 continue
             await sender.push(output, send_text)
 
