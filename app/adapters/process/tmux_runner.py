@@ -9,7 +9,7 @@ from pathlib import Path
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase
-from app.services.session_store import SessionStore
+from app.services.session_store import SessionStore, is_claude_session_id
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
@@ -185,7 +185,7 @@ class TmuxRunner:
                 claude_session_id=meta.claude_session_id,
                 fallback_session_id=meta.session_name,
             )
-            if state is not None and state.session_id.startswith("claude-session-"):
+            if state is not None and is_claude_session_id(state.session_id):
                 meta.claude_session_id = state.session_id
         else:
             self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_STARTED))
@@ -203,6 +203,8 @@ class TmuxRunner:
     async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
         position = 0
         latest_completed_turn_id_before_run: str | None = None
+        saw_interactive_progress = False
+        structured_offset_before_run = 0
         if meta.interactive:
             state = self._session_store.mark_interactive_turn_processing(
                 terminal_id=meta.terminal_id,
@@ -211,9 +213,10 @@ class TmuxRunner:
                 fallback_session_id=meta.session_name,
             )
             if state is not None:
-                if state.session_id.startswith("claude-session-"):
+                if is_claude_session_id(state.session_id):
                     meta.claude_session_id = state.session_id
-                position = state.checkpoint.last_offset
+                structured_offset_before_run = state.checkpoint.last_offset
+            position = self._interactive_log_position(meta.log_file)
             latest_completed_turn_id_before_run = self._session_store.latest_completed_assistant_turn_id(
                 terminal_id=meta.terminal_id,
                 workdir=meta.workdir,
@@ -252,13 +255,22 @@ class TmuxRunner:
                 )
                 if resolved_session_id is not None:
                     meta.claude_session_id = resolved_session_id
+                active_state = self._session_store.get_interactive_state(
+                    terminal_id=meta.terminal_id,
+                    workdir=meta.workdir,
+                    claude_session_id=meta.claude_session_id,
+                    fallback_session_id=meta.session_name,
+                    require_claude_session=True,
+                )
+                if active_state is not None and active_state.checkpoint.last_offset > structured_offset_before_run:
+                    saw_interactive_progress = True
                 completion_phase = self._session_store.interactive_completion_phase(
                     terminal_id=meta.terminal_id,
                     workdir=meta.workdir,
                     claude_session_id=meta.claude_session_id,
                     fallback_session_id=meta.session_name,
                 )
-                if completion_phase is not None:
+                if completion_phase is not None and saw_interactive_progress:
                     exit_code = 0
                     break
                 latest_completed_turn_id = self._session_store.latest_completed_assistant_turn_id(
@@ -327,10 +339,8 @@ class TmuxRunner:
         if state is None:
             return
         session_id = state.session_id
-        if session_id.startswith("claude-session-"):
+        if is_claude_session_id(session_id):
             meta.claude_session_id = session_id
-        state.checkpoint.last_offset = offset
-        self._session_store.save_checkpoint(session_id, state.checkpoint)
         self._session_store._persist(state)
 
     async def cancel(self, task_id: str) -> bool:
@@ -656,6 +666,14 @@ class TmuxRunner:
             path.unlink(missing_ok=True)
         except Exception:
             return
+
+    def _interactive_log_position(self, path: Path) -> int:
+        try:
+            return path.stat().st_size
+        except FileNotFoundError:
+            return 0
+        except Exception:
+            return 0
 
     def _get_session_lock(self, session_name: str) -> asyncio.Lock:
         lock = self._session_locks.get(session_name)

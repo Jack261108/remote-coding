@@ -262,7 +262,7 @@ def test_read_new_text_recovers_after_log_truncation(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_interactive_chunk_updates_checkpoint_without_structured_transcript(tmp_path: Path) -> None:
+async def test_process_interactive_chunk_does_not_overwrite_structured_checkpoint(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01)
     meta = _TmuxTaskMeta(
         session_name="tgcli_user_1",
@@ -280,6 +280,10 @@ async def test_process_interactive_chunk_updates_checkpoint_without_structured_t
         workdir=meta.workdir,
         terminal_id=meta.terminal_id,
     )
+    state = runner._session_store.get(meta.session_name)
+    assert state is not None
+    state.checkpoint.last_offset = 7
+    runner._session_store.save_checkpoint(meta.session_name, state.checkpoint)
     text = "TGCLI_BEGIN\n冒泡排序说明\nTGCLI_DONE\n"
     meta.log_file.write_text(text, encoding="utf-8")
 
@@ -292,7 +296,7 @@ async def test_process_interactive_chunk_updates_checkpoint_without_structured_t
     assert state is not None
     assert state.phase == SessionPhase.PROCESSING
     assert state.turns == []
-    assert state.checkpoint.last_offset == len(text.encode("utf-8"))
+    assert state.checkpoint.last_offset == 7
 
     raw_text = meta.log_file.read_text(encoding="utf-8")
     assert "冒泡排序说明" in raw_text
@@ -303,22 +307,29 @@ async def test_process_interactive_chunk_updates_checkpoint_without_structured_t
 
 
 @pytest.mark.asyncio
-async def test_process_interactive_chunk_uses_checkpoint_offset(tmp_path: Path) -> None:
+async def test_interactive_watch_starts_from_current_transcript_end(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     session_name = "tgcli_user_1"
+    claude_session = "claude-session-1"
     log_file = runner._file_store.raw_transcript_path(session_name)
     old_text = "TGCLI_BEGIN\n旧回复\nTGCLI_DONE\n"
     new_text = "TGCLI_BEGIN\n新回复\nTGCLI_DONE\n"
-    log_file.write_text(old_text + new_text, encoding="utf-8")
+    log_file.write_text(old_text, encoding="utf-8")
 
-    state = runner._session_store.get_or_create(
+    runner._session_store.get_or_create(
         session_id=session_name,
         provider="claude_code",
         workdir=str(tmp_path),
         terminal_id="user_1",
     )
-    state.checkpoint.last_offset = len(old_text.encode("utf-8"))
-    runner._session_store.save_checkpoint(session_name, state.checkpoint)
+    bound = runner._session_store.get_or_create(
+        session_id=claude_session,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+    )
+    bound.phase = SessionPhase.PROCESSING
+    runner._session_store._persist(bound)
 
     meta = _TmuxTaskMeta(
         session_name=session_name,
@@ -327,17 +338,37 @@ async def test_process_interactive_chunk_uses_checkpoint_offset(tmp_path: Path) 
         task_id="t2",
         workdir=str(tmp_path),
         terminal_id="user_1",
+        claude_session_id=claude_session,
         persistent_terminal=True,
         interactive=True,
     )
 
-    runner._process_interactive_chunk(
-        meta=meta,
-        offset=len((old_text + new_text).encode("utf-8")),
-    )
-    state = runner._session_store.get(session_name)
+    async def append_and_complete() -> None:
+        await asyncio.sleep(0.03)
+        log_file.write_text(old_text + new_text, encoding="utf-8")
+        bound = runner._session_store.get(claude_session)
+        assert bound is not None
+        bound.phase = SessionPhase.WAITING_FOR_INPUT
+        bound.turns.append(
+            ConversationTurn(
+                turn_id="turn-new",
+                role="assistant",
+                text="\n新回复\n",
+                is_complete=True,
+                source="jsonl",
+            )
+        )
+        bound.checkpoint.last_offset = 1
+        runner._session_store._persist(bound)
+
+    writer = asyncio.create_task(append_and_complete())
+    events = [event async for event in runner._watch_task(meta=meta, timeout_sec=1)]
+    await writer
+
+    assert [event.type for event in events] == [EventType.EXITED]
+    state = runner._session_store.get(claude_session)
     assert state is not None
-    assert state.checkpoint.last_offset == len((old_text + new_text).encode("utf-8"))
+    assert state.checkpoint.last_offset == 1
 
 
 @pytest.mark.asyncio
@@ -395,6 +426,7 @@ async def test_interactive_completion_does_not_end_terminal_session_state(tmp_pa
     state = runner._session_store.get(claude_session)
     assert state is not None
     assert state.phase == SessionPhase.PROCESSING
+    state.checkpoint.last_offset = 1
     state.phase = SessionPhase.WAITING_FOR_INPUT
     runner._session_store._persist(state)
 
@@ -434,12 +466,112 @@ async def test_watch_task_follows_late_bound_claude_session_on_first_turn(tmp_pa
     bound.phase = SessionPhase.PROCESSING
     runner._session_store._persist(bound)
     await asyncio.sleep(0.03)
+    bound.turns.append(
+        ConversationTurn(
+            turn_id="turn-first",
+            role="assistant",
+            text="\n首轮回复\n",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    bound.checkpoint.last_offset = 1
     bound.phase = SessionPhase.WAITING_FOR_INPUT
     runner._session_store._persist(bound)
 
     events = await task
 
     assert meta.claude_session_id == claude_session
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_watch_task_follows_late_bound_uuid_claude_session_on_first_turn(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "2185ae1c-14e5-4423-8f0d-1b76fcd893d6"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x1-uuid.exit",
+        task_id="t4-uuid",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    bound = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    bound.phase = SessionPhase.PROCESSING
+    runner._session_store._persist(bound)
+    await asyncio.sleep(0.03)
+    bound.turns.append(
+        ConversationTurn(
+            turn_id="turn-first-uuid",
+            role="assistant",
+            text="\n首轮 UUID 回复\n",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    bound.checkpoint.last_offset = 1
+    bound.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(bound)
+
+    events = await task
+
+    assert meta.claude_session_id == claude_session
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_watch_task_switches_from_stale_explicit_session_to_newer_bound_session(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    old_session = "2185ae1c-14e5-4423-8f0d-1b76fcd893d6"
+    new_session = "f5bc22fa-0e77-42f6-a2d3-e422037296f6"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    old_state = runner._session_store.get_or_create(session_id=old_session, workdir=str(tmp_path), terminal_id="user_1")
+    old_state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(old_state)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x1-switch.exit",
+        task_id="t4-switch",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=old_session,
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    new_state = runner._session_store.get_or_create(session_id=new_session, workdir=str(tmp_path), terminal_id="user_1")
+    new_state.turns.append(
+        ConversationTurn(
+            turn_id="turn-switch",
+            role="assistant",
+            text="\n切换后的新回复\n",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    new_state.checkpoint.last_offset = 1
+    new_state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(new_state)
+
+    events = await task
+
+    assert meta.claude_session_id == new_session
     assert [event.type for event in events] == [EventType.EXITED]
 
 
@@ -452,6 +584,16 @@ async def test_watch_task_uses_bound_claude_session_for_second_turn(tmp_path: Pa
     runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
     state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
     state.phase = SessionPhase.WAITING_FOR_INPUT
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-old",
+            role="assistant",
+            text="\n旧回复\n",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    state.checkpoint.last_offset = 10
     runner._session_store._persist(state)
 
     meta = _TmuxTaskMeta(
@@ -471,8 +613,79 @@ async def test_watch_task_uses_bound_claude_session_for_second_turn(tmp_path: Pa
     state = runner._session_store.get(claude_session)
     assert state is not None
     assert state.phase == SessionPhase.PROCESSING
-    runner._session_store._persist(state)
     await asyncio.sleep(0.03)
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-new",
+            role="assistant",
+            text="\n第二轮回复\n",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    state.checkpoint.last_offset = 20
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    events = await task
+
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_watch_task_does_not_exit_on_stale_waiting_phase_without_new_progress(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-old",
+            role="assistant",
+            text="\n旧回复\n",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    state.checkpoint.last_offset = 10
+    runner._session_store._persist(state)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x2-stale.exit",
+        task_id="t5-stale",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=claude_session,
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    state = runner._session_store.get(claude_session)
+    assert state is not None
+    assert state.phase == SessionPhase.PROCESSING
+
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+    await asyncio.sleep(0.05)
+    assert task.done() is False
+
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-new",
+            role="assistant",
+            text="\n真正的新回复\n",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    state.checkpoint.last_offset = 20
     state.phase = SessionPhase.WAITING_FOR_INPUT
     runner._session_store._persist(state)
 

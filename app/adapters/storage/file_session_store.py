@@ -58,6 +58,15 @@ class FileSessionStore:
             return None
         return SessionState.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
+    def list_session_states(self) -> list[SessionState]:
+        states: list[SessionState] = []
+        for path in sorted(self._base_dir.glob("*/session.state.json")):
+            try:
+                states.append(SessionState.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+        return states
+
     def load_conversation(self, session_id: str) -> list[ConversationTurn]:
         path = self.conversation_path(session_id)
         if not path.exists():

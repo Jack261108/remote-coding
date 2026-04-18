@@ -74,6 +74,53 @@ def test_session_store_interactive_completion_prefers_explicit_claude_session_id
     assert phase == SessionPhase.WAITING_FOR_INPUT
 
 
+def test_session_store_interactive_completion_prefers_uuid_claude_session_id(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="tgcli_user_1_8c393341f536", workdir="/tmp", terminal_id="user_1_8c393341f536")
+    target = store.get_or_create(
+        session_id="2185ae1c-14e5-4423-8f0d-1b76fcd893d6",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    target.phase = SessionPhase.WAITING_FOR_INPUT
+    store._persist(target)
+
+    phase = store.interactive_completion_phase(
+        terminal_id="user_1_8c393341f536",
+        workdir="/tmp",
+        claude_session_id="2185ae1c-14e5-4423-8f0d-1b76fcd893d6",
+        fallback_session_id="tgcli_user_1_8c393341f536",
+    )
+
+    assert phase == SessionPhase.WAITING_FOR_INPUT
+
+
+def test_session_store_resolve_interactive_session_id_prefers_newer_bound_session_over_stale_explicit(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    old_state = store.get_or_create(
+        session_id="2185ae1c-14e5-4423-8f0d-1b76fcd893d6",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    store._persist(old_state)
+
+    new_state = store.get_or_create(
+        session_id="f5bc22fa-0e77-42f6-a2d3-e422037296f6",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    store._persist(new_state)
+
+    resolved = store.resolve_interactive_session_id(
+        terminal_id="user_1_8c393341f536",
+        claude_session_id="2185ae1c-14e5-4423-8f0d-1b76fcd893d6",
+        fallback_session_id="tgcli_user_1_8c393341f536",
+        require_claude_session=True,
+    )
+
+    assert resolved == "f5bc22fa-0e77-42f6-a2d3-e422037296f6"
+
+
 def test_session_store_interactive_completion_waits_for_bound_claude_session(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     fallback = store.get_or_create(session_id="tgcli_user_1_8c393341f536", workdir="/tmp", terminal_id="user_1_8c393341f536")
@@ -87,6 +134,25 @@ def test_session_store_interactive_completion_waits_for_bound_claude_session(tmp
     )
 
     assert phase is None
+
+
+def test_session_store_find_by_terminal_id_keeps_newer_in_memory_state(tmp_path) -> None:
+    file_store = FileSessionStore(str(tmp_path))
+    disk_store = SessionStore(file_store)
+    disk_state = disk_store.get_or_create(session_id="claude-session-1", workdir="/tmp", terminal_id="user_1_8c393341f536")
+    disk_state.phase = SessionPhase.PROCESSING
+    disk_store._persist(disk_state)
+
+    store = SessionStore(file_store)
+    fresh_state = store.get_or_create(session_id="claude-session-1", workdir="/tmp", terminal_id="user_1_8c393341f536")
+    fresh_state.phase = SessionPhase.WAITING_FOR_INPUT
+    store._persist(fresh_state)
+
+    matched = store.find_by_terminal_id("user_1_8c393341f536")
+
+    assert matched is fresh_state
+    assert matched is not None
+    assert matched.phase == SessionPhase.WAITING_FOR_INPUT
 
 
 def test_session_store_returns_latest_completed_assistant_turn_id(tmp_path) -> None:

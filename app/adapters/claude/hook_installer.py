@@ -159,11 +159,105 @@ class HookInstaller:
         return f'''#!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import socket
 import sys
 
 DEFAULT_SOCKET_PATH = {self._socket_path!r}
+
+_STATUS_BY_EVENT = {{
+    "SessionStart": "starting",
+    "UserPromptSubmit": "processing",
+    "PreToolUse": "running_tool",
+    "PermissionRequest": "waiting_for_approval",
+    "PermissionDenied": "processing",
+    "PostToolUse": "processing",
+    "PostToolUseFailure": "processing",
+    "PreCompact": "processing",
+    "PostCompact": "processing",
+    "SubagentStart": "processing",
+    "Stop": "waiting_for_input",
+    "SubagentStop": "waiting_for_input",
+    "StopFailure": "waiting_for_input",
+    "SessionEnd": "ended",
+}}
+
+
+def _pick(payload: dict[str, object], *names: str) -> object | None:
+    for name in names:
+        value = payload.get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _normalize_message(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(value)
+
+
+def _normalize_tool_input(value: object | None) -> dict[str, object] | None:
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _status_for_event(event: str, payload: dict[str, object]) -> str:
+    explicit = _pick(payload, "status")
+    if explicit is not None:
+        return str(explicit)
+
+    if event == "Notification":
+        notification_type = _pick(payload, "notification_type", "notificationType")
+        if notification_type == "idle_prompt":
+            return "waiting_for_input"
+        if notification_type == "permission_prompt":
+            return "waiting_for_approval"
+        return "processing"
+
+    return _STATUS_BY_EVENT.get(event, "processing")
+
+
+def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
+    if all(key in payload for key in ("session_id", "cwd", "event", "status")):
+        normalized = dict(payload)
+        if "tool_input" in normalized:
+            normalized["tool_input"] = _normalize_tool_input(normalized.get("tool_input"))
+        if "message" in normalized:
+            normalized["message"] = _normalize_message(normalized.get("message"))
+        return normalized
+
+    event = _pick(payload, "event", "hook_event_name", "name")
+    session_id = _pick(payload, "session_id", "sessionId")
+    cwd = _pick(payload, "cwd", "working_directory")
+    tool = _pick(payload, "tool", "tool_name", "toolName")
+    tool_input = _pick(payload, "tool_input", "toolInput", "input")
+    tool_use_id = _pick(payload, "tool_use_id", "toolUseId", "toolUseID")
+    notification_type = _pick(payload, "notification_type", "notificationType")
+    message = _pick(payload, "message")
+    pid = _pick(payload, "pid")
+    tty = _pick(payload, "tty")
+
+    event_name = str(event or "Unknown")
+    normalized = {{
+        "session_id": str(session_id or "unknown"),
+        "cwd": str(cwd or os.getcwd()),
+        "event": event_name,
+        "status": _status_for_event(event_name, payload),
+        "pid": int(pid) if pid is not None else None,
+        "tty": str(tty) if tty is not None else None,
+        "tool": str(tool) if tool is not None else None,
+        "tool_input": _normalize_tool_input(tool_input),
+        "tool_use_id": str(tool_use_id) if tool_use_id is not None else None,
+        "notification_type": str(notification_type) if notification_type is not None else None,
+        "message": _normalize_message(message),
+    }}
+    return normalized
 
 
 def main() -> int:
@@ -171,12 +265,21 @@ def main() -> int:
     if not payload:
         return 0
 
+    try:
+        raw_payload = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(raw_payload, dict):
+        return 0
+
+    normalized_payload = normalize_payload(raw_payload)
+
     socket_path = os.environ.get("REMOTE_CODING_HOOK_SOCKET_PATH", DEFAULT_SOCKET_PATH)
     response = b""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(socket_path)
-            client.sendall(payload)
+            client.sendall(json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8"))
             try:
                 client.shutdown(socket.SHUT_WR)
             except OSError:

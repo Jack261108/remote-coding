@@ -19,6 +19,7 @@ _STREAM_PREVIEW_LINE_LIMIT = 60
 
 @dataclass
 class _StructuredSnapshot:
+    session_id: str | None
     turn_id: str | None
     reply: str
     session_available: bool
@@ -76,24 +77,27 @@ class StructuredReplyPresenter:
         self._last_structured_turn_id: str | None = None
         self._last_pending_permission_key: str | None = None
         self._structured_session_available = False
-        self._structured_reply_emitted = False
+        self._structured_reply_emitted_in_run = False
         self._fallback_announced = False
         self._revision = 0
+        self._current_session_id: str | None = None
 
     @property
     def structured_session_available(self) -> bool:
         return self._structured_session_available
 
-    async def prime(self, *, log_missing: bool = True) -> None:
+    async def prime(self, *, log_missing: bool = True, baseline_current_snapshot: bool = False) -> None:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = snapshot.session_available
+        self._current_session_id = snapshot.session_id
 
         cursor_getter = getattr(self._task_service, "get_structured_reply_cursor", None)
         if cursor_getter is not None:
             persisted_turn_id, persisted_permission_key = await cursor_getter(self._user_id)
             self._last_structured_turn_id = persisted_turn_id
+            if self._last_structured_turn_id is None and baseline_current_snapshot:
+                self._last_structured_turn_id = snapshot.turn_id
             self._last_pending_permission_key = persisted_permission_key
-            self._structured_reply_emitted = persisted_turn_id is not None
         else:
             self._last_structured_turn_id = snapshot.turn_id
 
@@ -108,6 +112,12 @@ class StructuredReplyPresenter:
         cursor_getter = getattr(self._task_service, "get_structured_session_cursor", None)
         if wait_for_update is None or cursor_getter is None:
             await asyncio.sleep(timeout_sec)
+            return True
+        current_session = await self._task_service.get_structured_session(self._user_id, log_missing=False)
+        current_session_id = current_session.session_id if current_session is not None else None
+        if current_session_id != self._current_session_id:
+            self._current_session_id = current_session_id
+            self._revision = await cursor_getter(self._user_id)
             return True
         changed = await wait_for_update(
             user_id=self._user_id,
@@ -139,8 +149,12 @@ class StructuredReplyPresenter:
         if reply:
             messages.append(reply)
 
-        if final and self._structured_session_available and not self._structured_reply_emitted and not self._fallback_announced:
+        if final and self._structured_session_available and not self._structured_reply_emitted_in_run and not self._fallback_announced:
             self._fallback_announced = True
+            logger.warning(
+                "structured reply fallback emitted",
+                extra={"task_id": task_id, "user_id": self._user_id, "phase": snapshot.phase},
+            )
             messages.append(_FALLBACK_PROMPT)
 
         return messages
@@ -166,7 +180,7 @@ class StructuredReplyPresenter:
             return None
 
         self._last_structured_turn_id = snapshot.turn_id
-        self._structured_reply_emitted = True
+        self._structured_reply_emitted_in_run = True
         acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
         if acknowledger is not None:
             await acknowledger(self._user_id, turn_id=snapshot.turn_id)
@@ -178,7 +192,7 @@ class StructuredReplyPresenter:
         if session is None:
             if log_missing:
                 logger.info("structured reply unavailable", extra={"user_id": self._user_id, "reason": "no_structured_session"})
-            return _StructuredSnapshot(turn_id=None, reply="", session_available=False)
+            return _StructuredSnapshot(session_id=None, turn_id=None, reply="", session_available=False)
 
         phase = session.phase.value
         pending = getattr(session, "pending_permission", None)
@@ -192,6 +206,7 @@ class StructuredReplyPresenter:
                 extra={"user_id": self._user_id, "reason": "no_turns", "phase": phase},
             )
             return _StructuredSnapshot(
+                session_id=session.session_id,
                 turn_id=None,
                 reply="",
                 session_available=True,
@@ -214,6 +229,7 @@ class StructuredReplyPresenter:
                 },
             )
             return _StructuredSnapshot(
+                session_id=session.session_id,
                 turn_id=turn.turn_id,
                 reply=preview,
                 session_available=True,
@@ -231,6 +247,7 @@ class StructuredReplyPresenter:
             },
         )
         return _StructuredSnapshot(
+            session_id=session.session_id,
             turn_id=None,
             reply="",
             session_available=True,

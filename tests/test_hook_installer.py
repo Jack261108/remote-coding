@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import socket
+import subprocess
+import threading
 
 from app.adapters.claude.hook_installer import ClaudeCodeVersion, HookInstaller
 from app.adapters.claude.paths import ClaudePaths
@@ -50,6 +53,72 @@ def test_hook_installer_removes_previous_remote_coding_entries(tmp_path) -> None
     commands = [hook["command"] for entry in settings["hooks"]["Stop"] for hook in entry["hooks"]]
     assert commands.count("echo keep-me") == 1
     assert sum("remote-coding-hook.py" in command for command in commands) == 1
+
+
+def test_hook_script_normalizes_claude_payload(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    socket_path = f"/tmp/rc-hook-installer-{tmp_path.name}.sock"
+    installer = HookInstaller(
+        paths=paths,
+        socket_path=socket_path,
+        python_bin="python3",
+    )
+    script_path = installer.install(version=ClaudeCodeVersion(2, 1, 88))
+
+    received: list[dict] = []
+
+    def serve_once() -> None:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(socket_path)
+            server.listen(1)
+            conn, _ = server.accept()
+            with conn:
+                chunks: list[bytes] = []
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                received.append(json.loads(b"".join(chunks).decode("utf-8")))
+
+    thread = threading.Thread(target=serve_once)
+    thread.start()
+
+    raw_payload = {
+        "session_id": "claude-session-123",
+        "cwd": "/tmp/project",
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {"command": "pwd"},
+        "tool_use_id": "tool-1",
+    }
+    completed = subprocess.run(
+        ["python3", str(script_path)],
+        input=json.dumps(raw_payload),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    thread.join(timeout=5)
+
+    assert completed.returncode == 0
+    assert completed.stdout == ""
+    assert received == [
+        {
+            "session_id": "claude-session-123",
+            "cwd": "/tmp/project",
+            "event": "PermissionRequest",
+            "status": "waiting_for_approval",
+            "pid": None,
+            "tty": None,
+            "tool": "Bash",
+            "tool_input": {"command": "pwd"},
+            "tool_use_id": "tool-1",
+            "notification_type": None,
+            "message": None,
+        }
+    ]
 
 
 def test_parse_claude_code_version() -> None:

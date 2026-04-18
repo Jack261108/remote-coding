@@ -47,6 +47,7 @@ class DummyTaskService:
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
         if self._structured_turns is not None:
             return SimpleNamespace(
+                session_id="claude-session-1",
                 phase=SessionPhase.WAITING_FOR_INPUT,
                 turns=self._structured_turns,
                 pending_permission=None,
@@ -54,6 +55,7 @@ class DummyTaskService:
         if not self._structured_reply:
             return None
         return SimpleNamespace(
+            session_id="claude-session-1",
             phase=SessionPhase.WAITING_FOR_INPUT,
             turns=[ConversationTurn(turn_id="turn-1", role="assistant", text=self._structured_reply, is_complete=True)],
             pending_permission=None,
@@ -442,6 +444,7 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
 
     async def get_structured_session(user_id: int, *, log_missing: bool = True):
         return SimpleNamespace(
+            session_id="claude-session-1",
             phase=SessionPhase.WAITING_FOR_APPROVAL,
             turns=turns,
             pending_permission=pending,

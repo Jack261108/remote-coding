@@ -18,6 +18,7 @@ from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
+from app.domain.models import TaskStatus
 from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.router import create_router
@@ -248,7 +249,11 @@ class AppContainer:
                 self.agent_file_watcher.watch(session_id=state.session_id, workdir=state.workdir)
                 continue
             terminal_state = self.structured_session_store.find_by_terminal_id(session.terminal_id) if session.terminal_id else None
-            if terminal_state is not None and terminal_state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+            if (
+                terminal_state is not None
+                and terminal_state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}
+                and (terminal_state.turns or terminal_state.tool_calls or terminal_state.pending_permission is not None)
+            ):
                 self.interrupt_watcher.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
                 self.agent_file_watcher.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
                 continue
@@ -299,6 +304,7 @@ class AppContainer:
                 "tool": event.tool,
             },
         )
+        await self._bind_hook_session(event)
         await self._dispatch_session_event(
             SessionEvent(
                 session_id=event.session_id,
@@ -306,7 +312,6 @@ class AppContainer:
                 payload=event.to_dict(),
             )
         )
-        await self._bind_hook_session(event)
         self._schedule_jsonl_sync(event.session_id, event.cwd)
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
@@ -397,6 +402,20 @@ class AppContainer:
         state.claude_session_id = event.session_id
         self.structured_session_store._persist(state)
 
+    async def _has_active_interactive_task(self, *, user_id: int, workdir: str) -> bool:
+        tasks = await self.task_store.iter_all()
+        for task in tasks:
+            if task.user_id != user_id:
+                continue
+            if task.provider != "claude_code":
+                continue
+            if task.workdir != workdir:
+                continue
+            if task.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.TIMEOUT, TaskStatus.CANCELED}:
+                continue
+            return True
+        return False
+
     async def _match_session_context(self, event: HookEvent) -> SessionContext | None:
         sessions = await self.session_service.list_all()
         logger.info(
@@ -463,15 +482,31 @@ class AppContainer:
 
         if len(workdir_matches) == 1:
             session = workdir_matches[0]
-            logger.info(
-                "matched hook session by unique workdir",
+            has_active_task = await self._has_active_interactive_task(user_id=session.user_id, workdir=session.workdir)
+            if has_active_task:
+                logger.info(
+                    "matched hook session by active interactive task",
+                    extra={
+                        "hook_session_id": event.session_id,
+                        "user_id": session.user_id,
+                        "terminal_id": session.terminal_id,
+                        "resolved_event_workdir": event_workdir,
+                    },
+                )
+                return session
+            logger.warning(
+                "failed to match hook session context",
                 extra={
                     "hook_session_id": event.session_id,
-                    "user_id": session.user_id,
+                    "hook_cwd": event.cwd,
+                    "reason": "workdir_only_match_blocked",
+                    "candidate_user_ids": [session.user_id],
                     "resolved_event_workdir": event_workdir,
+                    "terminal_id": session.terminal_id,
+                    "has_active_interactive_task": has_active_task,
                 },
             )
-            return session
+            return None
 
         if len(workdir_matches) > 1:
             logger.warning(

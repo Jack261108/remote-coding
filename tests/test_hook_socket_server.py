@@ -56,6 +56,49 @@ async def test_hook_socket_server_emits_plain_event(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_hook_socket_server_accepts_normalized_claude_payload(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+        delivered.set()
+
+    await server.start(on_event)
+    reader, writer = await _send_event(
+        socket_path,
+        {
+            "session_id": "claude-session-1",
+            "cwd": "/tmp/project",
+            "event": "PreToolUse",
+            "status": "running_tool",
+            "tool": "Bash",
+            "tool_input": {"command": "pwd"},
+            "tool_use_id": "tool-1",
+            "pid": 123,
+            "tty": "/dev/ttys001",
+            "notification_type": None,
+            "message": None,
+        },
+    )
+    await asyncio.wait_for(delivered.wait(), timeout=1)
+    assert await reader.read() == b""
+    writer.close()
+    await writer.wait_closed()
+    await server.stop()
+
+    assert seen[0].event == "PreToolUse"
+    assert seen[0].status == "running_tool"
+    assert seen[0].tool == "Bash"
+    assert seen[0].tool_input == {"command": "pwd"}
+    assert seen[0].tool_use_id == "tool-1"
+    assert seen[0].pid == 123
+    assert seen[0].tty == "/dev/ttys001"
+
+
+@pytest.mark.asyncio
 async def test_hook_socket_server_resolves_permission_tool_use_id_and_replies(tmp_path) -> None:
     seen: list[HookEvent] = []
     delivered = asyncio.Event()

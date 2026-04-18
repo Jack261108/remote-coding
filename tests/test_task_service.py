@@ -364,6 +364,84 @@ async def test_open_claude_chat_session_rebuilds_terminal(tmp_path: Path) -> Non
     assert session.terminal_mode is True
     assert session.terminal_id == expected
     assert session.claude_chat_active is True
+    assert session.claude_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_open_claude_chat_session_rebuilds_when_previous_terminal_is_missing(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+
+    async def missing_close_terminal(terminal_key: str) -> bool:
+        factory._closed_terminal_key = terminal_key
+        return False
+
+    factory.close_terminal = missing_close_terminal
+    session_service = make_file_backed_session_service(tmp_path)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    await session_service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    opened, text = await service.open_claude_chat_session(1)
+    session = await session_service.get(1)
+
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+    assert opened is True
+    assert text.startswith("Claude 会话已重建")
+    assert factory._closed_terminal_key == expected
+    assert factory._ensured_interactive_terminal_key == expected
+    assert session is not None
+    assert session.terminal_mode is True
+    assert session.terminal_id == expected
+    assert session.claude_chat_active is True
+    assert session.claude_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_open_claude_chat_session_clears_stale_claude_session_without_previous_terminal(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    session = await session_service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=False,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="stale-session")
+
+    opened, text = await service.open_claude_chat_session(1)
+    session = await session_service.get(1)
+
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+    assert opened is True
+    assert text.startswith("Claude 会话已开启")
+    assert factory._closed_terminal_key is None
+    assert session is not None
+    assert session.claude_session_id is None
+    assert session.terminal_mode is True
+    assert session.terminal_id == expected
 
 
 @pytest.mark.asyncio
@@ -644,6 +722,61 @@ async def test_get_structured_session_for_task_prefers_task_claude_session_id(tm
 
     assert structured is not None
     assert structured.session_id == "claude-session-1"
+
+
+@pytest.mark.asyncio
+async def test_get_structured_session_for_task_accepts_uuid_claude_session_id(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    file_store = FileSessionStore(str(tmp_path))
+    structured_store = SessionStore(file_store)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    uuid_session_id = "2185ae1c-14e5-4423-8f0d-1b76fcd893d6"
+    state = structured_store.get_or_create(
+        session_id=uuid_session_id,
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id=uuid_session_id,
+    )
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    state.turns.append(ConversationTurn(turn_id="turn-1", role="assistant", text="\n你好\n", is_complete=True))
+    structured_store._persist(state)
+
+    await service._task_store.add(
+        TaskRecord(
+            task_id="task-uuid",
+            session_id="session-1",
+            user_id=1,
+            provider="claude_code",
+            prompt="hi",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            claude_session_id=uuid_session_id,
+            status=TaskStatus.SUCCEEDED,
+        )
+    )
+
+    structured = await service.get_structured_session_for_task(task_id="task-uuid", user_id=1)
+
+    assert structured is not None
+    assert structured.session_id == uuid_session_id
 
 
 @pytest.mark.asyncio

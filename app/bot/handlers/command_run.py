@@ -168,7 +168,7 @@ async def run_prompt_and_stream(
 
     sender: ChunkSender = sender_factory()
     presenter = StructuredReplyPresenter(task_service=task_service, user_id=user_id)
-    await presenter.prime()
+    await presenter.prime(baseline_current_snapshot=True)
     interactive_pump: asyncio.Task | None = None
 
     async def send_text(text: str) -> None:

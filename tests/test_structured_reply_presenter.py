@@ -63,8 +63,15 @@ class PersistentTaskService:
         return await self._store.wait_for_publish("claude-session-1", since_cursor=since_cursor, timeout_sec=timeout_sec)
 
 
-def _session(*, phase: SessionPhase, turns: list[ConversationTurn] | None = None, pending: PendingPermission | None = None):
+def _session(
+    *,
+    phase: SessionPhase,
+    turns: list[ConversationTurn] | None = None,
+    pending: PendingPermission | None = None,
+    session_id: str = "claude-session-1",
+):
     return SimpleNamespace(
+        session_id=session_id,
         phase=phase,
         turns=turns or [],
         pending_permission=pending,
@@ -142,6 +149,33 @@ async def test_presenter_final_poll_emits_fallback_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_presenter_final_poll_does_not_fallback_after_structured_reply_emitted() -> None:
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.PROCESSING, turns=[]),
+                _session(
+                    phase=SessionPhase.WAITING_FOR_INPUT,
+                    turns=[ConversationTurn(turn_id="turn-1", role="assistant", text="\n你好\n", is_complete=True)],
+                ),
+                _session(
+                    phase=SessionPhase.WAITING_FOR_INPUT,
+                    turns=[ConversationTurn(turn_id="turn-1", role="assistant", text="\n你好\n", is_complete=True)],
+                ),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    final = await presenter.poll(task_id="task-1", final=True)
+
+    assert first == ["你好"]
+    assert final == []
+
+
+@pytest.mark.asyncio
 async def test_presenter_without_structured_session_emits_nothing() -> None:
     presenter = StructuredReplyPresenter(task_service=DummyTaskService([None, None]), user_id=1)
 
@@ -157,6 +191,45 @@ def test_stream_text_helpers_strip_and_preview() -> None:
     assert strip_bridge_markers(raw) == "正文\n\n\n"
     assert normalize_stream_text(raw) == "正文"
     assert preview_stream_text(raw) == "正文"
+
+
+class SwitchingTaskService:
+    def __init__(self) -> None:
+        self.current = _session(phase=SessionPhase.PROCESSING, session_id="old-session")
+        self._cursors = {"old-session": 35, "new-session": 12}
+
+    async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
+        return self.current
+
+    async def get_structured_session_cursor(self, user_id: int) -> int:
+        return self._cursors[self.current.session_id]
+
+    async def get_structured_reply_cursor(self, user_id: int):
+        return None, None
+
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+        return None
+
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+        return self._cursors[self.current.session_id] > since_cursor
+
+
+@pytest.mark.asyncio
+async def test_presenter_wait_for_update_detects_session_switch_with_lower_revision() -> None:
+    task_service = SwitchingTaskService()
+    presenter = StructuredReplyPresenter(task_service=task_service, user_id=1)
+    await presenter.prime()
+
+    task_service.current = _session(
+        phase=SessionPhase.WAITING_FOR_INPUT,
+        session_id="new-session",
+        turns=[ConversationTurn(turn_id="turn-new", role="assistant", text="\n你好\n", is_complete=True)],
+    )
+
+    changed = await presenter.wait_for_update(timeout_sec=0.01)
+
+    assert changed is True
+    assert await presenter.poll(task_id="task-1") == ["你好"]
 
 
 @pytest.mark.asyncio
@@ -192,6 +265,40 @@ async def test_presenter_restart_with_ack_only_persist_does_not_emit(tmp_path) -
     await presenter.prime()
 
     assert await presenter.poll(task_id="task-1") == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_prime_uses_current_snapshot_as_baseline_when_cursor_missing(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    state.turns.append(ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True))
+    store._persist(state)
+
+    presenter = StructuredReplyPresenter(task_service=PersistentTaskService(store), user_id=1)
+    await presenter.prime(baseline_current_snapshot=True)
+
+    assert await presenter.poll(task_id="task-1") == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_final_poll_still_falls_back_when_only_old_reply_cursor_exists(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")
+    state.phase = SessionPhase.PROCESSING
+    state.turns.append(ConversationTurn(turn_id="turn-1", role="assistant", text="\n旧回复\n", is_complete=True))
+    store._persist(state)
+    store.mark_structured_reply_emitted("claude-session-1", turn_id="turn-1")
+
+    presenter = StructuredReplyPresenter(task_service=PersistentTaskService(store), user_id=1)
+    await presenter.prime()
+
+    assert await presenter.poll(task_id="task-1") == []
+
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    store._persist(state)
+
+    assert await presenter.poll(task_id="task-1", final=True) == ["结构化回复暂不可用，已回退为原始输出。"]
 
 
 @pytest.mark.asyncio

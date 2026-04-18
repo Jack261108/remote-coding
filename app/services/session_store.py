@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.hook_models import HookEvent
@@ -20,6 +21,19 @@ from app.domain.session_models import (
 
 
 CLAUDE_SESSION_PREFIX = "claude-session-"
+_UUID_SESSION_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def is_claude_session_id(session_id: str | None) -> bool:
+    if not session_id:
+        return False
+    text = str(session_id).strip()
+    if not text:
+        return False
+    return text.startswith(CLAUDE_SESSION_PREFIX) or bool(_UUID_SESSION_RE.match(text))
 
 
 class SessionStore:
@@ -29,25 +43,67 @@ class SessionStore:
         self._revision_conditions: dict[str, asyncio.Condition] = {}
 
     def _is_claude_session_id(self, session_id: str | None) -> bool:
-        return bool(session_id and session_id.startswith(CLAUDE_SESSION_PREFIX))
+        return is_claude_session_id(session_id)
 
     def _is_claude_state(self, state: SessionState | None) -> bool:
         if state is None:
             return False
         return self._is_claude_session_id(state.claude_session_id) or self._is_claude_session_id(state.session_id)
 
+    def _state_rank(self, state: SessionState) -> tuple[int, int, float, float, int]:
+        has_content = int(bool(state.turns or state.tool_calls or state.pending_permission is not None))
+        is_claude = int(self._is_claude_state(state))
+        created_at = state.created_at.timestamp()
+        last_activity = state.last_activity.timestamp()
+        return is_claude, has_content, created_at, last_activity, state.revision
+
     def find_by_terminal_id(self, terminal_id: str | None) -> SessionState | None:
         if not terminal_id:
             return None
-        fallback: SessionState | None = None
+
+        best: SessionState | None = None
         for state in self._states.values():
             if state.terminal_id != terminal_id:
                 continue
-            if self._is_claude_state(state):
-                return state
-            if fallback is None:
-                fallback = state
-        return fallback
+            if best is None or self._state_rank(state) > self._state_rank(best):
+                best = state
+        if best is not None and self._state_rank(best)[:2] == (1, 1):
+            return best
+
+        for state in self._file_store.list_session_states():
+            if state.terminal_id != terminal_id:
+                continue
+            loaded_checkpoint = self._file_store.load_checkpoint(state.session_id)
+            loaded_turns = state.turns or self._file_store.load_conversation(state.session_id)
+            cached = self._states.get(state.session_id)
+            if cached is not None:
+                if not cached.turns:
+                    if loaded_turns:
+                        cached.turns = loaded_turns
+                if not cached.tool_calls and state.tool_calls:
+                    cached.tool_calls = state.tool_calls
+                if cached.pending_permission is None and state.pending_permission is not None:
+                    cached.pending_permission = state.pending_permission
+                if cached.user_id is None and state.user_id is not None:
+                    cached.user_id = state.user_id
+                if cached.terminal_id is None and state.terminal_id is not None:
+                    cached.terminal_id = state.terminal_id
+                if cached.claude_session_id is None and state.claude_session_id is not None:
+                    cached.claude_session_id = state.claude_session_id
+                if cached.checkpoint.last_offset == 0 and loaded_checkpoint.last_offset != 0:
+                    cached.checkpoint = loaded_checkpoint
+                cached.history_loaded = bool(cached.turns or cached.tool_calls or cached.pending_permission is not None)
+                candidate = cached
+            else:
+                state.checkpoint = loaded_checkpoint
+                if not state.turns:
+                    state.turns = loaded_turns
+                state.history_loaded = bool(state.turns or state.tool_calls or state.pending_permission is not None)
+                self._states[state.session_id] = state
+                candidate = state
+            if best is None or self._state_rank(candidate) > self._state_rank(best):
+                best = candidate
+        return best
 
     def resolve_interactive_session_id(
         self,
@@ -57,9 +113,13 @@ class SessionStore:
         fallback_session_id: str | None = None,
         require_claude_session: bool = False,
     ) -> str | None:
-        if self._is_claude_session_id(claude_session_id):
-            return claude_session_id
         bound = self.find_by_terminal_id(terminal_id)
+        if self._is_claude_session_id(claude_session_id):
+            explicit = self.get(claude_session_id)
+            if self._is_claude_state(bound) and bound is not None and bound.session_id != claude_session_id:
+                if explicit is None or self._state_rank(bound) > self._state_rank(explicit):
+                    return bound.session_id
+            return claude_session_id
         if self._is_claude_state(bound):
             return bound.session_id
         if require_claude_session:
@@ -441,9 +501,6 @@ class SessionStore:
         state.claude_session_id = str(payload.get("claude_session_id") or state.claude_session_id or state.session_id)
         last_offset = int(payload["last_offset"]) if payload.get("last_offset") is not None else None
         reset_detected = bool(payload.get("reset_detected", False))
-        if last_offset is not None and last_offset < state.checkpoint.last_offset and not reset_detected:
-            return
-
         turns_payload = payload.get("turns", [])
         parsed_turns = [
             item if isinstance(item, ConversationTurn) else ConversationTurn.from_dict(item)
@@ -454,6 +511,12 @@ class SessionStore:
         if isinstance(tool_calls_payload, dict):
             for key, value in tool_calls_payload.items():
                 parsed_tool_calls[str(key)] = value if isinstance(value, ToolCallRecord) else ToolCallRecord.from_dict(value)
+
+        if last_offset is not None and last_offset < state.checkpoint.last_offset and not reset_detected:
+            has_newer_turns = len(parsed_turns) > len(state.turns)
+            has_more_tool_calls = len(parsed_tool_calls) > len(state.tool_calls)
+            if not has_newer_turns and not has_more_tool_calls:
+                return
 
         if payload.get("clear_detected"):
             state.turns = parsed_turns

@@ -21,7 +21,7 @@ from app.domain.models import (
 )
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState
 from app.services.session_service import SessionService
-from app.services.session_store import CLAUDE_SESSION_PREFIX, SessionStore
+from app.services.session_store import SessionStore, is_claude_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +313,7 @@ class TaskService:
         return state
 
     def _is_claude_session_id(self, session_id: str | None) -> bool:
-        return bool(session_id and session_id.startswith(CLAUDE_SESSION_PREFIX))
+        return is_claude_session_id(session_id)
 
     async def get_structured_session_cursor(self, user_id: int) -> int:
         if self._structured_session_store is None:
@@ -382,9 +382,11 @@ class TaskService:
     async def open_claude_chat_session(self, user_id: int) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)
         had_old_terminal = bool(session and session.terminal_mode and session.terminal_id)
+        if session is not None:
+            await self._session_service.clear_claude_session(user_id=user_id)
         if had_old_terminal:
             closed, text = await self.close_terminal(user_id)
-            if not closed:
+            if not closed and text != "终端不存在或关闭失败":
                 return False, f"旧终端关闭失败: {text}"
 
         selected_workdir = str(Path((session.workdir if session else self._settings.default_workdir)).resolve())
