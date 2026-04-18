@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 
+from app.domain.user_question_models import UserQuestionPrompt, extract_user_question_prompts
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,8 @@ _STREAM_PREVIEW_CHAR_LIMIT = 1800
 _STREAM_PREVIEW_LINE_LIMIT = 60
 _PERMISSION_INPUT_CHAR_LIMIT = 280
 _PERMISSION_INPUT_LINE_LIMIT = 8
+_QUESTION_TEXT_CHAR_LIMIT = 360
+_QUESTION_TEXT_LINE_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,12 @@ class PermissionRequestOutput:
 @dataclass(frozen=True)
 class ProgressUpdateOutput:
     text: str
+
+
+@dataclass(frozen=True)
+class UserQuestionOutput:
+    text: str
+    question: UserQuestionPrompt
 
 
 def strip_bridge_markers(text: str) -> str:
@@ -109,6 +118,25 @@ def _truncate_permission_text(text: str) -> str:
     needs_char_truncation = len(preview) > _PERMISSION_INPUT_CHAR_LIMIT
     if needs_char_truncation:
         preview = preview[:_PERMISSION_INPUT_CHAR_LIMIT].rstrip()
+
+    if needs_line_truncation or needs_char_truncation:
+        preview = f"{preview}..."
+    return preview
+
+
+def _truncate_question_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return ""
+
+    lines = normalized.split("\n")
+    needs_line_truncation = len(lines) > _QUESTION_TEXT_LINE_LIMIT
+    preview_lines = lines[:_QUESTION_TEXT_LINE_LIMIT]
+    preview = "\n".join(preview_lines)
+
+    needs_char_truncation = len(preview) > _QUESTION_TEXT_CHAR_LIMIT
+    if needs_char_truncation:
+        preview = preview[:_QUESTION_TEXT_CHAR_LIMIT].rstrip()
 
     if needs_line_truncation or needs_char_truncation:
         preview = f"{preview}..."
@@ -188,6 +216,26 @@ def build_compacting_progress_message() -> str:
     return "执行进度\n正在整理上下文，稍后继续。"
 
 
+def build_user_question_prompt(question: UserQuestionPrompt) -> str:
+    lines = ["需要你选择"]
+    if question.total_questions > 1:
+        lines.append(f"问题: {question.question_index + 1}/{question.total_questions}")
+    if question.header:
+        lines.append(f"主题: {question.header}")
+    lines.append(f"内容: {_truncate_question_text(question.question)}")
+
+    if question.options:
+        lines.append("")
+        for index, option in enumerate(question.options, start=1):
+            lines.append(f"{index}. {_truncate_question_text(option.label)}")
+            if option.description:
+                lines.append(f"   {_truncate_question_text(option.description)}")
+
+    lines.append("")
+    lines.append("请点击下方按钮；如果要自己补充说明，也可以直接回复文字。")
+    return "\n".join(lines)
+
+
 class StructuredReplyPresenter:
     def __init__(self, *, task_service: TaskService, user_id: int) -> None:
         self._task_service = task_service
@@ -201,6 +249,7 @@ class StructuredReplyPresenter:
         self._current_session_id: str | None = None
         self._last_phase: str | None = None
         self._tool_status_by_id: dict[str, str | None] = {}
+        self._question_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
 
     @property
     def structured_session_available(self) -> bool:
@@ -224,8 +273,22 @@ class StructuredReplyPresenter:
 
         if baseline_current_snapshot:
             self._tool_status_by_id = {tool.tool_use_id: tool.status for tool in snapshot.tool_states}
+            self._question_keys_by_tool_id = {
+                tool.tool_use_id: tuple(prompt.key for prompt in extract_user_question_prompts(
+                    tool_use_id=tool.tool_use_id,
+                    tool_name=tool.tool_name,
+                    tool_input=tool.tool_input,
+                ))
+                for tool in snapshot.tool_states
+                if extract_user_question_prompts(
+                    tool_use_id=tool.tool_use_id,
+                    tool_name=tool.tool_name,
+                    tool_input=tool.tool_input,
+                )
+            }
         else:
             self._tool_status_by_id = {}
+            self._question_keys_by_tool_id = {}
 
         revision_getter = getattr(self._task_service, "get_structured_session_cursor", None)
         if revision_getter is None:
@@ -246,6 +309,7 @@ class StructuredReplyPresenter:
             self._last_phase = None
             self._last_pending_permission_key = None
             self._tool_status_by_id = {}
+            self._question_keys_by_tool_id = {}
             self._revision = await cursor_getter(self._user_id)
             return True
         changed = await wait_for_update(
@@ -257,11 +321,12 @@ class StructuredReplyPresenter:
             self._revision = await cursor_getter(self._user_id)
         return changed
 
-    async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput | ProgressUpdateOutput]:
+    async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
 
-        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput] = []
+        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput] = []
+        messages.extend(self._collect_user_question_updates(snapshot=snapshot))
         messages.extend(self._collect_progress_updates(snapshot=snapshot))
         acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
         if snapshot.phase == "waiting_for_approval" and snapshot.pending_permission_key and snapshot.pending_permission_key != self._last_pending_permission_key:
@@ -343,6 +408,12 @@ class StructuredReplyPresenter:
         current_status_by_id: dict[str, str | None] = {}
         for tool in snapshot.tool_states:
             current_status_by_id[tool.tool_use_id] = tool.status
+            if extract_user_question_prompts(
+                tool_use_id=tool.tool_use_id,
+                tool_name=tool.tool_name,
+                tool_input=tool.tool_input,
+            ):
+                continue
             if tool.status != "running":
                 continue
             previous_status = self._tool_status_by_id.get(tool.tool_use_id)
@@ -358,6 +429,36 @@ class StructuredReplyPresenter:
                 )
             )
         self._tool_status_by_id = current_status_by_id
+        return messages
+
+    def _collect_user_question_updates(self, *, snapshot: _StructuredSnapshot) -> list[UserQuestionOutput]:
+        messages: list[UserQuestionOutput] = []
+        current_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
+
+        for tool in snapshot.tool_states:
+            if tool.status != "running":
+                continue
+            prompts = extract_user_question_prompts(
+                tool_use_id=tool.tool_use_id,
+                tool_name=tool.tool_name,
+                tool_input=tool.tool_input,
+            )
+            if not prompts:
+                continue
+            current_keys = tuple(prompt.key for prompt in prompts)
+            current_keys_by_tool_id[tool.tool_use_id] = current_keys
+            previous_keys = self._question_keys_by_tool_id.get(tool.tool_use_id, ())
+            for prompt in prompts:
+                if prompt.key in previous_keys:
+                    continue
+                messages.append(
+                    UserQuestionOutput(
+                        text=build_user_question_prompt(prompt),
+                        question=prompt,
+                    )
+                )
+
+        self._question_keys_by_tool_id = current_keys_by_tool_id
         return messages
 
     async def _load_snapshot(self, *, log_missing: bool) -> _StructuredSnapshot:

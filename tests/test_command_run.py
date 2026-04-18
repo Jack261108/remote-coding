@@ -11,7 +11,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
-from app.bot.presenters.structured_reply_presenter import build_permission_prompt, build_tool_progress_message
+from app.bot.presenters.structured_reply_presenter import build_permission_prompt, build_tool_progress_message, build_user_question_prompt
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
 
@@ -465,6 +465,91 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
     assert reply_markup is not None
     assert [button.text for button in reply_markup.inline_keyboard[0]] == ["允许", "拒绝"]
     assert [button.callback_data for button in reply_markup.inline_keyboard[0]] == ["perm:allow:tool-1", "perm:deny:tool-1"]
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_reports_user_question_once() -> None:
+    message = DummyMessage()
+    turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已收到问题\n", is_complete=True)]
+    empty_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    question_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理方式",
+                    "question": "这两条误写到项目级的记忆，你要我怎么处理？",
+                    "options": [
+                        {"label": "迁到全局(推荐)", "description": "保留记忆内容并迁移"},
+                        {"label": "直接删除", "description": "删除项目级这两条记忆"},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    question_session.tool_calls = {"tool-ask-1": question_tool}
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    responses = iter([empty_session, empty_session, question_session])
+
+    async def get_structured_session(user_id: int, *, log_missing: bool = True):
+        try:
+            return next(responses)
+        except StopIteration:
+            return question_session
+
+    task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+
+    expected_prompt = build_user_question_prompt(
+        SimpleNamespace(
+            tool_use_id="tool-ask-1",
+            question_index=0,
+            total_questions=1,
+            header="处理方式",
+            question="这两条误写到项目级的记忆，你要我怎么处理？",
+            options=(
+                SimpleNamespace(label="迁到全局(推荐)", description="保留记忆内容并迁移"),
+                SimpleNamespace(label="直接删除", description="删除项目级这两条记忆"),
+            ),
+            multi_select=False,
+        )
+    )
+    assert message.answers.count(expected_prompt) == 1
+    question_index = message.answers.index(expected_prompt)
+    reply_markup = message.reply_markups[question_index]
+    assert reply_markup is not None
+    assert [button.text for row in reply_markup.inline_keyboard for button in row] == ["迁到全局(推荐)", "直接删除"]
+    assert [button.callback_data for row in reply_markup.inline_keyboard for button in row] == [
+        "ask:tool-ask-1:0:0",
+        "ask:tool-ask-1:0:1",
+    ]
 
 
 @pytest.mark.asyncio

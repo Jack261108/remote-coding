@@ -73,6 +73,11 @@ class CLIAdapterFactory:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
         return await self._tmux_runner.reveal_terminal(terminal_key)
 
+    async def send_claude_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
+        return await self._tmux_runner.send_interactive_input(terminal_key=terminal_key, workdir=workdir, text=text)
+
     def get_session_state(self, terminal_key: str) -> SessionState | None:
         if not self._claude_tmux_enabled or self._tmux_runner is None:
             return None

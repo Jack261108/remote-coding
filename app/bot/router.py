@@ -10,6 +10,7 @@ from app.bot.handlers.command_cancel import register_cancel_handler
 from app.bot.handlers.command_claude import register_claude_handler
 from app.bot.handlers.command_exit import register_exit_handler
 from app.bot.handlers.command_permission import register_permission_handlers
+from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
@@ -67,6 +68,7 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
     register_status_handler(router, task_service=task_service)
     register_session_handler(router, task_service=task_service, session_service=session_service)
     register_permission_handlers(router, task_service=task_service)
+    register_user_question_handlers(router, task_service=task_service)
     register_exit_handler(router, task_service=task_service)
 
     @router.message(F.text & ~F.text.startswith("/"))
@@ -76,6 +78,8 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
             return
 
         user_id = message.from_user.id if message.from_user else 0
+        if await maybe_handle_pending_user_question_text(message=message, task_service=task_service):
+            return
         session = await session_service.get(user_id)
         logger.info(
             "claude chat text received",

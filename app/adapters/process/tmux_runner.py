@@ -381,6 +381,14 @@ class TmuxRunner:
         async with session_lock:
             return await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=env)
 
+    async def send_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
+        session_name = self._build_session_name(terminal_key)
+        prompt = self._wrap_interactive_prompt(prompt=text)
+        ready, err = await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=None)
+        if not ready:
+            return False, err
+        return await self._send_command(session_name, prompt, workdir=workdir, env=None, interactive=True)
+
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
         session_name = self._build_session_name(terminal_key)
         exists = await self._session_exists(session_name)

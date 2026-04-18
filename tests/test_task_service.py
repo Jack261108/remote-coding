@@ -11,7 +11,7 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
 from app.domain.models import CLIEvent, EventType, ExecutionTask, TaskRecord, TaskStatus, utc_now
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
@@ -66,6 +66,7 @@ class StubFactory:
         self._ensured_interactive_terminal_key: str | None = None
         self._ensured_interactive_workdir: str | None = None
         self._revealed_terminal_key: str | None = None
+        self._interactive_inputs: list[tuple[str, str, str]] = []
 
     def normalize_provider(self, provider: str) -> str:
         p = provider.strip().lower()
@@ -100,6 +101,10 @@ class StubFactory:
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
         self._revealed_terminal_key = terminal_key
         return True, f"已在桌面打开 Terminal 并附着到 tgcli_{terminal_key}"
+
+    async def send_claude_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
+        self._interactive_inputs.append((terminal_key, workdir, text))
+        return True, ""
 
 
 class DummyHookSocketServer:
@@ -1074,3 +1079,156 @@ async def test_respond_to_pending_permission_uses_button_tool_use_id_when_struct
     assert ok is True
     assert text == "已批准权限请求"
     assert hook_socket_server.calls == [("tool-1", "allow", None)]
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_user_question_option_collects_multi_question_answers_and_sends_to_tmux(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-1"] = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理范围",
+                    "question": "你说的范围我理解为这三块之一，具体按哪种处理？",
+                    "options": [
+                        {"label": "当前相关改动(推荐)", "description": "只处理相关已改动文件"},
+                        {"label": "三个目录全部", "description": "范围非常大"},
+                    ],
+                    "multiSelect": False,
+                },
+                {
+                    "header": "提交前置",
+                    "question": "按你的 CLAUDE.md，要修改代码前先提交现有改动。现在是否允许我先做这一步？",
+                    "options": [
+                        {"label": "允许先提交(推荐)", "description": "先提交后继续"},
+                        {"label": "暂不允许", "description": "先不改代码"},
+                    ],
+                    "multiSelect": False,
+                },
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(state)
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1,
+        tool_use_id="tool-ask-1",
+        question_index=0,
+        option_index=0,
+    )
+
+    assert ok is True
+    assert text == "已记录选择: 当前相关改动(推荐)"
+    assert next_prompt is not None
+    assert next_prompt.tool_use_id == "tool-ask-1"
+    assert next_prompt.question_index == 1
+    assert next_prompt.total_questions == 2
+    assert next_prompt.header == "提交前置"
+    assert next_prompt.question == "按你的 CLAUDE.md，要修改代码前先提交现有改动。现在是否允许我先做这一步？"
+
+    ok, text, next_prompt = await service.answer_pending_user_question_text(
+        user_id=1,
+        text="允许先提交(推荐)",
+    )
+
+    assert ok is True
+    assert text == "已提交你的选择，Claude 继续执行中"
+    assert next_prompt is None
+    assert factory._interactive_inputs == [
+        (
+            expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+            str(tmp_path),
+            "我的选择如下：\n- 处理范围: 当前相关改动(推荐)\n- 提交前置: 允许先提交(推荐)",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_user_question_option_rejects_stale_button(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-2"] = ToolCallRecord(
+        tool_use_id="tool-ask-2",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "question": "这两条误写到项目级的记忆，你要我怎么处理？",
+                    "options": [{"label": "直接删除", "description": "删除项目级这两条记忆"}],
+                    "multiSelect": False,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(state)
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1,
+        tool_use_id="tool-ask-1",
+        question_index=0,
+        option_index=0,
+    )
+
+    assert ok is False
+    assert text == "这个选择按钮已经过期，请等待最新的问题"
+    assert next_prompt is None
+    assert factory._interactive_inputs == []

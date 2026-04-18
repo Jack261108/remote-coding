@@ -7,11 +7,13 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from app.bot.handlers.command_permission import build_permission_keyboard
+from app.bot.handlers.command_user_question import build_user_question_keyboard
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import (
     PermissionRequestOutput,
     ProgressUpdateOutput,
     StructuredReplyPresenter,
+    UserQuestionOutput,
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
     normalize_stream_text,
     preview_stream_text,
@@ -187,6 +189,13 @@ async def run_prompt_and_stream(
                 await answer_safely(
                     output.text,
                     reply_markup=build_permission_keyboard(tool_use_id=output.tool_use_id),
+                )
+                continue
+            if isinstance(output, UserQuestionOutput):
+                await sender.flush(send_text)
+                await answer_safely(
+                    output.text,
+                    reply_markup=build_user_question_keyboard(output),
                 )
                 continue
             if isinstance(output, ProgressUpdateOutput):

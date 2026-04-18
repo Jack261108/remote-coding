@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
@@ -20,6 +20,11 @@ from app.domain.models import (
     utc_now,
 )
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState
+from app.domain.user_question_models import (
+    UserQuestionPrompt,
+    compose_user_question_answers,
+    extract_user_question_prompts,
+)
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore, is_claude_session_id
 
@@ -31,6 +36,13 @@ class StartTaskResult:
     task: TaskRecord
     events: AsyncIterator[CLIEvent]
     interactive: bool = False
+
+
+@dataclass
+class _UserQuestionDraft:
+    tool_use_id: str
+    prompts: tuple[UserQuestionPrompt, ...]
+    answers_by_index: dict[int, str] = field(default_factory=dict)
 
 
 class TaskService:
@@ -52,6 +64,7 @@ class TaskService:
         self._semaphore = semaphore
         self._structured_session_store = structured_session_store
         self._hook_socket_server = hook_socket_server
+        self._user_question_drafts: dict[int, _UserQuestionDraft] = {}
 
     async def create_and_run(
         self,
@@ -358,6 +371,59 @@ class TaskService:
     async def wait_for_structured_session_change(self, *, user_id: int, since_revision: int, timeout_sec: float) -> bool:
         return await self.wait_for_structured_session_update(user_id=user_id, since_cursor=since_revision, timeout_sec=timeout_sec)
 
+    async def get_pending_user_questions(self, user_id: int) -> tuple[UserQuestionPrompt, ...]:
+        state = await self.get_structured_session(user_id, log_missing=False)
+        prompts = self._extract_active_user_questions(state)
+        self._sync_user_question_draft(user_id, prompts)
+        return prompts
+
+    async def answer_pending_user_question_option(
+        self,
+        *,
+        user_id: int,
+        tool_use_id: str,
+        question_index: int,
+        option_index: int,
+    ) -> tuple[bool, str, UserQuestionPrompt | None]:
+        prompts = await self.get_pending_user_questions(user_id)
+        if not prompts:
+            return False, "当前没有待处理的选择题", None
+
+        draft, prompt = self._locate_user_question_prompt(
+            user_id=user_id,
+            prompts=prompts,
+            tool_use_id=tool_use_id,
+            question_index=question_index,
+        )
+        if prompt is None:
+            return False, "这个选择按钮已经过期，请等待最新的问题", None
+        if option_index < 0 or option_index >= len(prompt.options):
+            return False, "无效的选项", None
+
+        answer = prompt.options[option_index].label
+        return await self._submit_user_question_answer(user_id=user_id, draft=draft, prompt=prompt, answer=answer)
+
+    async def answer_pending_user_question_text(
+        self,
+        *,
+        user_id: int,
+        text: str,
+    ) -> tuple[bool, str, UserQuestionPrompt | None]:
+        answer = text.strip()
+        if not answer:
+            return False, "回复内容不能为空", None
+
+        prompts = await self.get_pending_user_questions(user_id)
+        if not prompts:
+            return False, "当前没有待处理的选择题", None
+
+        draft = self._ensure_user_question_draft(user_id=user_id, prompts=prompts)
+        prompt = next((item for item in prompts if item.question_index not in draft.answers_by_index), None)
+        if prompt is None:
+            return False, "当前没有待处理的选择题", None
+
+        return await self._submit_user_question_answer(user_id=user_id, draft=draft, prompt=prompt, answer=answer)
+
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)
         if session is None:
@@ -367,6 +433,7 @@ class TaskService:
                 session.claude_session_id = None
                 await self._session_service.clear_claude_session(user_id=user_id)
                 await self._session_service.switch(user_id=user_id, claude_chat_active=False)
+                self._user_question_drafts.pop(user_id, None)
                 return True, "Claude 会话已退出"
             return False, "当前没有可关闭的持久终端"
 
@@ -377,11 +444,13 @@ class TaskService:
         session.claude_session_id = None
         await self._session_service.clear_claude_session(user_id=user_id)
         await self._session_service.switch(user_id=user_id, terminal_mode=False, claude_chat_active=False)
+        self._user_question_drafts.pop(user_id, None)
         return True, "终端已关闭"
 
     async def open_claude_chat_session(self, user_id: int) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)
         had_old_terminal = bool(session and session.terminal_mode and session.terminal_id)
+        self._user_question_drafts.pop(user_id, None)
         if session is not None:
             await self._session_service.clear_claude_session(user_id=user_id)
         if had_old_terminal:
@@ -419,6 +488,106 @@ class TaskService:
         if ensure_result[1]:
             message = f"{message}\n{ensure_result[1]}"
         return True, message
+
+    def _extract_active_user_questions(self, state: SessionState | None) -> tuple[UserQuestionPrompt, ...]:
+        if state is None:
+            return ()
+
+        latest_prompts: tuple[UserQuestionPrompt, ...] = ()
+        latest_started_at = None
+        for tool in state.tool_calls.values():
+            status_value = getattr(tool.status, "value", tool.status)
+            if status_value != "running":
+                continue
+            prompts = extract_user_question_prompts(
+                tool_use_id=tool.tool_use_id,
+                tool_name=tool.name,
+                tool_input=tool.input,
+            )
+            if not prompts:
+                continue
+            if latest_started_at is None or tool.started_at >= latest_started_at:
+                latest_started_at = tool.started_at
+                latest_prompts = prompts
+        return latest_prompts
+
+    def _sync_user_question_draft(self, user_id: int, prompts: tuple[UserQuestionPrompt, ...]) -> None:
+        draft = self._user_question_drafts.get(user_id)
+        if not prompts:
+            self._user_question_drafts.pop(user_id, None)
+            return
+        if draft is None:
+            return
+        if draft.tool_use_id != prompts[0].tool_use_id:
+            self._user_question_drafts.pop(user_id, None)
+            return
+        draft.prompts = prompts
+
+    def _ensure_user_question_draft(self, *, user_id: int, prompts: tuple[UserQuestionPrompt, ...]) -> _UserQuestionDraft:
+        draft = self._user_question_drafts.get(user_id)
+        tool_use_id = prompts[0].tool_use_id
+        if draft is None or draft.tool_use_id != tool_use_id:
+            draft = _UserQuestionDraft(tool_use_id=tool_use_id, prompts=prompts)
+            self._user_question_drafts[user_id] = draft
+            return draft
+        draft.prompts = prompts
+        return draft
+
+    def _locate_user_question_prompt(
+        self,
+        *,
+        user_id: int,
+        prompts: tuple[UserQuestionPrompt, ...],
+        tool_use_id: str,
+        question_index: int,
+    ) -> tuple[_UserQuestionDraft, UserQuestionPrompt | None]:
+        draft = self._ensure_user_question_draft(user_id=user_id, prompts=prompts)
+        if not prompts or prompts[0].tool_use_id != tool_use_id:
+            return draft, None
+        prompt = next((item for item in prompts if item.question_index == question_index), None)
+        return draft, prompt
+
+    async def _submit_user_question_answer(
+        self,
+        *,
+        user_id: int,
+        draft: _UserQuestionDraft,
+        prompt: UserQuestionPrompt,
+        answer: str,
+    ) -> tuple[bool, str, UserQuestionPrompt | None]:
+        normalized_answer = answer.strip()
+        if not normalized_answer:
+            return False, "回复内容不能为空", None
+
+        draft.answers_by_index[prompt.question_index] = normalized_answer
+        remaining = [item for item in draft.prompts if item.question_index not in draft.answers_by_index]
+        if remaining:
+            return True, f"已记录选择: {normalized_answer}", remaining[0]
+
+        answer_text = compose_user_question_answers(draft.prompts, draft.answers_by_index)
+        if not answer_text:
+            return False, "答案内容为空，无法提交", None
+
+        sent, text = await self._send_interactive_text(user_id=user_id, text=answer_text)
+        if sent:
+            self._user_question_drafts.pop(user_id, None)
+            return True, "已提交你的选择，Claude 继续执行中", None
+        return False, text, None
+
+    async def _send_interactive_text(self, *, user_id: int, text: str) -> tuple[bool, str]:
+        session = await self._session_service.get(user_id)
+        if session is None or session.provider != "claude_code":
+            return False, "当前没有 Claude 会话"
+        if not session.terminal_mode or not session.terminal_id:
+            return False, "当前没有可用的 Claude 持久终端"
+        sender = getattr(self._cli_factory, "send_claude_interactive_input", None)
+        if sender is None:
+            return False, "当前环境不支持直接回复交互问题"
+        return await sender(
+            terminal_key=session.terminal_id,
+            workdir=session.workdir,
+            text=text,
+        )
 
     def is_workdir_allowed(self, workdir: str) -> bool:
         return self._is_workdir_allowed(str(Path(workdir).resolve()))

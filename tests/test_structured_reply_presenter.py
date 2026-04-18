@@ -10,12 +10,15 @@ from app.bot.presenters.structured_reply_presenter import (
     StructuredReplyPresenter,
     build_permission_prompt,
     build_tool_progress_message,
+    build_user_question_prompt,
     normalize_stream_text,
     preview_stream_text,
     strip_bridge_markers,
+    UserQuestionOutput,
 )
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
+from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
 from app.services.session_store import SessionStore
 
 
@@ -136,6 +139,57 @@ async def test_presenter_reports_pending_permission_once() -> None:
             tool_name="Bash",
         )
     ]
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_reports_user_question_once_without_generic_progress() -> None:
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理方式",
+                    "question": "这两条误写到项目级的记忆，你要我怎么处理？",
+                    "options": [
+                        {"label": "迁到全局(推荐)", "description": "保留记忆内容并迁移"},
+                        {"label": "直接删除", "description": "删除项目级这两条记忆"},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    prompt = UserQuestionPrompt(
+        tool_use_id="tool-ask-1",
+        question_index=0,
+        total_questions=1,
+        header="处理方式",
+        question="这两条误写到项目级的记忆，你要我怎么处理？",
+        options=(
+            UserQuestionOption(label="迁到全局(推荐)", description="保留记忆内容并迁移"),
+            UserQuestionOption(label="直接删除", description="删除项目级这两条记忆"),
+        ),
+        multi_select=False,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [UserQuestionOutput(text=build_user_question_prompt(prompt), question=prompt)]
     assert second == []
 
 
