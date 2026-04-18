@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import InlineKeyboardMarkup
 
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
@@ -33,18 +34,43 @@ class DummyMessage:
         self.text = text
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
+        self.reply_markups: list[InlineKeyboardMarkup | None] = []
+        self.edited_reply_markups: list[InlineKeyboardMarkup | None] = []
 
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, reply_markup=None) -> None:
         self.answers.append(text)
+        self.reply_markups.append(reply_markup)
+
+    async def edit_reply_markup(self, reply_markup=None) -> None:
+        self.edited_reply_markups.append(reply_markup)
+
+
+class DummyCallbackQuery:
+    def __init__(self, data: str, *, user_id: int = 1, message: DummyMessage | None = None) -> None:
+        self.data = data
+        self.from_user = SimpleNamespace(id=user_id)
+        self.message = message
+        self.answers: list[tuple[str, bool]] = []
+
+    async def answer(self, text: str, show_alert: bool = False) -> None:
+        self.answers.append((text, show_alert))
 
 
 class DummyRouter:
     def __init__(self) -> None:
         self.handlers = []
+        self.callback_handlers = []
 
     def message(self, *args, **kwargs):
         def decorator(fn):
             self.handlers.append(fn)
+            return fn
+
+        return decorator
+
+    def callback_query(self, *args, **kwargs):
+        def decorator(fn):
+            self.callback_handlers.append(fn)
             return fn
 
         return decorator
@@ -255,6 +281,94 @@ async def test_permission_handlers_report_stale_pending_request(tmp_path) -> Non
 
     assert hook_socket_server.calls == [("tool-1", "allow", None)]
     assert message.answers == ["批准失败: 待处理权限请求已失效，请等待 Claude 重新发起"]
+
+
+@pytest.mark.asyncio
+async def test_permission_callback_handler_approves_pending_request(tmp_path) -> None:
+    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    factory = StubFactory(StubAdapter(events=[]))
+    factory._tmux_runner = tmux_runner
+    factory._claude_tmux_enabled = True
+    factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
+    hook_socket_server = DummyHookSocketServer()
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=SessionService(MemorySessionStore()),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+        structured_session_store=tmux_runner._session_store,
+        hook_socket_server=hook_socket_server,
+    )
+    await service._session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+    state = tmux_runner._session_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f")
+    state.pending_permission = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    tmux_runner._session_store._persist(state)
+
+    router = DummyRouter()
+    register_permission_handlers(router, task_service=service)
+    callback_handler = router.callback_handlers[0]
+    message = DummyMessage("权限请求")
+    callback = DummyCallbackQuery("perm:allow:tool-1", message=message)
+
+    await callback_handler(callback)
+
+    assert hook_socket_server.calls == [("tool-1", "allow", None)]
+    assert message.answers == ["已批准权限请求: Bash"]
+    assert message.edited_reply_markups == [None]
+    assert callback.answers == [("已批准权限请求: Bash", False)]
+
+
+@pytest.mark.asyncio
+async def test_permission_callback_handler_rejects_stale_button(tmp_path) -> None:
+    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    factory = StubFactory(StubAdapter(events=[]))
+    factory._tmux_runner = tmux_runner
+    factory._claude_tmux_enabled = True
+    factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
+    hook_socket_server = DummyHookSocketServer()
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=SessionService(MemorySessionStore()),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+        structured_session_store=tmux_runner._session_store,
+        hook_socket_server=hook_socket_server,
+    )
+    await service._session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+    state = tmux_runner._session_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f")
+    state.pending_permission = PendingPermission(tool_use_id="tool-2", tool_name="Bash", tool_input={"command": "pwd"})
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    tmux_runner._session_store._persist(state)
+
+    router = DummyRouter()
+    register_permission_handlers(router, task_service=service)
+    callback_handler = router.callback_handlers[0]
+    message = DummyMessage("权限请求")
+    callback = DummyCallbackQuery("perm:allow:tool-1", message=message)
+
+    await callback_handler(callback)
+
+    assert hook_socket_server.calls == []
+    assert message.answers == ["权限操作失败: 这个权限按钮已经过期，请等待最新的权限请求"]
+    assert message.edited_reply_markups == [None]
+    assert callback.answers == [("这个权限按钮已经过期，请等待最新的权限请求", True)]
 
 
 @pytest.mark.asyncio

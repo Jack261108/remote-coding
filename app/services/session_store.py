@@ -105,6 +105,55 @@ class SessionStore:
                 best = candidate
         return best
 
+    def find_by_pending_tool_use_id(self, tool_use_id: str | None) -> SessionState | None:
+        if not tool_use_id:
+            return None
+
+        best: SessionState | None = None
+        for state in self._states.values():
+            pending = state.pending_permission
+            if pending is None or pending.tool_use_id != tool_use_id:
+                continue
+            if best is None or self._state_rank(state) > self._state_rank(best):
+                best = state
+        if best is not None:
+            return best
+
+        for state in self._file_store.list_session_states():
+            pending = state.pending_permission
+            if pending is None or pending.tool_use_id != tool_use_id:
+                continue
+            loaded_checkpoint = self._file_store.load_checkpoint(state.session_id)
+            loaded_turns = state.turns or self._file_store.load_conversation(state.session_id)
+            cached = self._states.get(state.session_id)
+            if cached is not None:
+                if cached.pending_permission is None:
+                    cached.pending_permission = pending
+                if not cached.turns:
+                    cached.turns = loaded_turns
+                if not cached.tool_calls and state.tool_calls:
+                    cached.tool_calls = state.tool_calls
+                if cached.user_id is None and state.user_id is not None:
+                    cached.user_id = state.user_id
+                if cached.terminal_id is None and state.terminal_id is not None:
+                    cached.terminal_id = state.terminal_id
+                if cached.claude_session_id is None and state.claude_session_id is not None:
+                    cached.claude_session_id = state.claude_session_id
+                if cached.checkpoint.last_offset == 0 and loaded_checkpoint.last_offset != 0:
+                    cached.checkpoint = loaded_checkpoint
+                cached.history_loaded = bool(cached.turns or cached.tool_calls or cached.pending_permission is not None)
+                candidate = cached
+            else:
+                state.checkpoint = loaded_checkpoint
+                if not state.turns:
+                    state.turns = loaded_turns
+                state.history_loaded = bool(state.turns or state.tool_calls or state.pending_permission is not None)
+                self._states[state.session_id] = state
+                candidate = state
+            if best is None or self._state_rank(candidate) > self._state_rank(best):
+                best = candidate
+        return best
+
     def resolve_interactive_session_id(
         self,
         *,

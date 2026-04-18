@@ -10,7 +10,7 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
 from app.domain.models import CLIEvent, EventType, ExecutionTask, TaskRecord, TaskStatus
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
@@ -99,6 +99,16 @@ class StubFactory:
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
         self._revealed_terminal_key = terminal_key
         return True, f"已在桌面打开 Terminal 并附着到 tgcli_{terminal_key}"
+
+
+class DummyHookSocketServer:
+    def __init__(self, *, respond_ok: bool = True) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+        self.respond_ok = respond_ok
+
+    async def respond_to_permission(self, *, tool_use_id: str, decision: str, reason: str | None = None) -> bool:
+        self.calls.append((tool_use_id, decision, reason))
+        return self.respond_ok
 
 
 def make_settings(tmp_path: Path, *, claude_tmux_mode: bool = False) -> Settings:
@@ -844,3 +854,160 @@ async def test_file_backed_session_service_persists_context(tmp_path: Path) -> N
     assert restored.terminal_id == expected
     assert restored.claude_chat_active is True
     assert restored.claude_session_id == "claude-session-1"
+
+
+@pytest.mark.asyncio
+async def test_respond_to_pending_permission_uses_resolved_structured_session_not_stale_context(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    hook_socket_server = DummyHookSocketServer()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+        hook_socket_server=hook_socket_server,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="stale-session", workdir=str(tmp_path))
+
+    stale_state = structured_store.get_or_create(
+        session_id="stale-session",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="stale-session",
+    )
+    stale_state.phase = SessionPhase.WAITING_FOR_INPUT
+    structured_store._persist(stale_state)
+
+    active_state = structured_store.get_or_create(
+        session_id="2185ae1c-14e5-4423-8f0d-1b76fcd893d6",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="2185ae1c-14e5-4423-8f0d-1b76fcd893d6",
+    )
+    active_state.pending_permission = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    active_state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    structured_store._persist(active_state)
+
+    ok, text = await service.respond_to_pending_permission(
+        user_id=1,
+        decision="allow",
+        expected_tool_use_id="tool-1",
+    )
+
+    assert ok is True
+    assert text == "已批准权限请求: Bash"
+    assert hook_socket_server.calls == [("tool-1", "allow", None)]
+    updated = structured_store.get("2185ae1c-14e5-4423-8f0d-1b76fcd893d6")
+    assert updated is not None
+    assert updated.pending_permission is None
+    assert updated.phase == SessionPhase.PROCESSING
+
+
+@pytest.mark.asyncio
+async def test_respond_to_pending_permission_prefers_expected_tool_use_id_over_current_session_pointer(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    hook_socket_server = DummyHookSocketServer()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+        hook_socket_server=hook_socket_server,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="current-session", workdir=str(tmp_path))
+
+    current_state = structured_store.get_or_create(
+        session_id="current-session",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="current-session",
+    )
+    current_state.phase = SessionPhase.PROCESSING
+    structured_store._persist(current_state)
+
+    pending_state = structured_store.get_or_create(
+        session_id="session-with-permission",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="session-with-permission",
+    )
+    pending_state.pending_permission = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    pending_state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    structured_store._persist(pending_state)
+
+    ok, text = await service.respond_to_pending_permission(
+        user_id=1,
+        decision="allow",
+        expected_tool_use_id="tool-1",
+    )
+
+    assert ok is True
+    assert text == "已批准权限请求: Bash"
+    assert hook_socket_server.calls == [("tool-1", "allow", None)]
+    updated = structured_store.get("session-with-permission")
+    assert updated is not None
+    assert updated.pending_permission is None
+    assert updated.phase == SessionPhase.PROCESSING
+
+
+@pytest.mark.asyncio
+async def test_respond_to_pending_permission_uses_button_tool_use_id_when_structured_state_missing(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    hook_socket_server = DummyHookSocketServer()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+        hook_socket_server=hook_socket_server,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="current-session", workdir=str(tmp_path))
+
+    ok, text = await service.respond_to_pending_permission(
+        user_id=1,
+        decision="allow",
+        expected_tool_use_id="tool-1",
+    )
+
+    assert ok is True
+    assert text == "已批准权限请求"
+    assert hook_socket_server.calls == [("tool-1", "allow", None)]

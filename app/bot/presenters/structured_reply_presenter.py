@@ -9,7 +9,7 @@ from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 
-_PERMISSION_PROMPT = "检测到权限请求，请发送 /approve 或 /deny [reason]。"
+_PERMISSION_PROMPT = "检测到权限请求，请点击下方按钮选择允许或拒绝。"
 _FALLBACK_PROMPT = "结构化回复暂不可用，已回退为原始输出。"
 _MARKER_LINE_RE = re.compile(r"^\s*_*(?:TGCLI_BEGIN|TGCLI_DONE)_*(?:\s*[:：]?\s*[A-Za-z0-9_-]+)?\s*$", re.IGNORECASE)
 _BLANK_LINE_BURST_RE = re.compile(r"\n{3,}")
@@ -25,6 +25,15 @@ class _StructuredSnapshot:
     session_available: bool
     phase: str | None = None
     pending_permission_key: str | None = None
+    pending_permission_tool_use_id: str | None = None
+    pending_permission_tool_name: str | None = None
+
+
+@dataclass(frozen=True)
+class PermissionRequestOutput:
+    text: str
+    tool_use_id: str
+    tool_name: str | None = None
 
 
 def strip_bridge_markers(text: str) -> str:
@@ -128,15 +137,24 @@ class StructuredReplyPresenter:
             self._revision = await cursor_getter(self._user_id)
         return changed
 
-    async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str]:
+    async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
 
-        messages: list[str] = []
+        messages: list[str | PermissionRequestOutput] = []
         acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
         if snapshot.phase == "waiting_for_approval" and snapshot.pending_permission_key and snapshot.pending_permission_key != self._last_pending_permission_key:
             self._last_pending_permission_key = snapshot.pending_permission_key
-            messages.append(_PERMISSION_PROMPT)
+            if snapshot.pending_permission_tool_use_id:
+                messages.append(
+                    PermissionRequestOutput(
+                        text=_PERMISSION_PROMPT,
+                        tool_use_id=snapshot.pending_permission_tool_use_id,
+                        tool_name=snapshot.pending_permission_tool_name,
+                    )
+                )
+            else:
+                messages.append(_PERMISSION_PROMPT)
             if acknowledger is not None:
                 await acknowledger(
                     self._user_id,
@@ -197,8 +215,12 @@ class StructuredReplyPresenter:
         phase = session.phase.value
         pending = getattr(session, "pending_permission", None)
         pending_permission_key = None
+        pending_permission_tool_use_id = None
+        pending_permission_tool_name = None
         if pending is not None:
             pending_permission_key = f"{pending.tool_use_id}:{pending.tool_name}"
+            pending_permission_tool_use_id = pending.tool_use_id
+            pending_permission_tool_name = pending.tool_name
 
         if not session.turns:
             logger.info(
@@ -212,6 +234,8 @@ class StructuredReplyPresenter:
                 session_available=True,
                 phase=phase,
                 pending_permission_key=pending_permission_key,
+                pending_permission_tool_use_id=pending_permission_tool_use_id,
+                pending_permission_tool_name=pending_permission_tool_name,
             )
 
         for turn in reversed(session.turns):
@@ -235,6 +259,8 @@ class StructuredReplyPresenter:
                 session_available=True,
                 phase=phase,
                 pending_permission_key=pending_permission_key,
+                pending_permission_tool_use_id=pending_permission_tool_use_id,
+                pending_permission_tool_name=pending_permission_tool_name,
             )
 
         logger.info(
@@ -253,4 +279,6 @@ class StructuredReplyPresenter:
             session_available=True,
             phase=phase,
             pending_permission_key=pending_permission_key,
+            pending_permission_tool_use_id=pending_permission_tool_use_id,
+            pending_permission_tool_name=pending_permission_tool_name,
         )

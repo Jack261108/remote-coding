@@ -69,7 +69,15 @@ class HookResponse:
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"decision": self.decision, "reason": self.reason}
+        decision_payload: dict[str, Any] = {"behavior": self.decision}
+        if self.decision == "deny" and self.reason:
+            decision_payload["message"] = self.reason
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": decision_payload,
+            }
+        }
 
 
 @dataclass(slots=True)

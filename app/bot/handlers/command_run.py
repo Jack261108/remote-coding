@@ -6,8 +6,10 @@ import logging
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.handlers.command_permission import build_permission_keyboard
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import (
+    PermissionRequestOutput,
     StructuredReplyPresenter,
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
     normalize_stream_text,
@@ -145,11 +147,11 @@ async def run_prompt_and_stream(
             "interactive": start.interactive,
         },
     )
-    async def answer_safely(text: str) -> bool:
+    async def answer_safely(text: str, *, reply_markup=None) -> bool:
         if not text:
             return False
         try:
-            await message.answer(text)
+            await message.answer(text, reply_markup=reply_markup)
             return True
         except Exception:
             logger.exception(
@@ -179,6 +181,13 @@ async def run_prompt_and_stream(
 
     async def emit_presenter_messages(*, final: bool = False, log_missing: bool) -> None:
         for output in await presenter.poll(task_id=start.task.task_id, final=final, log_missing=log_missing):
+            if isinstance(output, PermissionRequestOutput):
+                await sender.flush(send_text)
+                await answer_safely(
+                    output.text,
+                    reply_markup=build_permission_keyboard(tool_use_id=output.tool_use_id),
+                )
+                continue
             await sender.push(output, send_text)
 
     async def pump_structured_reply() -> None:

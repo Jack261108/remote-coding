@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.bot.presenters.structured_reply_presenter import (
+    PermissionRequestOutput,
     StructuredReplyPresenter,
     normalize_stream_text,
     preview_stream_text,
@@ -123,7 +124,7 @@ async def test_presenter_reports_pending_permission_once() -> None:
     first = await presenter.poll(task_id="task-1")
     second = await presenter.poll(task_id="task-1")
 
-    assert first == ["检测到权限请求，请发送 /approve 或 /deny [reason]。"]
+    assert first == [PermissionRequestOutput(text="检测到权限请求，请点击下方按钮选择允许或拒绝。", tool_use_id="tool-1", tool_name="Bash")]
     assert second == []
 
 

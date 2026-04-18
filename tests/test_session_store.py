@@ -4,7 +4,7 @@ import json
 import pytest
 
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.domain.session_models import ParserCheckpoint, SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_store import SessionStore
 
 
@@ -153,6 +153,30 @@ def test_session_store_find_by_terminal_id_keeps_newer_in_memory_state(tmp_path)
     assert matched is fresh_state
     assert matched is not None
     assert matched.phase == SessionPhase.WAITING_FOR_INPUT
+
+
+def test_session_store_find_by_pending_tool_use_id_hits_disk_snapshot(tmp_path) -> None:
+    file_store = FileSessionStore(str(tmp_path))
+    disk_store = SessionStore(file_store)
+    disk_state = disk_store.get_or_create(
+        session_id="claude-session-1",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    disk_state.pending_permission = PendingPermission(
+        tool_use_id="tool-1",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    disk_store._persist(disk_state)
+
+    store = SessionStore(file_store)
+    matched = store.find_by_pending_tool_use_id("tool-1")
+
+    assert matched is not None
+    assert matched.session_id == "claude-session-1"
+    assert matched.pending_permission is not None
+    assert matched.pending_permission.tool_use_id == "tool-1"
 
 
 def test_session_store_returns_latest_completed_assistant_turn_id(tmp_path) -> None:

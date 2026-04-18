@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import InlineKeyboardMarkup
 
 from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
@@ -18,14 +19,16 @@ class DummyMessage:
     def __init__(self, user_id: int = 1, *, fail_on_calls: set[int] | None = None) -> None:
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
+        self.reply_markups: list[InlineKeyboardMarkup | None] = []
         self._answer_calls = 0
         self._fail_on_calls = fail_on_calls or set()
 
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, reply_markup=None) -> None:
         self._answer_calls += 1
         if self._answer_calls in self._fail_on_calls:
             raise TelegramBadRequest(method="sendMessage", message="chat not found")
         self.answers.append(text)
+        self.reply_markups.append(reply_markup)
 
 
 class DummyTaskService:
@@ -454,4 +457,9 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
 
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
 
-    assert message.answers.count("检测到权限请求，请发送 /approve 或 /deny [reason]。") == 1
+    assert message.answers.count("检测到权限请求，请点击下方按钮选择允许或拒绝。") == 1
+    permission_index = message.answers.index("检测到权限请求，请点击下方按钮选择允许或拒绝。")
+    reply_markup = message.reply_markups[permission_index]
+    assert reply_markup is not None
+    assert [button.text for button in reply_markup.inline_keyboard[0]] == ["允许", "拒绝"]
+    assert [button.callback_data for button in reply_markup.inline_keyboard[0]] == ["perm:allow:tool-1", "perm:deny:tool-1"]

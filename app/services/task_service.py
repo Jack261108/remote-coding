@@ -430,31 +430,52 @@ class TaskService:
             workdir=workdir,
         )
 
-    async def respond_to_pending_permission(self, *, user_id: int, decision: str, reason: str | None = None) -> tuple[bool, str]:
+    async def respond_to_pending_permission(
+        self,
+        *,
+        user_id: int,
+        decision: str,
+        reason: str | None = None,
+        expected_tool_use_id: str | None = None,
+    ) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)
-        if session is None or not session.claude_session_id:
+        if session is None or session.provider != "claude_code":
             return False, "当前没有 Claude 会话"
         if self._structured_session_store is None or self._hook_socket_server is None:
             return False, "当前未启用 Claude hooks 权限通道"
-        state = self._structured_session_store.get(session.claude_session_id)
-        if state is None or state.pending_permission is None:
+        state = None
+        if expected_tool_use_id is not None:
+            state = self._structured_session_store.find_by_pending_tool_use_id(expected_tool_use_id)
+        if state is None:
+            state = await self.get_structured_session(user_id, log_missing=False)
+        pending = state.pending_permission if state is not None else None
+        if pending is None and expected_tool_use_id is None:
             return False, "当前没有待处理的权限请求"
-        pending = state.pending_permission
-        tool_use_id = pending.tool_use_id
+        if expected_tool_use_id is not None and pending is not None and pending.tool_use_id != expected_tool_use_id:
+            return False, "这个权限按钮已经过期，请等待最新的权限请求"
+        tool_use_id = pending.tool_use_id if pending is not None else expected_tool_use_id
+        if not tool_use_id:
+            return False, "当前没有待处理的权限请求"
         sent = await self._hook_socket_server.respond_to_permission(tool_use_id=tool_use_id, decision=decision, reason=reason)
         if not sent:
+            if pending is None:
+                return False, "当前没有待处理的权限请求"
             return False, "待处理权限请求已失效，请等待 Claude 重新发起"
-        event_type = SessionEventType.PERMISSION_APPROVED if decision == "allow" else SessionEventType.PERMISSION_DENIED
-        updated = self._structured_session_store.process(
-            SessionEvent(
-                session_id=session.claude_session_id,
-                type=event_type,
-                payload={"tool_use_id": tool_use_id},
+        tool_name = pending.tool_name if pending is not None else None
+        if state is not None and pending is not None:
+            event_type = SessionEventType.PERMISSION_APPROVED if decision == "allow" else SessionEventType.PERMISSION_DENIED
+            updated = self._structured_session_store.process(
+                SessionEvent(
+                    session_id=state.session_id,
+                    type=event_type,
+                    payload={"tool_use_id": tool_use_id},
+                )
             )
-        )
-        tool_name = updated.last_tool_name or pending.tool_name
+            tool_name = updated.last_tool_name or pending.tool_name
         action = "已批准" if decision == "allow" else "已拒绝"
-        return True, f"{action}权限请求: {tool_name}"
+        if tool_name:
+            return True, f"{action}权限请求: {tool_name}"
+        return True, f"{action}权限请求"
 
     async def _ensure_and_reveal_terminal(
         self,
