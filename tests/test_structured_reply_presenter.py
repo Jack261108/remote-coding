@@ -7,6 +7,7 @@ import pytest
 from app.bot.presenters.structured_reply_presenter import (
     PermissionRequestOutput,
     StructuredReplyPresenter,
+    build_permission_prompt,
     normalize_stream_text,
     preview_stream_text,
     strip_bridge_markers,
@@ -124,8 +125,29 @@ async def test_presenter_reports_pending_permission_once() -> None:
     first = await presenter.poll(task_id="task-1")
     second = await presenter.poll(task_id="task-1")
 
-    assert first == [PermissionRequestOutput(text="检测到权限请求，请点击下方按钮选择允许或拒绝。", tool_use_id="tool-1", tool_name="Bash")]
+    assert first == [
+        PermissionRequestOutput(
+            text=build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"}),
+            tool_use_id="tool-1",
+            tool_name="Bash",
+        )
+    ]
     assert second == []
+
+
+def test_build_permission_prompt_includes_specific_bash_command() -> None:
+    prompt = build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"})
+
+    assert prompt == "权限请求\n工具: Bash\n命令: pwd\n\n请点击下方按钮选择允许或拒绝。"
+
+
+def test_build_permission_prompt_falls_back_to_compact_json_preview() -> None:
+    prompt = build_permission_prompt(tool_name="Edit", tool_input={"old_string": "a" * 400, "new_string": "b"})
+
+    assert "权限请求" in prompt
+    assert "工具: Edit" in prompt
+    assert "参数:" in prompt
+    assert "..." in prompt
 
 
 @pytest.mark.asyncio

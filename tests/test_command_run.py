@@ -11,6 +11,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
+from app.bot.presenters.structured_reply_presenter import build_permission_prompt
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase
 
@@ -457,8 +458,9 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
 
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
 
-    assert message.answers.count("检测到权限请求，请点击下方按钮选择允许或拒绝。") == 1
-    permission_index = message.answers.index("检测到权限请求，请点击下方按钮选择允许或拒绝。")
+    expected_prompt = build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"})
+    assert message.answers.count(expected_prompt) == 1
+    permission_index = message.answers.index(expected_prompt)
     reply_markup = message.reply_markups[permission_index]
     assert reply_markup is not None
     assert [button.text for button in reply_markup.inline_keyboard[0]] == ["允许", "拒绝"]

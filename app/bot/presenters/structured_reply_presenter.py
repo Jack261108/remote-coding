@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -9,12 +10,13 @@ from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 
-_PERMISSION_PROMPT = "检测到权限请求，请点击下方按钮选择允许或拒绝。"
 _FALLBACK_PROMPT = "结构化回复暂不可用，已回退为原始输出。"
 _MARKER_LINE_RE = re.compile(r"^\s*_*(?:TGCLI_BEGIN|TGCLI_DONE)_*(?:\s*[:：]?\s*[A-Za-z0-9_-]+)?\s*$", re.IGNORECASE)
 _BLANK_LINE_BURST_RE = re.compile(r"\n{3,}")
 _STREAM_PREVIEW_CHAR_LIMIT = 1800
 _STREAM_PREVIEW_LINE_LIMIT = 60
+_PERMISSION_INPUT_CHAR_LIMIT = 280
+_PERMISSION_INPUT_LINE_LIMIT = 8
 
 
 @dataclass
@@ -27,6 +29,7 @@ class _StructuredSnapshot:
     pending_permission_key: str | None = None
     pending_permission_tool_use_id: str | None = None
     pending_permission_tool_name: str | None = None
+    pending_permission_tool_input: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,73 @@ def preview_stream_text(text: str) -> str:
         preview = f"{preview}\n...[输出片段过长，已截断本条消息]"
 
     return preview
+
+
+def _truncate_permission_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return ""
+
+    lines = normalized.split("\n")
+    needs_line_truncation = len(lines) > _PERMISSION_INPUT_LINE_LIMIT
+    preview_lines = lines[:_PERMISSION_INPUT_LINE_LIMIT]
+    preview = "\n".join(preview_lines)
+
+    needs_char_truncation = len(preview) > _PERMISSION_INPUT_CHAR_LIMIT
+    if needs_char_truncation:
+        preview = preview[:_PERMISSION_INPUT_CHAR_LIMIT].rstrip()
+
+    if needs_line_truncation or needs_char_truncation:
+        preview = f"{preview}..."
+    return preview
+
+
+def _format_permission_input(tool_name: str | None, tool_input: dict | None) -> tuple[str, str] | None:
+    if not tool_input:
+        return None
+
+    tool = (tool_name or "").strip().lower()
+    if tool == "bash":
+        command = str(tool_input.get("command") or "").strip()
+        if command:
+            return "命令", _truncate_permission_text(command)
+
+    if tool == "webfetch":
+        url = str(tool_input.get("url") or "").strip()
+        if url:
+            return "目标", _truncate_permission_text(url)
+
+    for key, label in (
+        ("file_path", "文件"),
+        ("path", "文件"),
+        ("url", "目标"),
+        ("command", "命令"),
+        ("pattern", "内容"),
+    ):
+        value = tool_input.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return label, _truncate_permission_text(text)
+
+    serialized = json.dumps(tool_input, ensure_ascii=False, sort_keys=True, indent=2)
+    return "参数", _truncate_permission_text(serialized)
+
+
+def build_permission_prompt(*, tool_name: str | None, tool_input: dict | None = None) -> str:
+    lines = ["权限请求"]
+    if tool_name:
+        lines.append(f"工具: {tool_name}")
+
+    detail = _format_permission_input(tool_name, tool_input)
+    if detail is not None:
+        label, value = detail
+        lines.append(f"{label}: {value}")
+
+    lines.append("")
+    lines.append("请点击下方按钮选择允许或拒绝。")
+    return "\n".join(lines)
 
 
 class StructuredReplyPresenter:
@@ -148,13 +218,21 @@ class StructuredReplyPresenter:
             if snapshot.pending_permission_tool_use_id:
                 messages.append(
                     PermissionRequestOutput(
-                        text=_PERMISSION_PROMPT,
+                        text=build_permission_prompt(
+                            tool_name=snapshot.pending_permission_tool_name,
+                            tool_input=snapshot.pending_permission_tool_input,
+                        ),
                         tool_use_id=snapshot.pending_permission_tool_use_id,
                         tool_name=snapshot.pending_permission_tool_name,
                     )
                 )
             else:
-                messages.append(_PERMISSION_PROMPT)
+                messages.append(
+                    build_permission_prompt(
+                        tool_name=snapshot.pending_permission_tool_name,
+                        tool_input=snapshot.pending_permission_tool_input,
+                    )
+                )
             if acknowledger is not None:
                 await acknowledger(
                     self._user_id,
@@ -217,10 +295,12 @@ class StructuredReplyPresenter:
         pending_permission_key = None
         pending_permission_tool_use_id = None
         pending_permission_tool_name = None
+        pending_permission_tool_input = None
         if pending is not None:
             pending_permission_key = f"{pending.tool_use_id}:{pending.tool_name}"
             pending_permission_tool_use_id = pending.tool_use_id
             pending_permission_tool_name = pending.tool_name
+            pending_permission_tool_input = pending.tool_input
 
         if not session.turns:
             logger.info(
@@ -236,6 +316,7 @@ class StructuredReplyPresenter:
                 pending_permission_key=pending_permission_key,
                 pending_permission_tool_use_id=pending_permission_tool_use_id,
                 pending_permission_tool_name=pending_permission_tool_name,
+                pending_permission_tool_input=pending_permission_tool_input,
             )
 
         for turn in reversed(session.turns):
@@ -261,6 +342,7 @@ class StructuredReplyPresenter:
                 pending_permission_key=pending_permission_key,
                 pending_permission_tool_use_id=pending_permission_tool_use_id,
                 pending_permission_tool_name=pending_permission_tool_name,
+                pending_permission_tool_input=pending_permission_tool_input,
             )
 
         logger.info(
@@ -281,4 +363,5 @@ class StructuredReplyPresenter:
             pending_permission_key=pending_permission_key,
             pending_permission_tool_use_id=pending_permission_tool_use_id,
             pending_permission_tool_name=pending_permission_tool_name,
+            pending_permission_tool_input=pending_permission_tool_input,
         )
