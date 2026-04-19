@@ -502,6 +502,9 @@ class StructuredReplyPresenter:
         for turn in reversed(session.turns):
             if turn.role != "assistant" or not turn.is_complete:
                 continue
+            normalized_reply = normalize_stream_text(turn.text)
+            if not normalized_reply:
+                continue
             preview = preview_stream_text(turn.text)
             logger.info(
                 "structured reply loaded",
@@ -516,7 +519,7 @@ class StructuredReplyPresenter:
             return _StructuredSnapshot(
                 session_id=session.session_id,
                 turn_id=turn.turn_id,
-                reply=preview,
+                reply=normalized_reply,
                 session_available=True,
                 phase=phase,
                 pending_permission_key=pending_permission_key,

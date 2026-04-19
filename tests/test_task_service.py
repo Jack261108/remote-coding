@@ -491,6 +491,68 @@ async def test_open_claude_chat_session_creates_terminal_without_previous_sessio
 
 
 @pytest.mark.asyncio
+async def test_open_claude_chat_session_switches_to_explicit_workdir(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    original_workdir = str(tmp_path / "one")
+    target_workdir = str(tmp_path / "sub dir")
+    Path(original_workdir).mkdir(parents=True)
+    Path(target_workdir).mkdir(parents=True)
+
+    await session_service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=original_workdir,
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    opened, text = await service.open_claude_chat_session(1, workdir=target_workdir)
+    session = await session_service.get(1)
+
+    old_terminal = expected_terminal_id(user_id=1, workdir=original_workdir)
+    new_terminal = expected_terminal_id(user_id=1, workdir=str(Path(target_workdir).resolve()))
+    assert opened is True
+    assert text.startswith("Claude 会话已重建")
+    assert factory._closed_terminal_key == old_terminal
+    assert factory._ensured_interactive_terminal_key == new_terminal
+    assert factory._ensured_interactive_workdir == str(Path(target_workdir).resolve())
+    assert session is not None
+    assert session.workdir == str(Path(target_workdir).resolve())
+    assert session.terminal_id == new_terminal
+    assert session.claude_chat_active is True
+
+
+@pytest.mark.asyncio
+async def test_open_claude_chat_session_rejects_explicit_workdir_outside_allowlist(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError, match="workdir 不在 ALLOWED_WORKDIRS 白名单内"):
+        await service.open_claude_chat_session(1, workdir=str(outside))
+
+
+@pytest.mark.asyncio
 async def test_create_and_run_claude_uses_claude_provider_in_chat_mode(tmp_path: Path) -> None:
     adapter = StubAdapter(
         events=[

@@ -447,7 +447,7 @@ class TaskService:
         self._user_question_drafts.pop(user_id, None)
         return True, "终端已关闭"
 
-    async def open_claude_chat_session(self, user_id: int) -> tuple[bool, str]:
+    async def open_claude_chat_session(self, user_id: int, *, workdir: str | None = None) -> tuple[bool, str]:
         session = await self._session_service.get(user_id)
         had_old_terminal = bool(session and session.terminal_mode and session.terminal_id)
         self._user_question_drafts.pop(user_id, None)
@@ -458,7 +458,7 @@ class TaskService:
             if not closed and text != "终端不存在或关闭失败":
                 return False, f"旧终端关闭失败: {text}"
 
-        selected_workdir = str(Path((session.workdir if session else self._settings.default_workdir)).resolve())
+        selected_workdir = str(Path(workdir or (session.workdir if session else self._settings.default_workdir)).resolve())
         if not self._is_workdir_allowed(selected_workdir):
             raise ValueError("workdir 不在 ALLOWED_WORKDIRS 白名单内")
 

@@ -42,7 +42,7 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
             "欢迎使用 Telegram CLI Gateway\n"
             "命令:\n"
             "/run <provider> <task text>\n"
-            "/claude (开启 Claude 会话模式)\n"
+            "/claude [workdir] (开启 Claude 会话模式)\n"
             "/status [task_id]\n"
             "/cancel <task_id>\n"
             "/session [provider] [workdir]\n"

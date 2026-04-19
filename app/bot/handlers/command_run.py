@@ -17,7 +17,6 @@ from app.bot.presenters.structured_reply_presenter import (
     UserQuestionOutput,
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
     normalize_stream_text,
-    preview_stream_text,
 )
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
 from app.domain.models import EventType
@@ -186,10 +185,10 @@ async def run_prompt_and_stream(
     interactive_pump: asyncio.Task | None = None
 
     async def send_text(text: str) -> None:
-        preview = preview_stream_text(text)
-        if not preview:
+        normalized = normalize_stream_text(text)
+        if not normalized:
             return
-        await answer_safely(preview)
+        await answer_safely(normalized)
 
     async def emit_presenter_messages(*, final: bool = False, log_missing: bool) -> None:
         for output in await presenter.poll(task_id=start.task.task_id, final=final, log_missing=log_missing):

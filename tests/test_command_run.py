@@ -696,3 +696,49 @@ async def test_run_prompt_and_stream_splits_long_code_block_reply_into_valid_htm
     ]
     reply_indexes = [message.answers.index(chunk) for chunk in reply_chunks]
     assert all(message.parse_modes[index] == ParseMode.HTML for index in reply_indexes)
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_does_not_truncate_long_structured_reply_preview() -> None:
+    message = DummyMessage()
+    long_reply = "A" * 1905
+    turns: list[ConversationTurn] = []
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    async def append_long_turn() -> None:
+        await asyncio.sleep(0.02)
+        turns.append(
+            ConversationTurn(
+                turn_id="turn-long",
+                role="assistant",
+                text=long_reply,
+                is_complete=True,
+            )
+        )
+
+    updater = asyncio.create_task(append_long_turn())
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=4096, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+    await asyncio.sleep(0.14)
+    if task is not None:
+        await task
+    await updater
+
+    assert message.answers[2] == long_reply
+    assert "输出片段过长" not in message.answers[2]
