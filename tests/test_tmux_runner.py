@@ -633,6 +633,47 @@ async def test_watch_task_uses_bound_claude_session_for_second_turn(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_watch_task_exits_when_fast_reply_arrives_before_watch_baseline(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    state.checkpoint.last_offset = 1
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-fast",
+            role="assistant",
+            text="\n很快返回的新回复\n",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    runner._session_store._persist(state)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x-fast.exit",
+        task_id="t-fast",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=claude_session,
+        persistent_terminal=True,
+        interactive=True,
+        baseline_captured=True,
+        baseline_offset=0,
+        baseline_completed_turn_id=None,
+    )
+
+    events = await _collect_events(runner._watch_task(meta=meta, timeout_sec=1))
+
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
 async def test_watch_task_does_not_exit_on_stale_waiting_phase_without_new_progress(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"

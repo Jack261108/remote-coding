@@ -32,6 +32,9 @@ class _TmuxTaskMeta:
     cancel_requested: bool = False
     interactive: bool = False
     prompt_text: str = ""
+    baseline_captured: bool = False
+    baseline_offset: int = 0
+    baseline_completed_turn_id: str | None = None
 
 
 class TmuxRunner:
@@ -165,6 +168,7 @@ class TmuxRunner:
                     err = err_text.strip() or "unknown error"
                     yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=f"tmux 管道设置失败: {err}")
                     return
+                self._capture_interactive_baseline(meta=meta)
             sent, send_err = await self._send_command(meta.session_name, command, workdir=workdir, env=env, interactive=meta.interactive)
             if not sent:
                 yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=send_err)
@@ -202,9 +206,9 @@ class TmuxRunner:
 
     async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
         position = 0
-        latest_completed_turn_id_before_run: str | None = None
+        latest_completed_turn_id_before_run: str | None = meta.baseline_completed_turn_id
         saw_interactive_progress = False
-        structured_offset_before_run = 0
+        structured_offset_before_run = meta.baseline_offset
         if meta.interactive:
             state = self._session_store.mark_interactive_turn_processing(
                 terminal_id=meta.terminal_id,
@@ -215,14 +219,16 @@ class TmuxRunner:
             if state is not None:
                 if is_claude_session_id(state.session_id):
                     meta.claude_session_id = state.session_id
-                structured_offset_before_run = state.checkpoint.last_offset
+                if not meta.baseline_captured:
+                    structured_offset_before_run = state.checkpoint.last_offset
             position = self._interactive_log_position(meta.log_file)
-            latest_completed_turn_id_before_run = self._session_store.latest_completed_assistant_turn_id(
-                terminal_id=meta.terminal_id,
-                workdir=meta.workdir,
-                claude_session_id=meta.claude_session_id,
-                fallback_session_id=meta.session_name,
-            )
+            if latest_completed_turn_id_before_run is None and not meta.baseline_captured:
+                latest_completed_turn_id_before_run = self._session_store.latest_completed_assistant_turn_id(
+                    terminal_id=meta.terminal_id,
+                    workdir=meta.workdir,
+                    claude_session_id=meta.claude_session_id,
+                    fallback_session_id=meta.session_name,
+                )
         partial = ""
         timed_out = False
         exit_code: int | None = None
@@ -689,3 +695,32 @@ class TmuxRunner:
             lock = asyncio.Lock()
             self._session_locks[session_name] = lock
         return lock
+
+    def _capture_interactive_baseline(self, *, meta: _TmuxTaskMeta) -> None:
+        meta.baseline_captured = True
+        resolved_session_id = self._session_store.resolve_interactive_session_id(
+            terminal_id=meta.terminal_id,
+            claude_session_id=meta.claude_session_id,
+            fallback_session_id=meta.session_name,
+            require_claude_session=True,
+        )
+        if resolved_session_id is not None:
+            meta.claude_session_id = resolved_session_id
+        state = self._session_store.get_interactive_state(
+            terminal_id=meta.terminal_id,
+            workdir=meta.workdir,
+            claude_session_id=meta.claude_session_id,
+            fallback_session_id=meta.session_name,
+            require_claude_session=True,
+        )
+        if state is None:
+            meta.baseline_offset = 0
+            meta.baseline_completed_turn_id = None
+            return
+        meta.baseline_offset = state.checkpoint.last_offset
+        meta.baseline_completed_turn_id = self._session_store.latest_completed_assistant_turn_id(
+            terminal_id=meta.terminal_id,
+            workdir=meta.workdir,
+            claude_session_id=meta.claude_session_id,
+            fallback_session_id=meta.session_name,
+        )

@@ -50,14 +50,14 @@ class SessionStore:
             return False
         return self._is_claude_session_id(state.claude_session_id) or self._is_claude_session_id(state.session_id)
 
-    def _state_rank(self, state: SessionState) -> tuple[int, int, int, int, float, float, int]:
+    def _state_rank(self, state: SessionState) -> tuple[int, int, int, float, int, float, int]:
         has_content = int(bool(state.turns or state.tool_calls or state.pending_permission is not None))
         has_pending_permission = int(state.pending_permission is not None or state.phase == SessionPhase.WAITING_FOR_APPROVAL)
         is_active = int(state.phase in {SessionPhase.WAITING_FOR_APPROVAL, SessionPhase.PROCESSING, SessionPhase.COMPACTING})
         is_claude = int(self._is_claude_state(state))
         created_at = state.created_at.timestamp()
         last_activity = state.last_activity.timestamp()
-        return is_claude, has_pending_permission, is_active, has_content, last_activity, created_at, state.revision
+        return is_claude, has_pending_permission, has_content, last_activity, is_active, created_at, state.revision
 
     def _explicit_resolution_rank(self, state: SessionState) -> tuple[int, int, float, float, int]:
         has_content = int(bool(state.turns or state.tool_calls or state.pending_permission is not None))

@@ -7,7 +7,7 @@ import pytest
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import utc_now
-from app.domain.session_models import ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
 from app.services.session_store import SessionStore
 
 
@@ -217,6 +217,52 @@ def test_session_store_find_by_terminal_id_prefers_pending_active_state_over_new
     assert matched.session_id == "claude-session-pending"
     assert matched.pending_permission is not None
     assert matched.pending_permission.tool_use_id == "tool-1"
+
+
+def test_session_store_find_by_terminal_id_prefers_newer_waiting_session_over_stale_processing_session(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    now = utc_now()
+
+    stale_processing = store.get_or_create(
+        session_id="claude-session-stale-processing",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    stale_processing.created_at = now - timedelta(hours=2)
+    stale_processing.last_activity = now - timedelta(hours=1)
+    stale_processing.phase = SessionPhase.PROCESSING
+    stale_processing.turns.append(
+        ConversationTurn(
+            turn_id="turn-old",
+            role="assistant",
+            text="旧回复",
+            is_complete=True,
+        )
+    )
+    store._persist(stale_processing)
+
+    fresh_waiting = store.get_or_create(
+        session_id="claude-session-fresh-waiting",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    fresh_waiting.created_at = now - timedelta(minutes=5)
+    fresh_waiting.last_activity = now
+    fresh_waiting.phase = SessionPhase.WAITING_FOR_INPUT
+    fresh_waiting.turns.append(
+        ConversationTurn(
+            turn_id="turn-new",
+            role="assistant",
+            text="新回复",
+            is_complete=True,
+        )
+    )
+    store._persist(fresh_waiting)
+
+    matched = store.find_by_terminal_id("user_1_8c393341f536")
+
+    assert matched is not None
+    assert matched.session_id == "claude-session-fresh-waiting"
 
 
 def test_session_store_returns_latest_completed_assistant_turn_id(tmp_path) -> None:
