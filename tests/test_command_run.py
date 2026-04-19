@@ -6,12 +6,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup
 
 from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import build_permission_prompt, build_tool_progress_message, build_user_question_prompt
+from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
 
@@ -21,15 +23,17 @@ class DummyMessage:
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
         self.reply_markups: list[InlineKeyboardMarkup | None] = []
+        self.parse_modes: list[ParseMode | None] = []
         self._answer_calls = 0
         self._fail_on_calls = fail_on_calls or set()
 
-    async def answer(self, text: str, reply_markup=None) -> None:
+    async def answer(self, text: str, reply_markup=None, parse_mode=None) -> None:
         self._answer_calls += 1
         if self._answer_calls in self._fail_on_calls:
             raise TelegramBadRequest(method="sendMessage", message="chat not found")
         self.answers.append(text)
         self.reply_markups.append(reply_markup)
+        self.parse_modes.append(parse_mode)
 
 
 class DummyTaskService:
@@ -601,3 +605,94 @@ async def test_run_prompt_and_stream_interactive_emits_progress_update_immediate
     assert progress_index == 2
     assert message.reply_markups[progress_index] is None
     assert "测试完成" in message.answers
+
+
+def test_render_markdownish_to_telegram_html_supports_bold_and_code_block() -> None:
+    rendered = render_markdownish_to_telegram_html("**标题**\n\n```python\nprint('hi')\n```")
+
+    assert rendered == "<b>标题</b>\n\n<pre><code>print(&#x27;hi&#x27;)</code></pre>"
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_renders_structured_reply_as_html() -> None:
+    message = DummyMessage()
+    turns: list[ConversationTurn] = []
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    async def append_markdown_turn() -> None:
+        await asyncio.sleep(0.02)
+        turns.append(
+            ConversationTurn(
+                turn_id="turn-md",
+                role="assistant",
+                text="**你好**\n\n```python\nprint('hi')\n```",
+                is_complete=True,
+            )
+        )
+
+    updater = asyncio.create_task(append_markdown_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+    await updater
+
+    assert "<b>你好</b>" in message.answers[2]
+    assert "<pre><code>print(&#x27;hi&#x27;)</code></pre>" in message.answers[2]
+    assert message.parse_modes[2] == ParseMode.HTML
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_splits_long_code_block_reply_into_valid_html_chunks() -> None:
+    message = DummyMessage()
+    turns: list[ConversationTurn] = []
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    async def append_markdown_turn() -> None:
+        await asyncio.sleep(0.02)
+        turns.append(
+            ConversationTurn(
+                turn_id="turn-md-long",
+                role="assistant",
+                text="```python\n1234567890\nabcdefghij\n```",
+                is_complete=True,
+            )
+        )
+
+    updater = asyncio.create_task(append_markdown_turn())
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=24, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+    await asyncio.sleep(0.14)
+    if task is not None:
+        await task
+    await updater
+
+    reply_chunks = [item for item in message.answers if item.startswith("<pre><code>")]
+    assert reply_chunks == [
+        "<pre><code>1234567890</code></pre>",
+        "<pre><code>abcdefghij</code></pre>",
+    ]
+    reply_indexes = [message.answers.index(chunk) for chunk in reply_chunks]
+    assert all(message.parse_modes[index] == ParseMode.HTML for index in reply_indexes)

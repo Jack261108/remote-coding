@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
@@ -18,6 +19,7 @@ from app.bot.presenters.structured_reply_presenter import (
     normalize_stream_text,
     preview_stream_text,
 )
+from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
 from app.domain.models import EventType
 from app.services.task_service import TaskService
 
@@ -154,7 +156,14 @@ async def run_prompt_and_stream(
         if not text:
             return False
         try:
-            await message.answer(text, reply_markup=reply_markup)
+            rendered = render_markdownish_to_telegram_html(text)
+            chunks = split_telegram_html(rendered, 4096)
+            for index, chunk in enumerate(chunks):
+                await message.answer(
+                    chunk,
+                    reply_markup=reply_markup if index == len(chunks) - 1 else None,
+                    parse_mode=ParseMode.HTML,
+                )
             return True
         except Exception:
             logger.exception(
