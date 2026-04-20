@@ -78,6 +78,57 @@ class CLIAdapterFactory:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
         return await self._tmux_runner.send_interactive_input(terminal_key=terminal_key, workdir=workdir, text=text)
 
+    async def select_claude_user_question_option(
+        self,
+        *,
+        terminal_key: str,
+        workdir: str,
+        option_index: int,
+        submit_after: bool = False,
+    ) -> tuple[bool, str]:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
+        return await self._tmux_runner.select_user_question_option(
+            terminal_key=terminal_key,
+            workdir=workdir,
+            option_index=option_index,
+            submit_after=submit_after,
+        )
+
+    async def answer_claude_user_question_with_text(
+        self,
+        *,
+        terminal_key: str,
+        workdir: str,
+        option_count: int,
+        text: str,
+        submit_after: bool = False,
+    ) -> tuple[bool, str]:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
+        return await self._tmux_runner.answer_user_question_with_text(
+            terminal_key=terminal_key,
+            workdir=workdir,
+            option_count=option_count,
+            text=text,
+            submit_after=submit_after,
+        )
+
+    async def advance_claude_user_question_after_multi_select(
+        self,
+        *,
+        terminal_key: str,
+        workdir: str,
+        final_question: bool,
+    ) -> tuple[bool, str]:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
+        return await self._tmux_runner.advance_user_question_after_multi_select(
+            terminal_key=terminal_key,
+            workdir=workdir,
+            final_question=final_question,
+        )
+
     def get_session_state(self, terminal_key: str) -> SessionState | None:
         if not self._claude_tmux_enabled or self._tmux_runner is None:
             return None

@@ -26,6 +26,7 @@ class DummyTaskService:
     def __init__(self, sessions: list[object | None]) -> None:
         self._sessions = sessions
         self._index = 0
+        self._question_key: str | None = None
 
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
         if self._index >= len(self._sessions):
@@ -42,6 +43,12 @@ class DummyTaskService:
 
     async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
         return None
+
+    async def get_structured_user_question_cursor(self, user_id: int):
+        return self._question_key
+
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+        self._question_key = question_key
 
     async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
         return True
@@ -65,6 +72,13 @@ class PersistentTaskService:
             self._store.mark_structured_reply_emitted("claude-session-1", turn_id=turn_id)
         if permission_key is not None:
             self._store.mark_structured_permission_emitted("claude-session-1", permission_key=permission_key)
+
+    async def get_structured_user_question_cursor(self, user_id: int):
+        return self._store.get_structured_user_question_cursor("claude-session-1")
+
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+        if question_key is not None:
+            self._store.mark_structured_user_question_emitted("claude-session-1", question_key=question_key)
 
     async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
         return await self._store.wait_for_publish("claude-session-1", since_cursor=since_cursor, timeout_sec=timeout_sec)
@@ -190,6 +204,277 @@ async def test_presenter_reports_user_question_once_without_generic_progress() -
     second = await presenter.poll(task_id="task-1")
 
     assert first == [UserQuestionOutput(text=build_user_question_prompt(prompt), question=prompt)]
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_reports_only_first_question_when_tool_contains_multiple_questions() -> None:
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理范围",
+                    "question": "你说的范围我理解为这三块之一，具体按哪种处理？",
+                    "options": [
+                        {"label": "当前相关改动(推荐)", "description": "只处理相关已改动文件"},
+                        {"label": "三个目录全部", "description": "范围非常大"},
+                    ],
+                    "multiSelect": False,
+                },
+                {
+                    "header": "提交前置",
+                    "question": "按你的 CLAUDE.md，要修改代码前先提交现有改动。现在是否允许我先做这一步？",
+                    "options": [
+                        {"label": "允许先提交(推荐)", "description": "先提交后继续"},
+                        {"label": "暂不允许", "description": "先不改代码"},
+                    ],
+                    "multiSelect": False,
+                },
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    first_prompt = UserQuestionPrompt(
+        tool_use_id="tool-ask-1",
+        question_index=0,
+        total_questions=2,
+        header="处理范围",
+        question="你说的范围我理解为这三块之一，具体按哪种处理？",
+        options=(
+            UserQuestionOption(label="当前相关改动(推荐)", description="只处理相关已改动文件"),
+            UserQuestionOption(label="三个目录全部", description="范围非常大"),
+        ),
+        multi_select=False,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_skips_question_already_acknowledged_by_handler() -> None:
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理范围",
+                    "question": "你说的范围我理解为这三块之一，具体按哪种处理？",
+                    "options": [
+                        {"label": "当前相关改动(推荐)", "description": "只处理相关已改动文件"},
+                        {"label": "三个目录全部", "description": "范围非常大"},
+                    ],
+                    "multiSelect": False,
+                },
+                {
+                    "header": "提交前置",
+                    "question": "按你的 CLAUDE.md，要修改代码前先提交现有改动。现在是否允许我先做这一步？",
+                    "options": [
+                        {"label": "允许先提交(推荐)", "description": "先提交后继续"},
+                        {"label": "暂不允许", "description": "先不改代码"},
+                    ],
+                    "multiSelect": False,
+                },
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    service = DummyTaskService(
+        [
+            _session(phase=SessionPhase.WAITING_FOR_INPUT),
+            _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+            _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+        ]
+    )
+    presenter = StructuredReplyPresenter(task_service=service, user_id=1)
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    service._question_key = "tool-ask-1:0"
+    second = await presenter.poll(task_id="task-1")
+
+    assert len(first) == 1
+    assert isinstance(first[0], UserQuestionOutput)
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_does_not_regress_to_first_question_when_cursor_already_advanced() -> None:
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理范围",
+                    "question": "第一题",
+                    "options": [
+                        {"label": "A", "description": "A"},
+                        {"label": "B", "description": "B"},
+                    ],
+                    "multiSelect": False,
+                },
+                {
+                    "header": "提交前置",
+                    "question": "第二题",
+                    "options": [
+                        {"label": "C", "description": "C"},
+                        {"label": "D", "description": "D"},
+                    ],
+                    "multiSelect": False,
+                },
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    service = DummyTaskService(
+        [
+            _session(phase=SessionPhase.WAITING_FOR_INPUT),
+            _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+        ]
+    )
+    service._question_key = "tool-ask-1:1"
+    presenter = StructuredReplyPresenter(task_service=service, user_id=1)
+
+    await presenter.prime()
+    outputs = await presenter.poll(task_id="task-1")
+
+    assert outputs == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_reports_pending_ask_user_question_instead_of_permission_prompt() -> None:
+    pending = PendingPermission(
+        tool_use_id="tool-ask-pending",
+        tool_name="AskUserQuestion",
+        tool_input={
+            "questions": [
+                {
+                    "header": "出发日期",
+                    "question": "你想查哪一天出发？",
+                    "options": [
+                        {"label": "今天", "description": "查询今天从郑州到西安的车票"},
+                        {"label": "明天", "description": "查询明天从郑州到西安的车票"},
+                    ],
+                    "multiSelect": False,
+                },
+                {
+                    "header": "出发站",
+                    "question": "你希望从哪个站出发？",
+                    "options": [
+                        {"label": "郑州站", "description": "只查询郑州站"},
+                        {"label": "都查", "description": "同时查询郑州相关车站"},
+                    ],
+                    "multiSelect": False,
+                },
+            ]
+        },
+    )
+    first_prompt = UserQuestionPrompt(
+        tool_use_id="tool-ask-pending",
+        question_index=0,
+        total_questions=2,
+        header="出发日期",
+        question="你想查哪一天出发？",
+        options=(
+            UserQuestionOption(label="今天", description="查询今天从郑州到西安的车票"),
+            UserQuestionOption(label="明天", description="查询明天从郑州到西安的车票"),
+        ),
+        multi_select=False,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_reports_waiting_for_approval_ask_user_question_without_pending_permission_snapshot() -> None:
+    waiting_question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-waiting",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "出发日期",
+                    "question": "你想查哪一天出发？",
+                    "options": [
+                        {"label": "今天", "description": "查询今天从郑州到西安的车票"},
+                        {"label": "明天", "description": "查询明天从郑州到西安的车票"},
+                    ],
+                    "multiSelect": False,
+                },
+                {
+                    "header": "出发站",
+                    "question": "你希望从哪个站出发？",
+                    "options": [
+                        {"label": "郑州站", "description": "只查询郑州站"},
+                        {"label": "都查", "description": "同时查询郑州相关车站"},
+                    ],
+                    "multiSelect": False,
+                },
+            ]
+        },
+        status=ToolStatus.WAITING_FOR_APPROVAL,
+    )
+    first_prompt = UserQuestionPrompt(
+        tool_use_id="tool-ask-waiting",
+        question_index=0,
+        total_questions=2,
+        header="出发日期",
+        question="你想查哪一天出发？",
+        options=(
+            UserQuestionOption(label="今天", description="查询今天从郑州到西安的车票"),
+            UserQuestionOption(label="明天", description="查询明天从郑州到西安的车票"),
+        ),
+        multi_select=False,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-ask-waiting": waiting_question_tool}),
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-ask-waiting": waiting_question_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
     assert second == []
 
 

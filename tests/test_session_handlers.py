@@ -439,9 +439,90 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
     await callback_handler(callback)
 
     assert factory._interactive_inputs == []
+    assert factory._user_question_option_actions == [("user_1_36d00faeb25f", str(tmp_path), 0, False)]
     assert message.answers[0] == "已记录选择: 当前相关改动(推荐)"
     assert "问题: 2/2" in message.answers[1]
     assert callback.answers == [("已记录选择: 当前相关改动(推荐)", False)]
+    assert tmux_runner._session_store.get("claude-session-1").structured_user_question_key == "tool-ask-1:1"
+
+
+@pytest.mark.asyncio
+async def test_user_question_callback_handler_toggles_multi_select_and_submits(tmp_path) -> None:
+    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    factory = StubFactory(StubAdapter(events=[]))
+    factory._tmux_runner = tmux_runner
+    factory._claude_tmux_enabled = True
+    factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=SessionService(MemorySessionStore()),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+        structured_session_store=tmux_runner._session_store,
+    )
+    session = await service._session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=session.terminal_id,
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-multi"] = ToolCallRecord(
+        tool_use_id="tool-ask-multi",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理方式",
+                    "question": "这次要保留哪些动作？",
+                    "options": [
+                        {"label": "保留日志", "description": "继续输出调试日志"},
+                        {"label": "保留测试", "description": "继续保留回归测试"},
+                    ],
+                    "multiSelect": True,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    tmux_runner._session_store._persist(state)
+
+    router = DummyRouter()
+    register_user_question_handlers(router, task_service=service)
+    callback_handler = router.callback_handlers[0]
+    message = DummyMessage("需要你选择")
+
+    toggle_callback = DummyCallbackQuery("ask:toggle:tool-ask-multi:0:0", message=message)
+    await callback_handler(toggle_callback)
+
+    assert message.answers == []
+    assert len(message.edited_reply_markups) == 1
+    toggle_markup = message.edited_reply_markups[0]
+    assert toggle_markup is not None
+    assert [button.text for row in toggle_markup.inline_keyboard for button in row] == [
+        "☑ 保留日志",
+        "☐ 保留测试",
+        "提交选择",
+    ]
+    assert toggle_callback.answers == [("已选择: 保留日志", False)]
+
+    submit_callback = DummyCallbackQuery("ask:submit:tool-ask-multi:0", message=message)
+    await callback_handler(submit_callback)
+
+    assert factory._interactive_inputs == []
+    assert factory._user_question_option_actions == [(session.terminal_id, str(tmp_path), 0, False)]
+    assert factory._user_question_multi_select_advances == [(session.terminal_id, str(tmp_path), True)]
+    assert message.answers == ["已提交你的选择，Claude 继续执行中"]
+    assert message.edited_reply_markups[-1] is None
+    assert submit_callback.answers == [("已提交你的选择，Claude 继续执行中", False)]
 
 
 @pytest.mark.asyncio
@@ -504,7 +585,8 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
     await text_handler(message)
 
     run_mock.assert_not_awaited()
-    assert factory._interactive_inputs == [(session.terminal_id, str(tmp_path), "直接删除")]
+    assert factory._interactive_inputs == []
+    assert factory._user_question_option_actions == [(session.terminal_id, str(tmp_path), 1, True)]
     assert message.answers == ["已提交你的选择，Claude 继续执行中"]
 
 

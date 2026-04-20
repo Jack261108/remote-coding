@@ -395,6 +395,85 @@ class TmuxRunner:
             return False, err
         return await self._send_command(session_name, prompt, workdir=workdir, env=None, interactive=True)
 
+    async def select_user_question_option(
+        self,
+        *,
+        terminal_key: str,
+        workdir: str,
+        option_index: int,
+        submit_after: bool = False,
+    ) -> tuple[bool, str]:
+        session_name = self._build_session_name(terminal_key)
+        ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
+        if not ready:
+            return False, err
+        ok, err = await self._move_user_question_cursor_to_option(session_name=session_name, target_index=option_index)
+        if not ok:
+            return False, err
+        ok, err = await self._send_keys(session_name, "C-m")
+        if not ok:
+            return False, err
+        if submit_after:
+            await asyncio.sleep(self._enter_delay_sec)
+            ok, err = await self._send_keys(session_name, "C-m")
+            if not ok:
+                return False, err
+        return True, ""
+
+    async def answer_user_question_with_text(
+        self,
+        *,
+        terminal_key: str,
+        workdir: str,
+        option_count: int,
+        text: str,
+        submit_after: bool = False,
+    ) -> tuple[bool, str]:
+        session_name = self._build_session_name(terminal_key)
+        ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
+        if not ready:
+            return False, err
+        ok, err = await self._move_user_question_cursor_to_option(session_name=session_name, target_index=option_count)
+        if not ok:
+            return False, err
+        ok, err = await self._send_keys(session_name, "C-m")
+        if not ok:
+            return False, err
+        await asyncio.sleep(self._enter_delay_sec)
+        ok, err = await self._paste_text(session_name, text)
+        if not ok:
+            return False, err
+        ok, err = await self._send_keys(session_name, "C-m")
+        if not ok:
+            return False, err
+        if submit_after:
+            await asyncio.sleep(self._enter_delay_sec)
+            ok, err = await self._send_keys(session_name, "C-m")
+            if not ok:
+                return False, err
+        return True, ""
+
+    async def advance_user_question_after_multi_select(
+        self,
+        *,
+        terminal_key: str,
+        workdir: str,
+        final_question: bool,
+    ) -> tuple[bool, str]:
+        session_name = self._build_session_name(terminal_key)
+        ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
+        if not ready:
+            return False, err
+        ok, err = await self._send_keys(session_name, "Right")
+        if not ok:
+            return False, err
+        if final_question:
+            await asyncio.sleep(self._enter_delay_sec)
+            ok, err = await self._send_keys(session_name, "C-m")
+            if not ok:
+                return False, err
+        return True, ""
+
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
         session_name = self._build_session_name(terminal_key)
         exists = await self._session_exists(session_name)
@@ -593,6 +672,106 @@ class TmuxRunner:
             return stdout.strip()
         except Exception:
             return ""
+
+    async def _ensure_live_claude_session_for_user_question(self, *, session_name: str) -> tuple[bool, str]:
+        exists = await self._session_exists(session_name)
+        if not exists:
+            return False, f"tmux 会话不存在: {session_name}\nhint: 请先发送 /claude 重建 Claude 会话后再试"
+        current_cmd = await self._session_current_command(session_name)
+        if "claude" not in current_cmd.lower():
+            return False, "当前 Claude 会话不在可回答问题的界面\nhint: 请先发送 /claude 重建会话后再试"
+        return True, ""
+
+    async def _move_user_question_cursor_to_option(self, *, session_name: str, target_index: int) -> tuple[bool, str]:
+        pane_text = await self._capture_pane_text(session_name)
+        if not self._looks_like_user_question_tui(pane_text):
+            return False, "当前问题不是 Claude 选择框界面，将回退为文本回答"
+
+        current_index = self._selected_user_question_option_index(pane_text)
+        if current_index is None:
+            return False, "当前问题不是 Claude 选择框界面，将回退为文本回答"
+
+        delta = target_index - current_index
+        if delta == 0:
+            return True, ""
+        direction = "Down" if delta > 0 else "Up"
+        return await self._send_keys(session_name, *([direction] * abs(delta)))
+
+    async def _send_keys(self, session_name: str, *keys: str) -> tuple[bool, str]:
+        if not keys:
+            return True, ""
+        try:
+            code, _, err_text = await self._run_tmux("send-keys", "-t", session_name, *keys)
+        except FileNotFoundError:
+            return False, f"启动失败: 找不到 tmux 可执行文件 ({self._tmux_bin})"
+        except Exception as exc:
+            return False, f"tmux 按键发送异常: {exc}"
+        if code == 0:
+            return True, ""
+        err = err_text.strip() or "unknown error"
+        return False, f"tmux 按键发送失败: {err}\ntmux_session: {session_name}"
+
+    async def _paste_text(self, session_name: str, text: str) -> tuple[bool, str]:
+        buffer_name = f"tgcli-answer-{uuid.uuid4().hex}"
+        try:
+            code, _, err_text = await self._run_tmux("load-buffer", "-b", buffer_name, "-", input_data=text.encode("utf-8"))
+            if code != 0:
+                err = err_text.strip() or "unknown error"
+                return False, f"tmux 加载回答内容失败: {err}\ntmux_session: {session_name}"
+            code, _, err_text = await self._run_tmux("paste-buffer", "-p", "-t", session_name, "-b", buffer_name)
+            if code == 0:
+                return True, ""
+            err = err_text.strip() or "unknown error"
+            return False, f"tmux 粘贴回答内容失败: {err}\ntmux_session: {session_name}"
+        except FileNotFoundError:
+            return False, f"启动失败: 找不到 tmux 可执行文件 ({self._tmux_bin})"
+        except Exception as exc:
+            return False, f"tmux 粘贴回答内容异常: {exc}"
+        finally:
+            try:
+                await self._run_tmux("delete-buffer", "-b", buffer_name)
+            except Exception:
+                pass
+
+    async def _capture_pane_text(self, session_name: str, *, start_line: int = -200) -> str:
+        try:
+            code, stdout, _ = await self._run_tmux("capture-pane", "-p", "-S", str(start_line), "-t", session_name)
+        except Exception:
+            return ""
+        if code != 0:
+            return ""
+        return stdout
+
+    def _looks_like_user_question_tui(self, pane_text: str) -> bool:
+        normalized = pane_text or ""
+        return (
+            "Enter to select" in normalized
+            or "Tab/Arrow keys to navigate" in normalized
+            or ("Submit" in normalized and ("☐" in normalized or "☑" in normalized or "☒" in normalized))
+        )
+
+    def _selected_user_question_option_index(self, pane_text: str) -> int | None:
+        for line in pane_text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(("›", "❯", ">")):
+                continue
+            candidate = stripped[1:].strip()
+            digits = []
+            for ch in candidate:
+                if ch.isdigit():
+                    digits.append(ch)
+                    continue
+                break
+            if not digits:
+                continue
+            remainder = candidate[len(digits):].lstrip()
+            if not remainder.startswith((".", ")", "）")):
+                continue
+            try:
+                return max(0, int("".join(digits)) - 1)
+            except ValueError:
+                return None
+        return None
 
     async def _is_cancel_requested(self, task_id: str) -> bool:
         async with self._lock:

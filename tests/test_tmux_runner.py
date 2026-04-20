@@ -175,6 +175,119 @@ async def test_send_command_uses_ctrl_m_in_interactive(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_select_user_question_option_sends_expected_tmux_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    key_calls: list[tuple[str, ...]] = []
+
+    async def fake_session_exists(session_name: str) -> bool:
+        return session_name == "tgcli_user_1"
+
+    async def fake_session_current_command(session_name: str) -> str:
+        assert session_name == "tgcli_user_1"
+        return "claude"
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        if args and args[0] == "capture-pane":
+            return 0, "› 1. 今天\n  2. 明天\n  3. 后天\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n", ""
+        if args and args[0] == "send-keys":
+            key_calls.append(args)
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_session_exists", fake_session_exists)
+    monkeypatch.setattr(runner, "_session_current_command", fake_session_current_command)
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    ok, err = await runner.select_user_question_option(
+        terminal_key="user_1",
+        workdir="/tmp",
+        option_index=2,
+        submit_after=True,
+    )
+
+    assert ok is True
+    assert err == ""
+    assert key_calls == [
+        ("send-keys", "-t", "tgcli_user_1", "Down", "Down"),
+        ("send-keys", "-t", "tgcli_user_1", "C-m"),
+        ("send-keys", "-t", "tgcli_user_1", "C-m"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answer_user_question_with_text_uses_type_something_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    key_calls: list[tuple[str, ...]] = []
+    buffer_inputs: list[bytes] = []
+
+    async def fake_session_exists(session_name: str) -> bool:
+        return session_name == "tgcli_user_1"
+
+    async def fake_session_current_command(session_name: str) -> str:
+        assert session_name == "tgcli_user_1"
+        return "claude"
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        if args and args[0] == "capture-pane":
+            return 0, "› 1. 今天\n  2. 明天\n  3. 后天\n  4. Type something.\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n", ""
+        if args and args[0] == "load-buffer" and input_data is not None:
+            buffer_inputs.append(input_data)
+        if args and args[0] == "send-keys":
+            key_calls.append(args)
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_session_exists", fake_session_exists)
+    monkeypatch.setattr(runner, "_session_current_command", fake_session_current_command)
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    ok, err = await runner.answer_user_question_with_text(
+        terminal_key="user_1",
+        workdir="/tmp",
+        option_count=3,
+        text="2026-05-01",
+        submit_after=False,
+    )
+
+    assert ok is True
+    assert err == ""
+    assert key_calls == [
+        ("send-keys", "-t", "tgcli_user_1", "Down", "Down", "Down"),
+        ("send-keys", "-t", "tgcli_user_1", "C-m"),
+        ("send-keys", "-t", "tgcli_user_1", "C-m"),
+    ]
+    assert buffer_inputs == [b"2026-05-01"]
+
+
+@pytest.mark.asyncio
+async def test_select_user_question_option_returns_text_fallback_when_not_tui(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+
+    async def fake_session_exists(session_name: str) -> bool:
+        return session_name == "tgcli_user_1"
+
+    async def fake_session_current_command(session_name: str) -> str:
+        return "claude"
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        if args and args[0] == "capture-pane":
+            return 0, "请直接按选项回复我，格式示例：2 / 3 / 3\n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_session_exists", fake_session_exists)
+    monkeypatch.setattr(runner, "_session_current_command", fake_session_current_command)
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    ok, err = await runner.select_user_question_option(
+        terminal_key="user_1",
+        workdir="/tmp",
+        option_index=1,
+        submit_after=False,
+    )
+
+    assert ok is False
+    assert err == "当前问题不是 Claude 选择框界面，将回退为文本回答"
+
+
+@pytest.mark.asyncio
 async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     seen_pipe_calls: list[tuple[str, ...]] = []

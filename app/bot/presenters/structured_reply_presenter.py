@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 
 from app.domain.user_question_models import UserQuestionPrompt, extract_user_question_prompts
+from app.services.session_store import parse_user_question_key
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -232,7 +233,10 @@ def build_user_question_prompt(question: UserQuestionPrompt) -> str:
                 lines.append(f"   {_truncate_question_text(option.description)}")
 
     lines.append("")
-    lines.append("请点击下方按钮；如果要自己补充说明，也可以直接回复文字。")
+    if question.multi_select:
+        lines.append("可多选，请先勾选需要的选项，再点击“提交选择”；如果要自己补充说明，也可以直接回复文字。")
+    else:
+        lines.append("请点击下方按钮；如果要自己补充说明，也可以直接回复文字。")
     return "\n".join(lines)
 
 
@@ -247,6 +251,7 @@ class StructuredReplyPresenter:
         self._fallback_announced = False
         self._revision = 0
         self._current_session_id: str | None = None
+        self._last_user_question_key: str | None = None
         self._last_phase: str | None = None
         self._tool_status_by_id: dict[str, str | None] = {}
         self._question_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
@@ -286,9 +291,20 @@ class StructuredReplyPresenter:
                     tool_input=tool.tool_input,
                 )
             }
+            pending_prompts = self._extract_pending_user_question_prompts(snapshot)
+            if pending_prompts:
+                self._question_keys_by_tool_id[pending_prompts[0].tool_use_id] = tuple(prompt.key for prompt in pending_prompts)
         else:
             self._tool_status_by_id = {}
             self._question_keys_by_tool_id = {}
+
+        question_cursor_getter = getattr(self._task_service, "get_structured_user_question_cursor", None)
+        if question_cursor_getter is not None:
+            self._last_user_question_key = await question_cursor_getter(self._user_id)
+        elif baseline_current_snapshot and pending_prompts:
+            self._last_user_question_key = pending_prompts[0].key
+        else:
+            self._last_user_question_key = None
 
         revision_getter = getattr(self._task_service, "get_structured_session_cursor", None)
         if revision_getter is None:
@@ -324,12 +340,26 @@ class StructuredReplyPresenter:
     async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
+        question_cursor_getter = getattr(self._task_service, "get_structured_user_question_cursor", None)
+        if question_cursor_getter is not None:
+            self._last_user_question_key = await question_cursor_getter(self._user_id)
 
         messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput] = []
-        messages.extend(self._collect_user_question_updates(snapshot=snapshot))
+        pending_question_prompts = self._extract_pending_user_question_prompts(snapshot)
+        question_updates = self._collect_user_question_updates(snapshot=snapshot, pending_question_prompts=pending_question_prompts)
+        messages.extend(question_updates)
+        question_acknowledger = getattr(self._task_service, "acknowledge_structured_user_question", None)
+        if question_acknowledger is not None:
+            for output in question_updates:
+                await question_acknowledger(self._user_id, question_key=output.question.key)
         messages.extend(self._collect_progress_updates(snapshot=snapshot))
         acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
-        if snapshot.phase == "waiting_for_approval" and snapshot.pending_permission_key and snapshot.pending_permission_key != self._last_pending_permission_key:
+        if (
+            snapshot.phase == "waiting_for_approval"
+            and snapshot.pending_permission_key
+            and snapshot.pending_permission_key != self._last_pending_permission_key
+            and not pending_question_prompts
+        ):
             self._last_pending_permission_key = snapshot.pending_permission_key
             if snapshot.pending_permission_tool_use_id:
                 messages.append(
@@ -431,35 +461,71 @@ class StructuredReplyPresenter:
         self._tool_status_by_id = current_status_by_id
         return messages
 
-    def _collect_user_question_updates(self, *, snapshot: _StructuredSnapshot) -> list[UserQuestionOutput]:
+    def _collect_user_question_updates(
+        self,
+        *,
+        snapshot: _StructuredSnapshot,
+        pending_question_prompts: tuple[UserQuestionPrompt, ...] = (),
+    ) -> list[UserQuestionOutput]:
         messages: list[UserQuestionOutput] = []
         current_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
 
-        for tool in snapshot.tool_states:
-            if tool.status != "running":
-                continue
-            prompts = extract_user_question_prompts(
-                tool_use_id=tool.tool_use_id,
-                tool_name=tool.tool_name,
-                tool_input=tool.tool_input,
-            )
-            if not prompts:
-                continue
-            current_keys = tuple(prompt.key for prompt in prompts)
-            current_keys_by_tool_id[tool.tool_use_id] = current_keys
-            previous_keys = self._question_keys_by_tool_id.get(tool.tool_use_id, ())
-            for prompt in prompts:
-                if prompt.key in previous_keys:
+        active_prompt_group: tuple[UserQuestionPrompt, ...] = pending_question_prompts
+        active_tool_use_id: str | None = pending_question_prompts[0].tool_use_id if pending_question_prompts else None
+        if not active_prompt_group:
+            for tool in snapshot.tool_states:
+                if tool.status != "running":
                     continue
+                prompts = extract_user_question_prompts(
+                    tool_use_id=tool.tool_use_id,
+                    tool_name=tool.tool_name,
+                    tool_input=tool.tool_input,
+                )
+                if not prompts:
+                    continue
+                active_prompt_group = prompts
+                active_tool_use_id = tool.tool_use_id
+
+        if active_tool_use_id is not None and active_prompt_group:
+            current_keys = tuple(prompt.key for prompt in active_prompt_group)
+            current_keys_by_tool_id[active_tool_use_id] = current_keys
+            previous_keys = self._question_keys_by_tool_id.get(active_tool_use_id, ())
+            selected_prompt = active_prompt_group[0]
+            current_question_cursor = parse_user_question_key(self._last_user_question_key)
+            if current_question_cursor is not None and current_question_cursor[0] == active_tool_use_id:
+                matched_prompt = next((prompt for prompt in active_prompt_group if prompt.key == self._last_user_question_key), None)
+                if matched_prompt is not None:
+                    selected_prompt = matched_prompt
+            if selected_prompt.key not in previous_keys and selected_prompt.key != self._last_user_question_key:
                 messages.append(
                     UserQuestionOutput(
-                        text=build_user_question_prompt(prompt),
-                        question=prompt,
+                        text=build_user_question_prompt(selected_prompt),
+                        question=selected_prompt,
                     )
                 )
+                self._last_user_question_key = selected_prompt.key
 
         self._question_keys_by_tool_id = current_keys_by_tool_id
         return messages
+
+    def _extract_pending_user_question_prompts(self, snapshot: _StructuredSnapshot) -> tuple[UserQuestionPrompt, ...]:
+        if not snapshot.pending_permission_tool_use_id:
+            for tool in snapshot.tool_states:
+                if tool.status != "waiting_for_approval":
+                    continue
+                prompts = extract_user_question_prompts(
+                    tool_use_id=tool.tool_use_id,
+                    tool_name=tool.tool_name,
+                    tool_input=tool.tool_input,
+                )
+                if prompts:
+                    return prompts
+            return ()
+        return extract_user_question_prompts(
+            tool_use_id=snapshot.pending_permission_tool_use_id,
+            tool_name=snapshot.pending_permission_tool_name,
+            tool_input=snapshot.pending_permission_tool_input,
+        )
 
     async def _load_snapshot(self, *, log_missing: bool) -> _StructuredSnapshot:
         session = await self._task_service.get_structured_session(self._user_id, log_missing=log_missing)

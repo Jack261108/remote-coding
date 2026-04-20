@@ -416,6 +416,37 @@ class AppContainer:
             return True
         return False
 
+    def _can_bind_unique_workdir_claude_chat(
+        self,
+        *,
+        session: SessionContext,
+        resolved_event_workdir: str | None,
+    ) -> tuple[bool, str, SessionState | None]:
+        if session.provider != "claude_code" or not session.claude_chat_active:
+            return False, "inactive_claude_chat", None
+        if not session.terminal_mode or not session.terminal_id:
+            return False, "terminal_not_ready", None
+
+        terminal_state = self.structured_session_store.find_by_terminal_id(session.terminal_id)
+        if terminal_state is None:
+            return True, "terminal_missing_state", None
+
+        if terminal_state.user_id is not None and terminal_state.user_id != session.user_id:
+            return False, "terminal_user_mismatch", terminal_state
+
+        terminal_workdir = str(Path(terminal_state.workdir).resolve()) if terminal_state.workdir else None
+        if resolved_event_workdir and terminal_workdir and terminal_workdir != resolved_event_workdir:
+            return False, "terminal_workdir_mismatch", terminal_state
+
+        has_content = bool(terminal_state.turns or terminal_state.tool_calls or terminal_state.pending_permission is not None)
+        if has_content:
+            return True, "terminal_has_content", terminal_state
+
+        if terminal_state.phase in {SessionPhase.IDLE, SessionPhase.WAITING_FOR_INPUT}:
+            return True, "terminal_waiting", terminal_state
+
+        return False, "terminal_empty_not_waiting", terminal_state
+
     async def _match_session_context(self, event: HookEvent) -> SessionContext | None:
         sessions = await self.session_service.list_all()
         logger.info(
@@ -494,6 +525,24 @@ class AppContainer:
                     },
                 )
                 return session
+            can_bind_chat, bind_reason, terminal_state = self._can_bind_unique_workdir_claude_chat(
+                session=session,
+                resolved_event_workdir=event_workdir,
+            )
+            if can_bind_chat:
+                logger.info(
+                    "matched hook session by active claude chat",
+                    extra={
+                        "hook_session_id": event.session_id,
+                        "user_id": session.user_id,
+                        "terminal_id": session.terminal_id,
+                        "resolved_event_workdir": event_workdir,
+                        "terminal_state_id": terminal_state.session_id if terminal_state is not None else None,
+                        "terminal_state_phase": terminal_state.phase.value if terminal_state is not None else None,
+                        "reason": bind_reason,
+                    },
+                )
+                return session
             logger.warning(
                 "failed to match hook session context",
                 extra={
@@ -504,6 +553,9 @@ class AppContainer:
                     "resolved_event_workdir": event_workdir,
                     "terminal_id": session.terminal_id,
                     "has_active_interactive_task": has_active_task,
+                    "claude_chat_bind_reason": bind_reason,
+                    "terminal_state_id": terminal_state.session_id if terminal_state is not None else None,
+                    "terminal_state_phase": terminal_state.phase.value if terminal_state is not None else None,
                 },
             )
             return None

@@ -4,6 +4,7 @@ import asyncio
 import re
 
 from app.adapters.storage.file_session_store import FileSessionStore
+from app.domain.user_question_models import extract_user_question_prompts
 from app.domain.hook_models import HookEvent
 from app.domain.session_models import (
     ConversationTurn,
@@ -34,6 +35,18 @@ def is_claude_session_id(session_id: str | None) -> bool:
     if not text:
         return False
     return text.startswith(CLAUDE_SESSION_PREFIX) or bool(_UUID_SESSION_RE.match(text))
+
+
+def parse_user_question_key(question_key: str | None) -> tuple[str, int] | None:
+    if not question_key:
+        return None
+    tool_use_id, separator, index_text = str(question_key).rpartition(":")
+    if not separator or not tool_use_id:
+        return None
+    try:
+        return tool_use_id, int(index_text)
+    except ValueError:
+        return None
 
 
 class SessionStore:
@@ -142,6 +155,101 @@ class SessionStore:
                     cached.turns = loaded_turns
                 if not cached.tool_calls and state.tool_calls:
                     cached.tool_calls = state.tool_calls
+                if cached.user_id is None and state.user_id is not None:
+                    cached.user_id = state.user_id
+                if cached.terminal_id is None and state.terminal_id is not None:
+                    cached.terminal_id = state.terminal_id
+                if cached.claude_session_id is None and state.claude_session_id is not None:
+                    cached.claude_session_id = state.claude_session_id
+                if cached.checkpoint.last_offset == 0 and loaded_checkpoint.last_offset != 0:
+                    cached.checkpoint = loaded_checkpoint
+                cached.history_loaded = bool(cached.turns or cached.tool_calls or cached.pending_permission is not None)
+                candidate = cached
+            else:
+                state.checkpoint = loaded_checkpoint
+                if not state.turns:
+                    state.turns = loaded_turns
+                state.history_loaded = bool(state.turns or state.tool_calls or state.pending_permission is not None)
+                self._states[state.session_id] = state
+                candidate = state
+            if best is None or self._state_rank(candidate) > self._state_rank(best):
+                best = candidate
+        return best
+
+    def find_by_active_user_question_tool_use_id(self, tool_use_id: str | None) -> SessionState | None:
+        if not tool_use_id:
+            return None
+
+        best: SessionState | None = None
+        for state in self._states.values():
+            if not self._has_active_user_question_tool_use_id(state, tool_use_id):
+                continue
+            if best is None or self._state_rank(state) > self._state_rank(best):
+                best = state
+        if best is not None:
+            return best
+
+        for state in self._file_store.list_session_states():
+            if not self._has_active_user_question_tool_use_id(state, tool_use_id):
+                continue
+            loaded_checkpoint = self._file_store.load_checkpoint(state.session_id)
+            loaded_turns = state.turns or self._file_store.load_conversation(state.session_id)
+            cached = self._states.get(state.session_id)
+            if cached is not None:
+                if not cached.turns:
+                    if loaded_turns:
+                        cached.turns = loaded_turns
+                if not cached.tool_calls and state.tool_calls:
+                    cached.tool_calls = state.tool_calls
+                if cached.pending_permission is None and state.pending_permission is not None:
+                    cached.pending_permission = state.pending_permission
+                if cached.user_id is None and state.user_id is not None:
+                    cached.user_id = state.user_id
+                if cached.terminal_id is None and state.terminal_id is not None:
+                    cached.terminal_id = state.terminal_id
+                if cached.claude_session_id is None and state.claude_session_id is not None:
+                    cached.claude_session_id = state.claude_session_id
+                if cached.checkpoint.last_offset == 0 and loaded_checkpoint.last_offset != 0:
+                    cached.checkpoint = loaded_checkpoint
+                cached.history_loaded = bool(cached.turns or cached.tool_calls or cached.pending_permission is not None)
+                candidate = cached
+            else:
+                state.checkpoint = loaded_checkpoint
+                if not state.turns:
+                    state.turns = loaded_turns
+                state.history_loaded = bool(state.turns or state.tool_calls or state.pending_permission is not None)
+                self._states[state.session_id] = state
+                candidate = state
+            if best is None or self._state_rank(candidate) > self._state_rank(best):
+                best = candidate
+        return best
+
+    def find_by_active_user_question_key(self, question_key: str | None) -> SessionState | None:
+        if not question_key:
+            return None
+
+        best: SessionState | None = None
+        for state in self._states.values():
+            if not self._has_active_user_question_key(state, question_key):
+                continue
+            if best is None or self._state_rank(state) > self._state_rank(best):
+                best = state
+        if best is not None:
+            return best
+
+        for state in self._file_store.list_session_states():
+            if not self._has_active_user_question_key(state, question_key):
+                continue
+            loaded_checkpoint = self._file_store.load_checkpoint(state.session_id)
+            loaded_turns = state.turns or self._file_store.load_conversation(state.session_id)
+            cached = self._states.get(state.session_id)
+            if cached is not None:
+                if not cached.turns and loaded_turns:
+                    cached.turns = loaded_turns
+                if not cached.tool_calls and state.tool_calls:
+                    cached.tool_calls = state.tool_calls
+                if cached.pending_permission is None and state.pending_permission is not None:
+                    cached.pending_permission = state.pending_permission
                 if cached.user_id is None and state.user_id is not None:
                     cached.user_id = state.user_id
                 if cached.terminal_id is None and state.terminal_id is not None:
@@ -367,6 +475,12 @@ class SessionStore:
             return None, None
         return state.structured_reply_turn_id, state.structured_permission_key
 
+    def get_structured_user_question_cursor(self, session_id: str) -> str | None:
+        state = self.get(session_id)
+        if state is None:
+            return None
+        return state.structured_user_question_key
+
     def mark_structured_reply_emitted(self, session_id: str, *, turn_id: str) -> SessionState:
         state = self.get(session_id)
         if state is None:
@@ -384,6 +498,25 @@ class SessionStore:
         if state.structured_permission_key == permission_key:
             return state
         state.structured_permission_key = permission_key
+        self._persist(state, publish=False)
+        return state
+
+    def mark_structured_user_question_emitted(self, session_id: str, *, question_key: str) -> SessionState:
+        state = self.get(session_id)
+        if state is None:
+            state = self.get_or_create(session_id=session_id)
+        if state.structured_user_question_key == question_key:
+            return state
+        current_parsed = parse_user_question_key(state.structured_user_question_key)
+        next_parsed = parse_user_question_key(question_key)
+        if (
+            current_parsed is not None
+            and next_parsed is not None
+            and current_parsed[0] == next_parsed[0]
+            and next_parsed[1] < current_parsed[1]
+        ):
+            return state
+        state.structured_user_question_key = question_key
         self._persist(state, publish=False)
         return state
 
@@ -724,3 +857,53 @@ class SessionStore:
                 condition.notify_all()
 
         loop.create_task(_notify())
+
+    def _has_active_user_question_tool_use_id(self, state: SessionState, tool_use_id: str) -> bool:
+        pending = state.pending_permission
+        if pending is not None and pending.tool_use_id == tool_use_id:
+            prompts = extract_user_question_prompts(
+                tool_use_id=pending.tool_use_id,
+                tool_name=pending.tool_name,
+                tool_input=pending.tool_input,
+            )
+            if prompts:
+                return True
+        tool = state.tool_calls.get(tool_use_id)
+        if tool is None or tool.status not in {ToolStatus.RUNNING, ToolStatus.WAITING_FOR_APPROVAL}:
+            return False
+        prompts = extract_user_question_prompts(
+            tool_use_id=tool.tool_use_id,
+            tool_name=tool.name,
+            tool_input=tool.input,
+        )
+        return bool(prompts)
+
+    def _has_active_user_question_key(self, state: SessionState, question_key: str) -> bool:
+        if not question_key:
+            return False
+        parsed = parse_user_question_key(question_key)
+        if parsed is None:
+            return False
+        tool_use_id, _ = parsed
+        if not self._has_active_user_question_tool_use_id(state, tool_use_id):
+            return False
+
+        pending = state.pending_permission
+        if pending is not None and pending.tool_use_id == tool_use_id:
+            prompts = extract_user_question_prompts(
+                tool_use_id=pending.tool_use_id,
+                tool_name=pending.tool_name,
+                tool_input=pending.tool_input,
+            )
+            if any(prompt.key == question_key for prompt in prompts):
+                return True
+
+        tool = state.tool_calls.get(tool_use_id)
+        if tool is None or tool.status not in {ToolStatus.RUNNING, ToolStatus.WAITING_FOR_APPROVAL}:
+            return False
+        prompts = extract_user_question_prompts(
+            tool_use_id=tool.tool_use_id,
+            tool_name=tool.name,
+            tool_input=tool.input,
+        )
+        return any(prompt.key == question_key for prompt in prompts)

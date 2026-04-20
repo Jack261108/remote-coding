@@ -557,6 +557,209 @@ async def test_run_prompt_and_stream_interactive_reports_user_question_once() ->
 
 
 @pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_reports_multi_select_user_question_with_submit_button() -> None:
+    message = DummyMessage()
+    turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已收到问题\n", is_complete=True)]
+    empty_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    question_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-multi",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理方式",
+                    "question": "这次要保留哪些动作？",
+                    "options": [
+                        {"label": "保留日志", "description": "继续输出调试日志"},
+                        {"label": "保留测试", "description": "继续保留回归测试"},
+                    ],
+                    "multiSelect": True,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    question_session.tool_calls = {"tool-ask-multi": question_tool}
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    responses = iter([empty_session, empty_session, question_session])
+
+    async def get_structured_session(user_id: int, *, log_missing: bool = True):
+        try:
+            return next(responses)
+        except StopIteration:
+            return question_session
+
+    task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+
+    question_index = message.answers.index(
+        build_user_question_prompt(
+            SimpleNamespace(
+                tool_use_id="tool-ask-multi",
+                question_index=0,
+                total_questions=1,
+                header="处理方式",
+                question="这次要保留哪些动作？",
+                options=(
+                    SimpleNamespace(label="保留日志", description="继续输出调试日志"),
+                    SimpleNamespace(label="保留测试", description="继续保留回归测试"),
+                ),
+                multi_select=True,
+            )
+        )
+    )
+    reply_markup = message.reply_markups[question_index]
+    assert reply_markup is not None
+    assert [button.text for row in reply_markup.inline_keyboard for button in row] == [
+        "☐ 保留日志",
+        "☐ 保留测试",
+        "提交选择",
+    ]
+    assert [button.callback_data for row in reply_markup.inline_keyboard for button in row] == [
+        "ask:toggle:tool-ask-multi:0:0",
+        "ask:toggle:tool-ask-multi:0:1",
+        "ask:submit:tool-ask-multi:0",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_reports_only_first_question_for_multi_question_prompt() -> None:
+    message = DummyMessage()
+    turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已收到问题\n", is_complete=True)]
+    empty_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    question_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理范围",
+                    "question": "你说的范围我理解为这三块之一，具体按哪种处理？",
+                    "options": [
+                        {"label": "当前相关改动(推荐)", "description": "只处理相关已改动文件"},
+                        {"label": "三个目录全部", "description": "范围非常大"},
+                    ],
+                    "multiSelect": False,
+                },
+                {
+                    "header": "提交前置",
+                    "question": "按你的 CLAUDE.md，要修改代码前先提交现有改动。现在是否允许我先做这一步？",
+                    "options": [
+                        {"label": "允许先提交(推荐)", "description": "先提交后继续"},
+                        {"label": "暂不允许", "description": "先不改代码"},
+                    ],
+                    "multiSelect": False,
+                },
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    question_session.tool_calls = {"tool-ask-1": question_tool}
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    responses = iter([empty_session, empty_session, question_session])
+
+    async def get_structured_session(user_id: int, *, log_missing: bool = True):
+        try:
+            return next(responses)
+        except StopIteration:
+            return question_session
+
+    task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+
+    first_prompt = build_user_question_prompt(
+        SimpleNamespace(
+            tool_use_id="tool-ask-1",
+            question_index=0,
+            total_questions=2,
+            header="处理范围",
+            question="你说的范围我理解为这三块之一，具体按哪种处理？",
+            options=(
+                SimpleNamespace(label="当前相关改动(推荐)", description="只处理相关已改动文件"),
+                SimpleNamespace(label="三个目录全部", description="范围非常大"),
+            ),
+            multi_select=False,
+        )
+    )
+    second_prompt = build_user_question_prompt(
+        SimpleNamespace(
+            tool_use_id="tool-ask-1",
+            question_index=1,
+            total_questions=2,
+            header="提交前置",
+            question="按你的 CLAUDE.md，要修改代码前先提交现有改动。现在是否允许我先做这一步？",
+            options=(
+                SimpleNamespace(label="允许先提交(推荐)", description="先提交后继续"),
+                SimpleNamespace(label="暂不允许", description="先不改代码"),
+            ),
+            multi_select=False,
+        )
+    )
+
+    assert message.answers.count(first_prompt) == 1
+    assert second_prompt not in message.answers
+    question_index = message.answers.index(first_prompt)
+    reply_markup = message.reply_markups[question_index]
+    assert reply_markup is not None
+    assert [button.text for row in reply_markup.inline_keyboard for button in row] == [
+        "当前相关改动(推荐)",
+        "三个目录全部",
+    ]
+    assert [button.callback_data for row in reply_markup.inline_keyboard for button in row] == [
+        "ask:tool-ask-1:0:0",
+        "ask:tool-ask-1:0:1",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_emits_progress_update_immediately() -> None:
     message = DummyMessage()
     turns: list[ConversationTurn] = []

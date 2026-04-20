@@ -7,7 +7,16 @@ import pytest
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import utc_now
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import (
+    ConversationTurn,
+    ParserCheckpoint,
+    PendingPermission,
+    SessionEvent,
+    SessionEventType,
+    SessionPhase,
+    ToolCallRecord,
+    ToolStatus,
+)
 from app.services.session_store import SessionStore
 
 
@@ -180,6 +189,115 @@ def test_session_store_find_by_pending_tool_use_id_hits_disk_snapshot(tmp_path) 
     assert matched.session_id == "claude-session-1"
     assert matched.pending_permission is not None
     assert matched.pending_permission.tool_use_id == "tool-1"
+
+
+def test_session_store_find_by_active_user_question_tool_use_id_hits_disk_snapshot(tmp_path) -> None:
+    file_store = FileSessionStore(str(tmp_path))
+    disk_store = SessionStore(file_store)
+    disk_state = disk_store.get_or_create(
+        session_id="claude-session-ask",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    disk_state.tool_calls["tool-ask-1"] = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "question": "要怎么处理？",
+                    "options": [{"label": "直接删除"}],
+                    "multiSelect": False,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    disk_store._persist(disk_state)
+
+    store = SessionStore(file_store)
+    matched = store.find_by_active_user_question_tool_use_id("tool-ask-1")
+
+    assert matched is not None
+    assert matched.session_id == "claude-session-ask"
+    assert "tool-ask-1" in matched.tool_calls
+    assert matched.tool_calls["tool-ask-1"].status == ToolStatus.RUNNING
+
+
+def test_session_store_find_by_active_user_question_tool_use_id_accepts_waiting_for_approval_tool_without_pending_snapshot(tmp_path) -> None:
+    file_store = FileSessionStore(str(tmp_path))
+    disk_store = SessionStore(file_store)
+    disk_state = disk_store.get_or_create(
+        session_id="claude-session-ask-waiting",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    disk_state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    disk_state.tool_calls["tool-ask-waiting"] = ToolCallRecord(
+        tool_use_id="tool-ask-waiting",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "question": "要怎么处理？",
+                    "options": [{"label": "直接删除"}],
+                    "multiSelect": False,
+                }
+            ]
+        },
+        status=ToolStatus.WAITING_FOR_APPROVAL,
+    )
+    disk_store._persist(disk_state)
+
+    store = SessionStore(file_store)
+    matched = store.find_by_active_user_question_tool_use_id("tool-ask-waiting")
+
+    assert matched is not None
+    assert matched.session_id == "claude-session-ask-waiting"
+    assert "tool-ask-waiting" in matched.tool_calls
+    assert matched.tool_calls["tool-ask-waiting"].status == ToolStatus.WAITING_FOR_APPROVAL
+
+
+def test_session_store_find_by_active_user_question_key_hits_disk_snapshot(tmp_path) -> None:
+    file_store = FileSessionStore(str(tmp_path))
+    disk_store = SessionStore(file_store)
+    disk_state = disk_store.get_or_create(
+        session_id="claude-session-ask-key",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+        user_id=1,
+    )
+    disk_state.tool_calls["tool-ask-key"] = ToolCallRecord(
+        tool_use_id="tool-ask-key",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {"question": "第一题", "options": [{"label": "A"}], "multiSelect": False},
+                {"question": "第二题", "options": [{"label": "B"}], "multiSelect": False},
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    disk_store._persist(disk_state)
+
+    store = SessionStore(file_store)
+    matched = store.find_by_active_user_question_key("tool-ask-key:1")
+
+    assert matched is not None
+    assert matched.session_id == "claude-session-ask-key"
+    assert "tool-ask-key" in matched.tool_calls
+
+
+def test_mark_structured_user_question_emitted_does_not_regress_same_tool_cursor(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-ask-key", workdir="/tmp")
+
+    store.mark_structured_user_question_emitted("claude-session-ask-key", question_key="tool-ask-key:2")
+    store.mark_structured_user_question_emitted("claude-session-ask-key", question_key="tool-ask-key:0")
+
+    updated = store.get("claude-session-ask-key")
+    assert updated is not None
+    assert updated.structured_user_question_key == "tool-ask-key:2"
 
 
 def test_session_store_find_by_terminal_id_prefers_pending_active_state_over_newer_idle_state(tmp_path) -> None:

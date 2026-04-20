@@ -163,6 +163,128 @@ async def test_hook_socket_server_resolves_permission_tool_use_id_and_replies(tm
 
 
 @pytest.mark.asyncio
+async def test_hook_socket_server_relaxed_matches_permission_tool_use_id_when_input_differs(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+        if event.event == "PermissionRequest":
+            delivered.set()
+
+    await server.start(on_event)
+
+    pre_reader, pre_writer = await _send_event(
+        socket_path,
+        {
+            "session_id": "s1",
+            "cwd": "/tmp/project",
+            "event": "PreToolUse",
+            "status": "running_tool",
+            "tool": "Bash",
+            "tool_input": {
+                "command": "bash test.sh",
+                "description": "执行测试脚本",
+                "timeout": 120000,
+            },
+            "tool_use_id": "tool-1",
+        },
+    )
+    assert await pre_reader.read() == b""
+    pre_writer.close()
+    await pre_writer.wait_closed()
+
+    reader, writer = await _send_event(
+        socket_path,
+        {
+            "session_id": "s1",
+            "cwd": "/tmp/project",
+            "event": "PermissionRequest",
+            "status": "waiting_for_approval",
+            "tool": "Bash",
+            "tool_input": {
+                "command": "bash test.sh",
+            },
+        },
+    )
+
+    await asyncio.wait_for(delivered.wait(), timeout=1)
+    pending = await server.get_pending_permission(session_id="s1")
+    assert pending == ("Bash", "tool-1", {"command": "bash test.sh"})
+    assert seen[-1].tool_use_id == "tool-1"
+
+    sent = await server.respond_to_permission(tool_use_id="tool-1", decision="allow")
+    response = await asyncio.wait_for(reader.read(), timeout=1)
+    writer.close()
+    await writer.wait_closed()
+    await server.stop()
+
+    assert sent is True
+    assert json.loads(response.decode("utf-8")) == {
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {
+                "behavior": "allow",
+            },
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_keeps_permission_request_open_with_synthetic_id_when_cache_missing(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+        if event.event == "PermissionRequest":
+            delivered.set()
+
+    await server.start(on_event)
+
+    reader, writer = await _send_event(
+        socket_path,
+        {
+            "session_id": "s1",
+            "cwd": "/tmp/project",
+            "event": "PermissionRequest",
+            "status": "waiting_for_approval",
+            "tool": "Bash",
+            "tool_input": {"command": "pwd"},
+        },
+    )
+
+    await asyncio.wait_for(delivered.wait(), timeout=1)
+    pending = await server.get_pending_permission(session_id="s1")
+    assert pending is not None
+    tool_name, tool_use_id, tool_input = pending
+    assert tool_name == "Bash"
+    assert tool_use_id.startswith("hookperm-")
+    assert tool_input == {"command": "pwd"}
+    assert seen[-1].tool_use_id == tool_use_id
+
+    sent = await server.respond_to_permission(tool_use_id=tool_use_id, decision="allow")
+    response = await asyncio.wait_for(reader.read(), timeout=1)
+    writer.close()
+    await writer.wait_closed()
+    await server.stop()
+
+    assert sent is True
+    assert json.loads(response.decode("utf-8")) == {
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {
+                "behavior": "allow",
+            },
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_hook_socket_server_permission_deny_includes_message(tmp_path) -> None:
     seen: list[HookEvent] = []
     delivered = asyncio.Event()

@@ -355,6 +355,7 @@ class SessionState:
     subagent_state: SubagentState = field(default_factory=SubagentState)
     structured_reply_turn_id: str | None = None
     structured_permission_key: str | None = None
+    structured_user_question_key: str | None = None
     revision: int = 0
     history_loaded: bool = False
     clear_detected: bool = False
@@ -391,6 +392,7 @@ class SessionState:
             "subagent_state": self.subagent_state.to_dict(),
             "structured_reply_turn_id": self.structured_reply_turn_id,
             "structured_permission_key": self.structured_permission_key,
+            "structured_user_question_key": self.structured_user_question_key,
             "revision": self.revision,
             "history_loaded": self.history_loaded,
             "clear_detected": self.clear_detected,
@@ -422,6 +424,7 @@ class SessionState:
             subagent_state=SubagentState.from_dict(data.get("subagent_state")),
             structured_reply_turn_id=str(data["structured_reply_turn_id"]) if data.get("structured_reply_turn_id") is not None else None,
             structured_permission_key=str(data["structured_permission_key"]) if data.get("structured_permission_key") is not None else None,
+            structured_user_question_key=str(data["structured_user_question_key"]) if data.get("structured_user_question_key") is not None else None,
             revision=int(data.get("revision", 0)),
             history_loaded=bool(data.get("history_loaded", False)),
             clear_detected=bool(data.get("clear_detected", False)),
