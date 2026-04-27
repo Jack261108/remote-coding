@@ -662,6 +662,12 @@ class SwitchingTaskService:
     async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
         return None
 
+    async def get_structured_user_question_cursor(self, user_id: int):
+        return None
+
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+        return None
+
     async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
         return self._cursors[self.current.session_id] > since_cursor
 

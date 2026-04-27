@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from contextlib import suppress
 import json
+import os
 import socket
 import subprocess
 import threading
+import uuid
 
 from app.adapters.claude.hook_installer import ClaudeCodeVersion, HookInstaller
 from app.adapters.claude.paths import ClaudePaths
@@ -57,7 +60,7 @@ def test_hook_installer_removes_previous_remote_coding_entries(tmp_path) -> None
 
 def test_hook_script_normalizes_claude_payload(tmp_path) -> None:
     paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
-    socket_path = f"/tmp/rc-hook-installer-{tmp_path.name}.sock"
+    socket_path = f"/tmp/rc-hi-{uuid.uuid4().hex}.sock"
     installer = HookInstaller(
         paths=paths,
         socket_path=socket_path,
@@ -101,6 +104,8 @@ def test_hook_script_normalizes_claude_payload(tmp_path) -> None:
         timeout=5,
     )
     thread.join(timeout=5)
+    with suppress(FileNotFoundError):
+        os.unlink(socket_path)
 
     assert completed.returncode == 0
     assert completed.stdout == ""

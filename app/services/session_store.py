@@ -96,7 +96,9 @@ class SessionStore:
         for state in self._file_store.list_session_states():
             if state.terminal_id != terminal_id:
                 continue
-            candidate = self._hydrate_state_from_disk(state)
+            candidate = self._hydrate_and_cache_state(state)
+            if candidate.terminal_id != terminal_id:
+                continue
             if best is None or self._state_rank(candidate) > self._state_rank(best):
                 best = candidate
         return best
@@ -104,28 +106,25 @@ class SessionStore:
     def find_by_pending_tool_use_id(self, tool_use_id: str | None) -> SessionState | None:
         if not tool_use_id:
             return None
-        return self._find_best_matching_state(
-            in_memory_matcher=lambda state: (pending := state.pending_permission) is not None and pending.tool_use_id == tool_use_id,
-            persisted_matcher=lambda state: (pending := state.pending_permission) is not None and pending.tool_use_id == tool_use_id,
+        return self._find_cached_or_persisted_state(
+            matcher=lambda state: self._has_pending_permission_tool_use_id(state, tool_use_id),
         )
 
     def find_by_active_user_question_tool_use_id(self, tool_use_id: str | None) -> SessionState | None:
         if not tool_use_id:
             return None
-        return self._find_best_matching_state(
-            in_memory_matcher=lambda state: self._has_active_user_question_tool_use_id(state, tool_use_id),
-            persisted_matcher=lambda state: self._has_active_user_question_tool_use_id(state, tool_use_id),
+        return self._find_cached_or_persisted_state(
+            matcher=lambda state: self._has_active_user_question_tool_use_id(state, tool_use_id),
         )
 
     def find_by_active_user_question_key(self, question_key: str | None) -> SessionState | None:
         if not question_key:
             return None
-        return self._find_best_matching_state(
-            in_memory_matcher=lambda state: self._has_active_user_question_key(state, question_key),
-            persisted_matcher=lambda state: self._has_active_user_question_key(state, question_key),
+        return self._find_cached_or_persisted_state(
+            matcher=lambda state: self._has_active_user_question_key(state, question_key),
         )
 
-    def _hydrate_state_from_disk(self, state: SessionState) -> SessionState:
+    def _hydrate_and_cache_state(self, state: SessionState) -> SessionState:
         loaded_checkpoint = self._file_store.load_checkpoint(state.session_id)
         loaded_turns = state.turns or self._file_store.load_conversation(state.session_id)
         cached = self._states.get(state.session_id)
@@ -144,25 +143,27 @@ class SessionStore:
                 cached.claude_session_id = state.claude_session_id
             if cached.checkpoint.last_offset == 0 and loaded_checkpoint.last_offset != 0:
                 cached.checkpoint = loaded_checkpoint
-            cached.history_loaded = bool(cached.turns or cached.tool_calls or cached.pending_permission is not None)
+            cached.history_loaded = self._has_loaded_history(cached)
             return cached
 
         state.checkpoint = loaded_checkpoint
         if not state.turns:
             state.turns = loaded_turns
-        state.history_loaded = bool(state.turns or state.tool_calls or state.pending_permission is not None)
+        state.history_loaded = self._has_loaded_history(state)
         self._states[state.session_id] = state
         return state
 
-    def _find_best_matching_state(
+    def _has_loaded_history(self, state: SessionState) -> bool:
+        return bool(state.turns or state.tool_calls or state.pending_permission is not None)
+
+    def _find_cached_or_persisted_state(
         self,
         *,
-        in_memory_matcher: Callable[[SessionState], bool],
-        persisted_matcher: Callable[[SessionState], bool],
+        matcher: Callable[[SessionState], bool],
     ) -> SessionState | None:
         best: SessionState | None = None
         for state in self._states.values():
-            if not in_memory_matcher(state):
+            if not matcher(state):
                 continue
             if best is None or self._state_rank(state) > self._state_rank(best):
                 best = state
@@ -170,9 +171,11 @@ class SessionStore:
             return best
 
         for state in self._file_store.list_session_states():
-            if not persisted_matcher(state):
+            if not matcher(state):
                 continue
-            candidate = self._hydrate_state_from_disk(state)
+            candidate = self._hydrate_and_cache_state(state)
+            if not matcher(candidate):
+                continue
             if best is None or self._state_rank(candidate) > self._state_rank(best):
                 best = candidate
         return best
@@ -311,10 +314,7 @@ class SessionStore:
 
         loaded = self._file_store.load_session_state(session_id)
         if loaded is not None:
-            state = loaded
-            state.checkpoint = self._file_store.load_checkpoint(session_id)
-            if not state.turns:
-                state.turns = self._file_store.load_conversation(session_id)
+            state = self._hydrate_and_cache_state(loaded)
             if user_id is not None:
                 state.user_id = user_id
             state.provider = provider
@@ -343,7 +343,7 @@ class SessionStore:
                     state.last_reply = current.text.strip() or None
                     state.last_reply_role = current.role
 
-        state.history_loaded = bool(state.turns or state.tool_calls or state.pending_permission is not None)
+        state.history_loaded = self._has_loaded_history(state)
         self._states[session_id] = state
         self._persist(state, publish=False)
         return state
@@ -355,12 +355,7 @@ class SessionStore:
         loaded = self._file_store.load_session_state(session_id)
         if loaded is None:
             return None
-        loaded.checkpoint = self._file_store.load_checkpoint(session_id)
-        if not loaded.turns:
-            loaded.turns = self._file_store.load_conversation(session_id)
-        loaded.history_loaded = bool(loaded.turns or loaded.tool_calls or loaded.pending_permission is not None)
-        self._states[session_id] = loaded
-        return loaded
+        return self._hydrate_and_cache_state(loaded)
 
     def get_cursor(self, session_id: str) -> int:
         state = self._states.get(session_id)
@@ -763,6 +758,10 @@ class SessionStore:
                 condition.notify_all()
 
         loop.create_task(_notify())
+
+    def _has_pending_permission_tool_use_id(self, state: SessionState, tool_use_id: str) -> bool:
+        pending = state.pending_permission
+        return pending is not None and pending.tool_use_id == tool_use_id
 
     def _has_active_user_question_tool_use_id(self, state: SessionState, tool_use_id: str) -> bool:
         pending = state.pending_permission

@@ -44,6 +44,10 @@ class DummyTaskService:
         self._structured_reply = structured_reply
         self._structured_turns = structured_turns
         self._event_delays = event_delays or [0.0] * len(events)
+        self._revision = 0
+        self._structured_reply_turn_id: str | None = None
+        self._structured_permission_key: str | None = None
+        self._structured_user_question_key: str | None = None
 
     async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
         task = SimpleNamespace(task_id="t1", provider="claude_code", session_id="s1")
@@ -68,6 +72,28 @@ class DummyTaskService:
             turns=[ConversationTurn(turn_id="turn-1", role="assistant", text=self._structured_reply, is_complete=True)],
             pending_permission=None,
         )
+
+    async def get_structured_session_cursor(self, user_id: int) -> int:
+        return self._revision
+
+    async def get_structured_reply_cursor(self, user_id: int):
+        return self._structured_reply_turn_id, self._structured_permission_key
+
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+        if turn_id is not None:
+            self._structured_reply_turn_id = turn_id
+        if permission_key is not None:
+            self._structured_permission_key = permission_key
+
+    async def get_structured_user_question_cursor(self, user_id: int):
+        return self._structured_user_question_key
+
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+        self._structured_user_question_key = question_key
+
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+        await asyncio.sleep(timeout_sec)
+        return True
 
     async def _stream(self):
         for delay, event in zip(self._event_delays, self._events, strict=False):

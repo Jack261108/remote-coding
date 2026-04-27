@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass
 
 from app.domain.user_question_models import UserQuestionPrompt, extract_user_question_prompts
-from app.domain.session_models import ToolStatus
+from app.domain.session_models import SessionPhase, ToolStatus
 from app.services.session_store import parse_user_question_key
 from app.services.task_service import TaskService
 
@@ -249,6 +248,13 @@ def _extract_tool_question_prompts(tool: _ToolStateSnapshot) -> tuple[UserQuesti
     )
 
 
+def _extract_tool_question_prompts_by_id(snapshot: _StructuredSnapshot) -> dict[str, tuple[UserQuestionPrompt, ...]]:
+    return {
+        tool.tool_use_id: _extract_tool_question_prompts(tool)
+        for tool in snapshot.tool_states
+    }
+
+
 class StructuredReplyPresenter:
     def __init__(self, *, task_service: TaskService, user_id: int) -> None:
         self._task_service = task_service
@@ -275,21 +281,14 @@ class StructuredReplyPresenter:
         self._current_session_id = snapshot.session_id
         self._last_phase = snapshot.phase
 
-        cursor_getter = getattr(self._task_service, "get_structured_reply_cursor", None)
-        if cursor_getter is not None:
-            persisted_turn_id, persisted_permission_key = await cursor_getter(self._user_id)
-            self._last_structured_turn_id = persisted_turn_id
-            if self._last_structured_turn_id is None and baseline_current_snapshot:
-                self._last_structured_turn_id = snapshot.turn_id
-            self._last_pending_permission_key = persisted_permission_key
-        else:
+        persisted_turn_id, persisted_permission_key = await self._task_service.get_structured_reply_cursor(self._user_id)
+        self._last_structured_turn_id = persisted_turn_id
+        if self._last_structured_turn_id is None and baseline_current_snapshot:
             self._last_structured_turn_id = snapshot.turn_id
+        self._last_pending_permission_key = persisted_permission_key
 
         if baseline_current_snapshot:
-            tool_question_prompts = {
-                tool.tool_use_id: _extract_tool_question_prompts(tool)
-                for tool in snapshot.tool_states
-            }
+            tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
             self._tool_status_by_id = {tool.tool_use_id: tool.status for tool in snapshot.tool_states}
             self._question_keys_by_tool_id = {
                 tool_use_id: tuple(prompt.key for prompt in prompts)
@@ -303,26 +302,13 @@ class StructuredReplyPresenter:
             self._tool_status_by_id = {}
             self._question_keys_by_tool_id = {}
 
-        question_cursor_getter = getattr(self._task_service, "get_structured_user_question_cursor", None)
-        if question_cursor_getter is not None:
-            self._last_user_question_key = await question_cursor_getter(self._user_id)
-        elif baseline_current_snapshot and pending_prompts:
+        self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id)
+        if self._last_user_question_key is None and baseline_current_snapshot and pending_prompts:
             self._last_user_question_key = pending_prompts[0].key
-        else:
-            self._last_user_question_key = None
 
-        revision_getter = getattr(self._task_service, "get_structured_session_cursor", None)
-        if revision_getter is None:
-            self._revision = 0
-            return
-        self._revision = await revision_getter(self._user_id)
+        self._revision = await self._task_service.get_structured_session_cursor(self._user_id)
 
     async def wait_for_update(self, *, timeout_sec: float) -> bool:
-        wait_for_update = getattr(self._task_service, "wait_for_structured_session_update", None)
-        cursor_getter = getattr(self._task_service, "get_structured_session_cursor", None)
-        if wait_for_update is None or cursor_getter is None:
-            await asyncio.sleep(timeout_sec)
-            return True
         current_session = await self._task_service.get_structured_session(self._user_id, log_missing=False)
         current_session_id = current_session.session_id if current_session is not None else None
         if current_session_id != self._current_session_id:
@@ -331,44 +317,36 @@ class StructuredReplyPresenter:
             self._last_pending_permission_key = None
             self._tool_status_by_id = {}
             self._question_keys_by_tool_id = {}
-            self._revision = await cursor_getter(self._user_id)
+            self._revision = await self._task_service.get_structured_session_cursor(self._user_id)
             return True
-        changed = await wait_for_update(
+        changed = await self._task_service.wait_for_structured_session_update(
             user_id=self._user_id,
             since_cursor=self._revision,
             timeout_sec=timeout_sec,
         )
         if changed:
-            self._revision = await cursor_getter(self._user_id)
+            self._revision = await self._task_service.get_structured_session_cursor(self._user_id)
         return changed
 
     async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
-        tool_question_prompts = {
-            tool.tool_use_id: _extract_tool_question_prompts(tool)
-            for tool in snapshot.tool_states
-        }
-        question_cursor_getter = getattr(self._task_service, "get_structured_user_question_cursor", None)
-        if question_cursor_getter is not None:
-            self._last_user_question_key = await question_cursor_getter(self._user_id)
+        tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
+        self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id)
 
         messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput] = []
         pending_question_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
         question_updates = self._collect_user_question_updates(
             snapshot=snapshot,
-            pending_question_prompts=pending_question_prompts,
             tool_question_prompts=tool_question_prompts,
+            pending_question_prompts=pending_question_prompts,
         )
         messages.extend(question_updates)
-        question_acknowledger = getattr(self._task_service, "acknowledge_structured_user_question", None)
-        if question_acknowledger is not None:
-            for output in question_updates:
-                await question_acknowledger(self._user_id, question_key=output.question.key)
+        for output in question_updates:
+            await self._task_service.acknowledge_structured_user_question(self._user_id, question_key=output.question.key)
         messages.extend(self._collect_progress_updates(snapshot=snapshot, tool_question_prompts=tool_question_prompts))
-        acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
         if (
-            snapshot.phase == "waiting_for_approval"
+            snapshot.phase == SessionPhase.WAITING_FOR_APPROVAL.value
             and snapshot.pending_permission_key
             and snapshot.pending_permission_key != self._last_pending_permission_key
             and not pending_question_prompts
@@ -392,12 +370,11 @@ class StructuredReplyPresenter:
                         tool_input=snapshot.pending_permission_tool_input,
                     )
                 )
-            if acknowledger is not None:
-                await acknowledger(
-                    self._user_id,
-                    permission_key=snapshot.pending_permission_key,
-                )
-        elif snapshot.phase != "waiting_for_approval":
+            await self._task_service.acknowledge_structured_reply(
+                self._user_id,
+                permission_key=snapshot.pending_permission_key,
+            )
+        elif snapshot.phase != SessionPhase.WAITING_FOR_APPROVAL.value:
             self._last_pending_permission_key = snapshot.pending_permission_key
 
         reply = await self._collect_reply(task_id=task_id, snapshot=snapshot, log_missing=log_missing)
@@ -436,9 +413,7 @@ class StructuredReplyPresenter:
 
         self._last_structured_turn_id = snapshot.turn_id
         self._structured_reply_emitted_in_run = True
-        acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
-        if acknowledger is not None:
-            await acknowledger(self._user_id, turn_id=snapshot.turn_id)
+        await self._task_service.acknowledge_structured_reply(self._user_id, turn_id=snapshot.turn_id)
         logger.info("[task %s][structured] %s", task_id, snapshot.reply.rstrip("\n"))
         return snapshot.reply
 
@@ -449,7 +424,7 @@ class StructuredReplyPresenter:
         tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
     ) -> list[ProgressUpdateOutput]:
         messages: list[ProgressUpdateOutput] = []
-        if snapshot.phase == "compacting" and self._last_phase != "compacting":
+        if snapshot.phase == SessionPhase.COMPACTING.value and self._last_phase != SessionPhase.COMPACTING.value:
             messages.append(ProgressUpdateOutput(text=build_compacting_progress_message()))
         self._last_phase = snapshot.phase
 
@@ -479,8 +454,8 @@ class StructuredReplyPresenter:
         self,
         *,
         snapshot: _StructuredSnapshot,
-        pending_question_prompts: tuple[UserQuestionPrompt, ...] = (),
         tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
+        pending_question_prompts: tuple[UserQuestionPrompt, ...] = (),
     ) -> list[UserQuestionOutput]:
         messages: list[UserQuestionOutput] = []
         current_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
