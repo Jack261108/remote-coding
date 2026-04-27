@@ -251,7 +251,7 @@ class HookSocketServer:
         for index in range(len(queue) - 1, -1, -1):
             if self._tool_inputs_relaxed_match(event.tool_input, queue[index].tool_input):
                 return index
-        return len(queue) - 1
+        return None
 
     def _tool_inputs_relaxed_match(
         self,

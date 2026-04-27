@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 
 from app.domain.user_question_models import UserQuestionPrompt, extract_user_question_prompts
+from app.domain.session_models import ToolStatus
 from app.services.session_store import parse_user_question_key
 from app.services.task_service import TaskService
 
@@ -240,6 +241,14 @@ def build_user_question_prompt(question: UserQuestionPrompt) -> str:
     return "\n".join(lines)
 
 
+def _extract_tool_question_prompts(tool: _ToolStateSnapshot) -> tuple[UserQuestionPrompt, ...]:
+    return extract_user_question_prompts(
+        tool_use_id=tool.tool_use_id,
+        tool_name=tool.tool_name,
+        tool_input=tool.tool_input,
+    )
+
+
 class StructuredReplyPresenter:
     def __init__(self, *, task_service: TaskService, user_id: int) -> None:
         self._task_service = task_service
@@ -277,21 +286,17 @@ class StructuredReplyPresenter:
             self._last_structured_turn_id = snapshot.turn_id
 
         if baseline_current_snapshot:
+            tool_question_prompts = {
+                tool.tool_use_id: _extract_tool_question_prompts(tool)
+                for tool in snapshot.tool_states
+            }
             self._tool_status_by_id = {tool.tool_use_id: tool.status for tool in snapshot.tool_states}
             self._question_keys_by_tool_id = {
-                tool.tool_use_id: tuple(prompt.key for prompt in extract_user_question_prompts(
-                    tool_use_id=tool.tool_use_id,
-                    tool_name=tool.tool_name,
-                    tool_input=tool.tool_input,
-                ))
-                for tool in snapshot.tool_states
-                if extract_user_question_prompts(
-                    tool_use_id=tool.tool_use_id,
-                    tool_name=tool.tool_name,
-                    tool_input=tool.tool_input,
-                )
+                tool_use_id: tuple(prompt.key for prompt in prompts)
+                for tool_use_id, prompts in tool_question_prompts.items()
+                if prompts
             }
-            pending_prompts = self._extract_pending_user_question_prompts(snapshot)
+            pending_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
             if pending_prompts:
                 self._question_keys_by_tool_id[pending_prompts[0].tool_use_id] = tuple(prompt.key for prompt in pending_prompts)
         else:
@@ -340,19 +345,27 @@ class StructuredReplyPresenter:
     async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
+        tool_question_prompts = {
+            tool.tool_use_id: _extract_tool_question_prompts(tool)
+            for tool in snapshot.tool_states
+        }
         question_cursor_getter = getattr(self._task_service, "get_structured_user_question_cursor", None)
         if question_cursor_getter is not None:
             self._last_user_question_key = await question_cursor_getter(self._user_id)
 
         messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput] = []
-        pending_question_prompts = self._extract_pending_user_question_prompts(snapshot)
-        question_updates = self._collect_user_question_updates(snapshot=snapshot, pending_question_prompts=pending_question_prompts)
+        pending_question_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
+        question_updates = self._collect_user_question_updates(
+            snapshot=snapshot,
+            pending_question_prompts=pending_question_prompts,
+            tool_question_prompts=tool_question_prompts,
+        )
         messages.extend(question_updates)
         question_acknowledger = getattr(self._task_service, "acknowledge_structured_user_question", None)
         if question_acknowledger is not None:
             for output in question_updates:
                 await question_acknowledger(self._user_id, question_key=output.question.key)
-        messages.extend(self._collect_progress_updates(snapshot=snapshot))
+        messages.extend(self._collect_progress_updates(snapshot=snapshot, tool_question_prompts=tool_question_prompts))
         acknowledger = getattr(self._task_service, "acknowledge_structured_reply", None)
         if (
             snapshot.phase == "waiting_for_approval"
@@ -429,7 +442,12 @@ class StructuredReplyPresenter:
         logger.info("[task %s][structured] %s", task_id, snapshot.reply.rstrip("\n"))
         return snapshot.reply
 
-    def _collect_progress_updates(self, *, snapshot: _StructuredSnapshot) -> list[ProgressUpdateOutput]:
+    def _collect_progress_updates(
+        self,
+        *,
+        snapshot: _StructuredSnapshot,
+        tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
+    ) -> list[ProgressUpdateOutput]:
         messages: list[ProgressUpdateOutput] = []
         if snapshot.phase == "compacting" and self._last_phase != "compacting":
             messages.append(ProgressUpdateOutput(text=build_compacting_progress_message()))
@@ -438,23 +456,19 @@ class StructuredReplyPresenter:
         current_status_by_id: dict[str, str | None] = {}
         for tool in snapshot.tool_states:
             current_status_by_id[tool.tool_use_id] = tool.status
-            if extract_user_question_prompts(
-                tool_use_id=tool.tool_use_id,
-                tool_name=tool.tool_name,
-                tool_input=tool.tool_input,
-            ):
+            if tool_question_prompts.get(tool.tool_use_id):
                 continue
-            if tool.status != "running":
+            if tool.status != ToolStatus.RUNNING.value:
                 continue
             previous_status = self._tool_status_by_id.get(tool.tool_use_id)
-            if previous_status == "running":
+            if previous_status == ToolStatus.RUNNING.value:
                 continue
             messages.append(
                 ProgressUpdateOutput(
                     text=build_tool_progress_message(
                         tool_name=tool.tool_name,
                         tool_input=tool.tool_input,
-                        resumed=previous_status == "waiting_for_approval",
+                        resumed=previous_status == ToolStatus.WAITING_FOR_APPROVAL.value,
                     )
                 )
             )
@@ -466,6 +480,7 @@ class StructuredReplyPresenter:
         *,
         snapshot: _StructuredSnapshot,
         pending_question_prompts: tuple[UserQuestionPrompt, ...] = (),
+        tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
     ) -> list[UserQuestionOutput]:
         messages: list[UserQuestionOutput] = []
         current_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
@@ -474,13 +489,9 @@ class StructuredReplyPresenter:
         active_tool_use_id: str | None = pending_question_prompts[0].tool_use_id if pending_question_prompts else None
         if not active_prompt_group:
             for tool in snapshot.tool_states:
-                if tool.status != "running":
+                if tool.status != ToolStatus.RUNNING.value:
                     continue
-                prompts = extract_user_question_prompts(
-                    tool_use_id=tool.tool_use_id,
-                    tool_name=tool.tool_name,
-                    tool_input=tool.tool_input,
-                )
+                prompts = tool_question_prompts.get(tool.tool_use_id, ())
                 if not prompts:
                     continue
                 active_prompt_group = prompts
@@ -508,19 +519,23 @@ class StructuredReplyPresenter:
         self._question_keys_by_tool_id = current_keys_by_tool_id
         return messages
 
-    def _extract_pending_user_question_prompts(self, snapshot: _StructuredSnapshot) -> tuple[UserQuestionPrompt, ...]:
+    def _extract_pending_user_question_prompts(
+        self,
+        snapshot: _StructuredSnapshot,
+        *,
+        tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
+    ) -> tuple[UserQuestionPrompt, ...]:
         if not snapshot.pending_permission_tool_use_id:
             for tool in snapshot.tool_states:
-                if tool.status != "waiting_for_approval":
+                if tool.status != ToolStatus.WAITING_FOR_APPROVAL.value:
                     continue
-                prompts = extract_user_question_prompts(
-                    tool_use_id=tool.tool_use_id,
-                    tool_name=tool.tool_name,
-                    tool_input=tool.tool_input,
-                )
+                prompts = tool_question_prompts.get(tool.tool_use_id, ())
                 if prompts:
                     return prompts
             return ()
+        prompts = tool_question_prompts.get(snapshot.pending_permission_tool_use_id)
+        if prompts is not None:
+            return prompts
         return extract_user_question_prompts(
             tool_use_id=snapshot.pending_permission_tool_use_id,
             tool_name=snapshot.pending_permission_tool_name,
