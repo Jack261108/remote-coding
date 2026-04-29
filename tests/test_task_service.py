@@ -635,9 +635,10 @@ async def test_create_and_run_fails_when_tmux_ensure_fails(tmp_path: Path) -> No
     factory.ensure_terminal = failed_ensure_terminal
     factory.ensure_claude_interactive_session = failed_ensure_terminal
 
+    task_store = MemoryTaskStore()
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
-        task_store=MemoryTaskStore(),
+        task_store=task_store,
         session_service=make_file_backed_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(2),
@@ -645,6 +646,12 @@ async def test_create_and_run_fails_when_tmux_ensure_fails(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="tmux 会话创建失败"):
         await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+
+    tasks = await task_store.iter_all()
+    assert len(tasks) == 1
+    assert tasks[0].status == TaskStatus.FAILED
+    assert tasks[0].failure_reason == "tmux 会话创建失败: no server running"
+    assert tasks[0].ended_at is not None
 
 
 @pytest.mark.asyncio
@@ -1143,7 +1150,7 @@ async def test_respond_to_pending_permission_prefers_expected_tool_use_id_over_c
 
 
 @pytest.mark.asyncio
-async def test_respond_to_pending_permission_uses_button_tool_use_id_when_structured_state_missing(tmp_path: Path) -> None:
+async def test_respond_to_pending_permission_rejects_button_tool_use_id_when_structured_state_missing(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
     session_service = make_file_backed_session_service(tmp_path)
@@ -1174,9 +1181,9 @@ async def test_respond_to_pending_permission_uses_button_tool_use_id_when_struct
         expected_tool_use_id="tool-1",
     )
 
-    assert ok is True
-    assert text == "已批准权限请求"
-    assert hook_socket_server.calls == [("tool-1", "allow", None)]
+    assert ok is False
+    assert text == "这个权限按钮已经过期，请等待最新的权限请求"
+    assert hook_socket_server.calls == []
 
 
 @pytest.mark.asyncio
@@ -1663,6 +1670,61 @@ async def test_acknowledge_structured_user_question_marks_target_state_by_questi
 
 
 @pytest.mark.asyncio
+async def test_acknowledge_structured_user_question_ignores_cross_user_question_key(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-ask", workdir=str(tmp_path))
+    await session_service.switch(
+        user_id=2,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=2, claude_session_id="claude-session-other", workdir=str(tmp_path))
+
+    ask_state = structured_store.get_or_create(
+        session_id="claude-session-ask",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        user_id=1,
+        claude_session_id="claude-session-ask",
+    )
+    ask_state.phase = SessionPhase.PROCESSING
+    ask_state.tool_calls["tool-ask-1"] = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={"questions": [{"question": "第一题", "options": [{"label": "A"}], "multiSelect": False}]},
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(ask_state)
+
+    await service.acknowledge_structured_user_question(user_id=2, question_key="tool-ask-1:0")
+
+    updated_ask = structured_store.get("claude-session-ask")
+    assert updated_ask is not None
+    assert updated_ask.structured_user_question_key is None
+
+
+@pytest.mark.asyncio
 async def test_get_structured_user_question_cursor_uses_draft_target_when_current_session_drifts(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
@@ -1942,6 +2004,7 @@ async def test_answer_pending_user_question_option_uses_button_tool_use_id_when_
         session_id="claude-session-ask",
         workdir=active_workdir,
         terminal_id=expected_terminal_id(user_id=1, workdir=active_workdir),
+        user_id=1,
         claude_session_id="claude-session-ask",
     )
     active_state.phase = SessionPhase.PROCESSING
@@ -2016,6 +2079,7 @@ async def test_submit_pending_user_question_multi_select_uses_button_tool_use_id
         session_id="claude-session-ask-multi",
         workdir=active_workdir,
         terminal_id=expected_terminal_id(user_id=1, workdir=active_workdir),
+        user_id=1,
         claude_session_id="claude-session-ask-multi",
     )
     active_state.phase = SessionPhase.PROCESSING

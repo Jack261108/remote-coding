@@ -33,6 +33,8 @@ dist/
 venv/
 env/
 ENV/
+!deploy/env/
+!deploy/env/.env.example
 
 # IDE/editor
 .vscode/

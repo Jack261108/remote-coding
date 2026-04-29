@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -10,6 +12,7 @@ from app.domain.models import CLIEvent, EventType
 class SubprocessRunner:
     def __init__(self, kill_grace_sec: float = 3.0) -> None:
         self._kill_grace_sec = kill_grace_sec
+        self._use_process_group = os.name == "posix" and hasattr(os, "killpg")
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._cancel_requested: set[str] = set()
         self._lock = asyncio.Lock()
@@ -32,6 +35,10 @@ class SubprocessRunner:
 
         queue: asyncio.Queue[CLIEvent | None] = asyncio.Queue()
 
+        popen_kwargs: dict[str, Any] = {}
+        if self._use_process_group:
+            popen_kwargs["start_new_session"] = True
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -39,6 +46,7 @@ class SubprocessRunner:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **popen_kwargs,
             )
         except Exception as exc:
             yield CLIEvent(type=EventType.FAILED, task_id=task_id, error=f"启动失败: {exc}")
@@ -128,14 +136,14 @@ class SubprocessRunner:
         if process.returncode is not None:
             return False
 
-        process.terminate()
+        await self._terminate_then_kill(process)
         return True
 
     async def _terminate_then_kill(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
             return
 
-        process.terminate()
+        self._send_signal(process, signal.SIGTERM)
         try:
             await asyncio.wait_for(process.wait(), timeout=self._kill_grace_sec)
             return
@@ -143,8 +151,32 @@ class SubprocessRunner:
             pass
 
         if process.returncode is None:
-            process.kill()
+            self._kill(process)
             await process.wait()
+
+    def _send_signal(self, process: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            if self._use_process_group:
+                os.killpg(process.pid, sig)
+            elif sig == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+        except ProcessLookupError:
+            return
+
+    def _kill(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            if self._use_process_group:
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            return
 
     async def _pump_stream(
         self,

@@ -372,8 +372,66 @@ async def test_permission_callback_handler_rejects_stale_button(tmp_path) -> Non
 
     assert hook_socket_server.calls == []
     assert message.answers == ["权限操作失败: 这个权限按钮已经过期，请等待最新的权限请求"]
-    assert message.edited_reply_markups == [None]
+    assert message.edited_reply_markups == []
     assert callback.answers == [("这个权限按钮已经过期，请等待最新的权限请求", True)]
+
+
+@pytest.mark.asyncio
+async def test_permission_callback_handler_rejects_cross_user_button(tmp_path) -> None:
+    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    factory = StubFactory(StubAdapter(events=[]))
+    factory._tmux_runner = tmux_runner
+    factory._claude_tmux_enabled = True
+    factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
+    hook_socket_server = DummyHookSocketServer()
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=SessionService(MemorySessionStore()),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+        structured_session_store=tmux_runner._session_store,
+        hook_socket_server=hook_socket_server,
+    )
+    await service._session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+    await service._session_service.switch(
+        user_id=2,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await service.bind_claude_session(user_id=2, claude_session_id="claude-session-2", workdir=str(tmp_path))
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id="user_1_36d00faeb25f",
+    )
+    state.pending_permission = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    tmux_runner._session_store._persist(state)
+
+    router = DummyRouter()
+    register_permission_handlers(router, task_service=service)
+    callback_handler = router.callback_handlers[0]
+    message = DummyMessage("权限请求", user_id=2)
+    callback = DummyCallbackQuery("perm:allow:tool-1", user_id=2, message=message)
+
+    await callback_handler(callback)
+
+    assert hook_socket_server.calls == []
+    assert message.answers == ["权限操作失败: 这个权限按钮已经过期，请等待最新的权限请求"]
+    assert message.edited_reply_markups == []
+    assert callback.answers == [("这个权限按钮已经过期，请等待最新的权限请求", True)]
+    assert tmux_runner._session_store.get("claude-session-1").pending_permission is not None
 
 
 @pytest.mark.asyncio
@@ -444,6 +502,80 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
     assert "问题: 2/2" in message.answers[1]
     assert callback.answers == [("已记录选择: 当前相关改动(推荐)", False)]
     assert tmux_runner._session_store.get("claude-session-1").structured_user_question_key == "tool-ask-1:1"
+
+
+@pytest.mark.asyncio
+async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path) -> None:
+    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    factory = StubFactory(StubAdapter(events=[]))
+    factory._tmux_runner = tmux_runner
+    factory._claude_tmux_enabled = True
+    factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=SessionService(MemorySessionStore()),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+        structured_session_store=tmux_runner._session_store,
+    )
+    await service._session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+    await service._session_service.switch(
+        user_id=2,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await service.bind_claude_session(user_id=2, claude_session_id="claude-session-2", workdir=str(tmp_path))
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id="user_1_36d00faeb25f",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-1"] = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理范围",
+                    "question": "你说的范围我理解为这三块之一，具体按哪种处理？",
+                    "options": [
+                        {"label": "当前相关改动(推荐)", "description": "只处理相关已改动文件"},
+                        {"label": "三个目录全部", "description": "范围非常大"},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    tmux_runner._session_store._persist(state)
+
+    router = DummyRouter()
+    register_user_question_handlers(router, task_service=service)
+    callback_handler = router.callback_handlers[0]
+    message = DummyMessage("需要你选择", user_id=2)
+    callback = DummyCallbackQuery("ask:tool-ask-1:0:0", user_id=2, message=message)
+
+    await callback_handler(callback)
+
+    assert factory._interactive_inputs == []
+    assert factory._user_question_option_actions == []
+    assert message.answers == ["选择失败: 当前没有待处理的选择题"]
+    assert message.edited_reply_markups == []
+    assert callback.answers == [("当前没有待处理的选择题", True)]
+    assert tmux_runner._session_store.get("claude-session-1").structured_user_question_key is None
 
 
 @pytest.mark.asyncio

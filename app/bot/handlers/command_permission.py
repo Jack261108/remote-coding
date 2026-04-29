@@ -79,11 +79,11 @@ def register_permission_handlers(router, *, task_service: TaskService):
             expected_tool_use_id=tool_use_id,
         )
         if callback.message is not None:
-            try:
-                await callback.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                logger.exception("failed to clear permission inline keyboard", extra={"user_id": user_id, "tool_use_id": tool_use_id})
             if ok:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    logger.exception("failed to clear permission inline keyboard", extra={"user_id": user_id, "tool_use_id": tool_use_id})
                 await callback.message.answer(text)
             else:
                 await callback.message.answer(f"权限操作失败: {text}")

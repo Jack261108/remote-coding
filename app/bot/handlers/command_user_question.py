@@ -229,18 +229,18 @@ def register_user_question_handlers(router, *, task_service: TaskService):
             option_index=parsed.option_index if parsed.option_index is not None else -1,
         )
         if callback.message is not None:
-            try:
-                await callback.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                logger.exception(
-                    "failed to clear user question inline keyboard",
-                    extra={
-                        "user_id": user_id,
-                        "tool_use_id": parsed.tool_use_id,
-                        "question_index": parsed.question_index,
-                    },
-                )
             if ok:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    logger.exception(
+                        "failed to clear user question inline keyboard",
+                        extra={
+                            "user_id": user_id,
+                            "tool_use_id": parsed.tool_use_id,
+                            "question_index": parsed.question_index,
+                        },
+                    )
                 await callback.message.answer(text)
                 await _acknowledge_and_send_next_prompt(message=callback.message, task_service=task_service, user_id=user_id, next_prompt=next_prompt)
             else:

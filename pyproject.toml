@@ -17,7 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3.3,<9",
-  "pytest-asyncio>=0.24.0,<1"
+  "pytest-asyncio>=0.24.0,<1",
+  "ruff>=0.8,<1",
+  "mypy>=1.13,<2"
 ]
 
 [tool.setuptools.packages.find]
@@ -26,3 +28,21 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/bot/router.py" = ["E731"]
+"tests/test_claude_chat_flow.py" = ["F401"]
+"tests/test_session_store.py" = ["F841"]
+
+[tool.mypy]
+python_version = "3.11"
+show_error_codes = true
+pretty = true
+warn_unused_ignores = true

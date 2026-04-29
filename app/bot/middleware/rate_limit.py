@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message
 
 
 class RateLimitMiddleware(BaseMiddleware):
@@ -18,8 +18,8 @@ class RateLimitMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[Message, dict], Awaitable],
-        event: Message,
+        handler: Callable[[Any, dict], Awaitable],
+        event: Any,
         data: dict,
     ):
         user = event.from_user

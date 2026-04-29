@@ -145,6 +145,10 @@ class TaskService:
                 interactive=interactive,
             )
             if not ensured:
+                record.status = TaskStatus.FAILED
+                record.ended_at = utc_now()
+                record.failure_reason = err
+                await self._task_store.save(record)
                 raise ValueError(err)
 
         async def event_stream() -> AsyncIterator[CLIEvent]:
@@ -330,6 +334,27 @@ class TaskService:
     def _is_claude_session_id(self, session_id: str | None) -> bool:
         return is_claude_session_id(session_id)
 
+    async def _is_state_owned_by_user(self, *, state: SessionState | None, user_id: int) -> bool:
+        if state is None:
+            return False
+        if state.user_id is not None:
+            return state.user_id == user_id
+
+        session = await self._session_service.get(user_id)
+        if session is None or session.provider != "claude_code":
+            return False
+
+        if session.claude_session_id:
+            if state.session_id == session.claude_session_id or state.claude_session_id == session.claude_session_id:
+                return True
+
+        if session.terminal_id and state.terminal_id and session.terminal_id == state.terminal_id:
+            session_workdir = str(Path(session.workdir).resolve()) if session.workdir else None
+            state_workdir = str(Path(state.workdir).resolve()) if state.workdir else None
+            return session_workdir == state_workdir
+
+        return False
+
     async def get_structured_session_cursor(self, user_id: int) -> int:
         if self._structured_session_store is None:
             return 0
@@ -371,7 +396,7 @@ class TaskService:
         draft = self._user_question_drafts.get(user_id)
         if draft is not None:
             targeted_state = self._structured_session_store.find_by_active_user_question_tool_use_id(draft.tool_use_id)
-            if targeted_state is not None:
+            if targeted_state is not None and await self._is_state_owned_by_user(state=targeted_state, user_id=user_id):
                 return self._structured_session_store.get_structured_user_question_cursor(targeted_state.session_id)
         return None
 
@@ -379,13 +404,17 @@ class TaskService:
         if self._structured_session_store is None or question_key is None:
             return
         state = self._structured_session_store.find_by_active_user_question_key(question_key)
+        if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+            state = None
         if state is None:
             draft = self._user_question_drafts.get(user_id)
             if draft is not None and draft.tool_use_id:
                 state = self._structured_session_store.find_by_active_user_question_tool_use_id(draft.tool_use_id)
+                if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+                    state = None
         if state is None:
             state = await self.get_structured_session(user_id, log_missing=False)
-        if state is None:
+        if state is None or not await self._is_state_owned_by_user(state=state, user_id=user_id):
             return
         self._structured_session_store.mark_structured_user_question_emitted(state.session_id, question_key=question_key)
 
@@ -783,37 +812,27 @@ class TaskService:
         expected_tool_use_id: str | None = None,
     ) -> tuple[SessionState | None, tuple[UserQuestionPrompt, ...]]:
         state = None
-        current_state = None
         if expected_tool_use_id and self._structured_session_store is not None:
-            state = self._structured_session_store.find_by_active_user_question_tool_use_id(expected_tool_use_id)
+            candidate = self._structured_session_store.find_by_active_user_question_tool_use_id(expected_tool_use_id)
+            if candidate is not None and await self._is_state_owned_by_user(state=candidate, user_id=user_id):
+                state = candidate
         if state is None:
             state = await self.get_structured_session(user_id, log_missing=False)
+            if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+                state = None
         current_state = state
         prompts = (
             self._extract_user_question_prompts_for_tool_use_id(state, tool_use_id=expected_tool_use_id)
             if expected_tool_use_id
             else self._extract_active_user_questions(state)
         )
-        if not prompts and expected_tool_use_id and self._structured_session_store is not None:
-            targeted_state = self._structured_session_store.find_by_active_user_question_tool_use_id(expected_tool_use_id)
-            if targeted_state is not None and targeted_state is not state:
-                state = targeted_state
-                prompts = self._extract_user_question_prompts_for_tool_use_id(state, tool_use_id=expected_tool_use_id)
-        if not prompts and expected_tool_use_id is not None:
-            if current_state is None:
-                current_state = await self.get_structured_session(user_id, log_missing=False)
-            if current_state is not None and current_state is not state:
-                current_prompts = self._extract_active_user_questions(current_state)
-                if current_prompts:
-                    state = current_state
-                    prompts = current_prompts
-            elif current_state is not None:
-                prompts = self._extract_active_user_questions(current_state)
+        if not prompts and expected_tool_use_id is not None and current_state is not None:
+            prompts = self._extract_active_user_questions(current_state)
         if not prompts and expected_tool_use_id is None and self._structured_session_store is not None:
             draft = self._user_question_drafts.get(user_id)
             if draft is not None:
                 draft_state = self._structured_session_store.find_by_active_user_question_tool_use_id(draft.tool_use_id)
-                if draft_state is not None:
+                if draft_state is not None and await self._is_state_owned_by_user(state=draft_state, user_id=user_id):
                     state = draft_state
                     prompts = self._extract_user_question_prompts_for_tool_use_id(state, tool_use_id=draft.tool_use_id)
         return state, prompts
@@ -853,11 +872,11 @@ class TaskService:
         draft.selected_option_indexes_by_question.pop(prompt.question_index, None)
         if remaining:
             next_prompt = remaining[0]
-            self._mark_user_question_prompt_emitted(state=state, prompt=next_prompt)
+            await self._mark_user_question_prompt_emitted(user_id=user_id, state=state, prompt=next_prompt)
             return True, f"已记录选择: {normalized_answer}", next_prompt
 
         if prompt.options and not draft.use_text_transport:
-            self._mark_user_question_completed(state=state, tool_use_id=prompt.tool_use_id)
+            await self._mark_user_question_completed(user_id=user_id, state=state, tool_use_id=prompt.tool_use_id)
             self._user_question_drafts.pop(user_id, None)
             return True, "已提交你的选择，Claude 继续执行中", None
 
@@ -872,19 +891,19 @@ class TaskService:
             workdir=state.workdir if state is not None else None,
         )
         if sent:
-            self._mark_user_question_completed(state=state, tool_use_id=prompt.tool_use_id)
+            await self._mark_user_question_completed(user_id=user_id, state=state, tool_use_id=prompt.tool_use_id)
             self._user_question_drafts.pop(user_id, None)
             return True, "已提交你的选择，Claude 继续执行中", None
         return False, text, None
 
-    def _mark_user_question_completed(self, *, state: SessionState | None, tool_use_id: str) -> None:
+    async def _mark_user_question_completed(self, *, user_id: int, state: SessionState | None, tool_use_id: str) -> None:
         if self._structured_session_store is None or not tool_use_id:
             return
 
         target_state = self._structured_session_store.find_by_active_user_question_tool_use_id(tool_use_id)
         if target_state is None and state is not None:
             target_state = self._structured_session_store.get(state.session_id)
-        if target_state is None:
+        if target_state is None or not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
             return
 
         self._structured_session_store.process(
@@ -895,16 +914,20 @@ class TaskService:
             )
         )
 
-    def _mark_user_question_prompt_emitted(self, *, state: SessionState | None, prompt: UserQuestionPrompt) -> None:
+    async def _mark_user_question_prompt_emitted(self, *, user_id: int, state: SessionState | None, prompt: UserQuestionPrompt) -> None:
         if self._structured_session_store is None:
             return
 
         target_state = self._structured_session_store.find_by_active_user_question_key(prompt.key)
+        if target_state is not None and not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
+            target_state = None
         if target_state is None and prompt.tool_use_id:
             target_state = self._structured_session_store.find_by_active_user_question_tool_use_id(prompt.tool_use_id)
+            if target_state is not None and not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
+                target_state = None
         if target_state is None and state is not None:
             target_state = self._structured_session_store.get(state.session_id)
-        if target_state is None:
+        if target_state is None or not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
             return
 
         self._structured_session_store.mark_structured_user_question_emitted(
@@ -982,6 +1005,8 @@ class TaskService:
         state: SessionState | None,
     ) -> tuple[str | None, str | None, str | None]:
         if state is not None and state.terminal_id and state.workdir:
+            if not await self._is_state_owned_by_user(state=state, user_id=user_id):
+                return None, None, "当前没有可用的 Claude 持久终端"
             return state.terminal_id, state.workdir, None
 
         session = await self._session_service.get(user_id)
@@ -1124,23 +1149,25 @@ class TaskService:
         state = None
         if expected_tool_use_id is not None:
             state = self._structured_session_store.find_by_pending_tool_use_id(expected_tool_use_id)
+            if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+                return False, "这个权限按钮已经过期，请等待最新的权限请求"
         if state is None:
             state = await self.get_structured_session(user_id, log_missing=False)
+            if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+                state = None
         pending = state.pending_permission if state is not None else None
-        if pending is None and expected_tool_use_id is None:
+        if pending is None:
+            if expected_tool_use_id is not None:
+                return False, "这个权限按钮已经过期，请等待最新的权限请求"
             return False, "当前没有待处理的权限请求"
-        if expected_tool_use_id is not None and pending is not None and pending.tool_use_id != expected_tool_use_id:
+        if expected_tool_use_id is not None and pending.tool_use_id != expected_tool_use_id:
             return False, "这个权限按钮已经过期，请等待最新的权限请求"
-        tool_use_id = pending.tool_use_id if pending is not None else expected_tool_use_id
-        if not tool_use_id:
-            return False, "当前没有待处理的权限请求"
+        tool_use_id = pending.tool_use_id
         sent = await self._hook_socket_server.respond_to_permission(tool_use_id=tool_use_id, decision=decision, reason=reason)
         if not sent:
-            if pending is None:
-                return False, "当前没有待处理的权限请求"
             return False, "待处理权限请求已失效，请等待 Claude 重新发起"
-        tool_name = pending.tool_name if pending is not None else None
-        if state is not None and pending is not None:
+        tool_name = pending.tool_name
+        if state is not None:
             event_type = SessionEventType.PERMISSION_APPROVED if decision == "allow" else SessionEventType.PERMISSION_DENIED
             updated = self._structured_session_store.process(
                 SessionEvent(

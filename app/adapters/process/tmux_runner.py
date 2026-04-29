@@ -8,7 +8,7 @@ from pathlib import Path
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType
-from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase
+from app.domain.session_models import SessionEvent, SessionEventType, SessionState
 from app.services.session_store import SessionStore, is_claude_session_id
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"

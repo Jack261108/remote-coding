@@ -595,18 +595,18 @@ class AppContainer:
             self.structured_session_store.process(event)
 
     def wire(self) -> None:
-        self.dispatcher.message.middleware(
-            AuthMiddleware(
-                self.settings.allowed_user_id_set,
-                allow_all_users=self.settings.allow_all_users,
-            )
+        auth_middleware = AuthMiddleware(
+            self.settings.allowed_user_id_set,
+            allow_all_users=self.settings.allow_all_users,
         )
-        self.dispatcher.message.middleware(
-            RateLimitMiddleware(
-                limit=self.settings.rate_limit_max_requests,
-                window_sec=self.settings.rate_limit_window_sec,
-            )
+        rate_limit_middleware = RateLimitMiddleware(
+            limit=self.settings.rate_limit_max_requests,
+            window_sec=self.settings.rate_limit_window_sec,
         )
+        self.dispatcher.message.middleware(auth_middleware)
+        self.dispatcher.callback_query.middleware(auth_middleware)
+        self.dispatcher.message.middleware(rate_limit_middleware)
+        self.dispatcher.callback_query.middleware(rate_limit_middleware)
 
         router = create_router(
             settings=self.settings,
