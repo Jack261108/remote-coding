@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.adapters.claude.paths import ClaudePaths
+from app.domain.hook_models import validate_path_component, validate_session_id
 from app.domain.models import utc_now
 from app.domain.session_models import ConversationTurn, SubagentToolCall, ToolCallRecord, ToolStatus
 
@@ -113,13 +114,16 @@ class ClaudeJSONLParser:
         self._states.pop(session_id, None)
 
     def session_file_path(self, *, session_id: str, cwd: str) -> Path:
+        safe_session_id = validate_session_id(session_id)
         project_dir = cwd.replace("/", "-").replace(".", "-")
-        return self._paths.projects_dir / project_dir / f"{session_id}.jsonl"
+        return self._paths.projects_dir / project_dir / f"{safe_session_id}.jsonl"
 
     def subagent_file_path(self, *, session_id: str, agent_id: str, cwd: str) -> Path:
+        safe_session_id = validate_session_id(session_id)
+        safe_agent_id = validate_path_component(agent_id, field_name="agent_id")
         project_dir = cwd.replace("/", "-").replace(".", "-")
-        nested = self._paths.projects_dir / project_dir / session_id / "subagents" / f"agent-{agent_id}.jsonl"
-        flat = self._paths.projects_dir / project_dir / f"agent-{agent_id}.jsonl"
+        nested = self._paths.projects_dir / project_dir / safe_session_id / "subagents" / f"agent-{safe_agent_id}.jsonl"
+        flat = self._paths.projects_dir / project_dir / f"agent-{safe_agent_id}.jsonl"
         return nested if nested.exists() else flat
 
     def parse_subagent_tools(self, *, session_id: str, agent_id: str, cwd: str) -> list[SubagentToolCall]:

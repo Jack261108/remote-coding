@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.user_question_models import extract_user_question_prompts
-from app.domain.hook_models import HookEvent
+from app.domain.hook_models import HookEvent, validate_session_id
 from app.domain.session_models import (
     ConversationTurn,
     ParserCheckpoint,
@@ -299,6 +299,7 @@ class SessionStore:
         terminal_id: str | None = None,
         claude_session_id: str | None = None,
     ) -> SessionState:
+        session_id = validate_session_id(session_id)
         state = self._states.get(session_id)
         resolved_claude_session_id = claude_session_id or (session_id if self._is_claude_session_id(session_id) else None)
         if state is not None:
@@ -349,6 +350,7 @@ class SessionStore:
         return state
 
     def get(self, session_id: str) -> SessionState | None:
+        session_id = validate_session_id(session_id)
         state = self._states.get(session_id)
         if state is not None:
             return state
@@ -358,6 +360,7 @@ class SessionStore:
         return self._hydrate_and_cache_state(loaded)
 
     def get_cursor(self, session_id: str) -> int:
+        session_id = validate_session_id(session_id)
         state = self._states.get(session_id)
         if state is not None:
             return state.revision
@@ -438,12 +441,14 @@ class SessionStore:
         return await self.wait_for_publish(session_id, since_cursor=since_revision, timeout_sec=timeout_sec)
 
     def save_checkpoint(self, session_id: str, checkpoint: ParserCheckpoint) -> SessionState:
+        session_id = validate_session_id(session_id)
         state = self._states[session_id]
         state.checkpoint = checkpoint
         self._persist(state, publish=False)
         return state
 
     def process(self, event: SessionEvent) -> SessionState:
+        event.session_id = validate_session_id(event.session_id)
         state = self._states.get(event.session_id)
         if state is None:
             state = self.get_or_create(session_id=event.session_id)
@@ -494,8 +499,7 @@ class SessionStore:
         elif event.type == SessionEventType.PERMISSION_DENIED:
             self._process_permission_decision(state, event, approved=False)
         elif event.type == SessionEventType.PERMISSION_RESPONSE_FAILED:
-            self._interrupt_session_tools(state, event.at)
-            state.interrupted = True
+            self._process_permission_response_failed(state, event)
 
         self._persist(state)
         return state
@@ -677,6 +681,21 @@ class SessionStore:
             state.pending_permission = None
         state.interrupted = not approved
         self._move_to_next_phase(state, default=SessionPhase.PROCESSING if approved else SessionPhase.IDLE)
+
+    def _process_permission_response_failed(self, state: SessionState, event: SessionEvent) -> None:
+        tool_use_id = str(event.payload.get("tool_use_id", ""))
+        if not tool_use_id:
+            state.interrupted = self._interrupt_session_tools(state, event.at)
+            self._move_to_next_phase(state, default=SessionPhase.WAITING_FOR_INPUT)
+            return
+        tool = state.tool_calls.get(tool_use_id)
+        if tool is not None and tool.status in {ToolStatus.RUNNING, ToolStatus.WAITING_FOR_APPROVAL}:
+            tool.status = ToolStatus.INTERRUPTED
+            tool.completed_at = tool.completed_at or event.at
+            state.interrupted = True
+        if state.pending_permission and state.pending_permission.tool_use_id == tool_use_id:
+            state.pending_permission = None
+        self._move_to_next_phase(state, default=SessionPhase.WAITING_FOR_INPUT)
 
     def _move_to_next_phase(self, state: SessionState, *, default: SessionPhase) -> None:
         next_pending = None

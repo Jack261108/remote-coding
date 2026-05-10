@@ -473,6 +473,37 @@ async def test_handle_hook_event_runs_bind_before_dispatch_and_sync(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_handle_hook_event_rejects_workdir_outside_allowlist(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    seen: list[str] = []
+
+    async def fake_bind(event: HookEvent) -> None:
+        seen.append(f"bind:{event.session_id}")
+
+    async def fake_dispatch(event) -> None:
+        seen.append(f"dispatch:{event.session_id}")
+
+    def fake_schedule(session_id: str, cwd: str) -> None:
+        seen.append(f"sync:{session_id}:{cwd}")
+
+    monkeypatch.setattr(container, "_bind_hook_session", fake_bind)
+    monkeypatch.setattr(container, "_dispatch_session_event", fake_dispatch)
+    monkeypatch.setattr(container, "_schedule_jsonl_sync", fake_schedule)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="claude-session-outside",
+            cwd=str(tmp_path.parent / f"{tmp_path.name}-outside"),
+            event="Notification",
+            status="running",
+        )
+    )
+
+    assert seen == []
+    assert container.structured_session_store.get("claude-session-outside") is None
+
+
+@pytest.mark.asyncio
 async def test_handle_hook_event_debounces_jsonl_sync(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     seen: list[tuple[str, str]] = []

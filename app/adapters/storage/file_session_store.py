@@ -5,6 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from app.domain.hook_models import validate_session_id
 from app.domain.models import SessionContext
 from app.domain.session_models import ConversationTurn, ParserCheckpoint, SessionState
 
@@ -27,7 +28,11 @@ class FileSessionStore:
         tmp_path.replace(path)
 
     def session_dir(self, session_id: str) -> Path:
-        path = self._base_dir / session_id
+        safe_session_id = validate_session_id(session_id)
+        base_dir = self._base_dir.resolve()
+        path = (base_dir / safe_session_id).resolve()
+        if path != base_dir and base_dir not in path.parents:
+            raise ValueError("session_id 路径非法")
         path.mkdir(parents=True, exist_ok=True)
         return path
 

@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def is_workdir_allowed(workdir: str, allowed_workdirs: Sequence[str]) -> bool:
+    try:
+        target = Path(workdir).resolve()
+        for allowed in allowed_workdirs:
+            allowed_path = Path(allowed).resolve()
+            if target == allowed_path or allowed_path in target.parents:
+                return True
+    except (OSError, ValueError):
+        return False
+    return False
 
 
 class Settings(BaseSettings):
@@ -32,6 +45,9 @@ class Settings(BaseSettings):
     claude_config_dir: str | None = Field(None, alias="CLAUDE_CONFIG_DIR")
     claude_hook_socket_path: str = Field("/tmp/remote-coding-claude.sock", alias="CLAUDE_HOOK_SOCKET_PATH")
     claude_install_hooks: bool = Field(True, alias="CLAUDE_INSTALL_HOOKS")
+    claude_hook_max_message_bytes: int = Field(1_048_576, alias="CLAUDE_HOOK_MAX_MESSAGE_BYTES")
+    claude_hook_pending_permission_ttl_sec: int = Field(600, alias="CLAUDE_HOOK_PENDING_PERMISSION_TTL_SEC")
+    claude_hook_max_pending_permissions: int = Field(64, alias="CLAUDE_HOOK_MAX_PENDING_PERMISSIONS")
     claude_jsonl_sync_debounce_ms: int = Field(100, alias="CLAUDE_JSONL_SYNC_DEBOUNCE_MS")
     claude_periodic_recheck_ms: int = Field(500, alias="CLAUDE_PERIODIC_RECHECK_MS")
     codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
@@ -126,6 +142,9 @@ class Settings(BaseSettings):
         "task_output_char_limit",
         "tg_request_timeout_sec",
         "tg_polling_retry_delay_sec",
+        "claude_hook_max_message_bytes",
+        "claude_hook_pending_permission_ttl_sec",
+        "claude_hook_max_pending_permissions",
         "claude_jsonl_sync_debounce_ms",
         "claude_periodic_recheck_ms",
     )

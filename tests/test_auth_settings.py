@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
@@ -60,6 +61,9 @@ def test_settings_parse_claude_hook_fields() -> None:
             "CLAUDE_CONFIG_DIR": " ~/.config/claude ",
             "CLAUDE_HOOK_SOCKET_PATH": "/tmp/remote-coding.sock",
             "CLAUDE_INSTALL_HOOKS": "true",
+            "CLAUDE_HOOK_MAX_MESSAGE_BYTES": 2048,
+            "CLAUDE_HOOK_PENDING_PERMISSION_TTL_SEC": 30,
+            "CLAUDE_HOOK_MAX_PENDING_PERMISSIONS": 4,
             "CLAUDE_JSONL_SYNC_DEBOUNCE_MS": 250,
             "CLAUDE_PERIODIC_RECHECK_MS": 750,
             "CODEX_CLI_BIN": "codex",
@@ -71,8 +75,34 @@ def test_settings_parse_claude_hook_fields() -> None:
     assert settings.claude_config_dir == "~/.config/claude"
     assert settings.claude_hook_socket_path == "/tmp/remote-coding.sock"
     assert settings.claude_install_hooks is True
+    assert settings.claude_hook_max_message_bytes == 2048
+    assert settings.claude_hook_pending_permission_ttl_sec == 30
+    assert settings.claude_hook_max_pending_permissions == 4
     assert settings.claude_jsonl_sync_debounce_ms == 250
     assert settings.claude_periodic_recheck_ms == 750
+
+
+def test_settings_rejects_non_positive_claude_hook_limits() -> None:
+    base_payload = {
+        "TG_BOT_TOKEN": "token",
+        "TG_ALLOWED_USER_IDS": "1",
+        "DEFAULT_PROVIDER": "claude_code",
+        "DEFAULT_TIMEOUT_SEC": 10,
+        "MAX_CONCURRENT_TASKS": 1,
+        "CLAUDE_TMUX_MODE": False,
+        "CLAUDE_CLI_BIN": "claude",
+        "CODEX_CLI_BIN": "codex",
+        "GEMINI_CLI_BIN": "gemini",
+        "ALLOWED_WORKDIRS": "/tmp",
+    }
+
+    for field in (
+        "CLAUDE_HOOK_MAX_MESSAGE_BYTES",
+        "CLAUDE_HOOK_PENDING_PERMISSION_TTL_SEC",
+        "CLAUDE_HOOK_MAX_PENDING_PERMISSIONS",
+    ):
+        with pytest.raises(ValidationError):
+            Settings.model_validate({**base_payload, field: 0})
 
 
 def test_env_example_matches_supported_claude_settings() -> None:
@@ -82,6 +112,9 @@ def test_env_example_matches_supported_claude_settings() -> None:
     assert "CLAUDE_CONFIG_DIR=" in content
     assert "CLAUDE_HOOK_SOCKET_PATH=/tmp/remote-coding-claude.sock" in content
     assert "CLAUDE_INSTALL_HOOKS=true" in content
+    assert "CLAUDE_HOOK_MAX_MESSAGE_BYTES=1048576" in content
+    assert "CLAUDE_HOOK_PENDING_PERMISSION_TTL_SEC=600" in content
+    assert "CLAUDE_HOOK_MAX_PENDING_PERMISSIONS=64" in content
     assert "CLAUDE_JSONL_SYNC_DEBOUNCE_MS=100" in content
     assert "CLAUDE_PERIODIC_RECHECK_MS=500" in content
 

@@ -4,14 +4,17 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.config.settings import is_workdir_allowed
 from app.domain.hook_models import HookEvent, HookResponse, PendingPermission
+from app.domain.models import utc_now
 
 HookEventHandler = Callable[[HookEvent], Awaitable[None] | None]
 PermissionFailureHandler = Callable[[str, str], Awaitable[None] | None]
@@ -26,12 +29,31 @@ class _CachedToolUseId:
 
 
 class HookSocketServer:
-    def __init__(self, socket_path: str) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        *,
+        allowed_workdirs: Sequence[str] | None = None,
+        max_message_bytes: int = 1_048_576,
+        pending_permission_ttl_sec: int = 600,
+        max_pending_permissions: int = 64,
+    ) -> None:
+        if max_message_bytes <= 0:
+            raise ValueError("max_message_bytes 必须大于 0")
+        if pending_permission_ttl_sec <= 0:
+            raise ValueError("pending_permission_ttl_sec 必须大于 0")
+        if max_pending_permissions <= 0:
+            raise ValueError("max_pending_permissions 必须大于 0")
         self._socket_path = Path(socket_path)
+        self._allowed_workdirs = list(allowed_workdirs) if allowed_workdirs is not None else None
+        self._max_message_bytes = max_message_bytes
+        self._pending_permission_ttl_sec = pending_permission_ttl_sec
+        self._max_pending_permissions = max_pending_permissions
         self._server: asyncio.AbstractServer | None = None
         self._event_handler: HookEventHandler | None = None
         self._permission_failure_handler: PermissionFailureHandler | None = None
         self._pending_permissions: dict[str, PendingPermission] = {}
+        self._pending_expiration_tasks: dict[str, asyncio.Task[None]] = {}
         self._tool_use_id_cache: dict[str, list[_CachedToolUseId]] = {}
         self._lock = asyncio.Lock()
 
@@ -47,7 +69,12 @@ class HookSocketServer:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
         with suppress(FileNotFoundError):
             self._socket_path.unlink()
-        self._server = await asyncio.start_unix_server(self._handle_client, path=str(self._socket_path))
+        previous_umask = os.umask(0o177)
+        try:
+            self._server = await asyncio.start_unix_server(self._handle_client, path=str(self._socket_path))
+        finally:
+            os.umask(previous_umask)
+        self._socket_path.chmod(0o600)
 
     async def stop(self) -> None:
         server = self._server
@@ -57,29 +84,42 @@ class HookSocketServer:
             await server.wait_closed()
         async with self._lock:
             pending = list(self._pending_permissions.values())
+            expiration_tasks = list(self._pending_expiration_tasks.values())
             self._pending_permissions.clear()
+            self._pending_expiration_tasks.clear()
             self._tool_use_id_cache.clear()
-        for item in pending:
-            item.writer.close()
-            with suppress(Exception):
-                await item.writer.wait_closed()
+        for task in expiration_tasks:
+            task.cancel()
+        for task in expiration_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        await self._close_pending_permissions(pending, emit_failure=False)
         with suppress(FileNotFoundError):
             self._socket_path.unlink()
 
     async def respond_to_permission(self, *, tool_use_id: str, decision: str, reason: str | None = None) -> bool:
+        expired: list[PendingPermission]
         async with self._lock:
+            expired = self._pop_expired_pending_permissions_locked()
             pending = self._pending_permissions.pop(tool_use_id, None)
+            if pending is not None:
+                self._cancel_pending_expiration_locked(tool_use_id)
+        await self._expire_pending_permissions(expired)
         if pending is None:
             return False
         await self._write_response(pending=pending, decision=decision, reason=reason)
         return True
 
     async def respond_to_permission_by_session(self, *, session_id: str, decision: str, reason: str | None = None) -> bool:
+        expired: list[PendingPermission]
         async with self._lock:
+            expired = self._pop_expired_pending_permissions_locked()
             candidates = [item for item in self._pending_permissions.values() if item.session_id == session_id]
             pending = max(candidates, key=lambda item: item.received_at, default=None)
             if pending is not None:
                 self._pending_permissions.pop(pending.tool_use_id, None)
+                self._cancel_pending_expiration_locked(pending.tool_use_id)
+        await self._expire_pending_permissions(expired)
         if pending is None:
             return False
         await self._write_response(pending=pending, decision=decision, reason=reason)
@@ -87,45 +127,64 @@ class HookSocketServer:
 
     async def cancel_pending_permissions(self, *, session_id: str) -> None:
         async with self._lock:
+            expired = self._pop_expired_pending_permissions_locked()
             matching = [item for item in self._pending_permissions.values() if item.session_id == session_id]
             for item in matching:
                 self._pending_permissions.pop(item.tool_use_id, None)
-        for item in matching:
-            item.writer.close()
-            with suppress(Exception):
-                await item.writer.wait_closed()
+                self._cancel_pending_expiration_locked(item.tool_use_id)
+        await self._expire_pending_permissions(expired)
+        await self._close_pending_permissions(matching, emit_failure=False)
 
     async def has_pending_permission(self, *, session_id: str) -> bool:
         async with self._lock:
-            return any(item.session_id == session_id for item in self._pending_permissions.values())
+            expired = self._pop_expired_pending_permissions_locked()
+            result = any(item.session_id == session_id for item in self._pending_permissions.values())
+        await self._expire_pending_permissions(expired)
+        return result
 
     async def get_pending_permission(self, *, session_id: str) -> tuple[str | None, str | None, dict[str, Any] | None] | None:
         async with self._lock:
+            expired = self._pop_expired_pending_permissions_locked()
+            found = None
             for item in self._pending_permissions.values():
                 if item.session_id == session_id:
-                    return item.event.tool, item.tool_use_id, item.event.tool_input
-        return None
+                    found = (item.event.tool, item.tool_use_id, item.event.tool_input)
+                    break
+        await self._expire_pending_permissions(expired)
+        return found
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        raw = await reader.read()
+        raw = await reader.read(self._max_message_bytes + 1)
         if not raw:
-            writer.close()
-            with suppress(Exception):
-                await writer.wait_closed()
+            await self._close_writer(writer)
+            return
+        if len(raw) > self._max_message_bytes:
+            logger.warning("hook message rejected: too large", extra={"max_message_bytes": self._max_message_bytes})
+            await self._close_writer(writer)
             return
 
         try:
-            event = HookEvent.from_dict(json.loads(raw.decode("utf-8")))
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("hook payload 必须为对象")
+            event = HookEvent.from_dict(payload)
         except (UnicodeDecodeError, json.JSONDecodeError, KeyError, ValueError):
-            writer.close()
-            with suppress(Exception):
-                await writer.wait_closed()
+            await self._close_writer(writer)
+            return
+
+        if not self._is_event_workdir_allowed(event):
+            logger.warning(
+                "hook event rejected by workdir allowlist",
+                extra={"session_id": event.session_id, "cwd": event.cwd, "event": event.event},
+            )
+            await self._close_writer(writer)
             return
 
         if event.event == "PreToolUse" and event.tool_use_id:
             await self._cache_tool_use_id(event)
         if event.event == "SessionEnd":
             await self._cleanup_cache(event.session_id)
+            await self.cancel_pending_permissions(session_id=event.session_id)
 
         keep_open = False
         emit_event = event
@@ -145,34 +204,64 @@ class HookSocketServer:
                         "synthetic_tool_use_id": fallback_tool_use_id,
                     },
                 )
+
             async with self._lock:
-                self._pending_permissions[emit_event.tool_use_id or ""] = PendingPermission(
-                    session_id=emit_event.session_id,
-                    tool_use_id=emit_event.tool_use_id or "",
-                    writer=writer,
-                    event=emit_event,
+                expired = self._pop_expired_pending_permissions_locked()
+                if len(self._pending_permissions) >= self._max_pending_permissions:
+                    over_limit = True
+                    previous = None
+                else:
+                    over_limit = False
+                    tool_id = emit_event.tool_use_id or ""
+                    previous = self._pending_permissions.pop(tool_id, None)
+                    if previous is not None:
+                        self._cancel_pending_expiration_locked(tool_id)
+                    self._pending_permissions[tool_id] = PendingPermission(
+                        session_id=emit_event.session_id,
+                        tool_use_id=tool_id,
+                        writer=writer,
+                        event=emit_event,
+                    )
+                    self._schedule_pending_expiration_locked(tool_id)
+            await self._expire_pending_permissions(expired)
+            if over_limit:
+                logger.warning(
+                    "permission request rejected: pending limit reached",
+                    extra={"session_id": emit_event.session_id, "max_pending_permissions": self._max_pending_permissions},
                 )
+                await self._write_response(
+                    pending=PendingPermission(
+                        session_id=emit_event.session_id,
+                        tool_use_id=emit_event.tool_use_id or "",
+                        writer=writer,
+                        event=emit_event,
+                    ),
+                    decision="deny",
+                    reason="pending permission limit reached",
+                )
+                return
+            if previous is not None:
+                await self._expire_pending_permissions([previous], reason="permission request superseded")
             keep_open = True
 
         if not keep_open:
-            writer.close()
-            with suppress(Exception):
-                await writer.wait_closed()
+            await self._close_writer(writer)
 
         await self._emit_event(emit_event)
 
-    async def _write_response(self, *, pending: PendingPermission, decision: str, reason: str | None) -> None:
+    async def _write_response(self, *, pending: PendingPermission, decision: str, reason: str | None) -> bool:
         response = HookResponse(decision=decision, reason=reason)
         data = json.dumps(response.to_dict(), ensure_ascii=False).encode("utf-8")
+        success = True
         try:
             pending.writer.write(data)
             await pending.writer.drain()
         except Exception:
+            success = False
             await self._emit_permission_failure(pending.session_id, pending.tool_use_id)
         finally:
-            pending.writer.close()
-            with suppress(Exception):
-                await pending.writer.wait_closed()
+            await self._close_writer(pending.writer)
+        return success
 
     async def _emit_event(self, event: HookEvent) -> None:
         if self._event_handler is None:
@@ -187,6 +276,60 @@ class HookSocketServer:
         result = self._permission_failure_handler(session_id, tool_use_id)
         if inspect.isawaitable(result):
             await result
+
+    async def _close_pending_permissions(self, items: list[PendingPermission], *, emit_failure: bool) -> None:
+        for item in items:
+            await self._close_writer(item.writer)
+            if emit_failure:
+                await self._emit_permission_failure(item.session_id, item.tool_use_id)
+
+    async def _expire_pending_permissions(self, items: list[PendingPermission], *, reason: str = "permission request expired") -> None:
+        for item in items:
+            success = await self._write_response(pending=item, decision="deny", reason=reason)
+            if success:
+                await self._emit_permission_failure(item.session_id, item.tool_use_id)
+
+    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+        with suppress(Exception):
+            await writer.wait_closed()
+
+    def _pop_expired_pending_permissions_locked(self) -> list[PendingPermission]:
+        now = utc_now()
+        expired = [
+            item
+            for item in self._pending_permissions.values()
+            if (now - item.received_at).total_seconds() >= self._pending_permission_ttl_sec
+        ]
+        for item in expired:
+            self._pending_permissions.pop(item.tool_use_id, None)
+            self._cancel_pending_expiration_locked(item.tool_use_id)
+        return expired
+
+    def _schedule_pending_expiration_locked(self, tool_use_id: str) -> None:
+        self._cancel_pending_expiration_locked(tool_use_id)
+        self._pending_expiration_tasks[tool_use_id] = asyncio.create_task(self._expire_pending_permission_later(tool_use_id))
+
+    def _cancel_pending_expiration_locked(self, tool_use_id: str) -> None:
+        task = self._pending_expiration_tasks.pop(tool_use_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def _expire_pending_permission_later(self, tool_use_id: str) -> None:
+        try:
+            await asyncio.sleep(self._pending_permission_ttl_sec)
+            async with self._lock:
+                pending = self._pending_permissions.pop(tool_use_id, None)
+                self._pending_expiration_tasks.pop(tool_use_id, None)
+            if pending is not None:
+                await self._expire_pending_permissions([pending])
+        except asyncio.CancelledError:
+            raise
+
+    def _is_event_workdir_allowed(self, event: HookEvent) -> bool:
+        if self._allowed_workdirs is None:
+            return True
+        return is_workdir_allowed(event.cwd, self._allowed_workdirs)
 
     async def _cache_tool_use_id(self, event: HookEvent) -> None:
         key = self._session_tool_cache_key(event)

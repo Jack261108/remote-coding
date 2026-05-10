@@ -15,13 +15,17 @@ def _socket_path() -> Path:
     return Path("/tmp") / f"rc-hook-{uuid.uuid4().hex}.sock"
 
 
-async def _send_event(socket_path, payload: dict) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+async def _send_raw(socket_path, payload: bytes) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     reader, writer = await asyncio.open_unix_connection(str(socket_path))
-    writer.write(json.dumps(payload).encode("utf-8"))
+    writer.write(payload)
     await writer.drain()
     if writer.can_write_eof():
         writer.write_eof()
     return reader, writer
+
+
+async def _send_event(socket_path, payload: dict) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    return await _send_raw(socket_path, json.dumps(payload).encode("utf-8"))
 
 
 @pytest.mark.asyncio
@@ -397,3 +401,210 @@ async def test_hook_socket_server_emits_permission_failure_when_writer_breaks(tm
     await server.stop()
 
     assert reader.at_eof() or failures == [("s1", "tool-1")]
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_sets_socket_permissions(tmp_path) -> None:
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+
+    async def on_event(event: HookEvent) -> None:
+        return None
+
+    await server.start(on_event)
+    try:
+        assert socket_path.exists()
+        assert socket_path.stat().st_mode & 0o777 == 0o600
+    finally:
+        await server.stop()
+
+    assert not socket_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_rejects_invalid_hook_payloads(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+
+    await server.start(on_event)
+    invalid_payloads = [
+        {"session_id": "../evil", "cwd": "/tmp/project", "event": "SessionStart", "status": "starting"},
+        {"session_id": "s1", "cwd": "relative/path", "event": "SessionStart", "status": "starting"},
+        {"session_id": "s1", "cwd": "/tmp/project", "event": "Unknown", "status": "starting"},
+        {"session_id": "s1", "cwd": "/tmp/project", "event": "SessionStart", "status": "unknown"},
+        {"session_id": "s1", "cwd": "/tmp/project", "event": "SessionStart", "status": "starting", "pid": "123"},
+    ]
+    try:
+        for payload in invalid_payloads:
+            reader, writer = await _send_event(socket_path, payload)
+            assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+            writer.close()
+            await writer.wait_closed()
+    finally:
+        await server.stop()
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_rejects_oversized_message(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path), max_message_bytes=32)
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+
+    await server.start(on_event)
+    try:
+        reader, writer = await _send_raw(socket_path, b'{"session_id":"s1","cwd":"/tmp/project","event":"SessionStart","status":"starting"}')
+        assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_rejects_workdir_outside_allowlist(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    server = HookSocketServer(str(socket_path), allowed_workdirs=[str(allowed)])
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+        delivered.set()
+
+    await server.start(on_event)
+    try:
+        reader, writer = await _send_event(
+            socket_path,
+            {"session_id": "s1", "cwd": str(allowed), "event": "SessionStart", "status": "starting"},
+        )
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        assert await reader.read() == b""
+        writer.close()
+        await writer.wait_closed()
+
+        reader, writer = await _send_event(
+            socket_path,
+            {"session_id": "s2", "cwd": str(outside), "event": "SessionStart", "status": "starting"},
+        )
+        assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+    assert [event.session_id for event in seen] == ["s1"]
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_expires_pending_permission(tmp_path) -> None:
+    failures: list[tuple[str, str]] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path), pending_permission_ttl_sec=1)
+
+    async def on_event(event: HookEvent) -> None:
+        if event.event == "PermissionRequest":
+            delivered.set()
+
+    async def on_failure(session_id: str, tool_use_id: str) -> None:
+        failures.append((session_id, tool_use_id))
+
+    await server.start(on_event, on_failure)
+    try:
+        reader, writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-ttl",
+            },
+        )
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+    assert failures == [("s1", "tool-ttl")]
+    assert json.loads(response.decode("utf-8"))["hookSpecificOutput"]["decision"] == {
+        "behavior": "deny",
+        "message": "permission request expired",
+    }
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_rejects_permission_when_pending_limit_reached(tmp_path) -> None:
+    seen: list[str | None] = []
+    first_delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path), max_pending_permissions=1)
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event.tool_use_id)
+        if event.tool_use_id == "tool-1":
+            first_delivered.set()
+
+    await server.start(on_event)
+    try:
+        first_reader, first_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+        await asyncio.wait_for(first_delivered.wait(), timeout=1)
+
+        second_reader, second_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_use_id": "tool-2",
+            },
+        )
+        second_response = await asyncio.wait_for(second_reader.read(), timeout=1)
+        second_writer.close()
+        await second_writer.wait_closed()
+        assert json.loads(second_response.decode("utf-8"))["hookSpecificOutput"]["decision"] == {
+            "behavior": "deny",
+            "message": "pending permission limit reached",
+        }
+        assert await server.get_pending_permission(session_id="s1") == ("Bash", "tool-1", {"command": "pwd"})
+
+        assert await server.respond_to_permission(tool_use_id="tool-1", decision="allow") is True
+        assert await asyncio.wait_for(first_reader.read(), timeout=1)
+        first_writer.close()
+        await first_writer.wait_closed()
+    finally:
+        await server.stop()
+
+    assert seen == ["tool-1"]

@@ -10,7 +10,7 @@ from pathlib import Path
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.storage.memory import MemoryTaskStore
-from app.config.settings import Settings
+from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import (
     CLIEvent,
     EventType,
@@ -1266,9 +1266,4 @@ class TaskService:
             logger.error("task completed with error", extra=payload)
 
     def _is_workdir_allowed(self, workdir: str) -> bool:
-        target = Path(workdir).resolve()
-        for allowed in self._settings.allowed_workdirs:
-            allowed_path = Path(allowed).resolve()
-            if target == allowed_path or allowed_path in target.parents:
-                return True
-        return False
+        return is_workdir_allowed(workdir, self._settings.allowed_workdirs)

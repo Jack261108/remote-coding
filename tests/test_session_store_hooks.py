@@ -1,8 +1,27 @@
 from __future__ import annotations
 
+import pytest
+
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolStatus
 from app.services.session_store import SessionStore
+
+
+def test_file_session_store_rejects_path_traversal_session_id(tmp_path) -> None:
+    store = FileSessionStore(str(tmp_path))
+
+    with pytest.raises(ValueError):
+        store.raw_transcript_path("../evil")
+
+
+def test_session_store_rejects_invalid_session_id(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+
+    with pytest.raises(ValueError):
+        store.get_or_create(session_id="../evil", workdir="/tmp/project")
+
+    with pytest.raises(ValueError):
+        store.process(SessionEvent(session_id="../evil", type=SessionEventType.SESSION_STARTED))
 
 
 def test_session_store_tracks_permission_from_hook_events(tmp_path) -> None:
@@ -57,6 +76,57 @@ def test_session_store_tracks_permission_from_hook_events(tmp_path) -> None:
     assert state.phase == SessionPhase.PROCESSING
     assert state.pending_permission is None
     assert state.tool_calls["tool-1"].status == ToolStatus.RUNNING
+
+
+def test_session_store_permission_response_failed_only_interrupts_matching_tool(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="s1", workdir="/tmp/project")
+
+    for tool_use_id in ("tool-1", "tool-2"):
+        store.process(
+            SessionEvent(
+                session_id="s1",
+                type=SessionEventType.HOOK_RECEIVED,
+                payload={
+                    "session_id": "s1",
+                    "cwd": "/tmp/project",
+                    "event": "PreToolUse",
+                    "status": "running_tool",
+                    "tool": "Bash",
+                    "tool_input": {"command": tool_use_id},
+                    "tool_use_id": tool_use_id,
+                },
+            )
+        )
+        store.process(
+            SessionEvent(
+                session_id="s1",
+                type=SessionEventType.HOOK_RECEIVED,
+                payload={
+                    "session_id": "s1",
+                    "cwd": "/tmp/project",
+                    "event": "PermissionRequest",
+                    "status": "waiting_for_approval",
+                    "tool": "Bash",
+                    "tool_input": {"command": tool_use_id},
+                    "tool_use_id": tool_use_id,
+                },
+            )
+        )
+
+    state = store.process(
+        SessionEvent(
+            session_id="s1",
+            type=SessionEventType.PERMISSION_RESPONSE_FAILED,
+            payload={"tool_use_id": "tool-1"},
+        )
+    )
+
+    assert state.tool_calls["tool-1"].status == ToolStatus.INTERRUPTED
+    assert state.tool_calls["tool-2"].status == ToolStatus.WAITING_FOR_APPROVAL
+    assert state.pending_permission is not None
+    assert state.pending_permission.tool_use_id == "tool-2"
+    assert state.phase == SessionPhase.WAITING_FOR_APPROVAL
 
 
 def test_session_store_file_synced_preserves_pending_permission_from_hook(tmp_path) -> None:

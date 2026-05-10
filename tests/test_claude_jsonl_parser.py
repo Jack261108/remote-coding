@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.adapters.claude.paths import ClaudePaths
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 
@@ -11,6 +13,17 @@ def _write_jsonl(path, lines: list[dict]) -> None:
     with path.open("a", encoding="utf-8") as fh:
         for line in lines:
             fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+
+def test_claude_jsonl_parser_rejects_path_component_traversal(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+
+    with pytest.raises(ValueError):
+        parser.session_file_path(session_id="../evil", cwd="/tmp/project")
+
+    with pytest.raises(ValueError):
+        parser.subagent_file_path(session_id="session-1", agent_id="../evil", cwd="/tmp/project")
 
 
 def test_claude_jsonl_parser_reads_turns_and_tool_results(tmp_path) -> None:

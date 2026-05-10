@@ -22,7 +22,7 @@ from app.domain.models import TaskStatus
 from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.router import create_router
-from app.config.settings import Settings
+from app.config.settings import Settings, is_workdir_allowed
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.interrupt_watcher import InterruptWatcher
@@ -65,7 +65,13 @@ class AppContainer:
             socket_path=settings.claude_hook_socket_path,
             claude_bin=settings.claude_cli_bin,
         )
-        self.hook_socket_server = HookSocketServer(settings.claude_hook_socket_path)
+        self.hook_socket_server = HookSocketServer(
+            settings.claude_hook_socket_path,
+            allowed_workdirs=settings.allowed_workdirs,
+            max_message_bytes=settings.claude_hook_max_message_bytes,
+            pending_permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
+            max_pending_permissions=settings.claude_hook_max_pending_permissions,
+        )
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
         self.session_context_store = FileSessionContextStore(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
@@ -295,6 +301,12 @@ class AppContainer:
                     self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
 
     async def _handle_hook_event(self, event: HookEvent) -> None:
+        if not is_workdir_allowed(event.cwd, self.settings.allowed_workdirs):
+            logger.warning(
+                "hook event rejected by workdir allowlist",
+                extra={"session_id": event.session_id, "cwd": event.cwd, "event": event.event},
+            )
+            return
         logger.debug(
             "hook event received",
             extra={
