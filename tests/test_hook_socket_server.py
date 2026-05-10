@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
-from app.domain.hook_models import HookEvent
+from app.domain.hook_models import HookEvent, PendingPermission
 
 
 def _socket_path() -> Path:
@@ -26,6 +26,20 @@ async def _send_raw(socket_path, payload: bytes) -> tuple[asyncio.StreamReader, 
 
 async def _send_event(socket_path, payload: dict) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     return await _send_raw(socket_path, json.dumps(payload).encode("utf-8"))
+
+
+class BrokenWriter:
+    def write(self, data: bytes) -> None:
+        return None
+
+    async def drain(self) -> None:
+        raise RuntimeError("writer closed")
+
+    def close(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -237,6 +251,170 @@ async def test_hook_socket_server_relaxed_matches_permission_tool_use_id_when_in
 
 
 @pytest.mark.asyncio
+async def test_hook_socket_server_does_not_match_cache_after_post_tool_use(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+        if event.event == "PermissionRequest":
+            delivered.set()
+
+    await server.start(on_event)
+    try:
+        pre_reader, pre_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+        assert await pre_reader.read() == b""
+        pre_writer.close()
+        await pre_writer.wait_closed()
+
+        post_reader, post_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PostToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+        assert await post_reader.read() == b""
+        post_writer.close()
+        await post_writer.wait_closed()
+
+        reader, writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+            },
+        )
+
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        pending = await server.get_pending_permission(session_id="s1")
+        assert pending is not None
+        _, tool_use_id, _ = pending
+        assert tool_use_id.startswith("hookperm-")
+        assert seen[-1].tool_use_id == tool_use_id
+
+        assert await server.respond_to_permission(tool_use_id=tool_use_id, decision="allow") is True
+        assert await asyncio.wait_for(reader.read(), timeout=1)
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_trims_oldest_cached_tool_use_id_when_limit_reached(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path), max_tool_use_id_cache_entries=1)
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+        if event.event == "PermissionRequest":
+            delivered.set()
+
+    await server.start(on_event)
+    try:
+        first_pre_reader, first_pre_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+        assert await first_pre_reader.read() == b""
+        first_pre_writer.close()
+        await first_pre_writer.wait_closed()
+
+        second_pre_reader, second_pre_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_use_id": "tool-2",
+            },
+        )
+        assert await second_pre_reader.read() == b""
+        second_pre_writer.close()
+        await second_pre_writer.wait_closed()
+
+        first_reader, first_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+            },
+        )
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        first_pending = await server.get_pending_permission(session_id="s1")
+        assert first_pending is not None
+        _, first_tool_use_id, _ = first_pending
+        assert first_tool_use_id.startswith("hookperm-")
+        assert first_tool_use_id != "tool-1"
+        assert await server.respond_to_permission(tool_use_id=first_tool_use_id, decision="allow") is True
+        assert await asyncio.wait_for(first_reader.read(), timeout=1)
+        first_writer.close()
+        await first_writer.wait_closed()
+
+        delivered.clear()
+        second_reader, second_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "ls"},
+            },
+        )
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        assert await server.get_pending_permission(session_id="s1") == ("Bash", "tool-2", {"command": "ls"})
+        assert seen[-1].tool_use_id == "tool-2"
+        assert await server.respond_to_permission(tool_use_id="tool-2", decision="allow") is True
+        assert await asyncio.wait_for(second_reader.read(), timeout=1)
+        second_writer.close()
+        await second_writer.wait_closed()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_hook_socket_server_keeps_permission_request_open_with_synthetic_id_when_cache_missing(tmp_path) -> None:
     seen: list[HookEvent] = []
     delivered = asyncio.Event()
@@ -351,56 +529,35 @@ async def test_hook_socket_server_permission_deny_includes_message(tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_hook_socket_server_emits_permission_failure_when_writer_breaks(tmp_path) -> None:
-    socket_path = _socket_path()
-    server = HookSocketServer(str(socket_path))
+async def test_hook_socket_server_returns_false_and_emits_failure_when_writer_breaks(tmp_path) -> None:
+    server = HookSocketServer(str(_socket_path()))
     failures: list[tuple[str, str]] = []
-    delivered = asyncio.Event()
-
-    async def on_event(event: HookEvent) -> None:
-        if event.event == "PermissionRequest":
-            delivered.set()
 
     async def on_failure(session_id: str, tool_use_id: str) -> None:
         failures.append((session_id, tool_use_id))
 
-    await server.start(on_event, on_failure)
-
-    pre_reader, pre_writer = await _send_event(
-        socket_path,
-        {
-            "session_id": "s1",
-            "cwd": "/tmp/project",
-            "event": "PreToolUse",
-            "status": "running_tool",
-            "tool": "Bash",
-            "tool_input": {"command": "pwd"},
-            "tool_use_id": "tool-1",
-        },
+    server._permission_failure_handler = on_failure
+    event = HookEvent(
+        session_id="s1",
+        cwd="/tmp/project",
+        event="PermissionRequest",
+        status="waiting_for_approval",
+        tool="Bash",
+        tool_input={"command": "pwd"},
+        tool_use_id="tool-1",
     )
-    assert await pre_reader.read() == b""
-    pre_writer.close()
-    await pre_writer.wait_closed()
-
-    reader, writer = await _send_event(
-        socket_path,
-        {
-            "session_id": "s1",
-            "cwd": "/tmp/project",
-            "event": "PermissionRequest",
-            "status": "waiting_for_approval",
-            "tool": "Bash",
-            "tool_input": {"command": "pwd"},
-        },
+    server._pending_permissions["tool-1"] = PendingPermission(
+        session_id="s1",
+        tool_use_id="tool-1",
+        writer=BrokenWriter(),
+        event=event,
     )
-    await asyncio.wait_for(delivered.wait(), timeout=1)
-    writer.close()
-    await writer.wait_closed()
-    await server.respond_to_permission(tool_use_id="tool-1", decision="allow")
-    await asyncio.sleep(0)
-    await server.stop()
 
-    assert reader.at_eof() or failures == [("s1", "tool-1")]
+    sent = await server.respond_to_permission(tool_use_id="tool-1", decision="allow")
+
+    assert sent is False
+    assert failures == [("s1", "tool-1")]
+    assert await server.get_pending_permission(session_id="s1") is None
 
 
 @pytest.mark.asyncio

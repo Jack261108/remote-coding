@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ class _CachedToolUseId:
     exact_key: str
     tool_use_id: str
     tool_input: dict[str, Any] | None
+    cached_at: datetime
 
 
 class HookSocketServer:
@@ -37,6 +39,7 @@ class HookSocketServer:
         max_message_bytes: int = 1_048_576,
         pending_permission_ttl_sec: int = 600,
         max_pending_permissions: int = 64,
+        max_tool_use_id_cache_entries: int = 256,
     ) -> None:
         if max_message_bytes <= 0:
             raise ValueError("max_message_bytes 必须大于 0")
@@ -44,11 +47,14 @@ class HookSocketServer:
             raise ValueError("pending_permission_ttl_sec 必须大于 0")
         if max_pending_permissions <= 0:
             raise ValueError("max_pending_permissions 必须大于 0")
+        if max_tool_use_id_cache_entries <= 0:
+            raise ValueError("max_tool_use_id_cache_entries 必须大于 0")
         self._socket_path = Path(socket_path)
         self._allowed_workdirs = list(allowed_workdirs) if allowed_workdirs is not None else None
         self._max_message_bytes = max_message_bytes
         self._pending_permission_ttl_sec = pending_permission_ttl_sec
         self._max_pending_permissions = max_pending_permissions
+        self._max_tool_use_id_cache_entries = max_tool_use_id_cache_entries
         self._server: asyncio.AbstractServer | None = None
         self._event_handler: HookEventHandler | None = None
         self._permission_failure_handler: PermissionFailureHandler | None = None
@@ -107,8 +113,7 @@ class HookSocketServer:
         await self._expire_pending_permissions(expired)
         if pending is None:
             return False
-        await self._write_response(pending=pending, decision=decision, reason=reason)
-        return True
+        return await self._write_response(pending=pending, decision=decision, reason=reason)
 
     async def respond_to_permission_by_session(self, *, session_id: str, decision: str, reason: str | None = None) -> bool:
         expired: list[PendingPermission]
@@ -122,8 +127,7 @@ class HookSocketServer:
         await self._expire_pending_permissions(expired)
         if pending is None:
             return False
-        await self._write_response(pending=pending, decision=decision, reason=reason)
-        return True
+        return await self._write_response(pending=pending, decision=decision, reason=reason)
 
     async def cancel_pending_permissions(self, *, session_id: str) -> None:
         async with self._lock:
@@ -182,6 +186,8 @@ class HookSocketServer:
 
         if event.event == "PreToolUse" and event.tool_use_id:
             await self._cache_tool_use_id(event)
+        if event.event in {"PostToolUse", "PostToolUseFailure"}:
+            await self._remove_cached_tool_use_id(event)
         if event.event == "SessionEnd":
             await self._cleanup_cache(event.session_id)
             await self.cancel_pending_permissions(session_id=event.session_id)
@@ -335,18 +341,37 @@ class HookSocketServer:
         key = self._session_tool_cache_key(event)
         exact_key = self._exact_cache_key(event)
         async with self._lock:
+            self._prune_tool_use_id_cache_locked()
             self._tool_use_id_cache.setdefault(key, []).append(
                 _CachedToolUseId(
                     exact_key=exact_key,
                     tool_use_id=event.tool_use_id or "",
                     tool_input=event.tool_input,
+                    cached_at=utc_now(),
                 )
             )
+            self._trim_tool_use_id_cache_locked()
+
+    async def _remove_cached_tool_use_id(self, event: HookEvent) -> None:
+        key = self._session_tool_cache_key(event)
+        exact_key = self._exact_cache_key(event)
+        async with self._lock:
+            self._prune_tool_use_id_cache_locked()
+            queue = self._tool_use_id_cache.get(key)
+            if not queue:
+                return
+            if event.tool_use_id:
+                self._tool_use_id_cache[key] = [cached for cached in queue if cached.tool_use_id != event.tool_use_id]
+            else:
+                self._tool_use_id_cache[key] = [cached for cached in queue if cached.exact_key != exact_key]
+            if not self._tool_use_id_cache[key]:
+                self._tool_use_id_cache.pop(key, None)
 
     async def _pop_cached_tool_use_id(self, event: HookEvent) -> str | None:
         key = self._session_tool_cache_key(event)
         exact_key = self._exact_cache_key(event)
         async with self._lock:
+            self._prune_tool_use_id_cache_locked()
             queue = self._tool_use_id_cache.get(key)
             if not queue:
                 return None
@@ -379,6 +404,34 @@ class HookSocketServer:
             keys = [key for key in self._tool_use_id_cache if key.startswith(f"{session_id}:")]
             for key in keys:
                 self._tool_use_id_cache.pop(key, None)
+
+    def _prune_tool_use_id_cache_locked(self) -> None:
+        now = utc_now()
+        for key, queue in list(self._tool_use_id_cache.items()):
+            fresh = [
+                cached
+                for cached in queue
+                if (now - cached.cached_at).total_seconds() < self._pending_permission_ttl_sec
+            ]
+            if fresh:
+                self._tool_use_id_cache[key] = fresh
+            else:
+                self._tool_use_id_cache.pop(key, None)
+
+    def _trim_tool_use_id_cache_locked(self) -> None:
+        overflow = sum(len(queue) for queue in self._tool_use_id_cache.values()) - self._max_tool_use_id_cache_entries
+        while overflow > 0:
+            oldest_key = min(
+                (key for key, queue in self._tool_use_id_cache.items() if queue),
+                key=lambda key: self._tool_use_id_cache[key][0].cached_at,
+                default=None,
+            )
+            if oldest_key is None:
+                return
+            self._tool_use_id_cache[oldest_key].pop(0)
+            if not self._tool_use_id_cache[oldest_key]:
+                self._tool_use_id_cache.pop(oldest_key, None)
+            overflow -= 1
 
     def _session_tool_cache_key(self, event: HookEvent) -> str:
         return f"{event.session_id}:{event.tool or 'unknown'}"
