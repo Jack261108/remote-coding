@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -7,6 +8,7 @@ from app.adapters.cli.factory import CLIAdapterFactory
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState, ToolStatus
 from app.domain.user_question_models import (
     USER_QUESTION_TUI_FALLBACK_ERROR,
+    USER_QUESTION_TUI_FALLBACK_ERROR_PREFIX,
     UserQuestionPrompt,
     compose_user_question_answers,
     extract_user_question_prompts,
@@ -40,9 +42,19 @@ class UserQuestionService:
         self._get_structured_session = get_structured_session
         self._is_state_owned_by_user = is_state_owned_by_user
         self._user_question_drafts: dict[int, _UserQuestionDraft] = {}
+        self._completed_user_question_tool_use_ids_by_user: dict[int, set[str]] = {}
+        self._user_question_locks: dict[int, asyncio.Lock] = {}
 
     def clear_user(self, user_id: int) -> None:
         self._user_question_drafts.pop(user_id, None)
+        self._completed_user_question_tool_use_ids_by_user.pop(user_id, None)
+
+    def _get_user_question_lock(self, *, user_id: int) -> asyncio.Lock:
+        lock = self._user_question_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._user_question_locks[user_id] = lock
+        return lock
 
     async def get_structured_user_question_cursor(self, user_id: int) -> str | None:
         if self._structured_session_store is None:
@@ -90,35 +102,36 @@ class UserQuestionService:
         question_index: int,
         option_index: int,
     ) -> tuple[bool, str, UserQuestionPrompt | None]:
-        state, prompts = await self._resolve_active_user_question_context(
-            user_id=user_id,
-            expected_tool_use_id=tool_use_id,
-        )
-        if not prompts:
-            return False, "当前没有待处理的选择题", None
+        async with self._get_user_question_lock(user_id=user_id):
+            state, prompts = await self._resolve_active_user_question_context(
+                user_id=user_id,
+                expected_tool_use_id=tool_use_id,
+            )
+            if not prompts:
+                return False, "当前没有待处理的选择题", None
 
-        draft, prompt = self._locate_user_question_prompt(
-            user_id=user_id,
-            prompts=prompts,
-            tool_use_id=tool_use_id,
-            question_index=question_index,
-        )
-        if prompt is None:
-            return False, "这个选择按钮已经过期，请等待最新的问题", None
-        if option_index < 0 or option_index >= len(prompt.options):
-            return False, "无效的选项", None
-        if prompt.multi_select:
-            return False, "这个问题需要先勾选，再点击提交选择", None
+            draft, prompt = self._locate_user_question_prompt(
+                user_id=user_id,
+                prompts=prompts,
+                tool_use_id=tool_use_id,
+                question_index=question_index,
+            )
+            if prompt is None:
+                return False, "这个选择按钮已经过期，请等待最新的问题", None
+            if option_index < 0 or option_index >= len(prompt.options):
+                return False, "无效的选项", None
+            if prompt.multi_select:
+                return False, "这个问题需要先勾选，再点击提交选择", None
 
-        answer = prompt.options[option_index].label
-        return await self._submit_user_question_answer(
-            user_id=user_id,
-            draft=draft,
-            prompt=prompt,
-            answer=answer,
-            state=state,
-            selected_option_index=option_index,
-        )
+            answer = prompt.options[option_index].label
+            return await self._submit_user_question_answer(
+                user_id=user_id,
+                draft=draft,
+                prompt=prompt,
+                answer=answer,
+                state=state,
+                selected_option_index=option_index,
+            )
 
     async def toggle_pending_user_question_multi_select_option(
         self,
@@ -128,49 +141,50 @@ class UserQuestionService:
         question_index: int,
         option_index: int,
     ) -> tuple[bool, str, UserQuestionPrompt | None, frozenset[int] | None]:
-        state, prompts = await self._resolve_active_user_question_context(
-            user_id=user_id,
-            expected_tool_use_id=tool_use_id,
-        )
-        if not prompts:
-            return False, "当前没有待处理的选择题", None, None
-
-        draft, prompt = self._locate_user_question_prompt(
-            user_id=user_id,
-            prompts=prompts,
-            tool_use_id=tool_use_id,
-            question_index=question_index,
-        )
-        if prompt is None:
-            return False, "这个选择按钮已经过期，请等待最新的问题", None, None
-        if not prompt.multi_select:
-            return False, "这个问题不是多选题", None, None
-        if option_index < 0 or option_index >= len(prompt.options):
-            return False, "无效的选项", None, None
-
-        if not draft.use_text_transport:
-            toggled, text = await self._toggle_user_question_option_in_terminal(
+        async with self._get_user_question_lock(user_id=user_id):
+            state, prompts = await self._resolve_active_user_question_context(
                 user_id=user_id,
-                state=state,
-                prompt=prompt,
-                option_index=option_index,
+                expected_tool_use_id=tool_use_id,
             )
-            if not toggled:
-                if self._is_user_question_text_transport_fallback_error(text):
-                    draft.use_text_transport = True
-                else:
-                    return False, text, None, None
+            if not prompts:
+                return False, "当前没有待处理的选择题", None, None
 
-        selected_option_indexes = draft.selected_option_indexes_by_question.setdefault(question_index, set())
-        if option_index in selected_option_indexes:
-            selected_option_indexes.remove(option_index)
-            message = f"已取消: {prompt.options[option_index].label}"
-        else:
-            selected_option_indexes.add(option_index)
-            message = f"已选择: {prompt.options[option_index].label}"
-        if not selected_option_indexes:
-            draft.selected_option_indexes_by_question.pop(question_index, None)
-        return True, message, prompt, frozenset(sorted(selected_option_indexes))
+            draft, prompt = self._locate_user_question_prompt(
+                user_id=user_id,
+                prompts=prompts,
+                tool_use_id=tool_use_id,
+                question_index=question_index,
+            )
+            if prompt is None:
+                return False, "这个选择按钮已经过期，请等待最新的问题", None, None
+            if not prompt.multi_select:
+                return False, "这个问题不是多选题", None, None
+            if option_index < 0 or option_index >= len(prompt.options):
+                return False, "无效的选项", None, None
+
+            if not draft.use_text_transport:
+                toggled, text = await self._toggle_user_question_option_in_terminal(
+                    user_id=user_id,
+                    state=state,
+                    prompt=prompt,
+                    option_index=option_index,
+                )
+                if not toggled:
+                    if self._is_user_question_text_transport_fallback_error(text):
+                        draft.use_text_transport = True
+                    else:
+                        return False, text, None, None
+
+            selected_option_indexes = draft.selected_option_indexes_by_question.setdefault(question_index, set())
+            if option_index in selected_option_indexes:
+                selected_option_indexes.remove(option_index)
+                message = f"已取消: {prompt.options[option_index].label}"
+            else:
+                selected_option_indexes.add(option_index)
+                message = f"已选择: {prompt.options[option_index].label}"
+            if not selected_option_indexes:
+                draft.selected_option_indexes_by_question.pop(question_index, None)
+            return True, message, prompt, frozenset(sorted(selected_option_indexes))
 
     async def submit_pending_user_question_multi_select(
         self,
@@ -179,53 +193,54 @@ class UserQuestionService:
         tool_use_id: str,
         question_index: int,
     ) -> tuple[bool, str, UserQuestionPrompt | None]:
-        state, prompts = await self._resolve_active_user_question_context(
-            user_id=user_id,
-            expected_tool_use_id=tool_use_id,
-        )
-        if not prompts:
-            return False, "当前没有待处理的选择题", None
-
-        draft, prompt = self._locate_user_question_prompt(
-            user_id=user_id,
-            prompts=prompts,
-            tool_use_id=tool_use_id,
-            question_index=question_index,
-        )
-        if prompt is None:
-            return False, "这个选择按钮已经过期，请等待最新的问题", None
-        if not prompt.multi_select:
-            return False, "这个问题不是多选题", None
-
-        selected_option_indexes = draft.selected_option_indexes_by_question.get(question_index, set())
-        if not selected_option_indexes:
-            return False, "请至少勾选一项再提交", None
-
-        answer = "、".join(
-            prompt.options[index].label
-            for index in range(len(prompt.options))
-            if index in selected_option_indexes
-        )
-        remaining = self._remaining_user_question_prompts(draft=draft, prompt=prompt)
-        if not draft.use_text_transport:
-            advanced, text = await self._advance_user_question_after_multi_select(
+        async with self._get_user_question_lock(user_id=user_id):
+            state, prompts = await self._resolve_active_user_question_context(
                 user_id=user_id,
-                state=state,
-                final_question=not remaining,
+                expected_tool_use_id=tool_use_id,
             )
-            if not advanced:
-                if self._is_user_question_text_transport_fallback_error(text):
-                    draft.use_text_transport = True
-                else:
-                    return False, text, None
-        return await self._submit_user_question_answer(
-            user_id=user_id,
-            draft=draft,
-            prompt=prompt,
-            answer=answer,
-            state=state,
-            answer_applied_in_terminal=not draft.use_text_transport,
-        )
+            if not prompts:
+                return False, "当前没有待处理的选择题", None
+
+            draft, prompt = self._locate_user_question_prompt(
+                user_id=user_id,
+                prompts=prompts,
+                tool_use_id=tool_use_id,
+                question_index=question_index,
+            )
+            if prompt is None:
+                return False, "这个选择按钮已经过期，请等待最新的问题", None
+            if not prompt.multi_select:
+                return False, "这个问题不是多选题", None
+
+            selected_option_indexes = draft.selected_option_indexes_by_question.get(question_index, set())
+            if not selected_option_indexes:
+                return False, "请至少勾选一项再提交", None
+
+            answer = "、".join(
+                prompt.options[index].label
+                for index in range(len(prompt.options))
+                if index in selected_option_indexes
+            )
+            remaining = self._remaining_user_question_prompts(draft=draft, prompt=prompt)
+            if not draft.use_text_transport:
+                advanced, text = await self._advance_user_question_after_multi_select(
+                    user_id=user_id,
+                    state=state,
+                    final_question=not remaining,
+                )
+                if not advanced:
+                    if self._is_user_question_text_transport_fallback_error(text):
+                        draft.use_text_transport = True
+                    else:
+                        return False, text, None
+            return await self._submit_user_question_answer(
+                user_id=user_id,
+                draft=draft,
+                prompt=prompt,
+                answer=answer,
+                state=state,
+                answer_applied_in_terminal=not draft.use_text_transport,
+            )
 
     async def answer_pending_user_question_text(
         self,
@@ -237,22 +252,23 @@ class UserQuestionService:
         if not answer:
             return False, "回复内容不能为空", None
 
-        state, prompts = await self._resolve_active_user_question_context(user_id=user_id)
-        if not prompts:
-            return False, "当前没有待处理的选择题", None
+        async with self._get_user_question_lock(user_id=user_id):
+            state, prompts = await self._resolve_active_user_question_context(user_id=user_id)
+            if not prompts:
+                return False, "当前没有待处理的选择题", None
 
-        draft = self._ensure_user_question_draft(user_id=user_id, prompts=prompts)
-        prompt = next((item for item in prompts if item.question_index not in draft.answers_by_index), None)
-        if prompt is None:
-            return False, "当前没有待处理的选择题", None
+            draft = self._ensure_user_question_draft(user_id=user_id, prompts=prompts)
+            prompt = next((item for item in prompts if item.question_index not in draft.answers_by_index), None)
+            if prompt is None:
+                return False, "当前没有待处理的选择题", None
 
-        return await self._submit_user_question_answer(
-            user_id=user_id,
-            draft=draft,
-            prompt=prompt,
-            answer=answer,
-            state=state,
-        )
+            return await self._submit_user_question_answer(
+                user_id=user_id,
+                draft=draft,
+                prompt=prompt,
+                answer=answer,
+                state=state,
+            )
 
     def _extract_active_user_questions(self, state: SessionState | None) -> tuple[UserQuestionPrompt, ...]:
         if state is None:
@@ -383,8 +399,10 @@ class UserQuestionService:
         draft = self._ensure_user_question_draft(user_id=user_id, prompts=prompts)
         if not prompts or prompts[0].tool_use_id != tool_use_id:
             return draft, None
-        prompt = next((item for item in prompts if item.question_index == question_index), None)
-        return draft, prompt
+        current_prompt = next((item for item in prompts if item.question_index not in draft.answers_by_index), None)
+        if current_prompt is None or current_prompt.question_index != question_index:
+            return draft, None
+        return draft, current_prompt
 
     async def _resolve_active_user_question_context(
         self,
@@ -409,6 +427,15 @@ class UserQuestionService:
         )
         if not prompts and expected_tool_use_id is not None and current_state is not None:
             prompts = self._extract_active_user_questions(current_state)
+        if prompts and expected_tool_use_id is not None and state is not None:
+            active_prompts = self._extract_active_user_questions(state)
+            if active_prompts and active_prompts[0].tool_use_id != expected_tool_use_id:
+                return state, active_prompts
+            if not active_prompts:
+                return state, ()
+        completed_tool_use_ids = self._completed_user_question_tool_use_ids_by_user.get(user_id, set())
+        if prompts and prompts[0].tool_use_id in completed_tool_use_ids:
+            return state, ()
         if not prompts and expected_tool_use_id is None and self._structured_session_store is not None:
             draft = self._user_question_drafts.get(user_id)
             if draft is not None:
@@ -458,6 +485,7 @@ class UserQuestionService:
 
         if prompt.options and not draft.use_text_transport:
             await self._mark_user_question_completed(user_id=user_id, state=state, tool_use_id=prompt.tool_use_id)
+            self._completed_user_question_tool_use_ids_by_user.setdefault(user_id, set()).add(prompt.tool_use_id)
             self._user_question_drafts.pop(user_id, None)
             return True, "已提交你的选择，Claude 继续执行中", None
 
@@ -473,6 +501,7 @@ class UserQuestionService:
         )
         if sent:
             await self._mark_user_question_completed(user_id=user_id, state=state, tool_use_id=prompt.tool_use_id)
+            self._completed_user_question_tool_use_ids_by_user.setdefault(user_id, set()).add(prompt.tool_use_id)
             self._user_question_drafts.pop(user_id, None)
             return True, "已提交你的选择，Claude 继续执行中", None
         return False, text, None
@@ -518,7 +547,7 @@ class UserQuestionService:
 
     def _is_user_question_text_transport_fallback_error(self, text: str) -> bool:
         normalized = text.strip()
-        return normalized.startswith(USER_QUESTION_TUI_FALLBACK_ERROR)
+        return normalized.startswith(USER_QUESTION_TUI_FALLBACK_ERROR_PREFIX)
 
     def _remaining_user_question_prompts(
         self,
@@ -608,7 +637,10 @@ class UserQuestionService:
         terminal_id, workdir, err = await self._resolve_user_question_terminal(user_id=user_id, state=state)
         if err is not None or terminal_id is None or workdir is None:
             return False, err or "当前没有可用的 Claude 持久终端"
-        return await self._cli_factory.select_claude_user_question_option(
+        select_option = getattr(self._cli_factory, "select_claude_user_question_option", None)
+        if select_option is None:
+            return False, USER_QUESTION_TUI_FALLBACK_ERROR
+        return await select_option(
             terminal_key=terminal_id,
             workdir=workdir,
             option_index=option_index,
@@ -644,7 +676,10 @@ class UserQuestionService:
         terminal_id, workdir, err = await self._resolve_user_question_terminal(user_id=user_id, state=state)
         if err is not None or terminal_id is None or workdir is None:
             return False, err or "当前没有可用的 Claude 持久终端"
-        return await self._cli_factory.answer_claude_user_question_with_text(
+        answer_with_text = getattr(self._cli_factory, "answer_claude_user_question_with_text", None)
+        if answer_with_text is None:
+            return False, USER_QUESTION_TUI_FALLBACK_ERROR
+        return await answer_with_text(
             terminal_key=terminal_id,
             workdir=workdir,
             option_count=option_count,
@@ -662,7 +697,10 @@ class UserQuestionService:
         terminal_id, workdir, err = await self._resolve_user_question_terminal(user_id=user_id, state=state)
         if err is not None or terminal_id is None or workdir is None:
             return False, err or "当前没有可用的 Claude 持久终端"
-        return await self._cli_factory.advance_claude_user_question_after_multi_select(
+        advance_after_multi_select = getattr(self._cli_factory, "advance_claude_user_question_after_multi_select", None)
+        if advance_after_multi_select is None:
+            return False, USER_QUESTION_TUI_FALLBACK_ERROR
+        return await advance_after_multi_select(
             terminal_key=terminal_id,
             workdir=workdir,
             final_question=final_question,
@@ -686,7 +724,10 @@ class UserQuestionService:
                 return False, "当前没有可用的 Claude 持久终端"
             resolved_terminal_id = session.terminal_id
             resolved_workdir = session.workdir
-        return await self._cli_factory.send_claude_interactive_input(
+        send_input = getattr(self._cli_factory, "send_claude_interactive_input", None)
+        if send_input is None:
+            return False, "当前环境不支持 Claude 文本回答"
+        return await send_input(
             terminal_key=resolved_terminal_id,
             workdir=resolved_workdir,
             text=text,

@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import shlex
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from app.adapters.process.tmux_commands import TmuxCommandMixin
 from app.adapters.process.tmux_log import TmuxLogMixin
 from app.adapters.process.tmux_session import TmuxSessionMixin
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.domain.models import CLIEvent, EventType
-from app.domain.session_models import SessionEvent, SessionEventType, SessionState
+from app.domain.models import CLIEvent, EventType, utc_now
+from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionState
 from app.services.session_store import SessionStore, is_claude_session_id
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
@@ -34,6 +35,7 @@ class _TmuxTaskMeta:
     baseline_captured: bool = False
     baseline_offset: int = 0
     baseline_completed_turn_id: str | None = None
+    command_started_at: datetime | None = None
 
 
 class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
@@ -168,6 +170,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                     yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=f"tmux 管道设置失败: {err}")
                     return
                 self._capture_interactive_baseline(meta=meta)
+            meta.command_started_at = utc_now()
             sent, send_err = await self._send_command(meta.session_name, command, workdir=workdir, env=env, interactive=meta.interactive)
             if not sent:
                 yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=send_err)
@@ -204,10 +207,17 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 self._safe_unlink(meta.command_file)
 
     async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
+        watch_started_at = utc_now()
+        completion_started_after = meta.command_started_at or watch_started_at
         position = 0
         latest_completed_turn_id_before_run: str | None = meta.baseline_completed_turn_id
         saw_interactive_progress = False
         structured_offset_before_run = meta.baseline_offset
+        partial = ""
+        timed_out = False
+        exit_code: int | None = None
+        started_at = asyncio.get_running_loop().time()
+        last_partial_emit = started_at
         if meta.interactive:
             state = self._session_store.mark_interactive_turn_processing(
                 terminal_id=meta.terminal_id,
@@ -218,7 +228,15 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             if state is not None:
                 if is_claude_session_id(state.session_id):
                     meta.claude_session_id = state.session_id
-                if not meta.baseline_captured:
+                    if not meta.baseline_captured:
+                        latest_completed_turn = self._latest_completed_assistant_turn(state)
+                        if latest_completed_turn is not None and latest_completed_turn.started_at >= completion_started_after:
+                            exit_code = 0
+                        else:
+                            self._record_interactive_baseline(meta=meta, state=state)
+                            structured_offset_before_run = meta.baseline_offset
+                            latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
+                elif not meta.baseline_captured:
                     structured_offset_before_run = state.checkpoint.last_offset
             position = self._interactive_log_position(meta.log_file)
             if latest_completed_turn_id_before_run is None and not meta.baseline_captured:
@@ -228,13 +246,8 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                     claude_session_id=meta.claude_session_id,
                     fallback_session_id=meta.session_name,
                 )
-        partial = ""
-        timed_out = False
-        exit_code: int | None = None
-        started_at = asyncio.get_running_loop().time()
-        last_partial_emit = started_at
 
-        while True:
+        while exit_code is None:
             now = asyncio.get_running_loop().time()
             text, new_position = self._read_new_text(meta.log_file, position)
             if text:
@@ -267,26 +280,43 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                     fallback_session_id=meta.session_name,
                     require_claude_session=True,
                 )
+                latest_completed_turn = self._latest_completed_assistant_turn(active_state) if active_state is not None else None
+                latest_completed_turn_is_current = latest_completed_turn is not None and (
+                    (meta.command_started_at is not None and latest_completed_turn.started_at >= completion_started_after)
+                    or (meta.command_started_at is None and meta.baseline_captured)
+                    or (meta.command_started_at is None and not meta.baseline_captured and latest_completed_turn.started_at >= watch_started_at)
+                )
+                if active_state is not None and is_claude_session_id(active_state.session_id) and not meta.baseline_captured:
+                    meta.claude_session_id = active_state.session_id
+                    if latest_completed_turn_is_current:
+                        exit_code = 0
+                        break
+                    self._record_interactive_baseline(meta=meta, state=active_state)
+                    structured_offset_before_run = meta.baseline_offset
+                    latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
                 if active_state is not None and active_state.checkpoint.last_offset > structured_offset_before_run:
-                    saw_interactive_progress = True
+                    if latest_completed_turn is not None and not latest_completed_turn_is_current:
+                        structured_offset_before_run = active_state.checkpoint.last_offset
+                        latest_completed_turn_id_before_run = latest_completed_turn.turn_id
+                        meta.baseline_offset = structured_offset_before_run
+                        meta.baseline_completed_turn_id = latest_completed_turn_id_before_run
+                    else:
+                        saw_interactive_progress = True
                 completion_phase = self._session_store.interactive_completion_phase(
                     terminal_id=meta.terminal_id,
                     workdir=meta.workdir,
                     claude_session_id=meta.claude_session_id,
                     fallback_session_id=meta.session_name,
                 )
-                if completion_phase is not None and saw_interactive_progress:
+                if completion_phase is not None and saw_interactive_progress and (latest_completed_turn is None or latest_completed_turn_is_current):
                     exit_code = 0
                     break
-                latest_completed_turn_id = self._session_store.latest_completed_assistant_turn_id(
-                    terminal_id=meta.terminal_id,
-                    workdir=meta.workdir,
-                    claude_session_id=meta.claude_session_id,
-                    fallback_session_id=meta.session_name,
-                )
-                if latest_completed_turn_id and latest_completed_turn_id != latest_completed_turn_id_before_run:
-                    exit_code = 0
-                    break
+                if latest_completed_turn is not None and latest_completed_turn.turn_id != latest_completed_turn_id_before_run:
+                    if latest_completed_turn_is_current:
+                        exit_code = 0
+                        break
+                    latest_completed_turn_id_before_run = latest_completed_turn.turn_id
+                    meta.baseline_completed_turn_id = latest_completed_turn_id_before_run
 
             if meta.exit_file.exists():
                 exit_code = self._read_exit_code(meta.exit_file)
@@ -515,7 +545,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         return lock
 
     def _capture_interactive_baseline(self, *, meta: _TmuxTaskMeta) -> None:
-        meta.baseline_captured = True
         resolved_session_id = self._session_store.resolve_interactive_session_id(
             terminal_id=meta.terminal_id,
             claude_session_id=meta.claude_session_id,
@@ -531,14 +560,22 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             fallback_session_id=meta.session_name,
             require_claude_session=True,
         )
-        if state is None:
+        if state is None or not is_claude_session_id(state.session_id):
+            meta.baseline_captured = False
             meta.baseline_offset = 0
             meta.baseline_completed_turn_id = None
             return
+        meta.claude_session_id = state.session_id
+        self._record_interactive_baseline(meta=meta, state=state)
+
+    def _record_interactive_baseline(self, *, meta: _TmuxTaskMeta, state: SessionState) -> None:
+        meta.baseline_captured = True
         meta.baseline_offset = state.checkpoint.last_offset
-        meta.baseline_completed_turn_id = self._session_store.latest_completed_assistant_turn_id(
-            terminal_id=meta.terminal_id,
-            workdir=meta.workdir,
-            claude_session_id=meta.claude_session_id,
-            fallback_session_id=meta.session_name,
+        latest_completed_turn = self._latest_completed_assistant_turn(state)
+        meta.baseline_completed_turn_id = latest_completed_turn.turn_id if latest_completed_turn is not None else None
+
+    def _latest_completed_assistant_turn(self, state: SessionState) -> ConversationTurn | None:
+        return next(
+            (turn for turn in reversed(state.turns) if turn.role == "assistant" and turn.is_complete),
+            None,
         )

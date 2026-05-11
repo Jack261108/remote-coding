@@ -1239,6 +1239,83 @@ async def test_respond_to_pending_permission_rejects_button_tool_use_id_when_str
 
 
 @pytest.mark.asyncio
+async def test_respond_to_pending_permission_serializes_same_tool_use_id_callbacks(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+
+    class BlockingHookSocketServer(DummyHookSocketServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def respond_to_permission(self, *, tool_use_id: str, decision: str, reason: str | None = None) -> bool:
+            self.calls.append((tool_use_id, decision, reason))
+            if len(self.calls) == 1:
+                self.entered.set()
+                await self.release.wait()
+            return True
+
+    hook_socket_server = BlockingHookSocketServer()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+        hook_socket_server=hook_socket_server,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-permission", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-permission",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-permission",
+    )
+    state.pending_permission = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    structured_store._persist(state)
+
+    first = asyncio.create_task(
+        service.respond_to_pending_permission(
+            user_id=1,
+            decision="allow",
+            expected_tool_use_id="tool-1",
+        )
+    )
+    await hook_socket_server.entered.wait()
+    second = asyncio.create_task(
+        service.respond_to_pending_permission(
+            user_id=1,
+            decision="deny",
+            expected_tool_use_id="tool-1",
+        )
+    )
+    await asyncio.sleep(0.03)
+    calls_during_block = list(hook_socket_server.calls)
+
+    hook_socket_server.release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert calls_during_block == [("tool-1", "allow", None)]
+    assert first_result == (True, "已批准权限请求: Bash")
+    assert second_result == (False, "这个权限按钮已经过期，请等待最新的权限请求")
+    assert hook_socket_server.calls == [("tool-1", "allow", None)]
+
+
+@pytest.mark.asyncio
 async def test_answer_pending_user_question_option_collects_multi_question_answers_and_sends_to_tmux(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
@@ -1392,6 +1469,300 @@ async def test_answer_pending_user_question_option_rejects_stale_button(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_answer_pending_user_question_option_rejects_older_active_tool_button(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-old"] = ToolCallRecord(
+        tool_use_id="tool-ask-old",
+        name="AskUserQuestion",
+        input={"questions": [{"question": "旧问题", "options": [{"label": "旧选项"}], "multiSelect": False}]},
+        status=ToolStatus.RUNNING,
+        started_at=utc_now() - timedelta(minutes=1),
+    )
+    state.tool_calls["tool-ask-new"] = ToolCallRecord(
+        tool_use_id="tool-ask-new",
+        name="AskUserQuestion",
+        input={"questions": [{"question": "新问题", "options": [{"label": "新选项"}], "multiSelect": False}]},
+        status=ToolStatus.RUNNING,
+        started_at=utc_now(),
+    )
+    structured_store._persist(state)
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1,
+        tool_use_id="tool-ask-old",
+        question_index=0,
+        option_index=0,
+    )
+
+    assert ok is False
+    assert text == "这个选择按钮已经过期，请等待最新的问题"
+    assert next_prompt is None
+    assert factory._user_question_option_actions == []
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_user_question_option_rejects_already_answered_question_button(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-old-button"] = ToolCallRecord(
+        tool_use_id="tool-ask-old-button",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {"question": "第一题", "options": [{"label": "A"}, {"label": "B"}], "multiSelect": False},
+                {"question": "第二题", "options": [{"label": "C"}, {"label": "D"}], "multiSelect": False},
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(state)
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1,
+        tool_use_id="tool-ask-old-button",
+        question_index=0,
+        option_index=0,
+    )
+
+    assert ok is True
+    assert text == "已记录选择: A"
+    assert next_prompt is not None
+    assert next_prompt.question_index == 1
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1,
+        tool_use_id="tool-ask-old-button",
+        question_index=0,
+        option_index=1,
+    )
+
+    assert ok is False
+    assert text == "这个选择按钮已经过期，请等待最新的问题"
+    assert next_prompt is None
+    assert factory._user_question_option_actions == [
+        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_user_question_option_serializes_same_user_and_tool_callbacks(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    option_actions: list[tuple[str, str, int, bool]] = []
+
+    async def blocking_select(*, terminal_key: str, workdir: str, option_index: int, submit_after: bool = False) -> tuple[bool, str]:
+        option_actions.append((terminal_key, workdir, option_index, submit_after))
+        if len(option_actions) == 1:
+            entered.set()
+            await release.wait()
+        return True, ""
+
+    factory.select_claude_user_question_option = blocking_select
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-concurrent"] = ToolCallRecord(
+        tool_use_id="tool-ask-concurrent",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {"question": "第一题", "options": [{"label": "A"}, {"label": "B"}], "multiSelect": False},
+                {"question": "第二题", "options": [{"label": "C"}, {"label": "D"}], "multiSelect": False},
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(state)
+
+    first = asyncio.create_task(
+        service.answer_pending_user_question_option(
+            user_id=1,
+            tool_use_id="tool-ask-concurrent",
+            question_index=0,
+            option_index=0,
+        )
+    )
+    await entered.wait()
+    second = asyncio.create_task(
+        service.answer_pending_user_question_option(
+            user_id=1,
+            tool_use_id="tool-ask-concurrent",
+            question_index=0,
+            option_index=1,
+        )
+    )
+    await asyncio.sleep(0.03)
+
+    assert option_actions == [
+        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)
+    ]
+
+    release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert first_result[0] is True
+    assert first_result[2] is not None
+    assert second_result == (False, "这个选择按钮已经过期，请等待最新的问题", None)
+    assert option_actions == [
+        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_user_question_text_serializes_with_option_callback(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    option_actions: list[tuple[str, str, int, bool]] = []
+
+    async def blocking_select(*, terminal_key: str, workdir: str, option_index: int, submit_after: bool = False) -> tuple[bool, str]:
+        option_actions.append((terminal_key, workdir, option_index, submit_after))
+        entered.set()
+        await release.wait()
+        return True, ""
+
+    factory.select_claude_user_question_option = blocking_select
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-text-race"] = ToolCallRecord(
+        tool_use_id="tool-ask-text-race",
+        name="AskUserQuestion",
+        input={"questions": [{"question": "第一题", "options": [{"label": "A"}, {"label": "B"}], "multiSelect": False}]},
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(state)
+
+    first = asyncio.create_task(
+        service.answer_pending_user_question_option(
+            user_id=1,
+            tool_use_id="tool-ask-text-race",
+            question_index=0,
+            option_index=0,
+        )
+    )
+    await entered.wait()
+    second = asyncio.create_task(service.answer_pending_user_question_text(user_id=1, text="手动输入"))
+    await asyncio.sleep(0.03)
+    text_actions_during_block = list(factory._user_question_text_actions)
+    interactive_inputs_during_block = list(factory._interactive_inputs)
+
+    release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert text_actions_during_block == []
+    assert interactive_inputs_during_block == []
+    assert first_result == (True, "已提交你的选择，Claude 继续执行中", None)
+    assert second_result == (False, "当前没有待处理的选择题", None)
+
+
+@pytest.mark.asyncio
 async def test_answer_pending_user_question_option_falls_back_to_text_transport_when_terminal_not_tui(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
@@ -1485,6 +1856,128 @@ async def test_answer_pending_user_question_option_falls_back_to_text_transport_
         )
     ]
     assert factory._user_question_option_actions == []
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_user_question_option_falls_back_when_factory_lacks_terminal_option_method(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+
+    class LegacyFactory:
+        def __init__(self) -> None:
+            self._interactive_inputs: list[tuple[str, str, str]] = []
+
+        async def send_claude_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
+            self._interactive_inputs.append((terminal_key, workdir, text))
+            return True, ""
+
+    factory = LegacyFactory()
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-legacy"] = ToolCallRecord(
+        tool_use_id="tool-ask-legacy",
+        name="AskUserQuestion",
+        input={"questions": [{"question": "选择", "options": [{"label": "A"}, {"label": "B"}], "multiSelect": False}]},
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(state)
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1,
+        tool_use_id="tool-ask-legacy",
+        question_index=0,
+        option_index=1,
+    )
+
+    assert ok is True
+    assert text == "已提交你的选择，Claude 继续执行中"
+    assert next_prompt is None
+    assert factory._interactive_inputs == [
+        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), "B")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_user_question_option_falls_back_on_short_tui_fallback_prefix(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+
+    async def not_tui_with_detail(*, terminal_key: str, workdir: str, option_index: int, submit_after: bool = False) -> tuple[bool, str]:
+        return False, "当前问题不是 Claude 选择框界面：capture-pane 为空"
+
+    factory.select_claude_user_question_option = not_tui_with_detail
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.tool_calls["tool-ask-prefix"] = ToolCallRecord(
+        tool_use_id="tool-ask-prefix",
+        name="AskUserQuestion",
+        input={"questions": [{"question": "选择", "options": [{"label": "A"}, {"label": "B"}], "multiSelect": False}]},
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(state)
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1,
+        tool_use_id="tool-ask-prefix",
+        question_index=0,
+        option_index=1,
+    )
+
+    assert ok is True
+    assert text == "已提交你的选择，Claude 继续执行中"
+    assert next_prompt is None
+    assert factory._interactive_inputs == [
+        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), "B")
+    ]
 
 
 @pytest.mark.asyncio

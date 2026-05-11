@@ -259,7 +259,7 @@ class TmuxSessionMixin:
         )
 
     def _selected_user_question_option_index(self, pane_text: str) -> int | None:
-        for line in pane_text.splitlines():
+        for line in reversed(pane_text.splitlines()):
             stripped = line.strip()
             if not stripped.startswith(("›", "❯", ">")):
                 continue
