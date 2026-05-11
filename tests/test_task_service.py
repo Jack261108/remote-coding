@@ -1986,6 +1986,7 @@ async def test_answer_pending_user_question_option_uses_pending_permission_ask_u
     factory = StubFactory(adapter)
     session_service = make_file_backed_session_service(tmp_path)
     structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    hook_socket_server = DummyHookSocketServer()
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -1993,6 +1994,7 @@ async def test_answer_pending_user_question_option_uses_pending_permission_ask_u
         cli_factory=factory,
         semaphore=asyncio.Semaphore(2),
         structured_session_store=structured_store,
+        hook_socket_server=hook_socket_server,
     )
 
     await session_service.switch(
@@ -2050,6 +2052,7 @@ async def test_answer_pending_user_question_option_uses_pending_permission_ask_u
     assert text == "已记录选择: 明天"
     assert next_prompt is not None
     assert next_prompt.question_index == 1
+    assert hook_socket_server.calls == []
     updated = structured_store.get("claude-session-1")
     assert updated is not None
     assert updated.structured_user_question_key == "tool-ask-pending:1"
@@ -2069,10 +2072,83 @@ async def test_answer_pending_user_question_option_uses_pending_permission_ask_u
         (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 1, False),
         (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 1, True),
     ]
+    assert hook_socket_server.calls == [("tool-ask-pending", "allow", None)]
     updated = structured_store.get("claude-session-1")
     assert updated is not None
     assert updated.pending_permission is None
     assert updated.phase == SessionPhase.PROCESSING
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_user_question_option_keeps_pending_when_hook_response_fails(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    hook_socket_server = DummyHookSocketServer(respond_ok=False)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+        hook_socket_server=hook_socket_server,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    state.pending_permission = PendingPermission(
+        tool_use_id="tool-ask-pending",
+        tool_name="AskUserQuestion",
+        tool_input={
+            "questions": [
+                {
+                    "question": "你想查哪一天出发？",
+                    "options": [
+                        {"label": "今天", "description": "查询今天"},
+                        {"label": "明天", "description": "查询明天"},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        },
+    )
+    structured_store._persist(state)
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1,
+        tool_use_id="tool-ask-pending",
+        question_index=0,
+        option_index=1,
+    )
+
+    assert ok is False
+    assert text == "待处理权限请求已失效，请等待 Claude 重新发起"
+    assert next_prompt is None
+    assert hook_socket_server.calls == [("tool-ask-pending", "allow", None)]
+    updated = structured_store.get("claude-session-1")
+    assert updated is not None
+    assert updated.pending_permission is not None
+    assert updated.pending_permission.tool_use_id == "tool-ask-pending"
+    assert updated.phase == SessionPhase.WAITING_FOR_APPROVAL
+    prompts = await service.get_pending_user_questions(user_id=1)
+    assert len(prompts) == 1
+    assert prompts[0].tool_use_id == "tool-ask-pending"
 
 
 @pytest.mark.asyncio
@@ -2081,6 +2157,7 @@ async def test_answer_pending_user_question_option_promotes_next_real_permission
     factory = StubFactory(adapter)
     session_service = make_file_backed_session_service(tmp_path)
     structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    hook_socket_server = DummyHookSocketServer()
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -2088,6 +2165,7 @@ async def test_answer_pending_user_question_option_promotes_next_real_permission
         cli_factory=factory,
         semaphore=asyncio.Semaphore(2),
         structured_session_store=structured_store,
+        hook_socket_server=hook_socket_server,
     )
 
     await session_service.switch(
@@ -2141,6 +2219,7 @@ async def test_answer_pending_user_question_option_promotes_next_real_permission
     assert ok is True
     assert text == "已提交你的选择，Claude 继续执行中"
     assert next_prompt is None
+    assert hook_socket_server.calls == [("tool-ask-pending", "allow", None)]
     updated = structured_store.get("claude-session-1")
     assert updated is not None
     assert updated.phase == SessionPhase.WAITING_FOR_APPROVAL

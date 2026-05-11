@@ -58,6 +58,7 @@ class TaskService:
             session_service=session_service,
             cli_factory=cli_factory,
             structured_session_store=structured_session_store,
+            hook_socket_server=hook_socket_server,
             get_structured_session=self.get_structured_session,
             is_state_owned_by_user=self._is_state_owned_by_user,
         )

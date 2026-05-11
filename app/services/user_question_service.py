@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState, ToolStatus
 from app.domain.user_question_models import (
@@ -33,12 +34,14 @@ class UserQuestionService:
         session_service: SessionService,
         cli_factory: CLIAdapterFactory,
         structured_session_store: SessionStore | None,
+        hook_socket_server: HookSocketServer | None,
         get_structured_session: Callable[..., Awaitable[SessionState | None]],
         is_state_owned_by_user: Callable[..., Awaitable[bool]],
     ) -> None:
         self._session_service = session_service
         self._cli_factory = cli_factory
         self._structured_session_store = structured_session_store
+        self._hook_socket_server = hook_socket_server
         self._get_structured_session = get_structured_session
         self._is_state_owned_by_user = is_state_owned_by_user
         self._user_question_drafts: dict[int, _UserQuestionDraft] = {}
@@ -476,19 +479,29 @@ class UserQuestionService:
                 else:
                     return False, text, None
 
-        draft.answers_by_index[prompt.question_index] = normalized_answer
-        draft.selected_option_indexes_by_question.pop(prompt.question_index, None)
         if remaining:
+            draft.answers_by_index[prompt.question_index] = normalized_answer
+            draft.selected_option_indexes_by_question.pop(prompt.question_index, None)
             next_prompt = remaining[0]
             await self._mark_user_question_prompt_emitted(user_id=user_id, state=state, prompt=next_prompt)
             return True, f"已记录选择: {normalized_answer}", next_prompt
 
         if prompt.options and not draft.use_text_transport:
+            approved, text = await self._approve_pending_user_question_permission(
+                user_id=user_id,
+                state=state,
+                tool_use_id=prompt.tool_use_id,
+            )
+            if not approved:
+                return False, text, None
+            draft.answers_by_index[prompt.question_index] = normalized_answer
+            draft.selected_option_indexes_by_question.pop(prompt.question_index, None)
             await self._mark_user_question_completed(user_id=user_id, state=state, tool_use_id=prompt.tool_use_id)
             self._completed_user_question_tool_use_ids_by_user.setdefault(user_id, set()).add(prompt.tool_use_id)
             self._user_question_drafts.pop(user_id, None)
             return True, "已提交你的选择，Claude 继续执行中", None
 
+        draft.answers_by_index[prompt.question_index] = normalized_answer
         answer_text = compose_user_question_answers(draft.prompts, draft.answers_by_index)
         if not answer_text:
             return False, "答案内容为空，无法提交", None
@@ -500,20 +513,61 @@ class UserQuestionService:
             workdir=state.workdir if state is not None else None,
         )
         if sent:
+            approved, approval_text = await self._approve_pending_user_question_permission(
+                user_id=user_id,
+                state=state,
+                tool_use_id=prompt.tool_use_id,
+            )
+            if not approved:
+                draft.answers_by_index.pop(prompt.question_index, None)
+                return False, approval_text, None
+            draft.selected_option_indexes_by_question.pop(prompt.question_index, None)
             await self._mark_user_question_completed(user_id=user_id, state=state, tool_use_id=prompt.tool_use_id)
             self._completed_user_question_tool_use_ids_by_user.setdefault(user_id, set()).add(prompt.tool_use_id)
             self._user_question_drafts.pop(user_id, None)
             return True, "已提交你的选择，Claude 继续执行中", None
         return False, text, None
 
-    async def _mark_user_question_completed(self, *, user_id: int, state: SessionState | None, tool_use_id: str) -> None:
+    async def _approve_pending_user_question_permission(
+        self,
+        *,
+        user_id: int,
+        state: SessionState | None,
+        tool_use_id: str,
+    ) -> tuple[bool, str]:
+        if self._hook_socket_server is None or not tool_use_id:
+            return True, ""
+
+        target_state = await self._resolve_user_question_target_state(user_id=user_id, state=state, tool_use_id=tool_use_id)
+        pending = target_state.pending_permission if target_state is not None else None
+        if pending is None or pending.tool_use_id != tool_use_id:
+            return True, ""
+
+        sent = await self._hook_socket_server.respond_to_permission(tool_use_id=tool_use_id, decision="allow")
+        if not sent:
+            return False, "待处理权限请求已失效，请等待 Claude 重新发起"
+        return True, ""
+
+    async def _resolve_user_question_target_state(
+        self,
+        *,
+        user_id: int,
+        state: SessionState | None,
+        tool_use_id: str,
+    ) -> SessionState | None:
         if self._structured_session_store is None or not tool_use_id:
-            return
+            return None
 
         target_state = self._structured_session_store.find_by_active_user_question_tool_use_id(tool_use_id)
         if target_state is None and state is not None:
             target_state = self._structured_session_store.get(state.session_id)
         if target_state is None or not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
+            return None
+        return target_state
+
+    async def _mark_user_question_completed(self, *, user_id: int, state: SessionState | None, tool_use_id: str) -> None:
+        target_state = await self._resolve_user_question_target_state(user_id=user_id, state=state, tool_use_id=tool_use_id)
+        if target_state is None or self._structured_session_store is None:
             return
 
         self._structured_session_store.process(
