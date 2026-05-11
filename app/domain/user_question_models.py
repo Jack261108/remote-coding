@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+USER_QUESTION_TUI_FALLBACK_ERROR = "当前问题不是 Claude 选择框界面，将回退为文本回答"
+
 
 @dataclass(frozen=True)
 class UserQuestionOption:
