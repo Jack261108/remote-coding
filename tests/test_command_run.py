@@ -73,25 +73,28 @@ class DummyTaskService:
             pending_permission=None,
         )
 
-    async def get_structured_session_cursor(self, user_id: int) -> int:
+    async def get_structured_session_for_task(self, *, task_id: str, user_id: int, log_missing: bool = True):
+        return await self.get_structured_session(user_id, log_missing=log_missing)
+
+    async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
         return self._revision
 
-    async def get_structured_reply_cursor(self, user_id: int):
+    async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._structured_reply_turn_id, self._structured_permission_key
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
         if turn_id is not None:
             self._structured_reply_turn_id = turn_id
         if permission_key is not None:
             self._structured_permission_key = permission_key
 
-    async def get_structured_user_question_cursor(self, user_id: int):
+    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._structured_user_question_key
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
         self._structured_user_question_key = question_key
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
         await asyncio.sleep(timeout_sec)
         return True
 
@@ -458,6 +461,59 @@ async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_
 
     assert "旧回复" not in "\n".join(message.answers)
     assert "退出后补到的回复" in "\n".join(message.answers)
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_uses_task_bound_session_after_context_drift() -> None:
+    message = DummyMessage()
+    task_turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
+    task_session = SimpleNamespace(
+        session_id="claude-session-task",
+        phase=SessionPhase.WAITING_FOR_INPUT,
+        turns=task_turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    drift_session = SimpleNamespace(
+        session_id="claude-session-other",
+        phase=SessionPhase.WAITING_FOR_APPROVAL,
+        turns=[],
+        pending_permission=None,
+        tool_calls={},
+    )
+    current_session = {"value": task_session}
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        event_delays=[0.0, 0.08],
+    )
+
+    async def get_structured_session(user_id: int, *, log_missing: bool = True):
+        return current_session["value"]
+
+    async def get_structured_session_for_task(*, task_id: str, user_id: int, log_missing: bool = True):
+        return task_session
+
+    task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
+    task_service.get_structured_session_for_task = AsyncMock(side_effect=get_structured_session_for_task)
+
+    async def drift_context_and_append_reply() -> None:
+        await asyncio.sleep(0.02)
+        current_session["value"] = drift_session
+        task_turns.append(ConversationTurn(turn_id="turn-task-new", role="assistant", text="\n任务对应回复\n", is_complete=True))
+
+    updater = asyncio.create_task(drift_context_and_append_reply())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.18)
+    await updater
+
+    answers = "\n".join(message.answers)
+    assert "旧回复" not in answers
+    assert "任务对应回复" in answers
+    assert "结构化回复暂不可用，已回退为原始输出。" not in message.answers
 
 
 @pytest.mark.asyncio

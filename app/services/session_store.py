@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.user_question_models import extract_user_question_prompts
@@ -48,6 +50,10 @@ def parse_user_question_key(question_key: str | None) -> tuple[str, int] | None:
         return tool_use_id, int(index_text)
     except ValueError:
         return None
+
+
+def _normalize_turn_match_text(text: str) -> str:
+    return " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
 
 
 class SessionStore:
@@ -123,6 +129,63 @@ class SessionStore:
         return self._find_cached_or_persisted_state(
             matcher=lambda state: self._has_active_user_question_key(state, question_key),
         )
+
+    def find_by_user_turn_text(
+        self,
+        *,
+        user_id: int,
+        workdir: str,
+        text: str,
+        since: datetime,
+        until: datetime | None = None,
+        terminal_id: str | None = None,
+    ) -> SessionState | None:
+        normalized_text = _normalize_turn_match_text(text)
+        if not normalized_text:
+            return None
+
+        best: tuple[datetime, int, SessionState] | None = None
+        seen: set[str] = set()
+        for state in [*self._states.values(), *self._file_store.list_session_states()]:
+            if state.session_id in seen:
+                continue
+            seen.add(state.session_id)
+            candidate = self._hydrate_and_cache_state(state)
+            if candidate.user_id is not None and candidate.user_id != user_id:
+                continue
+            if str(Path(candidate.workdir).resolve()) != str(Path(workdir).resolve()):
+                continue
+            if terminal_id and candidate.terminal_id != terminal_id:
+                continue
+            matched_at = self._latest_matching_user_turn_at(candidate, normalized_text=normalized_text, since=since, until=until)
+            if matched_at is None:
+                continue
+            ranked = (matched_at, candidate.revision, candidate)
+            if best is None or ranked[:2] > best[:2]:
+                best = ranked
+        return best[2] if best is not None else None
+
+    def _latest_matching_user_turn_at(
+        self,
+        state: SessionState,
+        *,
+        normalized_text: str,
+        since: datetime,
+        until: datetime | None,
+    ) -> datetime | None:
+        matched_at: datetime | None = None
+        for turn in state.turns:
+            if turn.role != "user":
+                continue
+            if turn.started_at < since:
+                continue
+            if until is not None and turn.started_at > until:
+                continue
+            if _normalize_turn_match_text(turn.text) != normalized_text:
+                continue
+            if matched_at is None or turn.started_at > matched_at:
+                matched_at = turn.started_at
+        return matched_at
 
     def _hydrate_and_cache_state(self, state: SessionState) -> SessionState:
         loaded_checkpoint = self._file_store.load_checkpoint(state.session_id)

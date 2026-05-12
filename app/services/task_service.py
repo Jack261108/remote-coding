@@ -5,6 +5,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
@@ -225,10 +226,40 @@ class TaskService:
         terminal_id = None
         claude_session_id = task.claude_session_id
         claude_chat_active = False
-        if session is not None and session.provider == "claude_code" and session.workdir == task.workdir:
+        if (
+            session is not None
+            and session.provider == "claude_code"
+            and str(Path(session.workdir).resolve()) == str(Path(task.workdir).resolve())
+        ):
             terminal_id = session.terminal_id
-            claude_session_id = claude_session_id or session.claude_session_id
             claude_chat_active = session.claude_chat_active
+
+        prompt_matched_state = None
+        if self._structured_session_store is not None and terminal_id and task.prompt and task.started_at is not None:
+            prompt_matched_state = self._structured_session_store.find_by_user_turn_text(
+                user_id=user_id,
+                workdir=task.workdir,
+                text=task.prompt,
+                since=task.started_at - timedelta(seconds=2),
+                until=task.ended_at,
+                terminal_id=terminal_id,
+            )
+        if prompt_matched_state is not None and self._is_claude_session_id(prompt_matched_state.claude_session_id or prompt_matched_state.session_id):
+            if task.claude_session_id != prompt_matched_state.session_id:
+                task.claude_session_id = prompt_matched_state.session_id
+                await self._task_store.save(task)
+            logger.info(
+                "structured session lookup hit prompt turn",
+                extra={
+                    "user_id": user_id,
+                    "task_id": task_id,
+                    "session_id": prompt_matched_state.session_id,
+                    "claude_session_id": prompt_matched_state.claude_session_id,
+                    "turn_count": len(prompt_matched_state.turns),
+                },
+            )
+            return prompt_matched_state
+
         return self._lookup_structured_session(
             user_id=user_id,
             provider=task.provider,
@@ -238,6 +269,11 @@ class TaskService:
             claude_chat_active=claude_chat_active,
             log_missing=log_missing,
         )
+
+    async def _get_structured_session_for_scope(self, *, user_id: int, task_id: str | None, log_missing: bool) -> SessionState | None:
+        if task_id is not None:
+            return await self.get_structured_session_for_task(task_id=task_id, user_id=user_id, log_missing=log_missing)
+        return await self.get_structured_session(user_id, log_missing=log_missing)
 
     def _lookup_structured_session(
         self,
@@ -266,10 +302,24 @@ class TaskService:
             if explicit_claude_session_id is not None:
                 state = self._structured_session_store.get(explicit_claude_session_id)
                 matched_by = "claude_session_id"
+                if state is not None and str(Path(state.workdir).resolve()) != str(Path(workdir).resolve()):
+                    if log_missing:
+                        logger.info(
+                            "structured session lookup skipped",
+                            extra={
+                                "user_id": user_id,
+                                "claude_session_id": explicit_claude_session_id,
+                                "workdir": workdir,
+                                "state_workdir": state.workdir,
+                                "reason": "claude_session_workdir_mismatch",
+                            },
+                        )
+                    state = None
+                    matched_by = None
             if state is None and terminal_id:
                 candidate = self._structured_session_store.find_by_terminal_id(terminal_id)
                 if candidate is not None and self._is_claude_session_id(candidate.claude_session_id or candidate.session_id):
-                    if candidate.workdir == workdir:
+                    if str(Path(candidate.workdir).resolve()) == str(Path(workdir).resolve()):
                         state = candidate
                         matched_by = "terminal_id"
                     elif log_missing:
@@ -321,6 +371,19 @@ class TaskService:
                 )
             return None
         state = getter(explicit_claude_session_id)
+        if state is not None and str(Path(state.workdir).resolve()) != str(Path(workdir).resolve()):
+            if log_missing:
+                logger.info(
+                    "structured session lookup skipped",
+                    extra={
+                        "user_id": user_id,
+                        "claude_session_id": explicit_claude_session_id,
+                        "workdir": workdir,
+                        "state_workdir": state.workdir,
+                        "reason": "fallback_workdir_mismatch",
+                    },
+                )
+            return None
         logger.info(
             "structured session lookup fallback",
             extra={
@@ -357,10 +420,10 @@ class TaskService:
 
         return False
 
-    async def get_structured_session_cursor(self, user_id: int) -> int:
+    async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
         if self._structured_session_store is None:
             return 0
-        state = await self.get_structured_session(user_id, log_missing=False)
+        state = await self._get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return 0
         return self._structured_session_store.get_cursor(state.session_id)
@@ -368,18 +431,18 @@ class TaskService:
     async def get_structured_session_revision(self, user_id: int) -> int:
         return await self.get_structured_session_cursor(user_id)
 
-    async def get_structured_reply_cursor(self, user_id: int) -> tuple[str | None, str | None]:
+    async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None) -> tuple[str | None, str | None]:
         if self._structured_session_store is None:
             return None, None
-        state = await self.get_structured_session(user_id, log_missing=False)
+        state = await self._get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return None, None
         return self._structured_session_store.get_structured_reply_cursor(state.session_id)
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
         if self._structured_session_store is None:
             return
-        state = await self.get_structured_session(user_id, log_missing=False)
+        state = await self._get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return
         if turn_id is not None:
@@ -387,17 +450,29 @@ class TaskService:
         if permission_key is not None:
             self._structured_session_store.mark_structured_permission_emitted(state.session_id, permission_key=permission_key)
 
-    async def get_structured_user_question_cursor(self, user_id: int) -> str | None:
+    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None) -> str | None:
+        if task_id is not None and self._structured_session_store is not None:
+            state = await self._get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
+            if state is None:
+                return None
+            return self._structured_session_store.get_structured_user_question_cursor(state.session_id)
         return await self._user_question_service.get_structured_user_question_cursor(user_id)
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
+        if task_id is not None and self._structured_session_store is not None:
+            state = await self._get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
+            if state is None:
+                return
+            if question_key is not None:
+                self._structured_session_store.mark_structured_user_question_emitted(state.session_id, question_key=question_key)
+            return
         await self._user_question_service.acknowledge_structured_user_question(user_id, question_key=question_key)
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
         if self._structured_session_store is None:
             await asyncio.sleep(timeout_sec)
             return True
-        state = await self.get_structured_session(user_id, log_missing=False)
+        state = await self._get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             await asyncio.sleep(timeout_sec)
             return True

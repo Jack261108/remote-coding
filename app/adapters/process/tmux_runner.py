@@ -11,7 +11,7 @@ from app.adapters.process.tmux_log import TmuxLogMixin
 from app.adapters.process.tmux_session import TmuxSessionMixin
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
-from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionState
+from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
 from app.services.session_store import SessionStore, is_claude_session_id
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
@@ -48,6 +48,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         cancel_grace_sec: float = 1.0,
         enter_delay_sec: float = 0.2,
         partial_flush_sec: float = 0.5,
+        interactive_completion_grace_sec: float = 0.1,
         claude_cli_bin: str = "claude",
         file_store: FileSessionStore | None = None,
         session_store: SessionStore | None = None,
@@ -58,6 +59,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         self._cancel_grace_sec = cancel_grace_sec
         self._enter_delay_sec = max(0.0, enter_delay_sec)
         self._partial_flush_sec = max(0.0, partial_flush_sec)
+        self._interactive_completion_grace_sec = max(0.0, interactive_completion_grace_sec)
         self._claude_cli_bin = claude_cli_bin
         self._tasks: dict[str, _TmuxTaskMeta] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -218,6 +220,22 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         exit_code: int | None = None
         started_at = asyncio.get_running_loop().time()
         last_partial_emit = started_at
+        completion_candidate_key: tuple[object, ...] | None = None
+        completion_candidate_seen_at: float | None = None
+
+        def completion_turn_ready(state: SessionState, turn: ConversationTurn, *, observed_at: float) -> bool:
+            nonlocal completion_candidate_key, completion_candidate_seen_at
+            candidate_key = self._interactive_completion_candidate_key(state, turn)
+            if candidate_key is None:
+                completion_candidate_key = None
+                completion_candidate_seen_at = None
+                return False
+            if candidate_key != completion_candidate_key:
+                completion_candidate_key = candidate_key
+                completion_candidate_seen_at = observed_at
+                return self._interactive_completion_grace_sec <= 0
+            return completion_candidate_seen_at is not None and (observed_at - completion_candidate_seen_at) >= self._interactive_completion_grace_sec
+
         if meta.interactive:
             state = self._session_store.mark_interactive_turn_processing(
                 terminal_id=meta.terminal_id,
@@ -230,8 +248,10 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                     meta.claude_session_id = state.session_id
                     if not meta.baseline_captured:
                         latest_completed_turn = self._latest_completed_assistant_turn(state)
-                        if latest_completed_turn is not None and latest_completed_turn.started_at >= completion_started_after:
-                            exit_code = 0
+                        current_completed_turn = latest_completed_turn is not None and latest_completed_turn.started_at >= completion_started_after
+                        if current_completed_turn and latest_completed_turn is not None:
+                            if completion_turn_ready(state, latest_completed_turn, observed_at=started_at):
+                                exit_code = 0
                         else:
                             self._record_interactive_baseline(meta=meta, state=state)
                             structured_offset_before_run = meta.baseline_offset
@@ -283,17 +303,19 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 latest_completed_turn = self._latest_completed_assistant_turn(active_state) if active_state is not None else None
                 latest_completed_turn_is_current = latest_completed_turn is not None and (
                     (meta.command_started_at is not None and latest_completed_turn.started_at >= completion_started_after)
-                    or (meta.command_started_at is None and meta.baseline_captured)
+                    or (meta.command_started_at is None and meta.baseline_captured and latest_completed_turn.turn_id != latest_completed_turn_id_before_run)
                     or (meta.command_started_at is None and not meta.baseline_captured and latest_completed_turn.started_at >= watch_started_at)
                 )
                 if active_state is not None and is_claude_session_id(active_state.session_id) and not meta.baseline_captured:
                     meta.claude_session_id = active_state.session_id
-                    if latest_completed_turn_is_current:
-                        exit_code = 0
-                        break
-                    self._record_interactive_baseline(meta=meta, state=active_state)
-                    structured_offset_before_run = meta.baseline_offset
-                    latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
+                    if latest_completed_turn_is_current and latest_completed_turn is not None:
+                        if completion_turn_ready(active_state, latest_completed_turn, observed_at=now):
+                            exit_code = 0
+                            break
+                    else:
+                        self._record_interactive_baseline(meta=meta, state=active_state)
+                        structured_offset_before_run = meta.baseline_offset
+                        latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
                 if active_state is not None and active_state.checkpoint.last_offset > structured_offset_before_run:
                     if latest_completed_turn is not None and not latest_completed_turn_is_current:
                         structured_offset_before_run = active_state.checkpoint.last_offset
@@ -308,13 +330,19 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                     claude_session_id=meta.claude_session_id,
                     fallback_session_id=meta.session_name,
                 )
-                if completion_phase is not None and saw_interactive_progress and (latest_completed_turn is None or latest_completed_turn_is_current):
+                completion_ready = latest_completed_turn is None or (
+                    latest_completed_turn_is_current
+                    and active_state is not None
+                    and completion_turn_ready(active_state, latest_completed_turn, observed_at=now)
+                )
+                if completion_phase is not None and saw_interactive_progress and completion_ready:
                     exit_code = 0
                     break
-                if latest_completed_turn is not None and latest_completed_turn.turn_id != latest_completed_turn_id_before_run:
-                    if latest_completed_turn_is_current:
+                if latest_completed_turn is not None and latest_completed_turn_is_current:
+                    if active_state is not None and completion_turn_ready(active_state, latest_completed_turn, observed_at=now):
                         exit_code = 0
                         break
+                elif latest_completed_turn is not None and latest_completed_turn.turn_id != latest_completed_turn_id_before_run:
                     latest_completed_turn_id_before_run = latest_completed_turn.turn_id
                     meta.baseline_completed_turn_id = latest_completed_turn_id_before_run
 
@@ -579,3 +607,58 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             (turn for turn in reversed(state.turns) if turn.role == "assistant" and turn.is_complete),
             None,
         )
+
+    def _interactive_completion_candidate_key(self, state: SessionState, turn: ConversationTurn) -> tuple[object, ...] | None:
+        if state.phase not in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_INPUT, SessionPhase.ENDED}:
+            return None
+        if state.pending_permission is not None:
+            return None
+        if self._has_active_tool_call(state):
+            return None
+        if self._has_tool_call_started_after_turn(state, turn):
+            return None
+        return (
+            state.session_id,
+            state.revision,
+            state.phase.value,
+            state.checkpoint.last_offset,
+            turn.turn_id,
+            tuple(
+                sorted(
+                    (
+                        tool.tool_use_id,
+                        tool.status.value,
+                        tool.started_at.isoformat(),
+                        tool.completed_at.isoformat() if tool.completed_at else "",
+                        tuple(
+                            sorted(
+                                (
+                                    subtool.tool_use_id,
+                                    subtool.status.value,
+                                    subtool.started_at.isoformat(),
+                                    subtool.completed_at.isoformat() if subtool.completed_at else "",
+                                )
+                                for subtool in tool.subagent_tools
+                            )
+                        ),
+                    )
+                    for tool in state.tool_calls.values()
+                )
+            ),
+        )
+
+    def _has_active_tool_call(self, state: SessionState) -> bool:
+        active_statuses = {ToolStatus.RUNNING, ToolStatus.WAITING_FOR_APPROVAL}
+        return any(
+            tool.status in active_statuses or any(subtool.status in active_statuses for subtool in tool.subagent_tools)
+            for tool in state.tool_calls.values()
+        )
+
+    def _has_tool_call_started_after_turn(self, state: SessionState, turn: ConversationTurn) -> bool:
+        turn_completed_at = turn.ended_at or turn.started_at
+        for tool in state.tool_calls.values():
+            if tool.started_at >= turn_completed_at:
+                return True
+            if any(subtool.started_at >= turn_completed_at for subtool in tool.subagent_tools):
+                return True
+        return False

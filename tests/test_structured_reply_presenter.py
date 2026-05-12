@@ -35,22 +35,22 @@ class DummyTaskService:
         self._index += 1
         return session
 
-    async def get_structured_session_cursor(self, user_id: int) -> int:
+    async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
         return self._index
 
-    async def get_structured_reply_cursor(self, user_id: int):
+    async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
         return None, None
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
         return None
 
-    async def get_structured_user_question_cursor(self, user_id: int):
+    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._question_key
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
         self._question_key = question_key
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
         return True
 
 
@@ -61,26 +61,26 @@ class PersistentTaskService:
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
         return self._store.get("claude-session-1")
 
-    async def get_structured_session_cursor(self, user_id: int) -> int:
+    async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
         return self._store.get_cursor("claude-session-1")
 
-    async def get_structured_reply_cursor(self, user_id: int):
+    async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._store.get_structured_reply_cursor("claude-session-1")
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
         if turn_id is not None:
             self._store.mark_structured_reply_emitted("claude-session-1", turn_id=turn_id)
         if permission_key is not None:
             self._store.mark_structured_permission_emitted("claude-session-1", permission_key=permission_key)
 
-    async def get_structured_user_question_cursor(self, user_id: int):
+    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._store.get_structured_user_question_cursor("claude-session-1")
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
         if question_key is not None:
             self._store.mark_structured_user_question_emitted("claude-session-1", question_key=question_key)
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
         return await self._store.wait_for_publish("claude-session-1", since_cursor=since_cursor, timeout_sec=timeout_sec)
 
 
@@ -653,22 +653,22 @@ class SwitchingTaskService:
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
         return self.current
 
-    async def get_structured_session_cursor(self, user_id: int) -> int:
+    async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
         return self._cursors[self.current.session_id]
 
-    async def get_structured_reply_cursor(self, user_id: int):
+    async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
         return None, None
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None) -> None:
+    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
         return None
 
-    async def get_structured_user_question_cursor(self, user_id: int):
+    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
         return None
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None) -> None:
+    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
         return None
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float) -> bool:
+    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
         return self._cursors[self.current.session_id] > since_cursor
 
 

@@ -256,9 +256,10 @@ def _extract_tool_question_prompts_by_id(snapshot: _StructuredSnapshot) -> dict[
 
 
 class StructuredReplyPresenter:
-    def __init__(self, *, task_service: TaskService, user_id: int) -> None:
+    def __init__(self, *, task_service: TaskService, user_id: int, task_id: str | None = None) -> None:
         self._task_service = task_service
         self._user_id = user_id
+        self._task_id = task_id
         self._last_structured_turn_id: str | None = None
         self._last_pending_permission_key: str | None = None
         self._structured_session_available = False
@@ -281,7 +282,7 @@ class StructuredReplyPresenter:
         self._current_session_id = snapshot.session_id
         self._last_phase = snapshot.phase
 
-        persisted_turn_id, persisted_permission_key = await self._task_service.get_structured_reply_cursor(self._user_id)
+        persisted_turn_id, persisted_permission_key = await self._task_service.get_structured_reply_cursor(self._user_id, task_id=self._task_id)
         self._last_structured_turn_id = persisted_turn_id
         if self._last_structured_turn_id is None and baseline_current_snapshot:
             self._last_structured_turn_id = snapshot.turn_id
@@ -302,14 +303,14 @@ class StructuredReplyPresenter:
             self._tool_status_by_id = {}
             self._question_keys_by_tool_id = {}
 
-        self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id)
+        self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
         if self._last_user_question_key is None and baseline_current_snapshot and pending_prompts:
             self._last_user_question_key = pending_prompts[0].key
 
-        self._revision = await self._task_service.get_structured_session_cursor(self._user_id)
+        self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
 
     async def wait_for_update(self, *, timeout_sec: float) -> bool:
-        current_session = await self._task_service.get_structured_session(self._user_id, log_missing=False)
+        current_session = await self._load_session(log_missing=False)
         current_session_id = current_session.session_id if current_session is not None else None
         if current_session_id != self._current_session_id:
             self._current_session_id = current_session_id
@@ -317,22 +318,23 @@ class StructuredReplyPresenter:
             self._last_pending_permission_key = None
             self._tool_status_by_id = {}
             self._question_keys_by_tool_id = {}
-            self._revision = await self._task_service.get_structured_session_cursor(self._user_id)
+            self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
             return True
         changed = await self._task_service.wait_for_structured_session_update(
             user_id=self._user_id,
             since_cursor=self._revision,
             timeout_sec=timeout_sec,
+            task_id=self._task_id,
         )
         if changed:
-            self._revision = await self._task_service.get_structured_session_cursor(self._user_id)
+            self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
         return changed
 
     async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
         tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
-        self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id)
+        self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
 
         messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput] = []
         pending_question_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
@@ -343,7 +345,11 @@ class StructuredReplyPresenter:
         )
         messages.extend(question_updates)
         for output in question_updates:
-            await self._task_service.acknowledge_structured_user_question(self._user_id, question_key=output.question.key)
+            await self._task_service.acknowledge_structured_user_question(
+                self._user_id,
+                question_key=output.question.key,
+                task_id=self._task_id,
+            )
         messages.extend(self._collect_progress_updates(snapshot=snapshot, tool_question_prompts=tool_question_prompts))
         if (
             snapshot.phase == SessionPhase.WAITING_FOR_APPROVAL.value
@@ -373,6 +379,7 @@ class StructuredReplyPresenter:
             await self._task_service.acknowledge_structured_reply(
                 self._user_id,
                 permission_key=snapshot.pending_permission_key,
+                task_id=self._task_id,
             )
         elif snapshot.phase != SessionPhase.WAITING_FOR_APPROVAL.value:
             self._last_pending_permission_key = snapshot.pending_permission_key
@@ -413,7 +420,7 @@ class StructuredReplyPresenter:
 
         self._last_structured_turn_id = snapshot.turn_id
         self._structured_reply_emitted_in_run = True
-        await self._task_service.acknowledge_structured_reply(self._user_id, turn_id=snapshot.turn_id)
+        await self._task_service.acknowledge_structured_reply(self._user_id, turn_id=snapshot.turn_id, task_id=self._task_id)
         logger.info("[task %s][structured] %s", task_id, snapshot.reply.rstrip("\n"))
         return snapshot.reply
 
@@ -517,8 +524,17 @@ class StructuredReplyPresenter:
             tool_input=snapshot.pending_permission_tool_input,
         )
 
+    async def _load_session(self, *, log_missing: bool):
+        if self._task_id is not None:
+            return await self._task_service.get_structured_session_for_task(
+                task_id=self._task_id,
+                user_id=self._user_id,
+                log_missing=log_missing,
+            )
+        return await self._task_service.get_structured_session(self._user_id, log_missing=log_missing)
+
     async def _load_snapshot(self, *, log_missing: bool) -> _StructuredSnapshot:
-        session = await self._task_service.get_structured_session(self._user_id, log_missing=log_missing)
+        session = await self._load_session(log_missing=log_missing)
         if session is None:
             if log_missing:
                 logger.info("structured reply unavailable", extra={"user_id": self._user_id, "reason": "no_structured_session"})

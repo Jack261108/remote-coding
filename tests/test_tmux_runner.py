@@ -6,7 +6,7 @@ import pytest
 
 from app.adapters.process.tmux_runner import _TmuxTaskMeta, TmuxRunner
 from app.domain.models import CLIEvent, EventType, utc_now
-from app.domain.session_models import ConversationTurn, SessionPhase
+from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
 
 
 async def _collect_events(stream):
@@ -771,6 +771,231 @@ async def test_watch_task_late_bound_completed_first_turn_exits_without_waiting_
         )
     )
     state.checkpoint.last_offset = 10
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    events = await task
+
+    assert meta.claude_session_id == claude_session
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_watch_task_waits_for_stable_completion_candidate_before_exit(tmp_path: Path) -> None:
+    runner = TmuxRunner(
+        data_dir=str(tmp_path),
+        poll_interval_sec=0.01,
+        partial_flush_sec=0.01,
+        interactive_completion_grace_sec=0.5,
+    )
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x-stable-completion.exit",
+        task_id="t-stable-completion",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=2)))
+    await asyncio.sleep(0.03)
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    progress_turn_started_at = utc_now()
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-progress",
+            role="assistant",
+            text="\n我先查一下。\n",
+            is_complete=True,
+            source="jsonl",
+            started_at=progress_turn_started_at,
+            ended_at=progress_turn_started_at,
+        )
+    )
+    state.checkpoint.last_offset = 10
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+    await asyncio.sleep(0.05)
+
+    assert task.done() is False
+
+    state.tool_calls["tool-after-progress"] = ToolCallRecord(
+        tool_use_id="tool-after-progress",
+        name="Read",
+        status=ToolStatus.SUCCESS,
+        started_at=progress_turn_started_at + timedelta(milliseconds=1),
+        completed_at=progress_turn_started_at + timedelta(milliseconds=2),
+    )
+    state.checkpoint.last_offset = 20
+    runner._session_store._persist(state)
+    await asyncio.sleep(0.08)
+
+    assert task.done() is False
+
+    final_turn_started_at = utc_now()
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-final",
+            role="assistant",
+            text="\n最终结果。\n",
+            is_complete=True,
+            source="jsonl",
+            started_at=final_turn_started_at,
+            ended_at=final_turn_started_at,
+        )
+    )
+    state.checkpoint.last_offset = 30
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    events = await task
+
+    assert meta.claude_session_id == claude_session
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_watch_task_does_not_finish_on_progress_turn_followed_by_tool(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+    command_started_at = utc_now() - timedelta(seconds=1)
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x-progress-tool.exit",
+        task_id="t-progress-tool",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        persistent_terminal=True,
+        interactive=True,
+        command_started_at=command_started_at,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    progress_turn_started_at = command_started_at + timedelta(milliseconds=100)
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-progress",
+            role="assistant",
+            text="\n我先查一下。\n",
+            is_complete=True,
+            source="jsonl",
+            started_at=progress_turn_started_at,
+            ended_at=progress_turn_started_at,
+        )
+    )
+    state.tool_calls["tool-after-progress"] = ToolCallRecord(
+        tool_use_id="tool-after-progress",
+        name="Read",
+        status=ToolStatus.SUCCESS,
+        started_at=progress_turn_started_at,
+        completed_at=progress_turn_started_at + timedelta(milliseconds=100),
+    )
+    state.checkpoint.last_offset = 10
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+    await asyncio.sleep(0.05)
+
+    assert task.done() is False
+
+    final_turn_started_at = progress_turn_started_at + timedelta(seconds=1)
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-final",
+            role="assistant",
+            text="\n最终结果。\n",
+            is_complete=True,
+            source="jsonl",
+            started_at=final_turn_started_at,
+            ended_at=final_turn_started_at,
+        )
+    )
+    state.checkpoint.last_offset = 20
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    events = await task
+
+    assert meta.claude_session_id == claude_session
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_watch_task_does_not_finish_while_permission_is_pending(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01, interactive_completion_grace_sec=0)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+    command_started_at = utc_now() - timedelta(seconds=1)
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x-pending-permission.exit",
+        task_id="t-pending-permission",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        persistent_terminal=True,
+        interactive=True,
+        command_started_at=command_started_at,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    progress_turn_started_at = command_started_at + timedelta(milliseconds=100)
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-progress",
+            role="assistant",
+            text="\n需要执行命令。\n",
+            is_complete=True,
+            source="jsonl",
+            started_at=progress_turn_started_at,
+            ended_at=progress_turn_started_at,
+        )
+    )
+    state.tool_calls["tool-pending"] = ToolCallRecord(
+        tool_use_id="tool-pending",
+        name="Bash",
+        status=ToolStatus.WAITING_FOR_APPROVAL,
+        started_at=progress_turn_started_at + timedelta(milliseconds=1),
+    )
+    state.pending_permission = PendingPermission(tool_use_id="tool-pending", tool_name="Bash", tool_input={"command": "pwd"})
+    state.checkpoint.last_offset = 10
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    runner._session_store._persist(state)
+    await asyncio.sleep(0.05)
+
+    assert task.done() is False
+
+    state.pending_permission = None
+    state.tool_calls["tool-pending"].status = ToolStatus.SUCCESS
+    state.tool_calls["tool-pending"].completed_at = progress_turn_started_at + timedelta(milliseconds=200)
+    final_turn_started_at = progress_turn_started_at + timedelta(seconds=1)
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-final",
+            role="assistant",
+            text="\n命令执行完了。\n",
+            is_complete=True,
+            source="jsonl",
+            started_at=final_turn_started_at,
+            ended_at=final_turn_started_at,
+        )
+    )
+    state.checkpoint.last_offset = 20
     state.phase = SessionPhase.WAITING_FOR_INPUT
     runner._session_store._persist(state)
 

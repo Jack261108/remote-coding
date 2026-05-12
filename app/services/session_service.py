@@ -34,6 +34,7 @@ class SessionService:
                 or (claude_chat_active is not None and current.claude_chat_active != claude_chat_active)
             )
             if needs_update:
+                workdir_changed = current.workdir != workdir
                 current.provider = provider
                 current.workdir = workdir
                 current.terminal_mode = terminal_mode
@@ -43,7 +44,7 @@ class SessionService:
                     current.terminal_id = None
                 if claude_chat_active is not None:
                     current.claude_chat_active = claude_chat_active
-                if provider is not None and provider != "claude_code":
+                if provider != "claude_code" or workdir_changed:
                     current.claude_session_id = None
                 current.updated_at = utc_now()
                 await self._store.save(current)
@@ -89,6 +90,7 @@ class SessionService:
             return session
 
         previous_workdir = current.workdir
+        previous_provider = current.provider
         if provider is not None:
             current.provider = provider
         if workdir is not None:
@@ -104,7 +106,7 @@ class SessionService:
             current.terminal_id = None
         if claude_chat_active is not None:
             current.claude_chat_active = claude_chat_active
-        if provider is not None and provider != "claude_code":
+        if current.provider != "claude_code" or current.workdir != previous_workdir or current.provider != previous_provider:
             current.claude_session_id = None
         current.updated_at = utc_now()
 

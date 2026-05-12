@@ -11,7 +11,7 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
 from app.domain.models import CLIEvent, EventType, ExecutionTask, TaskRecord, TaskStatus, utc_now
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolCallRecord, ToolStatus
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
@@ -898,6 +898,462 @@ async def test_get_structured_session_for_task_accepts_uuid_claude_session_id(tm
 
     assert structured is not None
     assert structured.session_id == uuid_session_id
+
+
+@pytest.mark.asyncio
+async def test_get_structured_session_for_task_uses_prompt_turn_after_context_drift(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    file_store = FileSessionStore(str(tmp_path))
+    structured_store = SessionStore(file_store)
+    task_store = MemoryTaskStore()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=task_store,
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    now = utc_now()
+    terminal_id = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await task_store.add(
+        TaskRecord(
+            task_id="task-1",
+            session_id="session-1",
+            user_id=1,
+            provider="claude_code",
+            prompt="hi",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            status=TaskStatus.RUNNING,
+            created_at=now,
+            started_at=now,
+        )
+    )
+
+    task_state = structured_store.get_or_create(
+        session_id="claude-session-task",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-task",
+    )
+    task_state.phase = SessionPhase.WAITING_FOR_INPUT
+    task_state.turns.extend(
+        [
+            ConversationTurn(
+                turn_id="user-task",
+                role="user",
+                text="hi",
+                is_complete=True,
+                started_at=now + timedelta(seconds=1),
+                ended_at=now + timedelta(seconds=1),
+            ),
+            ConversationTurn(
+                turn_id="turn-task",
+                role="assistant",
+                text="\n任务回复\n",
+                is_complete=True,
+                started_at=now + timedelta(seconds=2),
+                ended_at=now + timedelta(seconds=2),
+            ),
+        ]
+    )
+    structured_store._persist(task_state)
+
+    drift_state = structured_store.get_or_create(
+        session_id="claude-session-other",
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-other",
+    )
+    drift_state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    drift_state.pending_permission = PendingPermission(tool_use_id="tool-other", tool_name="Bash", tool_input={"command": "pwd"})
+    structured_store._persist(drift_state)
+
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-other", workdir=str(tmp_path))
+
+    structured = await service.get_structured_session_for_task(task_id="task-1", user_id=1)
+    updated_task = await task_store.get("task-1")
+
+    assert updated_task is not None
+    assert updated_task.claude_session_id == "claude-session-task"
+    assert structured is not None
+    assert structured.session_id == "claude-session-task"
+
+
+@pytest.mark.asyncio
+async def test_get_structured_session_for_task_prefers_prompt_turn_over_stale_context_session(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    file_store = FileSessionStore(str(tmp_path))
+    structured_store = SessionStore(file_store)
+    task_store = MemoryTaskStore()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=task_store,
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    now = utc_now()
+    terminal_id = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-drift", workdir=str(tmp_path))
+    await task_store.add(
+        TaskRecord(
+            task_id="task-prompt-turn",
+            session_id="session-1",
+            user_id=1,
+            provider="claude_code",
+            prompt="明天",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            claude_session_id="claude-session-drift",
+            status=TaskStatus.RUNNING,
+            created_at=now,
+            started_at=now,
+        )
+    )
+
+    actual_state = structured_store.get_or_create(
+        session_id="claude-session-actual",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-actual",
+    )
+    actual_state.phase = SessionPhase.WAITING_FOR_INPUT
+    actual_state.turns.extend(
+        [
+            ConversationTurn(
+                turn_id="user-actual",
+                role="user",
+                text="明天",
+                is_complete=True,
+                started_at=now + timedelta(seconds=1),
+                ended_at=now + timedelta(seconds=1),
+            ),
+            ConversationTurn(
+                turn_id="resp-actual",
+                role="assistant",
+                text="\n任务对应回复\n",
+                is_complete=True,
+                started_at=now + timedelta(seconds=2),
+                ended_at=now + timedelta(seconds=2),
+            ),
+        ]
+    )
+    structured_store._persist(actual_state)
+
+    drift_state = structured_store.get_or_create(
+        session_id="claude-session-drift",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-drift",
+    )
+    drift_state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    drift_state.pending_permission = PendingPermission(tool_use_id="tool-drift", tool_name="Bash", tool_input={"command": "pwd"})
+    drift_state.turns.append(
+        ConversationTurn(
+            turn_id="resp-drift",
+            role="assistant",
+            text="\n漂移会话回复\n",
+            is_complete=True,
+            started_at=now + timedelta(seconds=3),
+            ended_at=now + timedelta(seconds=3),
+        )
+    )
+    structured_store._persist(drift_state)
+
+    structured = await service.get_structured_session_for_task(task_id="task-prompt-turn", user_id=1)
+    updated_task = await task_store.get("task-prompt-turn")
+
+    assert structured is not None
+    assert structured.session_id == "claude-session-actual"
+    assert updated_task is not None
+    assert updated_task.claude_session_id == "claude-session-actual"
+
+
+@pytest.mark.asyncio
+async def test_get_structured_session_for_task_keeps_final_task_bound_when_later_same_prompt_exists(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    file_store = FileSessionStore(str(tmp_path))
+    structured_store = SessionStore(file_store)
+    task_store = MemoryTaskStore()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=task_store,
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    now = utc_now()
+    terminal_id = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await task_store.add(
+        TaskRecord(
+            task_id="task-final",
+            session_id="session-1",
+            user_id=1,
+            provider="claude_code",
+            prompt="hi",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            claude_session_id="claude-session-original",
+            status=TaskStatus.SUCCEEDED,
+            created_at=now,
+            started_at=now,
+            ended_at=now + timedelta(seconds=3),
+        )
+    )
+
+    original_state = structured_store.get_or_create(
+        session_id="claude-session-original",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-original",
+    )
+    original_state.phase = SessionPhase.WAITING_FOR_INPUT
+    original_state.turns.extend(
+        [
+            ConversationTurn(turn_id="user-original", role="user", text="hi", is_complete=True, started_at=now + timedelta(seconds=1)),
+            ConversationTurn(turn_id="resp-original", role="assistant", text="\n原任务回复\n", is_complete=True, started_at=now + timedelta(seconds=2)),
+        ]
+    )
+    structured_store._persist(original_state)
+
+    later_state = structured_store.get_or_create(
+        session_id="claude-session-later",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-later",
+    )
+    later_state.phase = SessionPhase.WAITING_FOR_INPUT
+    later_state.turns.extend(
+        [
+            ConversationTurn(turn_id="user-later", role="user", text="hi", is_complete=True, started_at=now + timedelta(seconds=4)),
+            ConversationTurn(turn_id="resp-later", role="assistant", text="\n后续任务回复\n", is_complete=True, started_at=now + timedelta(seconds=5)),
+        ]
+    )
+    structured_store._persist(later_state)
+
+    structured = await service.get_structured_session_for_task(task_id="task-final", user_id=1)
+    updated_task = await task_store.get("task-final")
+
+    assert structured is not None
+    assert structured.session_id == "claude-session-original"
+    assert updated_task is not None
+    assert updated_task.claude_session_id == "claude-session-original"
+
+
+@pytest.mark.asyncio
+async def test_bind_claude_session_does_not_bulk_rebind_unmatched_tasks(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    task_store = MemoryTaskStore()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=task_store,
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    now = utc_now()
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await task_store.add(
+        TaskRecord(
+            task_id="task-a",
+            session_id="session-a",
+            user_id=1,
+            provider="claude_code",
+            prompt="first",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            status=TaskStatus.RUNNING,
+            created_at=now,
+            started_at=now,
+        )
+    )
+    await task_store.add(
+        TaskRecord(
+            task_id="task-b",
+            session_id="session-b",
+            user_id=1,
+            provider="claude_code",
+            prompt="second",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            status=TaskStatus.RUNNING,
+            created_at=now,
+            started_at=now,
+        )
+    )
+
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-new", workdir=str(tmp_path))
+
+    task_a = await task_store.get("task-a")
+    task_b = await task_store.get("task-b")
+
+    assert task_a is not None
+    assert task_a.claude_session_id is None
+    assert task_b is not None
+    assert task_b.claude_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_get_structured_session_for_task_rejects_stale_task_session_from_other_workdir(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    file_store = FileSessionStore(str(tmp_path))
+    structured_store = SessionStore(file_store)
+    task_store = MemoryTaskStore()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=task_store,
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+    old_workdir = str(tmp_path / "old")
+    new_workdir = str(tmp_path / "new")
+    terminal_id = expected_terminal_id(user_id=1, workdir=new_workdir)
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=new_workdir,
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await task_store.add(
+        TaskRecord(
+            task_id="task-stale",
+            session_id="session-1",
+            user_id=1,
+            provider="claude_code",
+            prompt="hi",
+            workdir=new_workdir,
+            timeout_sec=10,
+            claude_session_id="claude-session-old",
+            status=TaskStatus.RUNNING,
+        )
+    )
+
+    old_state = structured_store.get_or_create(
+        session_id="claude-session-old",
+        workdir=old_workdir,
+        terminal_id=expected_terminal_id(user_id=1, workdir=old_workdir),
+        claude_session_id="claude-session-old",
+    )
+    old_state.phase = SessionPhase.WAITING_FOR_INPUT
+    old_state.turns.append(ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True))
+    structured_store._persist(old_state)
+
+    new_state = structured_store.get_or_create(
+        session_id="claude-session-new",
+        workdir=new_workdir,
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-new",
+    )
+    new_state.phase = SessionPhase.WAITING_FOR_INPUT
+    new_state.turns.append(ConversationTurn(turn_id="turn-new", role="assistant", text="\n新回复\n", is_complete=True))
+    structured_store._persist(new_state)
+
+    structured_before_bind = await service.get_structured_session_for_task(task_id="task-stale", user_id=1)
+    await service.bind_claude_session(user_id=1, claude_session_id="claude-session-new", workdir=new_workdir)
+    updated_task = await task_store.get("task-stale")
+    structured_after_bind = await service.get_structured_session_for_task(task_id="task-stale", user_id=1)
+
+    assert structured_before_bind is not None
+    assert structured_before_bind.session_id == "claude-session-new"
+    assert updated_task is not None
+    assert updated_task.claude_session_id == "claude-session-old"
+    assert structured_after_bind is not None
+    assert structured_after_bind.session_id == "claude-session-new"
+
+
+@pytest.mark.asyncio
+async def test_get_structured_session_for_task_rejects_stale_fallback_session_from_other_workdir(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    task_store = MemoryTaskStore()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=task_store,
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+    old_workdir = str(tmp_path / "old")
+    new_workdir = str(tmp_path / "new")
+    stale_state = SessionState(
+        session_id="claude-session-old",
+        workdir=old_workdir,
+        claude_session_id="claude-session-old",
+        phase=SessionPhase.WAITING_FOR_INPUT,
+    )
+    factory.get_claude_session_state = lambda session_id: stale_state
+    await task_store.add(
+        TaskRecord(
+            task_id="task-fallback-stale",
+            session_id="session-1",
+            user_id=1,
+            provider="claude_code",
+            prompt="hi",
+            workdir=new_workdir,
+            timeout_sec=10,
+            claude_session_id="claude-session-old",
+            status=TaskStatus.RUNNING,
+        )
+    )
+
+    structured = await service.get_structured_session_for_task(task_id="task-fallback-stale", user_id=1)
+
+    assert structured is None
 
 
 @pytest.mark.asyncio
