@@ -2316,8 +2316,6 @@ async def test_answer_pending_user_question_option_falls_back_to_text_transport_
 
 @pytest.mark.asyncio
 async def test_answer_pending_user_question_option_falls_back_when_factory_lacks_terminal_option_method(tmp_path: Path) -> None:
-    adapter = StubAdapter(events=[])
-
     class LegacyFactory:
         def __init__(self) -> None:
             self._interactive_inputs: list[tuple[str, str, str]] = []
