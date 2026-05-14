@@ -2,7 +2,7 @@
 
 ## 目标
 
-为当前 Telegram CLI Gateway 增加 cc-connect 风格的附件回传能力：当 Agent 生成本地截图、图表、PDF、报告或压缩包后，用户可以通过 Telegram 命令把这些文件发送回当前聊天。
+为当前 Telegram CLI Gateway 增加附件回传能力：当 Agent 生成本地截图、图表、PDF、报告或压缩包后，用户可以通过 Telegram 命令把这些文件发送回当前聊天。
 
 首版采用显式命令触发，不做任务结束后的自动扫描，避免误发敏感文件。
 
@@ -30,23 +30,11 @@
 - MCP 工具或 Claude Code tool 注册。
 - 文件压缩、打包或格式转换。
 
-## cc-connect 参考点
+## 设计原则
 
-cc-connect 的附件回传采用显式命令模式：
+本项目首版采用显式命令模式，并通过独立配置开关控制附件回传能力。
 
-```bash
-cc-connect send --image /absolute/path/to/chart.png
-cc-connect send --file /absolute/path/to/report.pdf
-cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
-```
-
-并通过独立配置开关控制：
-
-```toml
-attachment_send = "on"
-```
-
-本项目首版借鉴其关键原则：
+关键原则：
 
 - 附件发送是独立能力，不影响普通文本回复。
 - Agent 或用户必须显式指定要发送的文件。
