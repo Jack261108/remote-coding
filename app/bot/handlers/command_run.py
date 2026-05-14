@@ -14,11 +14,13 @@ from app.bot.presenters.structured_reply_presenter import (
     PermissionRequestOutput,
     ProgressUpdateOutput,
     StructuredReplyPresenter,
+    ToolStatusOutput,
     UserQuestionOutput,
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
     normalize_stream_text,
 )
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
+from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.models import EventType
 from app.services.task_service import TaskService
 
@@ -181,6 +183,12 @@ async def run_prompt_and_stream(
 
     sender: ChunkSender = sender_factory()
     presenter = StructuredReplyPresenter(task_service=task_service, user_id=user_id, task_id=start.task.task_id)
+    tool_message_manager = ToolMessageManager(
+        root_message=message,
+        task_id=start.task.task_id,
+        user_id=user_id,
+        provider=start.task.provider,
+    )
     await presenter.prime(baseline_current_snapshot=True)
     interactive_pump: asyncio.Task | None = None
 
@@ -205,6 +213,10 @@ async def run_prompt_and_stream(
                     output.text,
                     reply_markup=build_user_question_keyboard(output),
                 )
+                continue
+            if isinstance(output, ToolStatusOutput):
+                await sender.flush(send_text)
+                await tool_message_manager.handle(output)
                 continue
             if isinstance(output, ProgressUpdateOutput):
                 await sender.flush(send_text)

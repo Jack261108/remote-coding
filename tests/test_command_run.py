@@ -18,31 +18,62 @@ from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_n
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
 
 
+class DummyAnswerMessage:
+    def __init__(self, text: str, *, reply_markup=None, parse_mode=None) -> None:
+        self.text = text
+        self.reply_markup = reply_markup
+        self.parse_mode = parse_mode
+        self.edits: list[str] = []
+        self.edit_parse_modes: list[ParseMode | None] = []
+
+    async def edit_text(self, text: str, parse_mode=None) -> "DummyAnswerMessage":
+        self.text = text
+        self.edits.append(text)
+        self.edit_parse_modes.append(parse_mode)
+        return self
+
+
 class DummyMessage:
     def __init__(self, user_id: int = 1, *, fail_on_calls: set[int] | None = None) -> None:
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
+        self.sent_messages: list[DummyAnswerMessage] = []
         self.reply_markups: list[InlineKeyboardMarkup | None] = []
         self.parse_modes: list[ParseMode | None] = []
         self._answer_calls = 0
         self._fail_on_calls = fail_on_calls or set()
 
-    async def answer(self, text: str, reply_markup=None, parse_mode=None) -> None:
+    async def answer(self, text: str, reply_markup=None, parse_mode=None) -> DummyAnswerMessage:
         self._answer_calls += 1
         if self._answer_calls in self._fail_on_calls:
             raise TelegramBadRequest(method="sendMessage", message="chat not found")
+        sent = DummyAnswerMessage(text, reply_markup=reply_markup, parse_mode=parse_mode)
         self.answers.append(text)
+        self.sent_messages.append(sent)
         self.reply_markups.append(reply_markup)
         self.parse_modes.append(parse_mode)
+        return sent
 
 
 class DummyTaskService:
-    def __init__(self, events: list[CLIEvent], status: TaskRecord | None = None, *, interactive: bool = False, structured_reply: str = "", structured_turns: list[ConversationTurn] | None = None, event_delays: list[float] | None = None) -> None:
+    def __init__(
+        self,
+        events: list[CLIEvent],
+        status: TaskRecord | None = None,
+        *,
+        interactive: bool = False,
+        structured_reply: str = "",
+        structured_turns: list[ConversationTurn] | None = None,
+        structured_sessions: list[object | None] | None = None,
+        event_delays: list[float] | None = None,
+    ) -> None:
         self._events = events
         self._status = status
         self._interactive = interactive
         self._structured_reply = structured_reply
         self._structured_turns = structured_turns
+        self._structured_sessions = structured_sessions
+        self._structured_session_index = 0
         self._event_delays = event_delays or [0.0] * len(events)
         self._revision = 0
         self._structured_reply_turn_id: str | None = None
@@ -57,6 +88,14 @@ class DummyTaskService:
         return self._status
 
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
+        if self._structured_sessions is not None:
+            if self._structured_session_index < len(self._structured_sessions):
+                session = self._structured_sessions[self._structured_session_index]
+                self._structured_session_index += 1
+            else:
+                session = self._structured_sessions[-1]
+            self._revision += 1
+            return session
         if self._structured_turns is not None:
             return SimpleNamespace(
                 session_id="claude-session-1",
@@ -144,6 +183,16 @@ async def test_run_prompt_and_stream_interactive_pump_silences_missing_structure
     assert repeated_calls[-1].kwargs == {"log_missing": True}
 
 
+def _structured_session(*, phase: SessionPhase, tool_calls: dict[str, ToolCallRecord] | None = None):
+    return SimpleNamespace(
+        session_id="claude-session-1",
+        phase=phase,
+        turns=[],
+        pending_permission=None,
+        tool_calls=tool_calls or {},
+    )
+
+
 def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
     started_at = utc_now() - timedelta(seconds=2)
     ended_at = utc_now()
@@ -218,6 +267,50 @@ async def test_run_prompt_and_stream_reports_started_output_and_success() -> Non
     )
     assert message.answers[2] == "hello\nworld"
     assert message.answers[3].startswith("任务执行完成\ntask_id: t1\nstatus: 成功\nexit_code: 0\nduration: ")
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
+    running_tool = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.RUNNING,
+    )
+    success_tool = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.SUCCESS,
+    )
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_sessions=[
+            _structured_session(phase=SessionPhase.WAITING_FOR_INPUT),
+            _structured_session(phase=SessionPhase.PROCESSING, tool_calls={"tool-1": running_tool}),
+            _structured_session(phase=SessionPhase.PROCESSING, tool_calls={"tool-1": running_tool}),
+            _structured_session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"tool-1": success_tool}),
+            _structured_session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"tool-1": success_tool}),
+        ],
+        event_delays=[0.0, 0.16],
+    )
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25)
+
+    tool_messages = [
+        sent
+        for sent in message.sent_messages
+        if "工具: Bash" in sent.text or any("工具: Bash" in edit for edit in sent.edits)
+    ]
+    assert len(tool_messages) == 1
+    assert any("执行中" in answer and "工具: Bash" in answer for answer in message.answers)
+    assert "执行完成" in tool_messages[0].text or any("执行完成" in edit for edit in tool_messages[0].edits)
 
 
 @pytest.mark.asyncio
