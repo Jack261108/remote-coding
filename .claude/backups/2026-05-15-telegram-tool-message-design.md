@@ -8,11 +8,11 @@
 
 ## 目标
 
-- 每个工具调用在 Telegram 中有一条独立状态消息。
-- 所有工具都纳入展示范围。
+- 每个非交互工具调用在 Telegram 中有一条独立状态消息。
+- 交互工具继续用现有交互消息展示，避免重复消息。
 - 工具成功后删除对应状态消息，减少刷屏。
 - 工具失败或中断时保留状态消息，方便排查。
-- 权限请求和 `AskUserQuestion` 继续使用现有独立交互消息，不复用工具状态消息承载按钮。
+- 权限请求和 `AskUserQuestion` 继续使用现有独立交互消息，不复用工具状态消息承载按钮；其中 `AskUserQuestion` 不额外发送泛化工具状态消息。
 - Telegram 消息操作失败不能影响 Claude 任务执行。
 
 ## 非目标
@@ -60,15 +60,15 @@ class ToolStatusOutput:
 
 ## Presenter 行为
 
-`StructuredReplyPresenter` 维护每个工具上次已发状态。当本次快照中的工具状态与上次不同，则产出 `ToolStatusOutput`。
+`StructuredReplyPresenter` 维护每个非交互工具上次已发状态。当本次快照中的工具状态与上次不同，则产出 `ToolStatusOutput`。
 
 规则：
 
-- `RUNNING`：产出执行中状态。
-- `WAITING_FOR_APPROVAL`：产出等待权限状态；权限按钮仍由 `PermissionRequestOutput` 生成。
-- `SUCCESS`：产出成功状态，供 Telegram 层删除工具消息。
-- `ERROR`：产出失败状态，保留工具消息。
-- `INTERRUPTED`：产出中断状态，保留工具消息。
+- 非交互工具 `RUNNING`：产出执行中状态。
+- 非交互工具 `WAITING_FOR_APPROVAL`：产出等待权限状态；权限按钮仍由 `PermissionRequestOutput` 生成。
+- 非交互工具 `SUCCESS`：产出成功状态，供 Telegram 层删除工具消息。
+- 非交互工具 `ERROR`：产出失败状态，保留工具消息。
+- 非交互工具 `INTERRUPTED`：产出中断状态，保留工具消息。
 - `AskUserQuestion` 工具优先产出 `UserQuestionOutput`，不额外产出泛化工具状态，避免与现有提问交互消息重复。
 
 ## Telegram 工具消息管理
@@ -178,9 +178,9 @@ Telegram API 错误不能影响 Claude 任务执行：
 
 ## 验收标准
 
-- Claude 调用任意工具时，Telegram 出现该工具的独立状态消息。
-- 工具成功后，该工具状态消息被删除；删除失败时显示“执行完成”。
-- 工具失败或中断时，状态消息保留并显示最终状态。
+- Claude 调用非交互工具时，Telegram 出现该工具的独立状态消息。
+- 非交互工具成功后，该工具状态消息被删除；删除失败时显示“执行完成”。
+- 非交互工具失败或中断时，状态消息保留并显示最终状态。
 - 权限请求和用户提问仍使用现有带按钮消息。
 - 普通 Claude 输出的发送行为不变。
 - 相关测试通过。
