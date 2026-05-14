@@ -8,18 +8,20 @@ from app.bot.presenters.structured_reply_presenter import (
     PermissionRequestOutput,
     ProgressUpdateOutput,
     StructuredReplyPresenter,
+    SubagentToolStatusOutput,
     ToolStatusOutput,
     UserQuestionOutput,
     build_permission_prompt,
     build_tool_progress_message,
     build_tool_status_message,
+    build_tool_task_list_message,
     build_user_question_prompt,
     normalize_stream_text,
     preview_stream_text,
     strip_bridge_markers,
 )
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
 from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
 from app.services.session_store import SessionStore
 
@@ -522,6 +524,238 @@ def test_build_tool_status_message_formats_final_states() -> None:
         tool_input={"command": "rm file"},
         status=ToolStatus.WAITING_FOR_APPROVAL.value,
     ) == "等待权限\n工具: Bash\n命令: rm file"
+
+
+def test_build_tool_task_list_message_marks_current_task() -> None:
+    message = build_tool_task_list_message(
+        ToolStatusOutput(
+            tool_use_id="task-1",
+            tool_name="Task",
+            tool_input={"description": "修复测试失败"},
+            status=ToolStatus.RUNNING.value,
+            subagent_tools=(
+                SubagentToolStatusOutput(
+                    tool_use_id="read-1",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/foo.py"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+                SubagentToolStatusOutput(
+                    tool_use_id="bash-1",
+                    tool_name="Bash",
+                    tool_input={"command": "pytest -q"},
+                    status=ToolStatus.RUNNING.value,
+                ),
+            ),
+        )
+    )
+
+    assert message == (
+        "任务列表\n"
+        "任务: 修复测试失败\n"
+        "状态: 执行中\n"
+        "当前: 2. Bash\n"
+        "\n"
+        "1. Read - 完成 - 文件: app/foo.py\n"
+        "=> 2. Bash - 执行中 - 命令: pytest -q"
+    )
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_task_status_with_subagent_tools() -> None:
+    task_tool = ToolCallRecord(
+        tool_use_id="task-1",
+        name="Task",
+        input={"description": "修复测试失败"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-1",
+                name="Read",
+                input={"file_path": "app/foo.py"},
+                status=ToolStatus.RUNNING,
+            )
+        ],
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": task_tool}),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": task_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        ToolStatusOutput(
+            tool_use_id="task-1",
+            tool_name="Task",
+            tool_input={"description": "修复测试失败"},
+            status=ToolStatus.RUNNING.value,
+            subagent_tools=(
+                SubagentToolStatusOutput(
+                    tool_use_id="read-1",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/foo.py"},
+                    status=ToolStatus.RUNNING.value,
+                ),
+            ),
+        )
+    ]
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_task_status_when_subagent_status_changes() -> None:
+    read_running_task = ToolCallRecord(
+        tool_use_id="task-1",
+        name="Task",
+        input={"description": "修复测试失败"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-1",
+                name="Read",
+                input={"file_path": "app/foo.py"},
+                status=ToolStatus.RUNNING,
+            )
+        ],
+    )
+    bash_running_task = ToolCallRecord(
+        tool_use_id="task-1",
+        name="Task",
+        input={"description": "修复测试失败"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-1",
+                name="Read",
+                input={"file_path": "app/foo.py"},
+                status=ToolStatus.SUCCESS,
+            ),
+            SubagentToolCall(
+                tool_use_id="bash-1",
+                name="Bash",
+                input={"command": "pytest -q"},
+                status=ToolStatus.RUNNING,
+            ),
+        ],
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": read_running_task}),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": bash_running_task}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        ToolStatusOutput(
+            tool_use_id="task-1",
+            tool_name="Task",
+            tool_input={"description": "修复测试失败"},
+            status=ToolStatus.RUNNING.value,
+            subagent_tools=(
+                SubagentToolStatusOutput(
+                    tool_use_id="read-1",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/foo.py"},
+                    status=ToolStatus.RUNNING.value,
+                ),
+            ),
+        )
+    ]
+    assert second == [
+        ToolStatusOutput(
+            tool_use_id="task-1",
+            tool_name="Task",
+            tool_input={"description": "修复测试失败"},
+            status=ToolStatus.RUNNING.value,
+            subagent_tools=(
+                SubagentToolStatusOutput(
+                    tool_use_id="read-1",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/foo.py"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+                SubagentToolStatusOutput(
+                    tool_use_id="bash-1",
+                    tool_name="Bash",
+                    tool_input={"command": "pytest -q"},
+                    status=ToolStatus.RUNNING.value,
+                ),
+            ),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_presenter_skips_flat_status_for_nested_tool_duplicate() -> None:
+    task_tool = ToolCallRecord(
+        tool_use_id="task-1",
+        name="Task",
+        input={"description": "修复测试失败"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="bash-1",
+                name="Bash",
+                input={"command": "pytest -q"},
+                status=ToolStatus.RUNNING,
+            )
+        ],
+    )
+    duplicate_bash_tool = ToolCallRecord(
+        tool_use_id="bash-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.RUNNING,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(
+                    phase=SessionPhase.PROCESSING,
+                    tool_calls={"task-1": task_tool, "bash-1": duplicate_bash_tool},
+                ),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    outputs = await presenter.poll(task_id="task-1")
+
+    assert outputs == [
+        ToolStatusOutput(
+            tool_use_id="task-1",
+            tool_name="Task",
+            tool_input={"description": "修复测试失败"},
+            status=ToolStatus.RUNNING.value,
+            subagent_tools=(
+                SubagentToolStatusOutput(
+                    tool_use_id="bash-1",
+                    tool_name="Bash",
+                    tool_input={"command": "pytest -q"},
+                    status=ToolStatus.RUNNING.value,
+                ),
+            ),
+        )
+    ]
 
 
 @pytest.mark.asyncio

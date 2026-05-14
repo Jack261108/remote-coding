@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from aiogram.enums import ParseMode
 
-from app.bot.presenters.structured_reply_presenter import ToolStatusOutput
+from app.bot.presenters.structured_reply_presenter import SubagentToolStatusOutput, ToolStatusOutput
 from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.session_models import ToolStatus
 
@@ -47,6 +47,28 @@ def _output(status: ToolStatus | str, *, tool_use_id: str = "tool-1") -> ToolSta
         tool_name="Bash",
         tool_input={"command": "pytest -q"},
         status=status_value,
+    )
+
+
+def _task_output(
+    *,
+    subagent_statuses: tuple[tuple[str, str, dict, ToolStatus], ...],
+    task_status: ToolStatus = ToolStatus.RUNNING,
+) -> ToolStatusOutput:
+    return ToolStatusOutput(
+        tool_use_id="task-1",
+        tool_name="Task",
+        tool_input={"description": "修复测试失败"},
+        status=task_status.value,
+        subagent_tools=tuple(
+            SubagentToolStatusOutput(
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                status=status.value,
+            )
+            for tool_use_id, tool_name, tool_input, status in subagent_statuses
+        ),
     )
 
 
@@ -113,6 +135,80 @@ async def test_tool_message_manager_re_sends_when_edit_fails() -> None:
 
     assert len(root.sent) == 2
     assert "已中断" in root.sent[1].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_sends_task_list_message() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(
+        _task_output(
+            subagent_statuses=(
+                ("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),
+            )
+        )
+    )
+
+    assert len(root.sent) == 1
+    assert "任务列表" in root.sent[0].text
+    assert "任务: 修复测试失败" in root.sent[0].text
+    assert "当前: 1. Read" in root.sent[0].text
+    assert "1. Read - 执行中 - 文件: app/foo.py" in root.sent[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_edits_task_list_when_current_subagent_changes() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(
+        _task_output(
+            subagent_statuses=(
+                ("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),
+            )
+        )
+    )
+    await manager.handle(
+        _task_output(
+            subagent_statuses=(
+                ("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.SUCCESS),
+                ("bash-1", "Bash", {"command": "pytest -q"}, ToolStatus.RUNNING),
+            )
+        )
+    )
+
+    assert len(root.sent) == 1
+    assert "当前: 2. Bash" in root.sent[0].text
+    assert root.sent[0].edits
+    assert "2. Bash - 执行中 - 命令: pytest -q" in root.sent[0].edits[-1]
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_re_sends_task_list_when_edit_fails() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(
+        _task_output(
+            subagent_statuses=(
+                ("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),
+            )
+        )
+    )
+    root.sent[0].fail_next_edit = True
+    await manager.handle(
+        _task_output(
+            subagent_statuses=(
+                ("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.SUCCESS),
+                ("bash-1", "Bash", {"command": "pytest -q"}, ToolStatus.RUNNING),
+            )
+        )
+    )
+
+    assert len(root.sent) == 2
+    assert "任务列表" in root.sent[1].text
+    assert "当前: 2. Bash" in root.sent[1].text
 
 
 @pytest.mark.asyncio

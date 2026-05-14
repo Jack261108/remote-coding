@@ -15,7 +15,7 @@ from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import build_permission_prompt, build_tool_progress_message, build_user_question_prompt
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
-from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
+from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
 
 
 class DummyAnswerMessage:
@@ -338,6 +338,126 @@ async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
     assert len(tool_messages) == 1
     assert any("执行中" in answer and "工具: Bash" in answer for answer in message.answers)
     assert "执行完成" in tool_messages[0].text or any("执行完成" in edit for edit in tool_messages[0].edits)
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_updates_task_list_message_for_subagent_tools() -> None:
+    read_running_task = ToolCallRecord(
+        tool_use_id="task-1",
+        name="Task",
+        input={"description": "修复测试失败"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-1",
+                name="Read",
+                input={"file_path": "app/foo.py"},
+                status=ToolStatus.RUNNING,
+            )
+        ],
+    )
+    bash_running_task = ToolCallRecord(
+        tool_use_id="task-1",
+        name="Task",
+        input={"description": "修复测试失败"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-1",
+                name="Read",
+                input={"file_path": "app/foo.py"},
+                status=ToolStatus.SUCCESS,
+            ),
+            SubagentToolCall(
+                tool_use_id="bash-1",
+                name="Bash",
+                input={"command": "pytest -q"},
+                status=ToolStatus.RUNNING,
+            ),
+        ],
+    )
+    all_success_task = ToolCallRecord(
+        tool_use_id="task-1",
+        name="Task",
+        input={"description": "修复测试失败"},
+        status=ToolStatus.SUCCESS,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-1",
+                name="Read",
+                input={"file_path": "app/foo.py"},
+                status=ToolStatus.SUCCESS,
+            ),
+            SubagentToolCall(
+                tool_use_id="bash-1",
+                name="Bash",
+                input={"command": "pytest -q"},
+                status=ToolStatus.SUCCESS,
+            ),
+        ],
+    )
+    duplicate_bash_running = ToolCallRecord(
+        tool_use_id="bash-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.RUNNING,
+    )
+    duplicate_bash_success = ToolCallRecord(
+        tool_use_id="bash-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.SUCCESS,
+    )
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_sessions=[
+            _structured_session(phase=SessionPhase.WAITING_FOR_INPUT),
+            _structured_session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": read_running_task}),
+            _structured_session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": read_running_task}),
+            _structured_session(
+                phase=SessionPhase.PROCESSING,
+                tool_calls={"task-1": bash_running_task, "bash-1": duplicate_bash_running},
+            ),
+            _structured_session(
+                phase=SessionPhase.PROCESSING,
+                tool_calls={"task-1": bash_running_task, "bash-1": duplicate_bash_running},
+            ),
+            _structured_session(
+                phase=SessionPhase.WAITING_FOR_INPUT,
+                tool_calls={"task-1": all_success_task, "bash-1": duplicate_bash_success},
+            ),
+            _structured_session(
+                phase=SessionPhase.WAITING_FOR_INPUT,
+                tool_calls={"task-1": all_success_task, "bash-1": duplicate_bash_success},
+            ),
+            _structured_session(
+                phase=SessionPhase.WAITING_FOR_INPUT,
+                tool_calls={"task-1": all_success_task, "bash-1": duplicate_bash_success},
+            ),
+        ],
+        event_delays=[0.0, 0.24],
+    )
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36)
+
+    task_list_messages = [
+        sent
+        for sent in message.sent_messages
+        if "任务列表" in sent.text or any("任务列表" in edit for edit in sent.edits)
+    ]
+    assert len(task_list_messages) == 1
+    task_list_message = task_list_messages[0]
+    assert any("当前: 1. Read" in answer for answer in message.answers)
+    assert any("当前: 2. Bash" in edit for edit in task_list_message.edits)
+    assert "当前: 无（全部完成）" in task_list_message.text
+    assert "工具: Bash" not in "\n".join(message.answers)
+    assert all("工具: Bash" not in edit for edit in task_list_message.edits)
 
 
 @pytest.mark.asyncio

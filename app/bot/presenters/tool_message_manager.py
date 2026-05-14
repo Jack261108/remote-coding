@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from aiogram.enums import ParseMode
 from aiogram.types import Message
 
-from app.bot.presenters.structured_reply_presenter import ToolStatusOutput, build_tool_status_message
+from app.bot.presenters.structured_reply_presenter import ToolStatusOutput, build_tool_status_message, build_tool_task_list_message
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
 
 logger = logging.getLogger(__name__)
@@ -26,11 +26,14 @@ class ToolMessageManager:
         self._messages: dict[str, _TrackedToolMessage] = {}
 
     async def handle(self, output: ToolStatusOutput) -> None:
-        text = build_tool_status_message(
-            tool_name=output.tool_name,
-            tool_input=output.tool_input,
-            status=output.status,
-        )
+        if output.subagent_tools:
+            text = build_tool_task_list_message(output)
+        else:
+            text = build_tool_status_message(
+                tool_name=output.tool_name,
+                tool_input=output.tool_input,
+                status=output.status,
+            )
         existing = self._messages.get(output.tool_use_id)
         if existing is None:
             await self._send_and_track(output.tool_use_id, text)
