@@ -153,27 +153,48 @@ async def run_prompt_and_stream(
             "interactive": start.interactive,
         },
     )
-    async def answer_safely(text: str, *, reply_markup=None) -> bool:
+    async def send_message_safely(text: str, *, reply_markup=None) -> Message | None:
         if not text:
-            return False
+            return None
         try:
             rendered = render_markdownish_to_telegram_html(text)
             chunks = split_telegram_html(rendered, 4096)
+            sent_message = None
             for index, chunk in enumerate(chunks):
-                await message.answer(
+                sent_message = await message.answer(
                     chunk,
                     reply_markup=reply_markup if index == len(chunks) - 1 else None,
                     parse_mode=ParseMode.HTML,
                 )
-            return True
+            return sent_message
         except Exception:
             logger.exception(
                 "telegram answer failed",
                 extra={"task_id": start.task.task_id, "user_id": user_id, "provider": start.task.provider},
             )
+            return None
+
+    async def answer_safely(text: str, *, reply_markup=None) -> bool:
+        return await send_message_safely(text, reply_markup=reply_markup) is not None
+
+    async def edit_message_safely(target_message: Message | None, text: str) -> bool:
+        if target_message is None or not text:
+            return False
+        try:
+            rendered = render_markdownish_to_telegram_html(text)
+            chunks = split_telegram_html(rendered, 4096)
+            if len(chunks) != 1:
+                return False
+            await target_message.edit_text(chunks[0], parse_mode=ParseMode.HTML)
+            return True
+        except Exception:
+            logger.exception(
+                "telegram edit failed",
+                extra={"task_id": start.task.task_id, "user_id": user_id, "provider": start.task.provider},
+            )
             return False
 
-    await answer_safely(
+    lifecycle_message = await send_message_safely(
         _build_created_message(
             task_id=start.task.task_id,
             provider=start.task.provider,
@@ -261,7 +282,9 @@ async def run_prompt_and_stream(
                         start.task.provider,
                         user_id,
                     )
-                    await answer_safely(_build_started_message(task_id=start.task.task_id))
+                    started_message = _build_started_message(task_id=start.task.task_id)
+                    if not await edit_message_safely(lifecycle_message, started_message):
+                        await answer_safely(started_message)
                     if start.interactive and interactive_pump is None:
                         interactive_pump = asyncio.create_task(pump_structured_reply())
                     continue

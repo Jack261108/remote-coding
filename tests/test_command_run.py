@@ -19,14 +19,18 @@ from app.domain.session_models import ConversationTurn, PendingPermission, Sessi
 
 
 class DummyAnswerMessage:
-    def __init__(self, text: str, *, reply_markup=None, parse_mode=None) -> None:
+    def __init__(self, text: str, *, reply_markup=None, parse_mode=None, fail_next_edit: bool = False) -> None:
         self.text = text
         self.reply_markup = reply_markup
         self.parse_mode = parse_mode
         self.edits: list[str] = []
         self.edit_parse_modes: list[ParseMode | None] = []
+        self.fail_next_edit = fail_next_edit
 
     async def edit_text(self, text: str, parse_mode=None) -> "DummyAnswerMessage":
+        if self.fail_next_edit:
+            self.fail_next_edit = False
+            raise TelegramBadRequest(method="editMessageText", message="message is not modified")
         self.text = text
         self.edits.append(text)
         self.edit_parse_modes.append(parse_mode)
@@ -34,7 +38,7 @@ class DummyAnswerMessage:
 
 
 class DummyMessage:
-    def __init__(self, user_id: int = 1, *, fail_on_calls: set[int] | None = None) -> None:
+    def __init__(self, user_id: int = 1, *, fail_on_calls: set[int] | None = None, fail_first_edit: bool = False) -> None:
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
         self.sent_messages: list[DummyAnswerMessage] = []
@@ -42,12 +46,18 @@ class DummyMessage:
         self.parse_modes: list[ParseMode | None] = []
         self._answer_calls = 0
         self._fail_on_calls = fail_on_calls or set()
+        self._fail_first_edit = fail_first_edit
 
     async def answer(self, text: str, reply_markup=None, parse_mode=None) -> DummyAnswerMessage:
         self._answer_calls += 1
         if self._answer_calls in self._fail_on_calls:
             raise TelegramBadRequest(method="sendMessage", message="chat not found")
-        sent = DummyAnswerMessage(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        sent = DummyAnswerMessage(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            fail_next_edit=self._fail_first_edit and not self.sent_messages,
+        )
         self.answers.append(text)
         self.sent_messages.append(sent)
         self.reply_markups.append(reply_markup)
@@ -260,13 +270,30 @@ async def test_run_prompt_and_stream_reports_started_output_and_success() -> Non
         "session_id: s1\n"
         "status: 等待启动"
     )
-    assert message.answers[1] == (
-        "任务开始执行\n"
-        "task_id: t1\n"
-        "status: 正在处理"
+    started_message = "任务开始执行\ntask_id: t1\nstatus: 正在处理"
+    assert message.sent_messages[0].text == started_message
+    assert message.sent_messages[0].edits == [started_message]
+    assert started_message not in message.answers
+    assert message.answers[1] == "hello\nworld"
+    assert message.answers[2].startswith("任务执行完成\ntask_id: t1\nstatus: 成功\nexit_code: 0\nduration: ")
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_sends_started_message_when_lifecycle_edit_fails() -> None:
+    message = DummyMessage(fail_first_edit=True)
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
     )
-    assert message.answers[2] == "hello\nworld"
-    assert message.answers[3].startswith("任务执行完成\ntask_id: t1\nstatus: 成功\nexit_code: 0\nduration: ")
+
+    await _run_and_wait(message=message, task_service=task_service)
+
+    assert message.sent_messages[0].edits == []
+    assert "任务开始执行\ntask_id: t1\nstatus: 正在处理" in message.answers
+    assert any(answer.startswith("任务执行完成") for answer in message.answers)
 
 
 @pytest.mark.asyncio
@@ -404,7 +431,7 @@ async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mod
     await updater
 
     assert "噪音" not in "\n".join(message.answers)
-    assert message.answers[2] == "干净正文"
+    assert message.answers[1] == "干净正文"
 
 
 @pytest.mark.asyncio
@@ -433,7 +460,7 @@ async def test_run_prompt_and_stream_interactive_ignores_old_turn_and_emits_new_
 
     assert "旧回复" not in "\n".join(message.answers)
     assert "tmux 噪音" not in "\n".join(message.answers)
-    assert message.answers[2] == "新回复"
+    assert message.answers[1] == "新回复"
 
 
 @pytest.mark.asyncio
@@ -483,7 +510,7 @@ async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_st
 
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_continues_after_message_send_failure() -> None:
-    message = DummyMessage(fail_on_calls={2})
+    message = DummyMessage(fail_on_calls={1})
     task_service = DummyTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
@@ -495,7 +522,7 @@ async def test_run_prompt_and_stream_continues_after_message_send_failure() -> N
 
     await _run_and_wait(message=message, task_service=task_service)
 
-    assert message.answers[0].startswith("任务已接收")
+    assert message.answers[0].startswith("任务开始执行")
     assert "hello\nworld" in message.answers
     assert any(item.startswith("任务执行完成") for item in message.answers)
 
@@ -526,7 +553,7 @@ async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_befo
 
     assert "旧回复" not in "\n".join(message.answers)
     assert "tmux 噪音" not in "\n".join(message.answers)
-    assert "迟到回复" in message.answers[2]
+    assert "迟到回复" in message.answers[1]
 
 
 @pytest.mark.asyncio
@@ -980,7 +1007,7 @@ async def test_run_prompt_and_stream_interactive_emits_progress_update_immediate
     progress_message = build_tool_progress_message(tool_name="Bash", tool_input={"command": "pytest -q"})
     assert message.answers.count(progress_message) == 1
     progress_index = message.answers.index(progress_message)
-    assert progress_index == 2
+    assert progress_index == 1
     assert message.reply_markups[progress_index] is None
     assert "测试完成" in message.answers
 
@@ -1021,9 +1048,9 @@ async def test_run_prompt_and_stream_renders_structured_reply_as_html() -> None:
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
     await updater
 
-    assert "<b>你好</b>" in message.answers[2]
-    assert "<pre><code>print(&#x27;hi&#x27;)</code></pre>" in message.answers[2]
-    assert message.parse_modes[2] == ParseMode.HTML
+    assert "<b>你好</b>" in message.answers[1]
+    assert "<pre><code>print(&#x27;hi&#x27;)</code></pre>" in message.answers[1]
+    assert message.parse_modes[1] == ParseMode.HTML
 
 
 @pytest.mark.asyncio
@@ -1118,5 +1145,5 @@ async def test_run_prompt_and_stream_does_not_truncate_long_structured_reply_pre
         await task
     await updater
 
-    assert message.answers[2] == long_reply
-    assert "输出片段过长" not in message.answers[2]
+    assert message.answers[1] == long_reply
+    assert "输出片段过长" not in message.answers[1]
