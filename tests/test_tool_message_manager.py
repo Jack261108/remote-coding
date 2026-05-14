@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from aiogram.enums import ParseMode
 
-from app.bot.presenters.structured_reply_presenter import SubagentToolStatusOutput, ToolStatusOutput
+from app.bot.presenters.structured_reply_presenter import SubagentAggregateStatusOutput, SubagentToolStatusOutput, ToolStatusOutput
 from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.session_models import ToolStatus
 
@@ -72,6 +72,42 @@ def _task_output(
     )
 
 
+def _aggregate_output(*, second_status: ToolStatus = ToolStatus.RUNNING) -> SubagentAggregateStatusOutput:
+    return SubagentAggregateStatusOutput(
+        message_key="subagent-aggregate",
+        containers=(
+            ToolStatusOutput(
+                tool_use_id="agent-1",
+                tool_name="Agent",
+                tool_input={"description": "项目架构扫描"},
+                status=ToolStatus.SUCCESS.value,
+                subagent_tools=(
+                    SubagentToolStatusOutput(
+                        tool_use_id="read-1",
+                        tool_name="Read",
+                        tool_input={"file_path": "app/foo.py"},
+                        status=ToolStatus.SUCCESS.value,
+                    ),
+                ),
+            ),
+            ToolStatusOutput(
+                tool_use_id="agent-2",
+                tool_name="Agent",
+                tool_input={"description": "测试质量扫描"},
+                status=second_status.value,
+                subagent_tools=(
+                    SubagentToolStatusOutput(
+                        tool_use_id="grep-1",
+                        tool_name="Grep",
+                        tool_input={"pattern": "pytest"},
+                        status=second_status.value,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_tool_message_manager_sends_first_status_message() -> None:
     root = DummyRootMessage()
@@ -135,6 +171,60 @@ async def test_tool_message_manager_re_sends_when_edit_fails() -> None:
 
     assert len(root.sent) == 2
     assert "已中断" in root.sent[1].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_sends_subagent_aggregate_message() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_aggregate_output())
+
+    assert len(root.sent) == 1
+    assert "2 agents running" in root.sent[0].text
+    assert "项目架构扫描 · 1 tool uses · Done" in root.sent[0].text
+    assert "测试质量扫描 · 1 tool uses · Running" in root.sent[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_edits_subagent_aggregate_message() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_aggregate_output(second_status=ToolStatus.RUNNING))
+    await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
+
+    assert len(root.sent) == 1
+    assert "2 agents finished" in root.sent[0].text
+    assert root.sent[0].edits
+    assert "测试质量扫描 · 1 tool uses · Done" in root.sent[0].edits[-1]
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_re_sends_subagent_aggregate_when_edit_fails() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_aggregate_output(second_status=ToolStatus.RUNNING))
+    root.sent[0].fail_next_edit = True
+    await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
+
+    assert len(root.sent) == 2
+    assert "2 agents finished" in root.sent[1].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_tracks_aggregate_and_flat_tool_separately() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_aggregate_output(second_status=ToolStatus.RUNNING))
+    await manager.handle(_output(ToolStatus.RUNNING, tool_use_id="tool-1"))
+    await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
+
+    assert len(root.sent) == 2
+    assert "2 agents finished" in root.sent[0].text
+    assert "工具: Bash" in root.sent[1].text
 
 
 @pytest.mark.asyncio

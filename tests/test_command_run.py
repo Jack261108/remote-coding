@@ -341,11 +341,11 @@ async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_updates_task_list_message_for_subagent_tools() -> None:
-    read_running_task = ToolCallRecord(
-        tool_use_id="task-1",
-        name="Task",
-        input={"description": "修复测试失败"},
+async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> None:
+    agent_1_running = ToolCallRecord(
+        tool_use_id="agent-1",
+        name="Agent",
+        input={"description": "项目架构扫描"},
         status=ToolStatus.RUNNING,
         subagent_tools=[
             SubagentToolCall(
@@ -356,57 +356,120 @@ async def test_run_prompt_and_stream_updates_task_list_message_for_subagent_tool
             )
         ],
     )
-    bash_running_task = ToolCallRecord(
-        tool_use_id="task-1",
-        name="Task",
-        input={"description": "修复测试失败"},
+    agent_2_running = ToolCallRecord(
+        tool_use_id="agent-2",
+        name="Agent",
+        input={"description": "测试质量扫描"},
         status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="glob-1",
+                name="Glob",
+                input={"path": "tests"},
+                status=ToolStatus.RUNNING,
+            )
+        ],
+    )
+    agent_3_running = ToolCallRecord(
+        tool_use_id="agent-3",
+        name="Agent",
+        input={"description": "安全性能扫描"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[],
+    )
+    agent_1_success = ToolCallRecord(
+        tool_use_id="agent-1",
+        name="Agent",
+        input={"description": "项目架构扫描"},
+        status=ToolStatus.SUCCESS,
         subagent_tools=[
             SubagentToolCall(
                 tool_use_id="read-1",
                 name="Read",
                 input={"file_path": "app/foo.py"},
                 status=ToolStatus.SUCCESS,
+            )
+        ],
+    )
+    agent_2_partial = ToolCallRecord(
+        tool_use_id="agent-2",
+        name="Agent",
+        input={"description": "测试质量扫描"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="glob-1",
+                name="Glob",
+                input={"path": "tests"},
+                status=ToolStatus.SUCCESS,
             ),
             SubagentToolCall(
-                tool_use_id="bash-1",
-                name="Bash",
-                input={"command": "pytest -q"},
+                tool_use_id="grep-1",
+                name="Grep",
+                input={"pattern": "pytest"},
                 status=ToolStatus.RUNNING,
             ),
         ],
     )
-    all_success_task = ToolCallRecord(
-        tool_use_id="task-1",
-        name="Task",
-        input={"description": "修复测试失败"},
+    agent_3_partial = ToolCallRecord(
+        tool_use_id="agent-3",
+        name="Agent",
+        input={"description": "安全性能扫描"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-2",
+                name="Read",
+                input={"file_path": "app/bar.py"},
+                status=ToolStatus.RUNNING,
+            )
+        ],
+    )
+    agent_2_success = ToolCallRecord(
+        tool_use_id="agent-2",
+        name="Agent",
+        input={"description": "测试质量扫描"},
         status=ToolStatus.SUCCESS,
         subagent_tools=[
             SubagentToolCall(
-                tool_use_id="read-1",
-                name="Read",
-                input={"file_path": "app/foo.py"},
+                tool_use_id="glob-1",
+                name="Glob",
+                input={"path": "tests"},
                 status=ToolStatus.SUCCESS,
             ),
             SubagentToolCall(
-                tool_use_id="bash-1",
-                name="Bash",
-                input={"command": "pytest -q"},
+                tool_use_id="grep-1",
+                name="Grep",
+                input={"pattern": "pytest"},
                 status=ToolStatus.SUCCESS,
             ),
         ],
     )
-    duplicate_bash_running = ToolCallRecord(
-        tool_use_id="bash-1",
-        name="Bash",
-        input={"command": "pytest -q"},
+    agent_3_success = ToolCallRecord(
+        tool_use_id="agent-3",
+        name="Agent",
+        input={"description": "安全性能扫描"},
+        status=ToolStatus.SUCCESS,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-2",
+                name="Read",
+                input={"file_path": "app/bar.py"},
+                status=ToolStatus.SUCCESS,
+            )
+        ],
+    )
+    duplicate_glob = ToolCallRecord(
+        tool_use_id="glob-1",
+        name="Glob",
+        input={"path": "tests"},
         status=ToolStatus.RUNNING,
     )
-    duplicate_bash_success = ToolCallRecord(
-        tool_use_id="bash-1",
-        name="Bash",
-        input={"command": "pytest -q"},
-        status=ToolStatus.SUCCESS,
+    duplicate_read = ToolCallRecord(
+        tool_use_id="read-2",
+        name="Read",
+        input={"file_path": "app/bar.py"},
+        status=ToolStatus.RUNNING,
     )
     message = DummyMessage()
     task_service = DummyTaskService(
@@ -418,27 +481,41 @@ async def test_run_prompt_and_stream_updates_task_list_message_for_subagent_tool
         interactive=True,
         structured_sessions=[
             _structured_session(phase=SessionPhase.WAITING_FOR_INPUT),
-            _structured_session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": read_running_task}),
-            _structured_session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": read_running_task}),
             _structured_session(
                 phase=SessionPhase.PROCESSING,
-                tool_calls={"task-1": bash_running_task, "bash-1": duplicate_bash_running},
+                tool_calls={"agent-1": agent_1_running, "agent-2": agent_2_running, "agent-3": agent_3_running},
             ),
             _structured_session(
                 phase=SessionPhase.PROCESSING,
-                tool_calls={"task-1": bash_running_task, "bash-1": duplicate_bash_running},
+                tool_calls={"agent-1": agent_1_running, "agent-2": agent_2_running, "agent-3": agent_3_running},
+            ),
+            _structured_session(
+                phase=SessionPhase.PROCESSING,
+                tool_calls={
+                    "agent-1": agent_1_success,
+                    "agent-2": agent_2_partial,
+                    "agent-3": agent_3_partial,
+                    "glob-1": duplicate_glob,
+                    "read-2": duplicate_read,
+                },
+            ),
+            _structured_session(
+                phase=SessionPhase.PROCESSING,
+                tool_calls={
+                    "agent-1": agent_1_success,
+                    "agent-2": agent_2_partial,
+                    "agent-3": agent_3_partial,
+                    "glob-1": duplicate_glob,
+                    "read-2": duplicate_read,
+                },
             ),
             _structured_session(
                 phase=SessionPhase.WAITING_FOR_INPUT,
-                tool_calls={"task-1": all_success_task, "bash-1": duplicate_bash_success},
+                tool_calls={"agent-1": agent_1_success, "agent-2": agent_2_success, "agent-3": agent_3_success},
             ),
             _structured_session(
                 phase=SessionPhase.WAITING_FOR_INPUT,
-                tool_calls={"task-1": all_success_task, "bash-1": duplicate_bash_success},
-            ),
-            _structured_session(
-                phase=SessionPhase.WAITING_FOR_INPUT,
-                tool_calls={"task-1": all_success_task, "bash-1": duplicate_bash_success},
+                tool_calls={"agent-1": agent_1_success, "agent-2": agent_2_success, "agent-3": agent_3_success},
             ),
         ],
         event_delays=[0.0, 0.24],
@@ -446,18 +523,23 @@ async def test_run_prompt_and_stream_updates_task_list_message_for_subagent_tool
 
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36)
 
-    task_list_messages = [
+    aggregate_messages = [
         sent
         for sent in message.sent_messages
-        if "任务列表" in sent.text or any("任务列表" in edit for edit in sent.edits)
+        if "agents" in sent.text or any("agents" in edit for edit in sent.edits)
     ]
-    assert len(task_list_messages) == 1
-    task_list_message = task_list_messages[0]
-    assert any("当前: 1. Read" in answer for answer in message.answers)
-    assert any("当前: 2. Bash" in edit for edit in task_list_message.edits)
-    assert "当前: 无（全部完成）" in task_list_message.text
-    assert "工具: Bash" not in "\n".join(message.answers)
-    assert all("工具: Bash" not in edit for edit in task_list_message.edits)
+    assert len(aggregate_messages) == 1
+    aggregate_message = aggregate_messages[0]
+    assert any("3 agents running" in answer for answer in message.answers)
+    assert any("测试质量扫描 · 2 tool uses · Running" in edit for edit in aggregate_message.edits)
+    assert "3 agents finished" in aggregate_message.text
+    assert "项目架构扫描 · 1 tool uses · Done" in aggregate_message.text
+    assert "测试质量扫描 · 2 tool uses · Done" in aggregate_message.text
+    assert "安全性能扫描 · 1 tool uses · Done" in aggregate_message.text
+    all_tool_messages = "\n".join(message.answers + [edit for sent in message.sent_messages for edit in sent.edits])
+    assert "工具: Agent" not in all_tool_messages
+    assert "工具: Glob" not in all_tool_messages
+    assert "工具: Read" not in all_tool_messages
 
 
 @pytest.mark.asyncio

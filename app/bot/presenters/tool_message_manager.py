@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from aiogram.enums import ParseMode
 from aiogram.types import Message
 
-from app.bot.presenters.structured_reply_presenter import ToolStatusOutput, build_tool_status_message, build_tool_task_list_message
+from app.bot.presenters.structured_reply_presenter import (
+    SubagentAggregateStatusOutput,
+    ToolStatusOutput,
+    build_subagent_aggregate_status_message,
+    build_tool_status_message,
+    build_tool_task_list_message,
+)
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
 
 logger = logging.getLogger(__name__)
@@ -25,24 +31,29 @@ class ToolMessageManager:
         self._provider = provider
         self._messages: dict[str, _TrackedToolMessage] = {}
 
-    async def handle(self, output: ToolStatusOutput) -> None:
-        if output.subagent_tools:
+    async def handle(self, output: ToolStatusOutput | SubagentAggregateStatusOutput) -> None:
+        if isinstance(output, SubagentAggregateStatusOutput):
+            message_key = output.message_key
+            text = build_subagent_aggregate_status_message(output)
+        elif output.subagent_tools:
+            message_key = output.tool_use_id
             text = build_tool_task_list_message(output)
         else:
+            message_key = output.tool_use_id
             text = build_tool_status_message(
                 tool_name=output.tool_name,
                 tool_input=output.tool_input,
                 status=output.status,
             )
-        existing = self._messages.get(output.tool_use_id)
+        existing = self._messages.get(message_key)
         if existing is None:
-            await self._send_and_track(output.tool_use_id, text)
+            await self._send_and_track(message_key, text)
             return
 
-        edited = await self._edit(existing.message, text, tool_use_id=output.tool_use_id)
+        edited = await self._edit(existing.message, text, tool_use_id=message_key)
         if edited:
             return
-        await self._send_and_track(output.tool_use_id, text)
+        await self._send_and_track(message_key, text)
 
     async def _send_and_track(self, tool_use_id: str, text: str) -> None:
         sent = await self._send(text, tool_use_id=tool_use_id)

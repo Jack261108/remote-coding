@@ -8,10 +8,12 @@ from app.bot.presenters.structured_reply_presenter import (
     PermissionRequestOutput,
     ProgressUpdateOutput,
     StructuredReplyPresenter,
+    SubagentAggregateStatusOutput,
     SubagentToolStatusOutput,
     ToolStatusOutput,
     UserQuestionOutput,
     build_permission_prompt,
+    build_subagent_aggregate_status_message,
     build_tool_progress_message,
     build_tool_status_message,
     build_tool_task_list_message,
@@ -561,8 +563,151 @@ def test_build_tool_task_list_message_marks_current_task() -> None:
     )
 
 
+def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None:
+    message = build_subagent_aggregate_status_message(
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="agent-1",
+                    tool_name="Agent",
+                    tool_input={"description": "项目架构扫描"},
+                    status=ToolStatus.SUCCESS.value,
+                    subagent_tools=tuple(
+                        SubagentToolStatusOutput(
+                            tool_use_id=f"agent-1-tool-{index}",
+                            tool_name="Read",
+                            tool_input={"file_path": f"app/{index}.py"},
+                            status=ToolStatus.SUCCESS.value,
+                        )
+                        for index in range(51)
+                    ),
+                ),
+                ToolStatusOutput(
+                    tool_use_id="agent-2",
+                    tool_name="Agent",
+                    tool_input={"description": "测试质量扫描"},
+                    status=ToolStatus.SUCCESS.value,
+                    subagent_tools=tuple(
+                        SubagentToolStatusOutput(
+                            tool_use_id=f"agent-2-tool-{index}",
+                            tool_name="Glob",
+                            tool_input={"path": "tests"},
+                            status=ToolStatus.SUCCESS.value,
+                        )
+                        for index in range(29)
+                    ),
+                ),
+                ToolStatusOutput(
+                    tool_use_id="agent-3",
+                    tool_name="Agent",
+                    tool_input={"description": "安全性能扫描"},
+                    status=ToolStatus.SUCCESS.value,
+                    subagent_tools=tuple(
+                        SubagentToolStatusOutput(
+                            tool_use_id=f"agent-3-tool-{index}",
+                            tool_name="Grep",
+                            tool_input={"pattern": "password"},
+                            status=ToolStatus.SUCCESS.value,
+                        )
+                        for index in range(40)
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert message == (
+        "3 agents finished\n"
+        "\n"
+        "- 项目架构扫描 · 51 tool uses · Done\n"
+        "- 测试质量扫描 · 29 tool uses · Done\n"
+        "- 安全性能扫描 · 40 tool uses · Done"
+    )
+
+
 @pytest.mark.asyncio
-async def test_presenter_emits_task_status_with_subagent_tools() -> None:
+async def test_presenter_emits_one_aggregate_for_multiple_agents() -> None:
+    agent_1 = ToolCallRecord(
+        tool_use_id="agent-1",
+        name="Agent",
+        input={"description": "项目架构扫描"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-1",
+                name="Read",
+                input={"file_path": "app/foo.py"},
+                status=ToolStatus.SUCCESS,
+            )
+        ],
+    )
+    agent_2 = ToolCallRecord(
+        tool_use_id="agent-2",
+        name="Agent",
+        input={"description": "测试质量扫描"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="grep-1",
+                name="Grep",
+                input={"pattern": "pytest"},
+                status=ToolStatus.RUNNING,
+            )
+        ],
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"agent-1": agent_1, "agent-2": agent_2}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    outputs = await presenter.poll(task_id="task-1")
+
+    assert outputs == [
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="agent-1",
+                    tool_name="Agent",
+                    tool_input={"description": "项目架构扫描"},
+                    status=ToolStatus.RUNNING.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="read-1",
+                            tool_name="Read",
+                            tool_input={"file_path": "app/foo.py"},
+                            status=ToolStatus.SUCCESS.value,
+                        ),
+                    ),
+                ),
+                ToolStatusOutput(
+                    tool_use_id="agent-2",
+                    tool_name="Agent",
+                    tool_input={"description": "测试质量扫描"},
+                    status=ToolStatus.RUNNING.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="grep-1",
+                            tool_name="Grep",
+                            tool_input={"pattern": "pytest"},
+                            status=ToolStatus.RUNNING.value,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_subagent_aggregate_with_subagent_tools() -> None:
     task_tool = ToolCallRecord(
         tool_use_id="task-1",
         name="Task",
@@ -593,17 +738,22 @@ async def test_presenter_emits_task_status_with_subagent_tools() -> None:
     second = await presenter.poll(task_id="task-1")
 
     assert first == [
-        ToolStatusOutput(
-            tool_use_id="task-1",
-            tool_name="Task",
-            tool_input={"description": "修复测试失败"},
-            status=ToolStatus.RUNNING.value,
-            subagent_tools=(
-                SubagentToolStatusOutput(
-                    tool_use_id="read-1",
-                    tool_name="Read",
-                    tool_input={"file_path": "app/foo.py"},
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="task-1",
+                    tool_name="Task",
+                    tool_input={"description": "修复测试失败"},
                     status=ToolStatus.RUNNING.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="read-1",
+                            tool_name="Read",
+                            tool_input={"file_path": "app/foo.py"},
+                            status=ToolStatus.RUNNING.value,
+                        ),
+                    ),
                 ),
             ),
         )
@@ -612,7 +762,7 @@ async def test_presenter_emits_task_status_with_subagent_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_presenter_emits_task_status_when_subagent_status_changes() -> None:
+async def test_presenter_emits_subagent_aggregate_when_subagent_status_changes() -> None:
     read_running_task = ToolCallRecord(
         tool_use_id="task-1",
         name="Task",
@@ -663,39 +813,49 @@ async def test_presenter_emits_task_status_when_subagent_status_changes() -> Non
     second = await presenter.poll(task_id="task-1")
 
     assert first == [
-        ToolStatusOutput(
-            tool_use_id="task-1",
-            tool_name="Task",
-            tool_input={"description": "修复测试失败"},
-            status=ToolStatus.RUNNING.value,
-            subagent_tools=(
-                SubagentToolStatusOutput(
-                    tool_use_id="read-1",
-                    tool_name="Read",
-                    tool_input={"file_path": "app/foo.py"},
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="task-1",
+                    tool_name="Task",
+                    tool_input={"description": "修复测试失败"},
                     status=ToolStatus.RUNNING.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="read-1",
+                            tool_name="Read",
+                            tool_input={"file_path": "app/foo.py"},
+                            status=ToolStatus.RUNNING.value,
+                        ),
+                    ),
                 ),
             ),
         )
     ]
     assert second == [
-        ToolStatusOutput(
-            tool_use_id="task-1",
-            tool_name="Task",
-            tool_input={"description": "修复测试失败"},
-            status=ToolStatus.RUNNING.value,
-            subagent_tools=(
-                SubagentToolStatusOutput(
-                    tool_use_id="read-1",
-                    tool_name="Read",
-                    tool_input={"file_path": "app/foo.py"},
-                    status=ToolStatus.SUCCESS.value,
-                ),
-                SubagentToolStatusOutput(
-                    tool_use_id="bash-1",
-                    tool_name="Bash",
-                    tool_input={"command": "pytest -q"},
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="task-1",
+                    tool_name="Task",
+                    tool_input={"description": "修复测试失败"},
                     status=ToolStatus.RUNNING.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="read-1",
+                            tool_name="Read",
+                            tool_input={"file_path": "app/foo.py"},
+                            status=ToolStatus.SUCCESS.value,
+                        ),
+                        SubagentToolStatusOutput(
+                            tool_use_id="bash-1",
+                            tool_name="Bash",
+                            tool_input={"command": "pytest -q"},
+                            status=ToolStatus.RUNNING.value,
+                        ),
+                    ),
                 ),
             ),
         )
@@ -741,17 +901,22 @@ async def test_presenter_skips_flat_status_for_nested_tool_duplicate() -> None:
     outputs = await presenter.poll(task_id="task-1")
 
     assert outputs == [
-        ToolStatusOutput(
-            tool_use_id="task-1",
-            tool_name="Task",
-            tool_input={"description": "修复测试失败"},
-            status=ToolStatus.RUNNING.value,
-            subagent_tools=(
-                SubagentToolStatusOutput(
-                    tool_use_id="bash-1",
-                    tool_name="Bash",
-                    tool_input={"command": "pytest -q"},
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="task-1",
+                    tool_name="Task",
+                    tool_input={"description": "修复测试失败"},
                     status=ToolStatus.RUNNING.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="bash-1",
+                            tool_name="Bash",
+                            tool_input={"command": "pytest -q"},
+                            status=ToolStatus.RUNNING.value,
+                        ),
+                    ),
                 ),
             ),
         )

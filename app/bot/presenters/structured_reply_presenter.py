@@ -22,6 +22,7 @@ _PERMISSION_INPUT_LINE_LIMIT = 8
 _QUESTION_TEXT_CHAR_LIMIT = 360
 _QUESTION_TEXT_LINE_LIMIT = 10
 _TASK_LIST_VISIBLE_LIMIT = 20
+_SUBAGENT_AGGREGATE_MESSAGE_KEY = "subagent-aggregate"
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,12 @@ class ToolStatusOutput:
     tool_input: dict | None
     status: str
     subagent_tools: tuple[SubagentToolStatusOutput, ...] = ()
+
+
+@dataclass(frozen=True)
+class SubagentAggregateStatusOutput:
+    message_key: str
+    containers: tuple[ToolStatusOutput, ...]
 
 
 @dataclass(frozen=True)
@@ -296,12 +303,84 @@ def build_tool_task_list_message(output: ToolStatusOutput) -> str:
     return "\n".join(lines)
 
 
+def build_subagent_aggregate_status_message(output: SubagentAggregateStatusOutput) -> str:
+    containers = output.containers
+    noun = _subagent_aggregate_noun(containers)
+    lines = [f"{len(containers)} {noun} {_subagent_aggregate_status_text(containers)}"]
+    display_containers = containers[:_TASK_LIST_VISIBLE_LIMIT]
+    if display_containers:
+        lines.append("")
+    for container in display_containers:
+        tool_use_count = len(_visible_subagent_tools(container.subagent_tools))
+        lines.append(
+            f"- {_subagent_container_title(container)} · {tool_use_count} tool uses · {_subagent_container_status_text(container)}"
+        )
+
+    omitted = len(containers) - len(display_containers)
+    if omitted > 0:
+        lines.append(f"...and {omitted} more {noun}")
+
+    return "\n".join(lines)
+
+
 def _visible_subagent_tools(subagent_tools: tuple[SubagentToolStatusOutput, ...]) -> tuple[SubagentToolStatusOutput, ...]:
     return tuple(
         tool
         for tool in subagent_tools
         if not _is_user_question_tool(tool.tool_name, tool.tool_input)
     )
+
+
+def _subagent_aggregate_noun(containers: tuple[ToolStatusOutput, ...]) -> str:
+    if containers and all((container.tool_name or "").strip().lower() == "agent" for container in containers):
+        return "agents"
+    return "tasks"
+
+
+def _subagent_aggregate_status_text(containers: tuple[ToolStatusOutput, ...]) -> str:
+    statuses = _subagent_container_status_values(containers)
+    if ToolStatus.WAITING_FOR_APPROVAL.value in statuses:
+        return "waiting"
+    if ToolStatus.RUNNING.value in statuses:
+        return "running"
+    if ToolStatus.ERROR.value in statuses:
+        return "failed"
+    if ToolStatus.INTERRUPTED.value in statuses:
+        return "interrupted"
+    return "finished"
+
+
+def _subagent_container_status_text(container: ToolStatusOutput) -> str:
+    statuses = _subagent_container_status_values((container,))
+    if ToolStatus.WAITING_FOR_APPROVAL.value in statuses:
+        return "Waiting"
+    if ToolStatus.RUNNING.value in statuses:
+        return "Running"
+    if ToolStatus.ERROR.value in statuses:
+        return "Failed"
+    if ToolStatus.INTERRUPTED.value in statuses:
+        return "Interrupted"
+    return "Done"
+
+
+def _subagent_container_status_values(containers: tuple[ToolStatusOutput, ...]) -> tuple[str, ...]:
+    statuses: list[str] = []
+    for container in containers:
+        statuses.append(container.status)
+        statuses.extend(tool.status for tool in _visible_subagent_tools(container.subagent_tools))
+    return tuple(statuses)
+
+
+def _subagent_container_title(container: ToolStatusOutput) -> str:
+    tool_input = container.tool_input or {}
+    for key in ("description", "prompt"):
+        value = tool_input.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return _truncate_permission_text(text)
+    return container.tool_name or "Unknown"
 
 
 def _tool_status_label(status: str | None) -> str:
@@ -382,7 +461,7 @@ def _extract_tool_question_prompts_by_id(snapshot: _StructuredSnapshot) -> dict[
 
 
 def _is_subagent_container_tool(tool_name: str | None) -> bool:
-    return tool_name in {"Task", "Agent"}
+    return (tool_name or "").strip().lower() in {"task", "agent"}
 
 
 def _input_detail_fingerprint(tool_name: str | None, tool_input: dict | None) -> tuple:
@@ -405,6 +484,47 @@ def _tool_state_fingerprint(tool: _ToolStateSnapshot) -> tuple:
             )
             for subagent_tool in tool.subagent_tools
         ),
+    )
+
+
+def _tool_status_output_fingerprint(output: ToolStatusOutput) -> tuple:
+    return (
+        output.tool_use_id,
+        output.tool_name,
+        output.status,
+        _input_detail_fingerprint(output.tool_name, output.tool_input),
+        tuple(
+            (
+                subagent_tool.tool_use_id,
+                subagent_tool.tool_name,
+                subagent_tool.status,
+                _input_detail_fingerprint(subagent_tool.tool_name, subagent_tool.tool_input),
+            )
+            for subagent_tool in output.subagent_tools
+        ),
+    )
+
+
+def _subagent_aggregate_fingerprint(containers: tuple[ToolStatusOutput, ...]) -> tuple:
+    return tuple(_tool_status_output_fingerprint(container) for container in containers)
+
+
+def _subagent_container_output(tool: _ToolStateSnapshot) -> ToolStatusOutput:
+    assert tool.status is not None
+    return ToolStatusOutput(
+        tool_use_id=tool.tool_use_id,
+        tool_name=tool.tool_name,
+        tool_input=tool.tool_input,
+        status=tool.status,
+        subagent_tools=_subagent_status_outputs(tool),
+    )
+
+
+def _subagent_container_outputs(tools: tuple[_ToolStateSnapshot, ...]) -> tuple[ToolStatusOutput, ...]:
+    return tuple(
+        _subagent_container_output(tool)
+        for tool in tools
+        if tool.status is not None and _is_subagent_container_tool(tool.tool_name)
     )
 
 
@@ -436,6 +556,7 @@ class StructuredReplyPresenter:
         self._last_user_question_key: str | None = None
         self._last_phase: str | None = None
         self._tool_fingerprint_by_id: dict[str, tuple] = {}
+        self._subagent_aggregate_fingerprint: tuple | None = None
         self._question_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
 
     @property
@@ -457,6 +578,7 @@ class StructuredReplyPresenter:
         if baseline_current_snapshot:
             tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
             self._tool_fingerprint_by_id = {tool.tool_use_id: _tool_state_fingerprint(tool) for tool in snapshot.tool_states}
+            self._subagent_aggregate_fingerprint = _subagent_aggregate_fingerprint(_subagent_container_outputs(snapshot.tool_states))
             self._question_keys_by_tool_id = {
                 tool_use_id: tuple(prompt.key for prompt in prompts)
                 for tool_use_id, prompts in tool_question_prompts.items()
@@ -467,6 +589,7 @@ class StructuredReplyPresenter:
                 self._question_keys_by_tool_id[pending_prompts[0].tool_use_id] = tuple(prompt.key for prompt in pending_prompts)
         else:
             self._tool_fingerprint_by_id = {}
+            self._subagent_aggregate_fingerprint = None
             self._question_keys_by_tool_id = {}
 
         self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
@@ -483,6 +606,7 @@ class StructuredReplyPresenter:
             self._last_phase = None
             self._last_pending_permission_key = None
             self._tool_fingerprint_by_id = {}
+            self._subagent_aggregate_fingerprint = None
             self._question_keys_by_tool_id = {}
             self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
             return True
@@ -502,13 +626,13 @@ class StructuredReplyPresenter:
         task_id: str,
         final: bool = False,
         log_missing: bool = False,
-    ) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | UserQuestionOutput]:
+    ) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | UserQuestionOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
         tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
         self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
 
-        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | UserQuestionOutput] = []
+        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | UserQuestionOutput] = []
         pending_question_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
         question_updates = self._collect_user_question_updates(
             snapshot=snapshot,
@@ -601,8 +725,8 @@ class StructuredReplyPresenter:
         *,
         snapshot: _StructuredSnapshot,
         tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
-    ) -> list[ProgressUpdateOutput | ToolStatusOutput]:
-        messages: list[ProgressUpdateOutput | ToolStatusOutput] = []
+    ) -> list[ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput]:
+        messages: list[ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput] = []
         if snapshot.phase == SessionPhase.COMPACTING.value and self._last_phase != SessionPhase.COMPACTING.value:
             messages.append(ProgressUpdateOutput(text=build_compacting_progress_message()))
         self._last_phase = snapshot.phase
@@ -613,6 +737,7 @@ class StructuredReplyPresenter:
             for subagent_tool in tool.subagent_tools
         }
         current_fingerprint_by_id: dict[str, tuple] = {}
+        subagent_containers: list[ToolStatusOutput] = []
         for tool in snapshot.tool_states:
             if tool.status is None:
                 continue
@@ -622,21 +747,31 @@ class StructuredReplyPresenter:
                 continue
             if tool_question_prompts.get(tool.tool_use_id):
                 continue
+            if _is_subagent_container_tool(tool.tool_name):
+                subagent_containers.append(_subagent_container_output(tool))
+                continue
             previous_fingerprint = self._tool_fingerprint_by_id.get(tool.tool_use_id)
             if previous_fingerprint == fingerprint:
                 continue
-            subagent_outputs = ()
-            if _is_subagent_container_tool(tool.tool_name):
-                subagent_outputs = _subagent_status_outputs(tool)
             messages.append(
                 ToolStatusOutput(
                     tool_use_id=tool.tool_use_id,
                     tool_name=tool.tool_name,
                     tool_input=tool.tool_input,
                     status=tool.status,
-                    subagent_tools=subagent_outputs,
                 )
             )
+
+        containers = tuple(subagent_containers)
+        aggregate_fingerprint = _subagent_aggregate_fingerprint(containers)
+        if containers and aggregate_fingerprint != self._subagent_aggregate_fingerprint:
+            messages.append(
+                SubagentAggregateStatusOutput(
+                    message_key=_SUBAGENT_AGGREGATE_MESSAGE_KEY,
+                    containers=containers,
+                )
+            )
+        self._subagent_aggregate_fingerprint = aggregate_fingerprint if containers else None
         self._tool_fingerprint_by_id = current_fingerprint_by_id
         return messages
 
