@@ -82,6 +82,28 @@ def test_format_send_failure_after_rebuild_has_specific_hint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ensure_persistent_session_rejects_missing_workdir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = TmuxRunner()
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        calls.append(args)
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    ok, err = await runner._ensure_persistent_session(
+        "tgcli_user_1",
+        workdir=str(tmp_path / "不存在的目录"),
+        env=None,
+    )
+
+    assert ok is False
+    assert err.startswith("workdir 不存在或不是目录:")
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_respawn_and_send_command_success(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = TmuxRunner()
     calls: list[tuple[str, ...]] = []
@@ -347,6 +369,51 @@ async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: p
     assert seen_pipe_calls[1][0:3] == ("pipe-pane", "-t", "tgcli_user_1")
     assert "cat >>" in seen_pipe_calls[1][3]
     assert "sessions/tgcli_user_1/transcript.raw.log" in seen_pipe_calls[1][3]
+
+
+@pytest.mark.asyncio
+async def test_interactive_run_rebuilds_and_retries_pipe_when_tmux_server_is_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    ensure_calls: list[str] = []
+    pipe_bind_calls: list[tuple[str, ...]] = []
+
+    async def fake_ensure(*, session_name: str, workdir: str, env=None):
+        ensure_calls.append(session_name)
+        return True, ""
+
+    async def fake_send(*args, **kwargs):
+        return True, ""
+
+    async def fake_watch(*, meta, timeout_sec: int):
+        yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        if args and args[0] == "pipe-pane" and len(args) >= 4:
+            pipe_bind_calls.append(args)
+            if len(pipe_bind_calls) == 1:
+                return 1, "", "no server running on /private/tmp/tmux-501/default"
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_ensure_claude_interactive_session", fake_ensure)
+    monkeypatch.setattr(runner, "_send_command", fake_send)
+    monkeypatch.setattr(runner, "_watch_task", fake_watch)
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    events = [
+        e
+        async for e in runner.run(
+            task_id="t-pipe-retry",
+            argv=["hello"],
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            terminal_key="user_1",
+            interactive=True,
+        )
+    ]
+
+    assert [e.type for e in events] == [EventType.STARTED, EventType.EXITED]
+    assert ensure_calls == ["tgcli_user_1", "tgcli_user_1"]
+    assert len(pipe_bind_calls) == 2
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 
 from app.domain.user_question_models import USER_QUESTION_TUI_FALLBACK_ERROR
 
@@ -12,6 +13,8 @@ class TmuxSessionMixin:
     _enter_delay_sec: float
 
     async def _start_ephemeral_session(self, session_name: str, *, workdir: str, env: dict[str, str] | None, command: str) -> tuple[bool, str]:
+        if not Path(workdir).is_dir():
+            return False, f"workdir 不存在或不是目录: {workdir}"
         args = ["new-session", "-d", "-s", session_name, "-c", workdir]
         if env:
             for key, value in env.items():
@@ -29,6 +32,8 @@ class TmuxSessionMixin:
         return False, f"tmux 启动失败: {err}"
 
     async def _ensure_persistent_session(self, session_name: str, *, workdir: str, env: dict[str, str] | None) -> tuple[bool, str]:
+        if not Path(workdir).is_dir():
+            return False, f"workdir 不存在或不是目录: {workdir}"
         exists = await self._session_exists(session_name)
         if exists:
             return True, ""

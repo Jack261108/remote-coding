@@ -16,6 +16,18 @@ from app.services.session_store import SessionStore, is_claude_session_id
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
+_RECOVERABLE_TMUX_SESSION_ERRORS = (
+    "no server running",
+    "can't find session",
+    "can't find pane",
+    "no such session",
+    "session not found",
+)
+
+
+def _is_recoverable_tmux_session_error(error_text: str) -> bool:
+    normalized = error_text.lower()
+    return any(marker in normalized for marker in _RECOVERABLE_TMUX_SESSION_ERRORS)
 
 
 @dataclass
@@ -161,15 +173,9 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
                 return
             if meta.interactive:
-                try:
-                    await self._run_tmux("pipe-pane", "-t", meta.session_name)
-                except Exception:
-                    pass
-                pipe_cmd = f"cat >> {shlex.quote(str(meta.log_file))}"
-                code, _, err_text = await self._run_tmux("pipe-pane", "-t", meta.session_name, pipe_cmd)
-                if code != 0:
-                    err = err_text.strip() or "unknown error"
-                    yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=f"tmux 管道设置失败: {err}")
+                pipe_ready, pipe_err = await self._bind_interactive_pipe(meta=meta, workdir=workdir, env=env)
+                if not pipe_ready:
+                    yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=pipe_err)
                     return
                 self._capture_interactive_baseline(meta=meta)
             meta.command_started_at = utc_now()
@@ -207,6 +213,61 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 self._tasks.pop(meta.task_id, None)
             if meta.command_file is not None:
                 self._safe_unlink(meta.command_file)
+
+    async def _bind_interactive_pipe(self, *, meta: _TmuxTaskMeta, workdir: str, env: dict[str, str] | None) -> tuple[bool, str]:
+        await self._clear_interactive_pipe(meta.session_name)
+        ok, err = await self._set_interactive_pipe(meta)
+        if ok:
+            return True, ""
+        if not _is_recoverable_tmux_session_error(err):
+            return False, f"tmux 管道设置失败: {err}"
+
+        rebuilt, rebuild_err = await self._ensure_claude_interactive_session(
+            session_name=meta.session_name,
+            workdir=workdir,
+            env=env,
+        )
+        if not rebuilt:
+            return False, "\n".join(
+                [
+                    f"tmux 管道设置失败: {err}",
+                    f"tmux_session: {meta.session_name}",
+                    "auto_rebuilt: 否",
+                    f"rebuild_error: {rebuild_err}",
+                    "hint: tmux 会话丢失且自动重建失败，请发送 /claude 重新建立会话后再试",
+                ]
+            )
+
+        await self._clear_interactive_pipe(meta.session_name)
+        ok, retry_err = await self._set_interactive_pipe(meta)
+        if ok:
+            return True, ""
+        return False, "\n".join(
+            [
+                f"tmux 管道设置失败: {retry_err}",
+                f"tmux_session: {meta.session_name}",
+                "auto_rebuilt: 是",
+                "hint: 自动重建已执行但仍失败，请发送 /claude 重新建立会话后再试",
+            ]
+        )
+
+    async def _clear_interactive_pipe(self, session_name: str) -> None:
+        try:
+            await self._run_tmux("pipe-pane", "-t", session_name)
+        except Exception:
+            pass
+
+    async def _set_interactive_pipe(self, meta: _TmuxTaskMeta) -> tuple[bool, str]:
+        pipe_cmd = f"cat >> {shlex.quote(str(meta.log_file))}"
+        try:
+            code, _, err_text = await self._run_tmux("pipe-pane", "-t", meta.session_name, pipe_cmd)
+        except FileNotFoundError:
+            return False, f"找不到 tmux 可执行文件 ({self._tmux_bin})"
+        except Exception as exc:
+            return False, f"tmux pipe-pane 异常: {exc}"
+        if code == 0:
+            return True, ""
+        return False, err_text.strip() or "unknown error"
 
     async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
         watch_started_at = utc_now()

@@ -88,6 +88,8 @@ class TaskService:
         selected_workdir = str(Path(workdir or self._settings.default_workdir).resolve())
         if not self._is_workdir_allowed(selected_workdir):
             raise ValueError("workdir 不在 ALLOWED_WORKDIRS 白名单内")
+        if not Path(selected_workdir).is_dir():
+            raise ValueError(f"workdir 不存在或不是目录: {selected_workdir}")
 
         terminal_mode = selected_provider == "claude_code" and self._settings.claude_tmux_mode
 
@@ -569,9 +571,14 @@ class TaskService:
             if not closed and text != "终端不存在或关闭失败":
                 return False, f"旧终端关闭失败: {text}"
 
-        selected_workdir = str(Path(workdir or (session.workdir if session else self._settings.default_workdir)).resolve())
+        workdir_source = workdir or (session.workdir if session else self._settings.default_workdir)
+        selected_workdir = str(Path(workdir_source).resolve())
+        if workdir is None and not Path(selected_workdir).is_dir():
+            selected_workdir = str(Path(self._settings.default_workdir).resolve())
         if not self._is_workdir_allowed(selected_workdir):
             raise ValueError("workdir 不在 ALLOWED_WORKDIRS 白名单内")
+        if not Path(selected_workdir).is_dir():
+            return False, f"workdir 不存在或不是目录: {selected_workdir}"
 
         updated_session = await self._session_service.switch(
             user_id=user_id,
@@ -594,10 +601,14 @@ class TaskService:
             await self._session_service.switch(user_id=user_id, terminal_mode=False, claude_chat_active=False)
             return False, ensure_result[1]
 
+        detail = ensure_result[1]
+        if detail.startswith("未能自动打开桌面终端:"):
+            return True, detail
+
         action = "Claude 会话已重建" if had_old_terminal else "Claude 会话已开启"
         message = action
-        if ensure_result[1]:
-            message = f"{message}\n{ensure_result[1]}"
+        if detail:
+            message = f"{message}\n{detail}"
         return True, message
 
     def _extract_user_question_prompts_for_tool_use_id(

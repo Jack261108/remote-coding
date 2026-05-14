@@ -462,6 +462,102 @@ async def test_open_claude_chat_session_rebuilds_when_previous_terminal_is_missi
 
 
 @pytest.mark.asyncio
+async def test_open_claude_chat_session_without_workdir_falls_back_from_stale_missing_workdir(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    stale_workdir = tmp_path / "不存在的目录"
+    await session_service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(stale_workdir),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    opened, text = await service.open_claude_chat_session(1)
+    session = await session_service.get(1)
+
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path.resolve()))
+    assert opened is True
+    assert text.startswith("Claude 会话已重建")
+    assert factory._ensured_interactive_workdir == str(tmp_path.resolve())
+    assert session is not None
+    assert session.workdir == str(tmp_path.resolve())
+    assert session.terminal_id == expected
+
+
+@pytest.mark.asyncio
+async def test_open_claude_chat_session_rejects_explicit_missing_workdir(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    opened, text = await service.open_claude_chat_session(1, workdir=str(tmp_path / "不存在的目录"))
+
+    assert opened is False
+    assert text.startswith("workdir 不存在或不是目录:")
+    assert factory._ensured_interactive_terminal_key is None
+
+
+@pytest.mark.asyncio
+async def test_open_claude_chat_session_reveal_failure_does_not_claim_rebuilt(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+
+    async def failed_reveal_terminal(terminal_key: str) -> tuple[bool, str]:
+        factory._revealed_terminal_key = terminal_key
+        return False, "tmux 会话不存在: tgcli_user_1"
+
+    factory.reveal_terminal = failed_reveal_terminal
+    session_service = make_file_backed_session_service(tmp_path)
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    await session_service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+
+    opened, text = await service.open_claude_chat_session(1)
+    session = await session_service.get(1)
+
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+    assert opened is True
+    assert text.startswith("未能自动打开桌面终端:")
+    assert "Claude 会话已重建" not in text
+    assert "Claude 会话已开启" not in text
+    assert factory._revealed_terminal_key == expected
+    assert session is not None
+    assert session.terminal_mode is True
+    assert session.terminal_id == expected
+    assert session.claude_chat_active is True
+
+
+@pytest.mark.asyncio
 async def test_open_claude_chat_session_clears_stale_claude_session_without_previous_terminal(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
