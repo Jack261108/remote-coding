@@ -58,6 +58,14 @@ class ProgressUpdateOutput:
 
 
 @dataclass(frozen=True)
+class ToolStatusOutput:
+    tool_use_id: str
+    tool_name: str | None
+    tool_input: dict | None
+    status: str
+
+
+@dataclass(frozen=True)
 class UserQuestionOutput:
     text: str
     question: UserQuestionPrompt
@@ -200,8 +208,21 @@ def build_permission_prompt(*, tool_name: str | None, tool_input: dict | None = 
     return "\n".join(lines)
 
 
-def build_tool_progress_message(*, tool_name: str | None, tool_input: dict | None = None, resumed: bool = False) -> str:
-    lines = ["继续执行" if resumed else "执行中"]
+def build_tool_status_message(*, tool_name: str | None, tool_input: dict | None = None, status: str, resumed: bool = False) -> str:
+    if status == ToolStatus.SUCCESS.value:
+        heading = "执行完成"
+    elif status == ToolStatus.ERROR.value:
+        heading = "执行失败"
+    elif status == ToolStatus.INTERRUPTED.value:
+        heading = "已中断"
+    elif status == ToolStatus.WAITING_FOR_APPROVAL.value:
+        heading = "等待权限"
+    elif status == ToolStatus.RUNNING.value and resumed:
+        heading = "继续执行"
+    else:
+        heading = "执行中"
+
+    lines = [heading]
     if tool_name:
         lines.append(f"工具: {tool_name}")
 
@@ -211,6 +232,15 @@ def build_tool_progress_message(*, tool_name: str | None, tool_input: dict | Non
         lines.append(f"{label}: {value}")
 
     return "\n".join(lines)
+
+
+def build_tool_progress_message(*, tool_name: str | None, tool_input: dict | None = None, resumed: bool = False) -> str:
+    return build_tool_status_message(
+        tool_name=tool_name,
+        tool_input=tool_input,
+        status=ToolStatus.RUNNING.value,
+        resumed=resumed,
+    )
 
 
 def build_compacting_progress_message() -> str:
@@ -330,13 +360,19 @@ class StructuredReplyPresenter:
             self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
         return changed
 
-    async def poll(self, *, task_id: str, final: bool = False, log_missing: bool = False) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput]:
+    async def poll(
+        self,
+        *,
+        task_id: str,
+        final: bool = False,
+        log_missing: bool = False,
+    ) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | UserQuestionOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
         tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
         self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
 
-        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | UserQuestionOutput] = []
+        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | UserQuestionOutput] = []
         pending_question_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
         question_updates = self._collect_user_question_updates(
             snapshot=snapshot,
@@ -429,29 +465,28 @@ class StructuredReplyPresenter:
         *,
         snapshot: _StructuredSnapshot,
         tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
-    ) -> list[ProgressUpdateOutput]:
-        messages: list[ProgressUpdateOutput] = []
+    ) -> list[ProgressUpdateOutput | ToolStatusOutput]:
+        messages: list[ProgressUpdateOutput | ToolStatusOutput] = []
         if snapshot.phase == SessionPhase.COMPACTING.value and self._last_phase != SessionPhase.COMPACTING.value:
             messages.append(ProgressUpdateOutput(text=build_compacting_progress_message()))
         self._last_phase = snapshot.phase
 
         current_status_by_id: dict[str, str | None] = {}
         for tool in snapshot.tool_states:
+            if tool.status is None:
+                continue
             current_status_by_id[tool.tool_use_id] = tool.status
             if tool_question_prompts.get(tool.tool_use_id):
                 continue
-            if tool.status != ToolStatus.RUNNING.value:
-                continue
             previous_status = self._tool_status_by_id.get(tool.tool_use_id)
-            if previous_status == ToolStatus.RUNNING.value:
+            if previous_status == tool.status:
                 continue
             messages.append(
-                ProgressUpdateOutput(
-                    text=build_tool_progress_message(
-                        tool_name=tool.tool_name,
-                        tool_input=tool.tool_input,
-                        resumed=previous_status == ToolStatus.WAITING_FOR_APPROVAL.value,
-                    )
+                ToolStatusOutput(
+                    tool_use_id=tool.tool_use_id,
+                    tool_name=tool.tool_name,
+                    tool_input=tool.tool_input,
+                    status=tool.status,
                 )
             )
         self._tool_status_by_id = current_status_by_id

@@ -8,13 +8,15 @@ from app.bot.presenters.structured_reply_presenter import (
     PermissionRequestOutput,
     ProgressUpdateOutput,
     StructuredReplyPresenter,
+    ToolStatusOutput,
+    UserQuestionOutput,
     build_permission_prompt,
     build_tool_progress_message,
+    build_tool_status_message,
     build_user_question_prompt,
     normalize_stream_text,
     preview_stream_text,
     strip_bridge_markers,
-    UserQuestionOutput,
 )
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
@@ -499,8 +501,31 @@ def test_build_tool_progress_message_includes_specific_bash_command() -> None:
     assert message == "执行中\n工具: Bash\n命令: pytest -q"
 
 
+def test_build_tool_status_message_formats_final_states() -> None:
+    assert build_tool_status_message(
+        tool_name="Bash",
+        tool_input={"command": "pytest -q"},
+        status=ToolStatus.SUCCESS.value,
+    ) == "执行完成\n工具: Bash\n命令: pytest -q"
+    assert build_tool_status_message(
+        tool_name="Bash",
+        tool_input={"command": "pytest -q"},
+        status=ToolStatus.ERROR.value,
+    ) == "执行失败\n工具: Bash\n命令: pytest -q"
+    assert build_tool_status_message(
+        tool_name="Bash",
+        tool_input={"command": "pytest -q"},
+        status=ToolStatus.INTERRUPTED.value,
+    ) == "已中断\n工具: Bash\n命令: pytest -q"
+    assert build_tool_status_message(
+        tool_name="Bash",
+        tool_input={"command": "rm file"},
+        status=ToolStatus.WAITING_FOR_APPROVAL.value,
+    ) == "等待权限\n工具: Bash\n命令: rm file"
+
+
 @pytest.mark.asyncio
-async def test_presenter_emits_running_tool_progress_once() -> None:
+async def test_presenter_emits_running_tool_status_once() -> None:
     tool_calls = {
         "tool-1": ToolCallRecord(
             tool_use_id="tool-1",
@@ -524,8 +549,117 @@ async def test_presenter_emits_running_tool_progress_once() -> None:
     first = await presenter.poll(task_id="task-1")
     second = await presenter.poll(task_id="task-1")
 
-    assert first == [ProgressUpdateOutput(text="执行中\n工具: Bash\n命令: pytest -q")]
+    assert first == [
+        ToolStatusOutput(
+            tool_use_id="tool-1",
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.RUNNING.value,
+        )
+    ]
     assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_success_tool_status_after_running() -> None:
+    running_tool = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.RUNNING,
+    )
+    success_tool = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.SUCCESS,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-1": running_tool}),
+                _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"tool-1": success_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        ToolStatusOutput(
+            tool_use_id="tool-1",
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.RUNNING.value,
+        )
+    ]
+    assert second == [
+        ToolStatusOutput(
+            tool_use_id="tool-1",
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.SUCCESS.value,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_error_and_interrupted_tool_statuses() -> None:
+    running_tool = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.RUNNING,
+    )
+    error_tool = ToolCallRecord(
+        tool_use_id="tool-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.ERROR,
+    )
+    interrupted_tool = ToolCallRecord(
+        tool_use_id="tool-2",
+        name="Read",
+        input={"file_path": "/tmp/a.txt"},
+        status=ToolStatus.INTERRUPTED,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-1": running_tool}),
+                _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"tool-1": error_tool}),
+                _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"tool-2": interrupted_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    await presenter.poll(task_id="task-1")
+    error_output = await presenter.poll(task_id="task-1")
+    interrupted_output = await presenter.poll(task_id="task-1")
+
+    assert error_output == [
+        ToolStatusOutput(
+            tool_use_id="tool-1",
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.ERROR.value,
+        )
+    ]
+    assert interrupted_output == [
+        ToolStatusOutput(
+            tool_use_id="tool-2",
+            tool_name="Read",
+            tool_input={"file_path": "/tmp/a.txt"},
+            status=ToolStatus.INTERRUPTED.value,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -576,7 +710,14 @@ async def test_presenter_emits_resume_progress_after_permission() -> None:
     await presenter.prime(baseline_current_snapshot=True)
     messages = await presenter.poll(task_id="task-1")
 
-    assert messages == [ProgressUpdateOutput(text="继续执行\n工具: Bash\n命令: pytest -q")]
+    assert messages == [
+        ToolStatusOutput(
+            tool_use_id="tool-1",
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.RUNNING.value,
+        )
+    ]
 
 
 @pytest.mark.asyncio
