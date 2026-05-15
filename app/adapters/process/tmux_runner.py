@@ -82,6 +82,35 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         self._file_store = file_store or FileSessionStore(str(self._data_dir))
         self._session_store = session_store or SessionStore(self._file_store)
 
+    def _tmux_log_extra(self, meta: _TmuxTaskMeta, **extra) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "task_id": meta.task_id,
+            "session_name": meta.session_name,
+            "terminal_id": meta.terminal_id,
+            "claude_session_id": meta.claude_session_id,
+            "workdir": meta.workdir,
+            "persistent_terminal": meta.persistent_terminal,
+            "interactive": meta.interactive,
+        }
+        payload.update(extra)
+        return payload
+
+    def _structured_state_log_extra(self, state: SessionState | None) -> dict[str, object]:
+        if state is None:
+            return {}
+        tools = list(state.tool_calls.values())
+        return {
+            "active_session_id": state.session_id,
+            "active_phase": state.phase.value,
+            "active_revision": state.revision,
+            "active_offset": state.checkpoint.last_offset,
+            "turn_count": len(state.turns),
+            "tool_count": len(tools),
+            "running_tool_count": sum(1 for tool in tools if tool.status == ToolStatus.RUNNING),
+            "waiting_tool_count": sum(1 for tool in tools if tool.status == ToolStatus.WAITING_FOR_APPROVAL),
+            "interrupted_tool_count": sum(1 for tool in tools if tool.status == ToolStatus.INTERRUPTED),
+        }
+
     async def run(
         self,
         *,
@@ -346,6 +375,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
 
         while exit_code is None:
             now = asyncio.get_running_loop().time()
+            active_state: SessionState | None = None
             text, new_position = self._read_new_text(meta.log_file, position)
             if text:
                 position = new_position
@@ -440,6 +470,23 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             timeout_started_at = timeout_anchor if meta.interactive else started_at
             if (now - timeout_started_at) >= timeout_sec:
                 timed_out = True
+                action = "interrupt" if meta.persistent_terminal else "terminate"
+                logger.warning(
+                    "tmux task timeout",
+                    extra=self._tmux_log_extra(
+                        meta,
+                        timeout_sec=timeout_sec,
+                        elapsed_sec=round(now - started_at, 3),
+                        idle_sec=round(now - timeout_started_at, 3),
+                        action=action,
+                        log_position=position,
+                        baseline_captured=meta.baseline_captured,
+                        baseline_offset=meta.baseline_offset,
+                        last_interactive_revision=last_interactive_revision,
+                        saw_interactive_progress=saw_interactive_progress,
+                        **self._structured_state_log_extra(active_state),
+                    ),
+                )
                 if meta.persistent_terminal:
                     await self._interrupt_session(meta.session_name)
                 else:
@@ -447,6 +494,17 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 break
 
             if await self._is_cancel_requested(meta.task_id):
+                action = "interrupt" if meta.persistent_terminal else "terminate"
+                logger.info(
+                    "tmux task cancel detected",
+                    extra=self._tmux_log_extra(
+                        meta,
+                        action=action,
+                        log_position=position,
+                        elapsed_sec=round(now - started_at, 3),
+                        **self._structured_state_log_extra(active_state),
+                    ),
+                )
                 if meta.persistent_terminal:
                     await self._interrupt_session(meta.session_name)
                 else:
@@ -471,13 +529,55 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         canceled = await self._is_cancel_requested(meta.task_id)
         if not meta.interactive and self._session_store.get(meta.session_name) is not None:
             self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_ENDED))
+
+        finished_at = asyncio.get_running_loop().time()
         if timed_out:
+            finish_extra = self._tmux_log_extra(
+                meta,
+                result="timeout",
+                exit_code=exit_code,
+                timeout_sec=timeout_sec,
+                elapsed_sec=round(finished_at - started_at, 3),
+                log_position=position,
+                canceled=canceled,
+            )
+            logger.warning("tmux task finished", extra=finish_extra)
             yield CLIEvent(type=EventType.TIMEOUT, task_id=meta.task_id, error=f"任务超时({timeout_sec}s)")
         elif canceled:
+            finish_extra = self._tmux_log_extra(
+                meta,
+                result="canceled",
+                exit_code=exit_code,
+                timeout_sec=timeout_sec,
+                elapsed_sec=round(finished_at - started_at, 3),
+                log_position=position,
+                canceled=True,
+            )
+            logger.info("tmux task finished", extra=finish_extra)
             yield CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
         elif exit_code == 0:
+            finish_extra = self._tmux_log_extra(
+                meta,
+                result="exited",
+                exit_code=exit_code,
+                timeout_sec=timeout_sec,
+                elapsed_sec=round(finished_at - started_at, 3),
+                log_position=position,
+                canceled=False,
+            )
+            logger.info("tmux task finished", extra=finish_extra)
             yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
         else:
+            finish_extra = self._tmux_log_extra(
+                meta,
+                result="failed",
+                exit_code=exit_code,
+                timeout_sec=timeout_sec,
+                elapsed_sec=round(finished_at - started_at, 3),
+                log_position=position,
+                canceled=False,
+            )
+            logger.error("tmux task finished", extra=finish_extra)
             yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, exit_code=exit_code, error=f"进程退出码: {exit_code}")
 
     def _process_interactive_chunk(self, *, meta: _TmuxTaskMeta, offset: int) -> None:
@@ -502,6 +602,8 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             meta.cancel_requested = True
             session_name = meta.session_name
             persistent_terminal = meta.persistent_terminal
+            log_extra = self._tmux_log_extra(meta, action="interrupt" if persistent_terminal else "terminate")
+        logger.info("tmux task cancel requested", extra=log_extra)
         if persistent_terminal:
             return await self._interrupt_session(session_name)
         return await self._terminate_session(session_name)

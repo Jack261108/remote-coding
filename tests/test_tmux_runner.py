@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import timedelta
 from pathlib import Path
 
@@ -570,7 +571,8 @@ async def test_interactive_watch_starts_from_current_transcript_end(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_interactive_timeout_keeps_session_alive(tmp_path: Path) -> None:
+async def test_interactive_timeout_keeps_session_alive(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="app.adapters.process.tmux_runner")
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     session_name = "tgcli_user_1"
     state = runner._session_store.get_or_create(session_id=session_name, workdir=str(tmp_path), terminal_id="user_1")
@@ -592,6 +594,8 @@ async def test_interactive_timeout_keeps_session_alive(tmp_path: Path) -> None:
     events = [event async for event in runner._watch_task(meta=meta, timeout_sec=0)]
 
     assert events[-1].type == EventType.TIMEOUT
+    assert any(record.message == "tmux task timeout" for record in caplog.records)
+    assert any(record.message == "tmux task finished" and getattr(record, "result") == "timeout" for record in caplog.records)
     state = runner._session_store.get(session_name)
     assert state is not None
     assert state.phase == SessionPhase.PROCESSING
@@ -1680,7 +1684,12 @@ async def test_terminate_session_returns_false_when_kill_fails_and_session_remai
 
 
 @pytest.mark.asyncio
-async def test_cancel_returns_false_when_ephemeral_terminate_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_cancel_returns_false_when_ephemeral_terminate_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.adapters.process.tmux_runner")
     runner = TmuxRunner(data_dir=str(tmp_path))
     meta = _TmuxTaskMeta(
         session_name="tgcli_task_cancel",
@@ -1701,3 +1710,4 @@ async def test_cancel_returns_false_when_ephemeral_terminate_fails(monkeypatch: 
 
     assert await runner.cancel("task-cancel") is False
     assert meta.cancel_requested is True
+    assert any(record.message == "tmux task cancel requested" for record in caplog.records)
