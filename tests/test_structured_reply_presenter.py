@@ -640,6 +640,48 @@ def test_build_task_list_status_message_marks_first_pending_when_no_task_is_runn
     )
 
 
+def test_build_subagent_aggregate_status_message_shows_subagent_type() -> None:
+    message = build_subagent_aggregate_status_message(
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="agent-1",
+                    tool_name="Agent",
+                    tool_input={"subagent_type": "Explore", "description": "项目优化点审计"},
+                    status=ToolStatus.RUNNING.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="read-1",
+                            tool_name="Read",
+                            tool_input={"file_path": "app/foo.py"},
+                            status=ToolStatus.SUCCESS.value,
+                        ),
+                        SubagentToolStatusOutput(
+                            tool_use_id="read-2",
+                            tool_name="Read",
+                            tool_input={"file_path": "app/bar.py"},
+                            status=ToolStatus.RUNNING.value,
+                        ),
+                        SubagentToolStatusOutput(
+                            tool_use_id="glob-1",
+                            tool_name="Glob",
+                            tool_input={"path": "tests"},
+                            status=ToolStatus.SUCCESS.value,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert message == (
+        "1 agents running\n"
+        "\n"
+        "- Explore(项目优化点审计) · 3 tool uses · Running\n"
+        "  名称: Read ×2、Glob"
+    )
+
 
 def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None:
     message = build_subagent_aggregate_status_message(

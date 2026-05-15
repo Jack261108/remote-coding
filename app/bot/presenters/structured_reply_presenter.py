@@ -427,14 +427,26 @@ def _subagent_container_status_values(containers: tuple[ToolStatusOutput, ...]) 
 
 def _subagent_container_title(container: ToolStatusOutput) -> str:
     tool_input = container.tool_input or {}
+    title = _subagent_container_description(tool_input)
+    subagent_type = str(tool_input.get("subagent_type") or "").strip()
+    if subagent_type:
+        if title:
+            return _truncate_permission_text(f"{subagent_type}({title})")
+        return _truncate_permission_text(subagent_type)
+    if title:
+        return _truncate_permission_text(title)
+    return container.tool_name or "Unknown"
+
+
+def _subagent_container_description(tool_input: dict) -> str | None:
     for key in ("description", "prompt"):
         value = tool_input.get(key)
         if value is None:
             continue
         text = str(value).strip()
         if text:
-            return _truncate_permission_text(text)
-    return container.tool_name or "Unknown"
+            return text
+    return None
 
 
 def _subagent_tool_names_summary(tools: tuple[SubagentToolStatusOutput, ...]) -> str | None:
