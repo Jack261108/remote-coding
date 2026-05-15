@@ -699,8 +699,11 @@ def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None
         "3 agents finished\n"
         "\n"
         "- 项目架构扫描 · 51 tool uses · Done\n"
+        "  名称: Read ×51\n"
         "- 测试质量扫描 · 29 tool uses · Done\n"
-        "- 安全性能扫描 · 40 tool uses · Done"
+        "  名称: Glob ×29\n"
+        "- 安全性能扫描 · 40 tool uses · Done\n"
+        "  名称: Grep ×40"
     )
 
 

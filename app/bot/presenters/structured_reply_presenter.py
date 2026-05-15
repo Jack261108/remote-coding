@@ -361,10 +361,14 @@ def build_subagent_aggregate_status_message(output: SubagentAggregateStatusOutpu
     if display_containers:
         lines.append("")
     for container in display_containers:
-        tool_use_count = len(_visible_subagent_tools(container.subagent_tools))
+        visible_tools = _visible_subagent_tools(container.subagent_tools)
+        tool_use_count = len(visible_tools)
         lines.append(
             f"- {_subagent_container_title(container)} · {tool_use_count} tool uses · {_subagent_container_status_text(container)}"
         )
+        tool_names = _subagent_tool_names_summary(visible_tools)
+        if tool_names:
+            lines.append(f"  名称: {tool_names}")
 
     omitted = len(containers) - len(display_containers)
     if omitted > 0:
@@ -431,6 +435,19 @@ def _subagent_container_title(container: ToolStatusOutput) -> str:
         if text:
             return _truncate_permission_text(text)
     return container.tool_name or "Unknown"
+
+
+def _subagent_tool_names_summary(tools: tuple[SubagentToolStatusOutput, ...]) -> str | None:
+    if not tools:
+        return None
+
+    counts: dict[str, int] = {}
+    for tool in tools:
+        name = tool.tool_name or "Unknown"
+        counts[name] = counts.get(name, 0) + 1
+
+    parts = [f"{name} ×{count}" if count > 1 else name for name, count in counts.items()]
+    return _truncate_permission_text("、".join(parts))
 
 
 def _tool_status_label(status: str | None) -> str:
