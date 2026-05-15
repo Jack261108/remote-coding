@@ -252,21 +252,24 @@ def build_permission_prompt(*, tool_name: str | None, tool_input: dict | None = 
     return "\n".join(lines)
 
 
-def build_tool_status_message(*, tool_name: str | None, tool_input: dict | None = None, status: str, resumed: bool = False) -> str:
+def _tool_status_heading(status: str | None, *, resumed: bool = False) -> str:
     if status == ToolStatus.SUCCESS.value:
-        heading = "🟢 执行完成"
+        text = "执行完成"
     elif status == ToolStatus.ERROR.value:
-        heading = "执行失败"
+        text = "执行失败"
     elif status == ToolStatus.INTERRUPTED.value:
-        heading = "已中断"
+        text = "已中断"
     elif status == ToolStatus.WAITING_FOR_APPROVAL.value:
-        heading = "等待权限"
+        text = "等待权限"
     elif status == ToolStatus.RUNNING.value and resumed:
-        heading = "继续执行"
+        text = "继续执行"
     else:
-        heading = "执行中"
+        text = "执行中"
+    return f"{_tool_status_icon(status)} {text}"
 
-    lines = [heading]
+
+def build_tool_status_message(*, tool_name: str | None, tool_input: dict | None = None, status: str, resumed: bool = False) -> str:
+    lines = [_tool_status_heading(status, resumed=resumed)]
     if tool_name:
         lines.append(f"工具: {tool_name}")
 
@@ -303,7 +306,7 @@ def build_tool_task_list_message(output: ToolStatusOutput) -> str:
         lines.append("当前: 无（全部完成）")
     else:
         active_tool = visible_tools[active_index]
-        lines.append(f"当前: {active_index + 1}. {active_tool.tool_name or 'Unknown'}")
+        lines.append(f"当前: {_tool_status_icon(active_tool.status)} {active_index + 1}. {active_tool.tool_name or 'Unknown'}")
 
     lines.append("")
     display_indexes = _select_visible_subagent_indexes(visible_tools, active_index=active_index)
@@ -312,7 +315,7 @@ def build_tool_task_list_message(output: ToolStatusOutput) -> str:
         prefix = "=> " if index == active_index else ""
         detail = _format_tool_input_detail(tool.tool_name, tool.tool_input)
         detail_text = f" - {detail[0]}: {detail[1]}" if detail is not None else ""
-        lines.append(f"{prefix}{index + 1}. {tool.tool_name or 'Unknown'} - {_tool_status_label(tool.status)}{detail_text}")
+        lines.append(f"{prefix}{_tool_status_icon(tool.status)} {index + 1}. {tool.tool_name or 'Unknown'} - {_tool_status_label(tool.status)}{detail_text}")
 
     omitted = len(visible_tools) - len(display_indexes)
     if omitted > 0:
@@ -360,7 +363,7 @@ def build_subagent_aggregate_status_message(output: SubagentAggregateStatusOutpu
         visible_tools = _visible_subagent_tools(container.subagent_tools)
         tool_use_count = len(visible_tools)
         lines.append(
-            f"- {_subagent_container_title(container)} · {tool_use_count} tool uses · {_subagent_container_status_text(container)}"
+            f"- {_subagent_container_status_icon(container)} {_subagent_container_title(container)} · {tool_use_count} tool uses · {_subagent_container_status_text(container)}"
         )
         tool_names = _subagent_tool_names_summary(visible_tools)
         if tool_names:
@@ -481,6 +484,21 @@ def _subagent_container_status_text(container: ToolStatusOutput) -> str:
     if ToolStatus.INTERRUPTED.value in statuses:
         return "Interrupted"
     return "Done"
+
+
+def _subagent_container_status_icon(container: ToolStatusOutput) -> str:
+    statuses = _subagent_container_status_values((container,))
+    if ToolStatus.WAITING_FOR_APPROVAL.value in statuses:
+        return _tool_status_icon(ToolStatus.WAITING_FOR_APPROVAL.value)
+    if ToolStatus.RUNNING.value in statuses:
+        return _tool_status_icon(ToolStatus.RUNNING.value)
+    if ToolStatus.ERROR.value in statuses:
+        return _tool_status_icon(ToolStatus.ERROR.value)
+    if ToolStatus.INTERRUPTED.value in statuses:
+        return _tool_status_icon(ToolStatus.INTERRUPTED.value)
+    if ToolStatus.SUCCESS.value in statuses:
+        return _tool_status_icon(ToolStatus.SUCCESS.value)
+    return _tool_status_icon(None)
 
 
 def _subagent_container_status_values(containers: tuple[ToolStatusOutput, ...]) -> tuple[str, ...]:

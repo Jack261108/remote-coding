@@ -169,7 +169,7 @@ async def test_tool_message_manager_sends_first_status_message() -> None:
     await manager.handle(_output(ToolStatus.RUNNING))
 
     assert len(root.sent) == 1
-    assert "执行中" in root.sent[0].text
+    assert "🔄 执行中" in root.sent[0].text
     assert "工具: Bash" in root.sent[0].text
     assert "命令: pytest -q" in root.sent[0].text
     assert root.sent[0].parse_mode == ParseMode.HTML
@@ -181,12 +181,14 @@ async def test_tool_message_manager_edits_existing_message_to_success() -> None:
     manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
 
     await manager.handle(_output(ToolStatus.RUNNING))
+    original_sent_text = root.sent[0].text
     await manager.handle(_output(ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "🟢 执行完成" in root.sent[0].text
+    assert "🔄 执行中" in original_sent_text
+    assert "✅ 执行完成" in root.sent[0].text
     assert root.sent[0].edits
-    assert "🟢 执行完成" in root.sent[0].edits[-1]
+    assert "✅ 执行完成" in root.sent[0].edits[-1]
 
 
 @pytest.mark.asyncio
@@ -195,11 +197,13 @@ async def test_tool_message_manager_keeps_error_status_message() -> None:
     manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
 
     await manager.handle(_output(ToolStatus.RUNNING))
+    original_sent_text = root.sent[0].text
     await manager.handle(_output(ToolStatus.ERROR))
 
     assert len(root.sent) == 1
-    assert "执行失败" in root.sent[0].text
-    assert "执行失败" in root.sent[0].edits[-1]
+    assert "🔄 执行中" in original_sent_text
+    assert "❌ 执行失败" in root.sent[0].text
+    assert "❌ 执行失败" in root.sent[0].edits[-1]
 
 
 @pytest.mark.asyncio
@@ -418,8 +422,8 @@ async def test_tool_message_manager_sends_task_list_message() -> None:
     assert len(root.sent) == 1
     assert "任务列表" in root.sent[0].text
     assert "任务: 修复测试失败" in root.sent[0].text
-    assert "当前: 1. Read" in root.sent[0].text
-    assert "1. Read - 执行中 - 文件: app/foo.py" in root.sent[0].text
+    assert "当前: 🔄 1. Read" in root.sent[0].text
+    assert "🔄 1. Read - 执行中 - 文件: app/foo.py" in root.sent[0].text
 
 
 @pytest.mark.asyncio
@@ -444,9 +448,9 @@ async def test_tool_message_manager_edits_task_list_when_current_subagent_change
     )
 
     assert len(root.sent) == 1
-    assert "当前: 2. Bash" in root.sent[0].text
+    assert "当前: 🔄 2. Bash" in root.sent[0].text
     assert root.sent[0].edits
-    assert "2. Bash - 执行中 - 命令: pytest -q" in root.sent[0].edits[-1]
+    assert "🔄 2. Bash - 执行中 - 命令: pytest -q" in root.sent[0].edits[-1]
 
 
 @pytest.mark.asyncio
@@ -473,7 +477,7 @@ async def test_tool_message_manager_re_sends_task_list_when_edit_fails() -> None
 
     assert len(root.sent) == 2
     assert "任务列表" in root.sent[1].text
-    assert "当前: 2. Bash" in root.sent[1].text
+    assert "当前: 🔄 2. Bash" in root.sent[1].text
 
 
 @pytest.mark.asyncio

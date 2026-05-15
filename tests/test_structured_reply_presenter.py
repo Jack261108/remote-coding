@@ -507,7 +507,7 @@ def test_build_permission_prompt_falls_back_to_compact_json_preview() -> None:
 def test_build_tool_progress_message_includes_specific_bash_command() -> None:
     message = build_tool_progress_message(tool_name="Bash", tool_input={"command": "pytest -q"})
 
-    assert message == "执行中\n工具: Bash\n命令: pytest -q"
+    assert message == "🔄 执行中\n工具: Bash\n命令: pytest -q"
 
 
 def test_build_tool_status_message_formats_final_states() -> None:
@@ -515,22 +515,33 @@ def test_build_tool_status_message_formats_final_states() -> None:
         tool_name="Bash",
         tool_input={"command": "pytest -q"},
         status=ToolStatus.SUCCESS.value,
-    ) == "🟢 执行完成\n工具: Bash\n命令: pytest -q"
+    ) == "✅ 执行完成\n工具: Bash\n命令: pytest -q"
     assert build_tool_status_message(
         tool_name="Bash",
         tool_input={"command": "pytest -q"},
         status=ToolStatus.ERROR.value,
-    ) == "执行失败\n工具: Bash\n命令: pytest -q"
+    ) == "❌ 执行失败\n工具: Bash\n命令: pytest -q"
     assert build_tool_status_message(
         tool_name="Bash",
         tool_input={"command": "pytest -q"},
         status=ToolStatus.INTERRUPTED.value,
-    ) == "已中断\n工具: Bash\n命令: pytest -q"
+    ) == "⏹️ 已中断\n工具: Bash\n命令: pytest -q"
     assert build_tool_status_message(
         tool_name="Bash",
         tool_input={"command": "rm file"},
         status=ToolStatus.WAITING_FOR_APPROVAL.value,
-    ) == "等待权限\n工具: Bash\n命令: rm file"
+    ) == "⏳ 等待权限\n工具: Bash\n命令: rm file"
+    assert build_tool_status_message(
+        tool_name="Bash",
+        tool_input={"command": "pytest -q"},
+        status=ToolStatus.RUNNING.value,
+        resumed=True,
+    ) == "🔄 继续执行\n工具: Bash\n命令: pytest -q"
+    assert build_tool_status_message(
+        tool_name="Bash",
+        tool_input={"command": "pytest -q"},
+        status="unknown",
+    ) == "⏳ 执行中\n工具: Bash\n命令: pytest -q"
 
 
 def test_build_tool_task_list_message_marks_current_task() -> None:
@@ -561,10 +572,10 @@ def test_build_tool_task_list_message_marks_current_task() -> None:
         "任务列表\n"
         "任务: 修复测试失败\n"
         "状态: 执行中\n"
-        "当前: 2. Bash\n"
+        "当前: 🔄 2. Bash\n"
         "\n"
-        "1. Read - 完成 - 文件: app/foo.py\n"
-        "=> 2. Bash - 执行中 - 命令: pytest -q"
+        "✅ 1. Read - 完成 - 文件: app/foo.py\n"
+        "=> 🔄 2. Bash - 执行中 - 命令: pytest -q"
     )
 
 
@@ -805,9 +816,27 @@ def test_build_subagent_aggregate_status_message_shows_subagent_type() -> None:
     assert message == (
         "1 agents running\n"
         "\n"
-        "- Explore(项目优化点审计) · 3 tool uses · Running\n"
+        "- 🔄 Explore(项目优化点审计) · 3 tool uses · Running\n"
         "  名称: Read ×2、Glob"
     )
+
+
+def test_build_subagent_aggregate_status_message_uses_waiting_icon_for_unknown_status() -> None:
+    message = build_subagent_aggregate_status_message(
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="agent-1",
+                    tool_name="Agent",
+                    tool_input={"description": "未知状态"},
+                    status="unknown",
+                ),
+            ),
+        )
+    )
+
+    assert message == "1 agents finished\n\n- ⏳ 未知状态 · 0 tool uses · Done"
 
 
 def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None:
@@ -867,11 +896,11 @@ def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None
     assert message == (
         "3 agents finished\n"
         "\n"
-        "- 项目架构扫描 · 51 tool uses · Done\n"
+        "- ✅ 项目架构扫描 · 51 tool uses · Done\n"
         "  名称: Read ×51\n"
-        "- 测试质量扫描 · 29 tool uses · Done\n"
+        "- ✅ 测试质量扫描 · 29 tool uses · Done\n"
         "  名称: Glob ×29\n"
-        "- 安全性能扫描 · 40 tool uses · Done\n"
+        "- ✅ 安全性能扫描 · 40 tool uses · Done\n"
         "  名称: Grep ×40"
     )
 
