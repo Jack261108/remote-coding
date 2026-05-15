@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -32,6 +33,7 @@ class ToolMessageManager:
         self._user_id = user_id
         self._provider = provider
         self._messages: dict[str, _TrackedToolMessage] = {}
+        self._lock = asyncio.Lock()
 
     async def handle(self, output: ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput) -> None:
         if isinstance(output, SubagentAggregateStatusOutput):
@@ -50,15 +52,17 @@ class ToolMessageManager:
                 tool_input=output.tool_input,
                 status=output.status,
             )
-        existing = self._messages.get(message_key)
-        if existing is None:
-            await self._send_and_track(message_key, text)
-            return
 
-        edited = await self._edit(existing.message, text, tool_use_id=message_key)
-        if edited:
-            return
-        await self._send_and_track(message_key, text)
+        async with self._lock:
+            existing = self._messages.get(message_key)
+            if existing is None:
+                await self._send_and_track(message_key, text)
+                return
+
+            edited = await self._edit(existing.message, text, tool_use_id=message_key)
+            if edited:
+                return
+            await self._send_and_track(message_key, text)
 
     async def _send_and_track(self, tool_use_id: str, text: str) -> None:
         sent = await self._send(text, tool_use_id=tool_use_id)
@@ -86,7 +90,9 @@ class ToolMessageManager:
             rendered = self._render(text)
             await message.edit_text(rendered, parse_mode=ParseMode.HTML)
             return True
-        except Exception:
+        except Exception as exc:
+            if _is_message_not_modified(exc):
+                return True
             logger.exception(
                 "telegram tool message edit failed",
                 extra={
@@ -101,3 +107,7 @@ class ToolMessageManager:
     def _render(self, text: str) -> str:
         rendered = render_markdownish_to_telegram_html(text)
         return split_telegram_html(rendered, 4096)[0]
+
+
+def _is_message_not_modified(exc: Exception) -> bool:
+    return "message is not modified" in str(exc).lower()

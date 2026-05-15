@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from aiogram.enums import ParseMode
 
@@ -21,8 +23,12 @@ class DummyTelegramMessage:
         self.edits: list[str] = []
         self.edit_parse_modes: list[ParseMode | None] = []
         self.fail_next_edit = False
+        self.not_modified_next_edit = False
 
     async def edit_text(self, text: str, parse_mode=None) -> "DummyTelegramMessage":
+        if self.not_modified_next_edit:
+            self.not_modified_next_edit = False
+            raise RuntimeError("message is not modified")
         if self.fail_next_edit:
             self.fail_next_edit = False
             raise RuntimeError("edit failed")
@@ -265,6 +271,31 @@ async def test_tool_message_manager_sends_claude_task_list_message() -> None:
     assert "当前: 2. 评估当前改动" in root.sent[0].text
     assert "1. 梳理项目结构 - 完成" in root.sent[0].text
     assert "=&gt; 2. 评估当前改动 - 执行中" in root.sent[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_serializes_concurrent_claude_task_list_updates() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await asyncio.gather(
+        manager.handle(_task_list_status_output(second_status="in_progress")),
+        manager.handle(_task_list_status_output(second_status="completed")),
+    )
+
+    assert len(root.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_ignores_not_modified_edit_without_re_sending() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_task_list_status_output(second_status="in_progress"))
+    root.sent[0].not_modified_next_edit = True
+    await manager.handle(_task_list_status_output(second_status="in_progress"))
+
+    assert len(root.sent) == 1
 
 
 @pytest.mark.asyncio
