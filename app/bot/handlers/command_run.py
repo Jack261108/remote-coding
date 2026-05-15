@@ -14,6 +14,7 @@ from app.bot.presenters.structured_reply_presenter import (
     FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
+    StructuredReplyOutput,
     StructuredReplyPresenter,
     SubagentAggregateStatusOutput,
     TaskListStatusOutput,
@@ -226,17 +227,38 @@ async def run_prompt_and_stream(
         for output in await presenter.poll(task_id=start.task.task_id, final=final, log_missing=log_missing):
             if isinstance(output, PermissionRequestOutput):
                 await sender.flush(send_text)
-                await answer_safely(
+                sent = await answer_safely(
                     output.text,
-                    reply_markup=build_permission_keyboard(tool_use_id=output.tool_use_id),
+                    reply_markup=build_permission_keyboard(tool_use_id=output.tool_use_id) if output.tool_use_id else None,
                 )
+                if sent:
+                    await presenter.acknowledge_delivery(output)
                 continue
             if isinstance(output, UserQuestionOutput):
                 await sender.flush(send_text)
-                await answer_safely(
+                sent = await answer_safely(
                     output.text,
                     reply_markup=build_user_question_keyboard(output),
                 )
+                if sent:
+                    await presenter.acknowledge_delivery(output)
+                continue
+            if isinstance(output, StructuredReplyOutput):
+                await sender.flush(send_text)
+                delivered = True
+
+                async def send_structured_text(text: str) -> None:
+                    nonlocal delivered
+                    normalized = normalize_stream_text(text)
+                    if not normalized:
+                        return
+                    if not await answer_safely(normalized):
+                        delivered = False
+
+                await sender.push(output.text, send_structured_text)
+                await sender.flush(send_structured_text)
+                if delivered:
+                    await presenter.acknowledge_delivery(output)
                 continue
             if isinstance(
                 output,

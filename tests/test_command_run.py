@@ -38,7 +38,14 @@ class DummyAnswerMessage:
 
 
 class DummyMessage:
-    def __init__(self, user_id: int = 1, *, fail_on_calls: set[int] | None = None, fail_first_edit: bool = False) -> None:
+    def __init__(
+        self,
+        user_id: int = 1,
+        *,
+        fail_on_calls: set[int] | None = None,
+        fail_on_texts: set[str] | None = None,
+        fail_first_edit: bool = False,
+    ) -> None:
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
         self.sent_messages: list[DummyAnswerMessage] = []
@@ -46,11 +53,12 @@ class DummyMessage:
         self.parse_modes: list[ParseMode | None] = []
         self._answer_calls = 0
         self._fail_on_calls = fail_on_calls or set()
+        self._fail_on_texts = fail_on_texts or set()
         self._fail_first_edit = fail_first_edit
 
     async def answer(self, text: str, reply_markup=None, parse_mode=None) -> DummyAnswerMessage:
         self._answer_calls += 1
-        if self._answer_calls in self._fail_on_calls:
+        if self._answer_calls in self._fail_on_calls or any(fragment in text for fragment in self._fail_on_texts):
             raise TelegramBadRequest(method="sendMessage", message="chat not found")
         sent = DummyAnswerMessage(
             text,
@@ -834,6 +842,35 @@ async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mod
 
     assert "噪音" not in "\n".join(message.answers)
     assert message.answers[1] == "干净正文"
+    assert task_service._structured_reply_turn_id == "turn-1"
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_does_not_ack_structured_reply_when_send_fails() -> None:
+    message = DummyMessage(fail_on_texts={"干净正文"})
+    turns: list[ConversationTurn] = []
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="噪音\nTGCLI_BEGIN\n正文\nTGCLI_DONE\n"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.03, 0.1],
+    )
+
+    async def append_new_turn() -> None:
+        await asyncio.sleep(0.02)
+        turns.append(ConversationTurn(turn_id="turn-1", role="assistant", text="\n干净正文\n", is_complete=True))
+
+    updater = asyncio.create_task(append_new_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2)
+    await updater
+
+    assert "干净正文" not in "\n".join(message.answers)
+    assert task_service._structured_reply_turn_id is None
 
 
 @pytest.mark.asyncio
@@ -1073,6 +1110,39 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
     assert reply_markup is not None
     assert [button.text for button in reply_markup.inline_keyboard[0]] == ["允许", "拒绝"]
     assert [button.callback_data for button in reply_markup.inline_keyboard[0]] == ["perm:allow:tool-1", "perm:deny:tool-1"]
+    assert task_service._structured_permission_key == "tool-1:Bash"
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_does_not_ack_permission_when_prompt_send_fails() -> None:
+    message = DummyMessage(fail_on_texts={"权限请求"})
+    pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已完成回复\n", is_complete=True)]
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    async def get_structured_session(user_id: int, *, log_missing: bool = True):
+        return SimpleNamespace(
+            session_id="claude-session-1",
+            phase=SessionPhase.WAITING_FOR_APPROVAL,
+            turns=turns,
+            pending_permission=pending,
+        )
+
+    task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+
+    assert build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"}) not in message.answers
+    assert task_service._structured_permission_key is None
 
 
 @pytest.mark.asyncio
@@ -1158,6 +1228,71 @@ async def test_run_prompt_and_stream_interactive_reports_user_question_once() ->
         "ask:tool-ask-1:0:0",
         "ask:tool-ask-1:0:1",
     ]
+    assert task_service._structured_user_question_key == "tool-ask-1:0"
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_does_not_ack_user_question_when_prompt_send_fails() -> None:
+    message = DummyMessage(fail_on_texts={"这两条误写到项目级的记忆"})
+    turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已收到问题\n", is_complete=True)]
+    empty_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    question_session = SimpleNamespace(
+        session_id="claude-session-1",
+        phase=SessionPhase.PROCESSING,
+        turns=turns,
+        pending_permission=None,
+        tool_calls={},
+    )
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理方式",
+                    "question": "这两条误写到项目级的记忆，你要我怎么处理？",
+                    "options": [
+                        {"label": "迁到全局(推荐)", "description": "保留记忆内容并迁移"},
+                        {"label": "直接删除", "description": "删除项目级这两条记忆"},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    question_session.tool_calls = {"tool-ask-1": question_tool}
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.08],
+    )
+
+    responses = iter([empty_session, empty_session, question_session])
+
+    async def get_structured_session(user_id: int, *, log_missing: bool = True):
+        try:
+            return next(responses)
+        except StopIteration:
+            return question_session
+
+    task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+
+    assert all("这两条误写到项目级的记忆" not in answer for answer in message.answers)
+    assert task_service._structured_user_question_key is None
 
 
 @pytest.mark.asyncio

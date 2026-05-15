@@ -8,6 +8,7 @@ from app.bot.presenters.structured_reply_presenter import (
     FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
+    StructuredReplyOutput,
     StructuredReplyPresenter,
     SubagentAggregateStatusOutput,
     SubagentToolStatusOutput,
@@ -133,10 +134,38 @@ async def test_presenter_emits_new_completed_turn_once() -> None:
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
+    await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
-    assert first == ["你好"]
+    assert first == [StructuredReplyOutput(text="你好", turn_id="turn-1")]
     assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_reemits_completed_turn_until_delivery_acknowledged() -> None:
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(
+                    phase=SessionPhase.WAITING_FOR_INPUT,
+                    turns=[ConversationTurn(turn_id="turn-1", role="assistant", text="\n你好\n", is_complete=True)],
+                ),
+                _session(
+                    phase=SessionPhase.WAITING_FOR_INPUT,
+                    turns=[ConversationTurn(turn_id="turn-1", role="assistant", text="\n你好\n", is_complete=True)],
+                ),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [StructuredReplyOutput(text="你好", turn_id="turn-1")]
+    assert second == [StructuredReplyOutput(text="你好", turn_id="turn-1")]
 
 
 @pytest.mark.asyncio
@@ -155,16 +184,46 @@ async def test_presenter_reports_pending_permission_once() -> None:
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
+    await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
     assert first == [
         PermissionRequestOutput(
             text=build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"}),
             tool_use_id="tool-1",
+            permission_key="tool-1:Bash",
             tool_name="Bash",
         )
     ]
     assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_reemits_pending_permission_until_delivery_acknowledged() -> None:
+    pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
+            ]
+        ),
+        user_id=1,
+    )
+    expected = PermissionRequestOutput(
+        text=build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"}),
+        tool_use_id="tool-1",
+        permission_key="tool-1:Bash",
+        tool_name="Bash",
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [expected]
+    assert second == [expected]
 
 
 @pytest.mark.asyncio
@@ -212,10 +271,63 @@ async def test_presenter_reports_user_question_once_without_generic_progress() -
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
+    await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
     assert first == [UserQuestionOutput(text=build_user_question_prompt(prompt), question=prompt)]
     assert second == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_reemits_user_question_until_delivery_acknowledged() -> None:
+    question_tool = ToolCallRecord(
+        tool_use_id="tool-ask-1",
+        name="AskUserQuestion",
+        input={
+            "questions": [
+                {
+                    "header": "处理方式",
+                    "question": "这两条误写到项目级的记忆，你要我怎么处理？",
+                    "options": [
+                        {"label": "迁到全局(推荐)", "description": "保留记忆内容并迁移"},
+                        {"label": "直接删除", "description": "删除项目级这两条记忆"},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        },
+        status=ToolStatus.RUNNING,
+    )
+    prompt = UserQuestionPrompt(
+        tool_use_id="tool-ask-1",
+        question_index=0,
+        total_questions=1,
+        header="处理方式",
+        question="这两条误写到项目级的记忆，你要我怎么处理？",
+        options=(
+            UserQuestionOption(label="迁到全局(推荐)", description="保留记忆内容并迁移"),
+            UserQuestionOption(label="直接删除", description="删除项目级这两条记忆"),
+        ),
+        multi_select=False,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+    expected = UserQuestionOutput(text=build_user_question_prompt(prompt), question=prompt)
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [expected]
+    assert second == [expected]
 
 
 @pytest.mark.asyncio
@@ -272,6 +384,7 @@ async def test_presenter_reports_only_first_question_when_tool_contains_multiple
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
+    await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
     assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
@@ -423,6 +536,7 @@ async def test_presenter_reports_pending_ask_user_question_instead_of_permission
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
+    await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
     assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
@@ -483,6 +597,7 @@ async def test_presenter_reports_waiting_for_approval_ask_user_question_without_
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
+    await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
     assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
@@ -1821,9 +1936,10 @@ async def test_presenter_final_poll_does_not_fallback_after_structured_reply_emi
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
+    await presenter.acknowledge_delivery(first[0])
     final = await presenter.poll(task_id="task-1", final=True)
 
-    assert first == ["你好"]
+    assert first == [StructuredReplyOutput(text="你好", turn_id="turn-1")]
     assert final == []
 
 
@@ -1887,7 +2003,7 @@ async def test_presenter_wait_for_update_detects_session_switch_with_lower_revis
     changed = await presenter.wait_for_update(timeout_sec=0.01)
 
     assert changed is True
-    assert await presenter.poll(task_id="task-1") == ["你好"]
+    assert await presenter.poll(task_id="task-1") == [StructuredReplyOutput(text="你好", turn_id="turn-new")]
 
 
 @pytest.mark.asyncio
@@ -1900,7 +2016,8 @@ async def test_presenter_persists_reply_cursor_across_restarts(tmp_path) -> None
     presenter = StructuredReplyPresenter(task_service=PersistentTaskService(store), user_id=1)
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
-    assert first == ["你好"]
+    await presenter.acknowledge_delivery(first[0])
+    assert first == [StructuredReplyOutput(text="你好", turn_id="turn-1")]
 
     reloaded = SessionStore(FileSessionStore(str(tmp_path)))
     presenter = StructuredReplyPresenter(task_service=PersistentTaskService(reloaded), user_id=1)

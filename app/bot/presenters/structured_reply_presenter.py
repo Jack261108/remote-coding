@@ -67,9 +67,16 @@ class _StructuredSnapshot:
 
 
 @dataclass(frozen=True)
+class StructuredReplyOutput:
+    text: str
+    turn_id: str
+
+
+@dataclass(frozen=True)
 class PermissionRequestOutput:
     text: str
-    tool_use_id: str
+    tool_use_id: str | None
+    permission_key: str
     tool_name: str | None = None
 
 
@@ -1058,6 +1065,7 @@ class StructuredReplyPresenter:
         log_missing: bool = False,
     ) -> list[
         str
+        | StructuredReplyOutput
         | PermissionRequestOutput
         | ProgressUpdateOutput
         | ToolStatusOutput
@@ -1073,6 +1081,7 @@ class StructuredReplyPresenter:
 
         messages: list[
             str
+            | StructuredReplyOutput
             | PermissionRequestOutput
             | ProgressUpdateOutput
             | ToolStatusOutput
@@ -1088,12 +1097,6 @@ class StructuredReplyPresenter:
             pending_question_prompts=pending_question_prompts,
         )
         messages.extend(question_updates)
-        for output in question_updates:
-            await self._task_service.acknowledge_structured_user_question(
-                self._user_id,
-                question_key=output.question.key,
-                task_id=self._task_id,
-            )
         messages.extend(self._collect_progress_updates(snapshot=snapshot, tool_question_prompts=tool_question_prompts))
         if (
             snapshot.phase == SessionPhase.WAITING_FOR_APPROVAL.value
@@ -1101,29 +1104,16 @@ class StructuredReplyPresenter:
             and snapshot.pending_permission_key != self._last_pending_permission_key
             and not pending_question_prompts
         ):
-            self._last_pending_permission_key = snapshot.pending_permission_key
-            if snapshot.pending_permission_tool_use_id:
-                messages.append(
-                    PermissionRequestOutput(
-                        text=build_permission_prompt(
-                            tool_name=snapshot.pending_permission_tool_name,
-                            tool_input=snapshot.pending_permission_tool_input,
-                        ),
-                        tool_use_id=snapshot.pending_permission_tool_use_id,
-                        tool_name=snapshot.pending_permission_tool_name,
-                    )
-                )
-            else:
-                messages.append(
-                    build_permission_prompt(
+            messages.append(
+                PermissionRequestOutput(
+                    text=build_permission_prompt(
                         tool_name=snapshot.pending_permission_tool_name,
                         tool_input=snapshot.pending_permission_tool_input,
-                    )
+                    ),
+                    tool_use_id=snapshot.pending_permission_tool_use_id,
+                    permission_key=snapshot.pending_permission_key,
+                    tool_name=snapshot.pending_permission_tool_name,
                 )
-            await self._task_service.acknowledge_structured_reply(
-                self._user_id,
-                permission_key=snapshot.pending_permission_key,
-                task_id=self._task_id,
             )
         elif snapshot.phase != SessionPhase.WAITING_FOR_APPROVAL.value:
             self._last_pending_permission_key = snapshot.pending_permission_key
@@ -1132,7 +1122,7 @@ class StructuredReplyPresenter:
         if reply:
             messages.append(reply)
 
-        if final and self._structured_session_available and not self._structured_reply_emitted_in_run and not self._fallback_announced:
+        if final and self._structured_session_available and reply is None and not self._structured_reply_emitted_in_run and not self._fallback_announced:
             self._fallback_announced = True
             logger.warning(
                 "structured reply fallback emitted",
@@ -1142,7 +1132,29 @@ class StructuredReplyPresenter:
 
         return messages
 
-    async def _collect_reply(self, *, task_id: str, snapshot: _StructuredSnapshot, log_missing: bool) -> str | None:
+    async def acknowledge_delivery(self, output: StructuredReplyOutput | PermissionRequestOutput | UserQuestionOutput) -> None:
+        if isinstance(output, StructuredReplyOutput):
+            await self._task_service.acknowledge_structured_reply(self._user_id, turn_id=output.turn_id, task_id=self._task_id)
+            self._last_structured_turn_id = output.turn_id
+            self._structured_reply_emitted_in_run = True
+            return
+
+        if isinstance(output, PermissionRequestOutput):
+            await self._task_service.acknowledge_structured_reply(self._user_id, permission_key=output.permission_key, task_id=self._task_id)
+            self._last_pending_permission_key = output.permission_key
+            return
+
+        await self._task_service.acknowledge_structured_user_question(
+            self._user_id,
+            question_key=output.question.key,
+            task_id=self._task_id,
+        )
+        self._last_user_question_key = output.question.key
+        previous_keys = self._question_keys_by_tool_id.get(output.question.tool_use_id, ())
+        if output.question.key not in previous_keys:
+            self._question_keys_by_tool_id[output.question.tool_use_id] = (*previous_keys, output.question.key)
+
+    async def _collect_reply(self, *, task_id: str, snapshot: _StructuredSnapshot, log_missing: bool) -> StructuredReplyOutput | None:
         if not snapshot.turn_id:
             if log_missing:
                 logger.info("structured reply skipped", extra={"task_id": task_id, "user_id": self._user_id, "reason": "no_turn_id"})
@@ -1162,11 +1174,8 @@ class StructuredReplyPresenter:
                 )
             return None
 
-        self._last_structured_turn_id = snapshot.turn_id
-        self._structured_reply_emitted_in_run = True
-        await self._task_service.acknowledge_structured_reply(self._user_id, turn_id=snapshot.turn_id, task_id=self._task_id)
         logger.info("[task %s][structured] %s", task_id, snapshot.reply.rstrip("\n"))
-        return snapshot.reply
+        return StructuredReplyOutput(text=snapshot.reply, turn_id=snapshot.turn_id)
 
     def _collect_progress_updates(
         self,
@@ -1297,7 +1306,6 @@ class StructuredReplyPresenter:
         pending_question_prompts: tuple[UserQuestionPrompt, ...] = (),
     ) -> list[UserQuestionOutput]:
         messages: list[UserQuestionOutput] = []
-        current_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
 
         active_prompt_group: tuple[UserQuestionPrompt, ...] = pending_question_prompts
         active_tool_use_id: str | None = pending_question_prompts[0].tool_use_id if pending_question_prompts else None
@@ -1312,8 +1320,6 @@ class StructuredReplyPresenter:
                 active_tool_use_id = tool.tool_use_id
 
         if active_tool_use_id is not None and active_prompt_group:
-            current_keys = tuple(prompt.key for prompt in active_prompt_group)
-            current_keys_by_tool_id[active_tool_use_id] = current_keys
             previous_keys = self._question_keys_by_tool_id.get(active_tool_use_id, ())
             selected_prompt = active_prompt_group[0]
             current_question_cursor = parse_user_question_key(self._last_user_question_key)
@@ -1328,9 +1334,7 @@ class StructuredReplyPresenter:
                         question=selected_prompt,
                     )
                 )
-                self._last_user_question_key = selected_prompt.key
 
-        self._question_keys_by_tool_id = current_keys_by_tool_id
         return messages
 
     def _extract_pending_user_question_prompts(

@@ -134,11 +134,11 @@ def build_user_question_keyboard(
 async def _acknowledge_and_send_next_prompt(*, message: Message, task_service: TaskService, user_id: int, next_prompt: UserQuestionPrompt | None) -> None:
     if next_prompt is None:
         return
-    await task_service.acknowledge_structured_user_question(user_id, question_key=next_prompt.key)
     await message.answer(
         build_user_question_prompt(next_prompt),
         reply_markup=build_user_question_keyboard(next_prompt),
     )
+    await task_service.acknowledge_structured_user_question(user_id, question_key=next_prompt.key)
 
 
 async def maybe_handle_pending_user_question_text(
