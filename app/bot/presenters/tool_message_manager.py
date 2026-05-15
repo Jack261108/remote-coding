@@ -8,8 +8,10 @@ from aiogram.types import Message
 
 from app.bot.presenters.structured_reply_presenter import (
     SubagentAggregateStatusOutput,
+    TaskListStatusOutput,
     ToolStatusOutput,
     build_subagent_aggregate_status_message,
+    build_task_list_status_message,
     build_tool_status_message,
     build_tool_task_list_message,
 )
@@ -31,10 +33,13 @@ class ToolMessageManager:
         self._provider = provider
         self._messages: dict[str, _TrackedToolMessage] = {}
 
-    async def handle(self, output: ToolStatusOutput | SubagentAggregateStatusOutput) -> None:
+    async def handle(self, output: ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput) -> None:
         if isinstance(output, SubagentAggregateStatusOutput):
             message_key = output.message_key
             text = build_subagent_aggregate_status_message(output)
+        elif isinstance(output, TaskListStatusOutput):
+            message_key = output.message_key
+            text = build_task_list_status_message(output)
         elif output.subagent_tools:
             message_key = output.tool_use_id
             text = build_tool_task_list_message(output)

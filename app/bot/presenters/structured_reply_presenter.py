@@ -23,6 +23,7 @@ _QUESTION_TEXT_CHAR_LIMIT = 360
 _QUESTION_TEXT_LINE_LIMIT = 10
 _TASK_LIST_VISIBLE_LIMIT = 20
 _SUBAGENT_AGGREGATE_MESSAGE_KEY = "subagent-aggregate"
+_TASK_LIST_MESSAGE_KEY = "task-list"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,8 @@ class _ToolStateSnapshot:
     tool_name: str | None
     tool_input: dict | None
     status: str | None
+    result: str | None = None
+    structured_result: dict | None = None
     subagent_tools: tuple[_SubagentToolStateSnapshot, ...] = ()
 
 
@@ -89,6 +92,20 @@ class ToolStatusOutput:
 class SubagentAggregateStatusOutput:
     message_key: str
     containers: tuple[ToolStatusOutput, ...]
+
+
+@dataclass(frozen=True)
+class TaskListItemStatusOutput:
+    task_id: str
+    subject: str
+    status: str
+    active_form: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskListStatusOutput:
+    message_key: str
+    items: tuple[TaskListItemStatusOutput, ...]
 
 
 @dataclass(frozen=True)
@@ -303,6 +320,32 @@ def build_tool_task_list_message(output: ToolStatusOutput) -> str:
     return "\n".join(lines)
 
 
+def build_task_list_status_message(output: TaskListStatusOutput) -> str:
+    visible_items = tuple(item for item in output.items if item.status != "deleted")
+    lines = ["任务列表"]
+    active_index = _select_active_task_list_item_index(visible_items)
+    if active_index is None:
+        lines.append("当前: 无（全部完成）")
+    else:
+        active_item = visible_items[active_index]
+        active_title = active_item.active_form or active_item.subject
+        lines.append(f"当前: {active_index + 1}. {_truncate_permission_text(active_title)}")
+
+    lines.append("")
+    display_indexes = _select_visible_task_list_item_indexes(visible_items, active_index=active_index)
+    for index in display_indexes:
+        item = visible_items[index]
+        prefix = "=> " if index == active_index else ""
+        subject = _truncate_permission_text(item.subject)
+        lines.append(f"{prefix}{index + 1}. {subject} - {_task_list_item_status_label(item.status)}")
+
+    omitted = len(visible_items) - len(display_indexes)
+    if omitted > 0:
+        lines.append(f"...另有 {omitted} 项未显示")
+
+    return "\n".join(lines)
+
+
 def build_subagent_aggregate_status_message(output: SubagentAggregateStatusOutput) -> str:
     containers = output.containers
     noun = _subagent_aggregate_noun(containers)
@@ -414,6 +457,37 @@ def _select_visible_subagent_indexes(tools: tuple[SubagentToolStatusOutput, ...]
     return tuple(indexes)
 
 
+def _select_active_task_list_item_index(items: tuple[TaskListItemStatusOutput, ...]) -> int | None:
+    for status in ("in_progress", "failed", "interrupted"):
+        for index, item in enumerate(items):
+            if item.status == status:
+                return index
+    return None
+
+
+def _select_visible_task_list_item_indexes(items: tuple[TaskListItemStatusOutput, ...], *, active_index: int | None) -> tuple[int, ...]:
+    if len(items) <= _TASK_LIST_VISIBLE_LIMIT:
+        return tuple(range(len(items)))
+    indexes = list(range(_TASK_LIST_VISIBLE_LIMIT))
+    if active_index is not None and active_index not in indexes:
+        indexes[-1] = active_index
+    return tuple(indexes)
+
+
+def _task_list_item_status_label(status: str | None) -> str:
+    if status == "in_progress":
+        return "执行中"
+    if status == "completed":
+        return "完成"
+    if status == "failed":
+        return "失败"
+    if status == "interrupted":
+        return "已中断"
+    if status == "deleted":
+        return "已删除"
+    return "待执行"
+
+
 def _is_user_question_tool(tool_name: str | None, tool_input: dict | None) -> bool:
     return bool(extract_user_question_prompts(tool_use_id="tool", tool_name=tool_name, tool_input=tool_input))
 
@@ -462,6 +536,119 @@ def _extract_tool_question_prompts_by_id(snapshot: _StructuredSnapshot) -> dict[
 
 def _is_subagent_container_tool(tool_name: str | None) -> bool:
     return (tool_name or "").strip().lower() in {"task", "agent"}
+
+
+def _is_task_list_tool(tool_name: str | None) -> bool:
+    return (tool_name or "").strip().lower() in {"taskcreate", "taskupdate"}
+
+
+def _task_list_status_output(tools: tuple[_ToolStateSnapshot, ...]) -> TaskListStatusOutput | None:
+    order: list[str] = []
+    items: dict[str, TaskListItemStatusOutput] = {}
+    for tool in tools:
+        tool_name = (tool.tool_name or "").strip().lower()
+        if tool_name == "taskcreate":
+            task_id = _task_create_task_id(tool) or f"create:{tool.tool_use_id}"
+            if task_id not in items:
+                order.append(task_id)
+            subject = _task_create_subject(tool, task_id=task_id)
+            active_form = _task_list_text_value(tool.tool_input, "activeForm")
+            items[task_id] = TaskListItemStatusOutput(
+                task_id=task_id,
+                subject=subject,
+                status=_task_create_status(tool.status),
+                active_form=active_form,
+            )
+            continue
+        if tool_name == "taskupdate":
+            task_input = tool.tool_input or {}
+            task_id = _task_list_text_value(task_input, "taskId") or _task_list_text_value(task_input, "task_id")
+            if not task_id:
+                continue
+            existing = items.get(task_id)
+            if existing is None:
+                order.append(task_id)
+                existing = TaskListItemStatusOutput(task_id=task_id, subject=f"Task {task_id}", status="pending")
+            subject = _task_list_text_value(task_input, "subject") or existing.subject
+            active_form = _task_list_text_value(task_input, "activeForm") or existing.active_form
+            status = existing.status
+            if tool.status == ToolStatus.ERROR.value:
+                status = "failed"
+            elif tool.status == ToolStatus.INTERRUPTED.value:
+                status = "interrupted"
+            else:
+                updated_status = _task_list_text_value(task_input, "status")
+                if updated_status:
+                    status = _normalize_task_list_item_status(updated_status)
+            items[task_id] = TaskListItemStatusOutput(
+                task_id=task_id,
+                subject=subject,
+                status=status,
+                active_form=active_form,
+            )
+
+    ordered_items = tuple(items[task_id] for task_id in order if task_id in items)
+    if not ordered_items:
+        return None
+    return TaskListStatusOutput(message_key=_TASK_LIST_MESSAGE_KEY, items=ordered_items)
+
+
+def _task_list_text_value(mapping: dict | None, key: str) -> str | None:
+    if not mapping:
+        return None
+    value = mapping.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _task_create_task_id(tool: _ToolStateSnapshot) -> str | None:
+    structured_result = tool.structured_result or {}
+    task = structured_result.get("task")
+    if isinstance(task, dict):
+        task_id = task.get("id")
+        if task_id is not None and str(task_id).strip():
+            return str(task_id).strip()
+    if tool.result:
+        match = re.search(r"Task #([^\s]+)", tool.result)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _task_create_subject(tool: _ToolStateSnapshot, *, task_id: str) -> str:
+    subject = _task_list_text_value(tool.tool_input, "subject")
+    if subject:
+        return subject
+    structured_result = tool.structured_result or {}
+    task = structured_result.get("task")
+    if isinstance(task, dict):
+        result_subject = task.get("subject")
+        if result_subject is not None and str(result_subject).strip():
+            return str(result_subject).strip()
+    return f"Task {task_id}"
+
+
+def _task_create_status(status: str | None) -> str:
+    if status == ToolStatus.ERROR.value:
+        return "failed"
+    if status == ToolStatus.INTERRUPTED.value:
+        return "interrupted"
+    return "pending"
+
+
+def _normalize_task_list_item_status(status: str) -> str:
+    normalized = status.strip().lower()
+    if normalized in {"pending", "in_progress", "completed", "deleted"}:
+        return normalized
+    return normalized or "pending"
+
+
+def _task_list_status_fingerprint(output: TaskListStatusOutput | None) -> tuple | None:
+    if output is None:
+        return None
+    return tuple((item.task_id, item.subject, item.status, item.active_form) for item in output.items)
 
 
 def _input_detail_fingerprint(tool_name: str | None, tool_input: dict | None) -> tuple:
@@ -557,6 +744,8 @@ class StructuredReplyPresenter:
         self._last_phase: str | None = None
         self._tool_fingerprint_by_id: dict[str, tuple] = {}
         self._subagent_aggregate_fingerprint: tuple | None = None
+        self._task_list_fingerprint: tuple | None = None
+        self._emitted_flat_tool_ids: set[str] = set()
         self._question_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
 
     @property
@@ -579,6 +768,8 @@ class StructuredReplyPresenter:
             tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
             self._tool_fingerprint_by_id = {tool.tool_use_id: _tool_state_fingerprint(tool) for tool in snapshot.tool_states}
             self._subagent_aggregate_fingerprint = _subagent_aggregate_fingerprint(_subagent_container_outputs(snapshot.tool_states))
+            self._task_list_fingerprint = _task_list_status_fingerprint(_task_list_status_output(snapshot.tool_states))
+            self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {
                 tool_use_id: tuple(prompt.key for prompt in prompts)
                 for tool_use_id, prompts in tool_question_prompts.items()
@@ -590,6 +781,8 @@ class StructuredReplyPresenter:
         else:
             self._tool_fingerprint_by_id = {}
             self._subagent_aggregate_fingerprint = None
+            self._task_list_fingerprint = None
+            self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {}
 
         self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
@@ -607,6 +800,8 @@ class StructuredReplyPresenter:
             self._last_pending_permission_key = None
             self._tool_fingerprint_by_id = {}
             self._subagent_aggregate_fingerprint = None
+            self._task_list_fingerprint = None
+            self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {}
             self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
             return True
@@ -626,13 +821,13 @@ class StructuredReplyPresenter:
         task_id: str,
         final: bool = False,
         log_missing: bool = False,
-    ) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | UserQuestionOutput]:
+    ) -> list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput | UserQuestionOutput]:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
         tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
         self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
 
-        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | UserQuestionOutput] = []
+        messages: list[str | PermissionRequestOutput | ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput | UserQuestionOutput] = []
         pending_question_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
         question_updates = self._collect_user_question_updates(
             snapshot=snapshot,
@@ -725,11 +920,17 @@ class StructuredReplyPresenter:
         *,
         snapshot: _StructuredSnapshot,
         tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
-    ) -> list[ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput]:
-        messages: list[ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput] = []
+    ) -> list[ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput]:
+        messages: list[ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput] = []
         if snapshot.phase == SessionPhase.COMPACTING.value and self._last_phase != SessionPhase.COMPACTING.value:
             messages.append(ProgressUpdateOutput(text=build_compacting_progress_message()))
         self._last_phase = snapshot.phase
+
+        task_list_output = _task_list_status_output(snapshot.tool_states)
+        task_list_fingerprint = _task_list_status_fingerprint(task_list_output)
+        suppress_flat_tools = task_list_output is not None
+        if task_list_output is not None and task_list_fingerprint != self._task_list_fingerprint:
+            messages.append(task_list_output)
 
         nested_tool_ids = {
             subagent_tool.tool_use_id
@@ -747,8 +948,12 @@ class StructuredReplyPresenter:
                 continue
             if tool_question_prompts.get(tool.tool_use_id):
                 continue
+            if _is_task_list_tool(tool.tool_name):
+                continue
             if _is_subagent_container_tool(tool.tool_name):
                 subagent_containers.append(_subagent_container_output(tool))
+                continue
+            if suppress_flat_tools and tool.tool_use_id not in self._emitted_flat_tool_ids:
                 continue
             previous_fingerprint = self._tool_fingerprint_by_id.get(tool.tool_use_id)
             if previous_fingerprint == fingerprint:
@@ -761,6 +966,7 @@ class StructuredReplyPresenter:
                     status=tool.status,
                 )
             )
+            self._emitted_flat_tool_ids.add(tool.tool_use_id)
 
         containers = tuple(subagent_containers)
         aggregate_fingerprint = _subagent_aggregate_fingerprint(containers)
@@ -771,6 +977,7 @@ class StructuredReplyPresenter:
                     containers=containers,
                 )
             )
+        self._task_list_fingerprint = task_list_fingerprint
         self._subagent_aggregate_fingerprint = aggregate_fingerprint if containers else None
         self._tool_fingerprint_by_id = current_fingerprint_by_id
         return messages
@@ -954,12 +1161,18 @@ class StructuredReplyPresenter:
             tool_input = getattr(tool, "input", None)
             if tool_input is not None and not isinstance(tool_input, dict):
                 tool_input = None
+            structured_result = getattr(tool, "structured_result", None)
+            if structured_result is not None and not isinstance(structured_result, dict):
+                structured_result = None
+            result = getattr(tool, "result", None)
             states.append(
                 _ToolStateSnapshot(
                     tool_use_id=str(tool_use_id),
                     tool_name=str(tool_name) if tool_name is not None else None,
                     tool_input=tool_input,
                     status=str(status_value) if status_value is not None else None,
+                    result=str(result) if result is not None else None,
+                    structured_result=structured_result,
                     subagent_tools=tuple(self._collect_subagent_tool_states(tool)),
                 )
             )

@@ -15,6 +15,7 @@ from app.bot.presenters.structured_reply_presenter import (
     ProgressUpdateOutput,
     StructuredReplyPresenter,
     SubagentAggregateStatusOutput,
+    TaskListStatusOutput,
     ToolStatusOutput,
     UserQuestionOutput,
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
@@ -236,7 +237,7 @@ async def run_prompt_and_stream(
                     reply_markup=build_user_question_keyboard(output),
                 )
                 continue
-            if isinstance(output, (ToolStatusOutput, SubagentAggregateStatusOutput)):
+            if isinstance(output, (ToolStatusOutput, SubagentAggregateStatusOutput, TaskListStatusOutput)):
                 await sender.flush(send_text)
                 await tool_message_manager.handle(output)
                 continue

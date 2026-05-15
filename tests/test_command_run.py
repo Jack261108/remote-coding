@@ -543,6 +543,160 @@ async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> Non
 
 
 @pytest.mark.asyncio
+async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam() -> None:
+    create_1 = ToolCallRecord(
+        tool_use_id="create-1",
+        name="TaskCreate",
+        input={"subject": "梳理项目结构", "activeForm": "梳理项目结构"},
+        status=ToolStatus.SUCCESS,
+        structured_result={"task": {"id": "1", "subject": "梳理项目结构"}},
+    )
+    create_2 = ToolCallRecord(
+        tool_use_id="create-2",
+        name="TaskCreate",
+        input={"subject": "评估当前改动", "activeForm": "评估当前改动"},
+        status=ToolStatus.SUCCESS,
+        structured_result={"task": {"id": "2", "subject": "评估当前改动"}},
+    )
+    create_3 = ToolCallRecord(
+        tool_use_id="create-3",
+        name="TaskCreate",
+        input={"subject": "形成优化建议", "activeForm": "形成优化建议"},
+        status=ToolStatus.SUCCESS,
+        structured_result={"task": {"id": "3", "subject": "形成优化建议"}},
+    )
+    update_1_running = ToolCallRecord(
+        tool_use_id="update-1-running",
+        name="TaskUpdate",
+        input={"taskId": "1", "status": "in_progress"},
+        status=ToolStatus.SUCCESS,
+    )
+    update_1_completed = ToolCallRecord(
+        tool_use_id="update-1-completed",
+        name="TaskUpdate",
+        input={"taskId": "1", "status": "completed"},
+        status=ToolStatus.SUCCESS,
+    )
+    update_2_running = ToolCallRecord(
+        tool_use_id="update-2-running",
+        name="TaskUpdate",
+        input={"taskId": "2", "status": "in_progress"},
+        status=ToolStatus.SUCCESS,
+    )
+    update_2_completed = ToolCallRecord(
+        tool_use_id="update-2-completed",
+        name="TaskUpdate",
+        input={"taskId": "2", "status": "completed"},
+        status=ToolStatus.SUCCESS,
+    )
+    update_3_running = ToolCallRecord(
+        tool_use_id="update-3-running",
+        name="TaskUpdate",
+        input={"taskId": "3", "status": "in_progress"},
+        status=ToolStatus.SUCCESS,
+    )
+    update_3_completed = ToolCallRecord(
+        tool_use_id="update-3-completed",
+        name="TaskUpdate",
+        input={"taskId": "3", "status": "completed"},
+        status=ToolStatus.SUCCESS,
+    )
+    glob_tool = ToolCallRecord(
+        tool_use_id="glob-1",
+        name="Glob",
+        input={"pattern": "**/*.py"},
+        status=ToolStatus.RUNNING,
+    )
+    read_tool = ToolCallRecord(
+        tool_use_id="read-1",
+        name="Read",
+        input={"file_path": "app/foo.py"},
+        status=ToolStatus.RUNNING,
+    )
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_sessions=[
+            _structured_session(phase=SessionPhase.WAITING_FOR_INPUT),
+            _structured_session(
+                phase=SessionPhase.PROCESSING,
+                tool_calls={
+                    "create-1": create_1,
+                    "create-2": create_2,
+                    "create-3": create_3,
+                    "update-1-running": update_1_running,
+                    "glob-1": glob_tool,
+                },
+            ),
+            _structured_session(
+                phase=SessionPhase.PROCESSING,
+                tool_calls={
+                    "create-1": create_1,
+                    "create-2": create_2,
+                    "create-3": create_3,
+                    "update-1-running": update_1_running,
+                    "glob-1": glob_tool,
+                },
+            ),
+            _structured_session(
+                phase=SessionPhase.PROCESSING,
+                tool_calls={
+                    "create-1": create_1,
+                    "create-2": create_2,
+                    "create-3": create_3,
+                    "update-1-running": update_1_running,
+                    "update-1-completed": update_1_completed,
+                    "update-2-running": update_2_running,
+                    "glob-1": glob_tool,
+                    "read-1": read_tool,
+                },
+            ),
+            _structured_session(
+                phase=SessionPhase.WAITING_FOR_INPUT,
+                tool_calls={
+                    "create-1": create_1,
+                    "create-2": create_2,
+                    "create-3": create_3,
+                    "update-1-running": update_1_running,
+                    "update-1-completed": update_1_completed,
+                    "update-2-running": update_2_running,
+                    "update-2-completed": update_2_completed,
+                    "update-3-running": update_3_running,
+                    "update-3-completed": update_3_completed,
+                    "glob-1": glob_tool,
+                    "read-1": read_tool,
+                },
+            ),
+        ],
+        event_delays=[0.0, 0.24],
+    )
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36)
+
+    task_list_messages = [
+        sent
+        for sent in message.sent_messages
+        if "任务列表" in sent.text or any("任务列表" in edit for edit in sent.edits)
+    ]
+    assert len(task_list_messages) == 1
+    task_list_message = task_list_messages[0]
+    assert any("=&gt; 1. 梳理项目结构 - 执行中" in answer for answer in message.answers)
+    assert task_list_message.edits
+    assert "当前: 无（全部完成）" in task_list_message.text
+    assert "3. 形成优化建议 - 完成" in task_list_message.text
+    all_tool_messages = "\n".join(message.answers + [edit for sent in message.sent_messages for edit in sent.edits])
+    assert "工具: TaskCreate" not in all_tool_messages
+    assert "工具: TaskUpdate" not in all_tool_messages
+    assert "工具: Glob" not in all_tool_messages
+    assert "工具: Read" not in all_tool_messages
+
+
+@pytest.mark.asyncio
 async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
     message = DummyMessage()
     task_service = DummyTaskService(

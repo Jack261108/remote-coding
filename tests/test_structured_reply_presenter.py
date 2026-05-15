@@ -10,10 +10,13 @@ from app.bot.presenters.structured_reply_presenter import (
     StructuredReplyPresenter,
     SubagentAggregateStatusOutput,
     SubagentToolStatusOutput,
+    TaskListItemStatusOutput,
+    TaskListStatusOutput,
     ToolStatusOutput,
     UserQuestionOutput,
     build_permission_prompt,
     build_subagent_aggregate_status_message,
+    build_task_list_status_message,
     build_tool_progress_message,
     build_tool_status_message,
     build_tool_task_list_message,
@@ -563,6 +566,43 @@ def test_build_tool_task_list_message_marks_current_task() -> None:
     )
 
 
+def test_build_task_list_status_message_marks_current_task() -> None:
+    message = build_task_list_status_message(
+        TaskListStatusOutput(
+            message_key="task-list",
+            items=(
+                TaskListItemStatusOutput(
+                    task_id="1",
+                    subject="梳理项目结构",
+                    status="completed",
+                    active_form="梳理项目结构",
+                ),
+                TaskListItemStatusOutput(
+                    task_id="2",
+                    subject="评估当前改动",
+                    status="in_progress",
+                    active_form="评估当前改动",
+                ),
+                TaskListItemStatusOutput(
+                    task_id="3",
+                    subject="形成优化建议",
+                    status="pending",
+                    active_form="形成优化建议",
+                ),
+            ),
+        )
+    )
+
+    assert message == (
+        "任务列表\n"
+        "当前: 2. 评估当前改动\n"
+        "\n"
+        "1. 梳理项目结构 - 完成\n"
+        "=> 2. 评估当前改动 - 执行中\n"
+        "3. 形成优化建议 - 待执行"
+    )
+
+
 def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None:
     message = build_subagent_aggregate_status_message(
         SubagentAggregateStatusOutput(
@@ -917,6 +957,235 @@ async def test_presenter_skips_flat_status_for_nested_tool_duplicate() -> None:
                             status=ToolStatus.RUNNING.value,
                         ),
                     ),
+                ),
+            ),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_presenter_emits_task_list_for_task_create_and_update_without_tool_spam() -> None:
+    create_1 = ToolCallRecord(
+        tool_use_id="create-1",
+        name="TaskCreate",
+        input={
+            "subject": "梳理项目结构",
+            "description": "查看当前仓库的主要目录、技术栈和入口文件。",
+            "activeForm": "梳理项目结构",
+        },
+        status=ToolStatus.SUCCESS,
+        structured_result={"task": {"id": "1", "subject": "梳理项目结构"}},
+    )
+    create_2 = ToolCallRecord(
+        tool_use_id="create-2",
+        name="TaskCreate",
+        input={
+            "subject": "评估当前改动",
+            "description": "查看当前未提交改动。",
+            "activeForm": "评估当前改动",
+        },
+        status=ToolStatus.SUCCESS,
+        structured_result={"task": {"id": "2", "subject": "评估当前改动"}},
+    )
+    update_1_running = ToolCallRecord(
+        tool_use_id="update-1-running",
+        name="TaskUpdate",
+        input={"taskId": "1", "status": "in_progress"},
+        status=ToolStatus.SUCCESS,
+    )
+    update_1_completed = ToolCallRecord(
+        tool_use_id="update-1-completed",
+        name="TaskUpdate",
+        input={"taskId": "1", "status": "completed"},
+        status=ToolStatus.SUCCESS,
+    )
+    update_2_running = ToolCallRecord(
+        tool_use_id="update-2-running",
+        name="TaskUpdate",
+        input={"taskId": "2", "status": "in_progress"},
+        status=ToolStatus.SUCCESS,
+    )
+    glob_tool = ToolCallRecord(
+        tool_use_id="glob-1",
+        name="Glob",
+        input={"pattern": "**/*.py"},
+        status=ToolStatus.RUNNING,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(
+                    phase=SessionPhase.PROCESSING,
+                    tool_calls={
+                        "create-1": create_1,
+                        "create-2": create_2,
+                        "update-1-running": update_1_running,
+                        "glob-1": glob_tool,
+                    },
+                ),
+                _session(
+                    phase=SessionPhase.PROCESSING,
+                    tool_calls={
+                        "create-1": create_1,
+                        "create-2": create_2,
+                        "update-1-running": update_1_running,
+                        "update-1-completed": update_1_completed,
+                        "update-2-running": update_2_running,
+                        "glob-1": glob_tool,
+                    },
+                ),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        TaskListStatusOutput(
+            message_key="task-list",
+            items=(
+                TaskListItemStatusOutput(
+                    task_id="1",
+                    subject="梳理项目结构",
+                    status="in_progress",
+                    active_form="梳理项目结构",
+                ),
+                TaskListItemStatusOutput(
+                    task_id="2",
+                    subject="评估当前改动",
+                    status="pending",
+                    active_form="评估当前改动",
+                ),
+            ),
+        )
+    ]
+    assert second == [
+        TaskListStatusOutput(
+            message_key="task-list",
+            items=(
+                TaskListItemStatusOutput(
+                    task_id="1",
+                    subject="梳理项目结构",
+                    status="completed",
+                    active_form="梳理项目结构",
+                ),
+                TaskListItemStatusOutput(
+                    task_id="2",
+                    subject="评估当前改动",
+                    status="in_progress",
+                    active_form="评估当前改动",
+                ),
+            ),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_presenter_updates_preexisting_flat_tool_after_task_list_appears() -> None:
+    bash_running = ToolCallRecord(
+        tool_use_id="bash-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.RUNNING,
+    )
+    bash_success = ToolCallRecord(
+        tool_use_id="bash-1",
+        name="Bash",
+        input={"command": "pytest -q"},
+        status=ToolStatus.SUCCESS,
+    )
+    create_1 = ToolCallRecord(
+        tool_use_id="create-1",
+        name="TaskCreate",
+        input={"subject": "运行测试", "activeForm": "运行测试"},
+        status=ToolStatus.SUCCESS,
+        structured_result={"task": {"id": "1", "subject": "运行测试"}},
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"bash-1": bash_running}),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"create-1": create_1, "bash-1": bash_success}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        ToolStatusOutput(
+            tool_use_id="bash-1",
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.RUNNING.value,
+        )
+    ]
+    assert second == [
+        TaskListStatusOutput(
+            message_key="task-list",
+            items=(
+                TaskListItemStatusOutput(
+                    task_id="1",
+                    subject="运行测试",
+                    status="pending",
+                    active_form="运行测试",
+                ),
+            ),
+        ),
+        ToolStatusOutput(
+            tool_use_id="bash-1",
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.SUCCESS.value,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_presenter_marks_failed_task_update_as_failed_instead_of_completed() -> None:
+    create_1 = ToolCallRecord(
+        tool_use_id="create-1",
+        name="TaskCreate",
+        input={"subject": "运行测试", "activeForm": "运行测试"},
+        status=ToolStatus.SUCCESS,
+        structured_result={"task": {"id": "1", "subject": "运行测试"}},
+    )
+    failed_update = ToolCallRecord(
+        tool_use_id="update-1",
+        name="TaskUpdate",
+        input={"taskId": "1", "status": "completed"},
+        status=ToolStatus.ERROR,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"create-1": create_1, "update-1": failed_update}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    outputs = await presenter.poll(task_id="task-1")
+
+    assert outputs == [
+        TaskListStatusOutput(
+            message_key="task-list",
+            items=(
+                TaskListItemStatusOutput(
+                    task_id="1",
+                    subject="运行测试",
+                    status="failed",
+                    active_form="运行测试",
                 ),
             ),
         )

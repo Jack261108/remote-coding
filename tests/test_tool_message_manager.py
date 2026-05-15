@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 from aiogram.enums import ParseMode
 
-from app.bot.presenters.structured_reply_presenter import SubagentAggregateStatusOutput, SubagentToolStatusOutput, ToolStatusOutput
+from app.bot.presenters.structured_reply_presenter import (
+    SubagentAggregateStatusOutput,
+    SubagentToolStatusOutput,
+    TaskListItemStatusOutput,
+    TaskListStatusOutput,
+    ToolStatusOutput,
+)
 from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.session_models import ToolStatus
 
@@ -103,6 +109,26 @@ def _aggregate_output(*, second_status: ToolStatus = ToolStatus.RUNNING) -> Suba
                         status=second_status.value,
                     ),
                 ),
+            ),
+        ),
+    )
+
+
+def _task_list_status_output(*, second_status: str = "pending") -> TaskListStatusOutput:
+    return TaskListStatusOutput(
+        message_key="task-list",
+        items=(
+            TaskListItemStatusOutput(
+                task_id="1",
+                subject="梳理项目结构",
+                status="completed",
+                active_form="梳理项目结构",
+            ),
+            TaskListItemStatusOutput(
+                task_id="2",
+                subject="评估当前改动",
+                status=second_status,
+                active_form="评估当前改动",
             ),
         ),
     )
@@ -224,6 +250,48 @@ async def test_tool_message_manager_tracks_aggregate_and_flat_tool_separately() 
 
     assert len(root.sent) == 2
     assert "2 agents finished" in root.sent[0].text
+    assert "工具: Bash" in root.sent[1].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_sends_claude_task_list_message() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_task_list_status_output(second_status="in_progress"))
+
+    assert len(root.sent) == 1
+    assert "任务列表" in root.sent[0].text
+    assert "当前: 2. 评估当前改动" in root.sent[0].text
+    assert "1. 梳理项目结构 - 完成" in root.sent[0].text
+    assert "=&gt; 2. 评估当前改动 - 执行中" in root.sent[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_edits_claude_task_list_message() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_task_list_status_output(second_status="in_progress"))
+    await manager.handle(_task_list_status_output(second_status="completed"))
+
+    assert len(root.sent) == 1
+    assert "当前: 无（全部完成）" in root.sent[0].text
+    assert root.sent[0].edits
+    assert "2. 评估当前改动 - 完成" in root.sent[0].edits[-1]
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_tracks_claude_task_list_and_flat_tool_separately() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_task_list_status_output(second_status="in_progress"))
+    await manager.handle(_output(ToolStatus.RUNNING, tool_use_id="tool-1"))
+    await manager.handle(_task_list_status_output(second_status="completed"))
+
+    assert len(root.sent) == 2
+    assert "当前: 无（全部完成）" in root.sent[0].text
     assert "工具: Bash" in root.sent[1].text
 
 
