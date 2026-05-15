@@ -681,7 +681,7 @@ def test_build_file_tool_aggregate_status_message_groups_reads_and_searches() ->
     )
 
     assert message == (
-        "文件检索 · 执行中\n"
+        "🔄 文件检索 · 执行中\n"
         "搜索 1 次，读取 2 个文件\n"
         "当前: 🔄 Read · 文件: app/services/session_store.py\n"
         "\n"
@@ -814,7 +814,7 @@ def test_build_subagent_aggregate_status_message_shows_subagent_type() -> None:
     )
 
     assert message == (
-        "1 agents running\n"
+        "🔄 1 agents running\n"
         "\n"
         "- 🔄 Explore(项目优化点审计) · 3 tool uses · Running\n"
         "  名称: Read ×2、Glob"
@@ -836,7 +836,7 @@ def test_build_subagent_aggregate_status_message_uses_waiting_icon_for_unknown_s
         )
     )
 
-    assert message == "1 agents finished\n\n- ⏳ 未知状态 · 0 tool uses · Done"
+    assert message == "⏳ 1 agents finished\n\n- ⏳ 未知状态 · 0 tool uses · Done"
 
 
 def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None:
@@ -894,7 +894,7 @@ def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None
     )
 
     assert message == (
-        "3 agents finished\n"
+        "✅ 3 agents finished\n"
         "\n"
         "- ✅ 项目架构扫描 · 51 tool uses · Done\n"
         "  名称: Read ×51\n"

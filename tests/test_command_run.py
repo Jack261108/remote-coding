@@ -398,8 +398,8 @@ async def test_run_prompt_and_stream_aggregates_top_level_file_tools() -> None:
         if "文件检索" in sent.text or any("文件检索" in edit for edit in sent.edits)
     ]
     assert len(file_tool_messages) == 1
-    assert any("文件检索 · 执行中" in answer for answer in message.answers)
-    assert "文件检索 · 完成" in file_tool_messages[0].text
+    assert any("🔄 文件检索 · 执行中" in answer for answer in message.answers)
+    assert "✅ 文件检索 · 完成" in file_tool_messages[0].text
     assert "读取 2 个文件" in file_tool_messages[0].text
     all_tool_messages = "\n".join(message.answers + [edit for sent in message.sent_messages for edit in sent.edits])
     assert "工具: Read" not in all_tool_messages
@@ -576,9 +576,9 @@ async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> Non
     ]
     assert len(aggregate_messages) == 1
     aggregate_message = aggregate_messages[0]
-    assert any("3 agents running" in answer for answer in message.answers)
-    assert any("测试质量扫描 · 2 tool uses · Running" in edit for edit in aggregate_message.edits)
-    assert "3 agents finished" in aggregate_message.text
+    assert any("🔄 3 agents running" in answer for answer in message.answers)
+    assert any("🔄 测试质量扫描 · 2 tool uses · Running" in edit for edit in aggregate_message.edits)
+    assert "✅ 3 agents finished" in aggregate_message.text
     assert "项目架构扫描 · 1 tool uses · Done" in aggregate_message.text
     assert "测试质量扫描 · 2 tool uses · Done" in aggregate_message.text
     assert "安全性能扫描 · 1 tool uses · Done" in aggregate_message.text

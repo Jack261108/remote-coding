@@ -355,7 +355,8 @@ def build_task_list_status_message(output: TaskListStatusOutput) -> str:
 def build_subagent_aggregate_status_message(output: SubagentAggregateStatusOutput) -> str:
     containers = output.containers
     noun = _subagent_aggregate_noun(containers)
-    lines = [f"{len(containers)} {noun} {_subagent_aggregate_status_text(containers)}"]
+    icon = _aggregate_status_icon(_subagent_container_status_values(containers))
+    lines = [f"{icon} {len(containers)} {noun} {_subagent_aggregate_status_text(containers)}"]
     display_containers = containers[:_TASK_LIST_VISIBLE_LIMIT]
     if display_containers:
         lines.append("")
@@ -378,7 +379,8 @@ def build_subagent_aggregate_status_message(output: SubagentAggregateStatusOutpu
 
 def build_file_tool_aggregate_status_message(output: FileToolAggregateStatusOutput) -> str:
     tools = output.tools
-    lines = [f"文件检索 · {_file_tool_aggregate_status_label(tools)}"]
+    icon = _aggregate_status_icon(tuple(tool.status for tool in tools))
+    lines = [f"{icon} 文件检索 · {_file_tool_aggregate_status_label(tools)}"]
     summary = _file_tool_aggregate_summary(tools)
     if summary:
         lines.append(summary)
@@ -412,6 +414,20 @@ def _visible_subagent_tools(subagent_tools: tuple[SubagentToolStatusOutput, ...]
         for tool in subagent_tools
         if not _is_user_question_tool(tool.tool_name, tool.tool_input)
     )
+
+
+def _aggregate_status_icon(statuses: tuple[str, ...]) -> str:
+    if ToolStatus.WAITING_FOR_APPROVAL.value in statuses:
+        return _tool_status_icon(ToolStatus.WAITING_FOR_APPROVAL.value)
+    if ToolStatus.RUNNING.value in statuses:
+        return _tool_status_icon(ToolStatus.RUNNING.value)
+    if ToolStatus.ERROR.value in statuses:
+        return _tool_status_icon(ToolStatus.ERROR.value)
+    if ToolStatus.INTERRUPTED.value in statuses:
+        return _tool_status_icon(ToolStatus.INTERRUPTED.value)
+    if ToolStatus.SUCCESS.value in statuses:
+        return _tool_status_icon(ToolStatus.SUCCESS.value)
+    return _tool_status_icon(None)
 
 
 def _file_tool_aggregate_status_label(tools: tuple[ToolStatusOutput, ...]) -> str:
@@ -487,18 +503,7 @@ def _subagent_container_status_text(container: ToolStatusOutput) -> str:
 
 
 def _subagent_container_status_icon(container: ToolStatusOutput) -> str:
-    statuses = _subagent_container_status_values((container,))
-    if ToolStatus.WAITING_FOR_APPROVAL.value in statuses:
-        return _tool_status_icon(ToolStatus.WAITING_FOR_APPROVAL.value)
-    if ToolStatus.RUNNING.value in statuses:
-        return _tool_status_icon(ToolStatus.RUNNING.value)
-    if ToolStatus.ERROR.value in statuses:
-        return _tool_status_icon(ToolStatus.ERROR.value)
-    if ToolStatus.INTERRUPTED.value in statuses:
-        return _tool_status_icon(ToolStatus.INTERRUPTED.value)
-    if ToolStatus.SUCCESS.value in statuses:
-        return _tool_status_icon(ToolStatus.SUCCESS.value)
-    return _tool_status_icon(None)
+    return _aggregate_status_icon(_subagent_container_status_values((container,)))
 
 
 def _subagent_container_status_values(containers: tuple[ToolStatusOutput, ...]) -> tuple[str, ...]:

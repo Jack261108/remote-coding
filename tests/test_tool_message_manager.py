@@ -238,7 +238,7 @@ async def test_tool_message_manager_sends_subagent_aggregate_message() -> None:
     await manager.handle(_aggregate_output())
 
     assert len(root.sent) == 1
-    assert "2 agents running" in root.sent[0].text
+    assert "🔄 2 agents running" in root.sent[0].text
     assert "项目架构扫描 · 1 tool uses · Done" in root.sent[0].text
     assert "测试质量扫描 · 1 tool uses · Running" in root.sent[0].text
 
@@ -252,7 +252,7 @@ async def test_tool_message_manager_edits_subagent_aggregate_message() -> None:
     await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "2 agents finished" in root.sent[0].text
+    assert "✅ 2 agents finished" in root.sent[0].text
     assert root.sent[0].edits
     assert "测试质量扫描 · 1 tool uses · Done" in root.sent[0].edits[-1]
 
@@ -267,12 +267,12 @@ async def test_tool_message_manager_keeps_subagent_aggregate_when_edit_fails() -
     await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "2 agents running" in root.sent[0].text
+    assert "🔄 2 agents running" in root.sent[0].text
 
     await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "2 agents finished" in root.sent[0].text
+    assert "✅ 2 agents finished" in root.sent[0].text
 
 
 @pytest.mark.asyncio
@@ -285,7 +285,7 @@ async def test_tool_message_manager_tracks_aggregate_and_flat_tool_separately() 
     await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
 
     assert len(root.sent) == 2
-    assert "2 agents finished" in root.sent[0].text
+    assert "✅ 2 agents finished" in root.sent[0].text
     assert "工具: Bash" in root.sent[1].text
 
 
@@ -298,7 +298,7 @@ async def test_tool_message_manager_edits_file_tool_aggregate_message() -> None:
     await manager.handle(_file_tool_aggregate_output(read_status=ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "文件检索 · 完成" in root.sent[0].text
+    assert "✅ 文件检索 · 完成" in root.sent[0].text
     assert root.sent[0].edits
     assert "✅ 2. Read - 完成" in root.sent[0].edits[-1]
 
@@ -313,12 +313,12 @@ async def test_tool_message_manager_keeps_file_tool_aggregate_when_edit_fails() 
     await manager.handle(_file_tool_aggregate_output(read_status=ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "文件检索 · 执行中" in root.sent[0].text
+    assert "🔄 文件检索 · 执行中" in root.sent[0].text
 
     await manager.handle(_file_tool_aggregate_output(read_status=ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "文件检索 · 完成" in root.sent[0].text
+    assert "✅ 文件检索 · 完成" in root.sent[0].text
 
 
 @pytest.mark.asyncio
