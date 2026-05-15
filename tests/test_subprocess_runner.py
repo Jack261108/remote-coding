@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 
@@ -9,7 +10,8 @@ from app.domain.models import EventType
 
 
 @pytest.mark.asyncio
-async def test_runner_timeout() -> None:
+async def test_runner_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="app.adapters.process.subprocess_runner")
     runner = SubprocessRunner(kill_grace_sec=0.2)
 
     events = []
@@ -23,6 +25,8 @@ async def test_runner_timeout() -> None:
 
     assert events[0].type == EventType.STARTED
     assert events[-1].type == EventType.TIMEOUT
+    assert any(record.message == "subprocess task timeout" for record in caplog.records)
+    assert any(record.message == "subprocess task finished" and getattr(record, "result") == "timeout" for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -48,7 +52,8 @@ async def test_runner_timeout_terminates_child_process(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_cancel() -> None:
+async def test_runner_cancel(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="app.adapters.process.subprocess_runner")
     runner = SubprocessRunner(kill_grace_sec=0.2)
 
     task = asyncio.create_task(
@@ -69,6 +74,8 @@ async def test_runner_cancel() -> None:
     events = await task
     assert events[0].type == EventType.STARTED
     assert events[-1].type == EventType.CANCELED
+    assert any(record.message == "subprocess task cancel requested" for record in caplog.records)
+    assert any(record.message == "subprocess task finished" and getattr(record, "result") == "canceled" for record in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import timedelta
 from pathlib import Path
 
@@ -15,7 +16,8 @@ from tests.fakes.cli import DummyHookSocketServer, StubAdapter, StubFactory, exp
 
 
 @pytest.mark.asyncio
-async def test_task_success(tmp_path: Path) -> None:
+async def test_task_success(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.task_service")
     adapter = StubAdapter(
         events=[
             CLIEvent(type=EventType.STARTED, task_id="x"),
@@ -41,6 +43,10 @@ async def test_task_success(tmp_path: Path) -> None:
     assert status is not None
     assert status.status == TaskStatus.SUCCEEDED
     assert status.exit_code == 0
+    completion_log = next(record for record in caplog.records if record.message == "task completed")
+    assert completion_log.session_id == result.task.session_id
+    assert completion_log.session_terminal_mode is False
+    assert completion_log.interactive_like is False
 
 
 @pytest.mark.asyncio

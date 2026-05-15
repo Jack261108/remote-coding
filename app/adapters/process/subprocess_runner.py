@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 from collections.abc import AsyncIterator
 from typing import Any
 
 from app.domain.models import CLIEvent, EventType
+
+logger = logging.getLogger(__name__)
 
 
 class SubprocessRunner:
@@ -55,6 +58,16 @@ class SubprocessRunner:
         async with self._lock:
             self._processes[task_id] = process
 
+        logger.info(
+            "subprocess task started",
+            extra={
+                "task_id": task_id,
+                "pid": process.pid,
+                "timeout_sec": timeout_sec,
+                "kill_grace_sec": self._kill_grace_sec,
+                "use_process_group": self._use_process_group,
+            },
+        )
         yield CLIEvent(type=EventType.STARTED, task_id=task_id)
 
         stdout_task = asyncio.create_task(self._pump_stream(task_id=task_id, stream=process.stdout, event_type=EventType.STDOUT, queue=queue))
@@ -84,7 +97,17 @@ class SubprocessRunner:
                         exit_code = wait_task.result()
                     except TimeoutError:
                         timed_out = True
-                        await self._terminate_then_kill(process)
+                        logger.warning(
+                            "subprocess task timeout",
+                            extra={
+                                "task_id": task_id,
+                                "pid": process.pid,
+                                "timeout_sec": timeout_sec,
+                                "kill_grace_sec": self._kill_grace_sec,
+                                "use_process_group": self._use_process_group,
+                            },
+                        )
+                        await self._terminate_then_kill(process, task_id=task_id)
                         exit_code = await process.wait()
 
                 if get_task is not None and get_task in done:
@@ -102,13 +125,62 @@ class SubprocessRunner:
                 if wait_task.done() and stream_done >= 2:
                     break
 
+            canceled = task_id in self._cancel_requested
             if timed_out:
+                logger.warning(
+                    "subprocess task finished",
+                    extra=self._finish_log_extra(
+                        task_id=task_id,
+                        process=process,
+                        timeout_sec=timeout_sec,
+                        result="timeout",
+                        exit_code=exit_code,
+                        timed_out=True,
+                        canceled=canceled,
+                    ),
+                )
                 yield CLIEvent(type=EventType.TIMEOUT, task_id=task_id, error=f"任务超时({timeout_sec}s)")
-            elif task_id in self._cancel_requested:
+            elif canceled:
+                logger.info(
+                    "subprocess task finished",
+                    extra=self._finish_log_extra(
+                        task_id=task_id,
+                        process=process,
+                        timeout_sec=timeout_sec,
+                        result="canceled",
+                        exit_code=exit_code,
+                        timed_out=False,
+                        canceled=True,
+                    ),
+                )
                 yield CLIEvent(type=EventType.CANCELED, task_id=task_id, error="任务已取消")
             elif exit_code == 0:
+                logger.info(
+                    "subprocess task finished",
+                    extra=self._finish_log_extra(
+                        task_id=task_id,
+                        process=process,
+                        timeout_sec=timeout_sec,
+                        result="exited",
+                        exit_code=exit_code,
+                        timed_out=False,
+                        canceled=False,
+                    ),
+                )
                 yield CLIEvent(type=EventType.EXITED, task_id=task_id, exit_code=0)
             else:
+                logger.error(
+                    "subprocess task finished",
+                    extra=self._finish_log_extra(
+                        task_id=task_id,
+                        process=process,
+                        timeout_sec=timeout_sec,
+                        result="failed",
+                        exit_code=exit_code,
+                        timed_out=False,
+                        canceled=False,
+                    ),
+                )
                 yield CLIEvent(
                     type=EventType.FAILED,
                     task_id=task_id,
@@ -126,6 +198,30 @@ class SubprocessRunner:
                 self._processes.pop(task_id, None)
                 self._cancel_requested.discard(task_id)
 
+    def _finish_log_extra(
+        self,
+        *,
+        task_id: str,
+        process: asyncio.subprocess.Process,
+        timeout_sec: int,
+        result: str,
+        exit_code: int | None,
+        timed_out: bool,
+        canceled: bool,
+    ) -> dict[str, object]:
+        return {
+            "task_id": task_id,
+            "pid": process.pid,
+            "returncode": process.returncode,
+            "timeout_sec": timeout_sec,
+            "kill_grace_sec": self._kill_grace_sec,
+            "use_process_group": self._use_process_group,
+            "result": result,
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "canceled": canceled,
+        }
+
     async def cancel(self, task_id: str) -> bool:
         async with self._lock:
             process = self._processes.get(task_id)
@@ -136,13 +232,33 @@ class SubprocessRunner:
         if process.returncode is not None:
             return False
 
-        await self._terminate_then_kill(process)
+        logger.info(
+            "subprocess task cancel requested",
+            extra={
+                "task_id": task_id,
+                "pid": process.pid,
+                "returncode": process.returncode,
+                "kill_grace_sec": self._kill_grace_sec,
+                "use_process_group": self._use_process_group,
+            },
+        )
+        await self._terminate_then_kill(process, task_id=task_id)
         return True
 
-    async def _terminate_then_kill(self, process: asyncio.subprocess.Process) -> None:
+    async def _terminate_then_kill(self, process: asyncio.subprocess.Process, *, task_id: str | None = None) -> None:
         if process.returncode is not None:
             return
 
+        logger.info(
+            "subprocess terminate sent",
+            extra={
+                "task_id": task_id,
+                "pid": process.pid,
+                "returncode": process.returncode,
+                "kill_grace_sec": self._kill_grace_sec,
+                "use_process_group": self._use_process_group,
+            },
+        )
         self._send_signal(process, signal.SIGTERM)
         try:
             await asyncio.wait_for(process.wait(), timeout=self._kill_grace_sec)
@@ -151,6 +267,16 @@ class SubprocessRunner:
             pass
 
         if process.returncode is None:
+            logger.warning(
+                "subprocess kill sent",
+                extra={
+                    "task_id": task_id,
+                    "pid": process.pid,
+                    "returncode": process.returncode,
+                    "kill_grace_sec": self._kill_grace_sec,
+                    "use_process_group": self._use_process_group,
+                },
+            )
             self._kill(process)
             await process.wait()
 

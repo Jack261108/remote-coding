@@ -11,6 +11,7 @@ def apply_task_event(
     event: CLIEvent,
     output_char_limit: int,
     logger: logging.Logger,
+    log_extra: dict[str, object] | None = None,
 ) -> None:
     if event.type == EventType.STARTED:
         record.status = TaskStatus.RUNNING
@@ -60,6 +61,8 @@ def apply_task_event(
         "exit_code": record.exit_code,
         "failure_reason": record.failure_reason,
     }
+    if log_extra:
+        payload.update(log_extra)
 
     if record.status == TaskStatus.SUCCEEDED:
         logger.info("task completed", extra=payload)

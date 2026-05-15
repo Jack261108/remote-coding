@@ -13,6 +13,7 @@ from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import (
     CLIEvent,
+    EventType,
     ExecutionTask,
     TaskRecord,
     TaskStatus,
@@ -420,11 +421,24 @@ class TaskService:
         )
 
     async def _apply_event(self, record: TaskRecord, event: CLIEvent) -> None:
+        log_extra: dict[str, object] | None = None
+        if event.type in {EventType.EXITED, EventType.CANCELED, EventType.TIMEOUT, EventType.FAILED}:
+            session = await self._session_service.get(record.user_id)
+            log_extra = {
+                "session_id": record.session_id,
+                "record_claude_session_id": record.claude_session_id,
+                "session_terminal_mode": session.terminal_mode if session is not None else None,
+                "session_terminal_id": session.terminal_id if session is not None else None,
+                "session_claude_chat_active": session.claude_chat_active if session is not None else None,
+                "session_claude_session_id": session.claude_session_id if session is not None else None,
+                "interactive_like": bool(session and session.terminal_mode and session.claude_chat_active),
+            }
         apply_task_event(
             record=record,
             event=event,
             output_char_limit=self._settings.task_output_char_limit,
             logger=logger,
+            log_extra=log_extra,
         )
 
     def _is_workdir_allowed(self, workdir: str) -> bool:
