@@ -233,7 +233,7 @@ async def test_tool_message_manager_edits_subagent_aggregate_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_message_manager_re_sends_subagent_aggregate_when_edit_fails() -> None:
+async def test_tool_message_manager_keeps_subagent_aggregate_when_edit_fails() -> None:
     root = DummyRootMessage()
     manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
 
@@ -241,8 +241,13 @@ async def test_tool_message_manager_re_sends_subagent_aggregate_when_edit_fails(
     root.sent[0].fail_next_edit = True
     await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
 
-    assert len(root.sent) == 2
-    assert "2 agents finished" in root.sent[1].text
+    assert len(root.sent) == 1
+    assert "2 agents running" in root.sent[0].text
+
+    await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
+
+    assert len(root.sent) == 1
+    assert "2 agents finished" in root.sent[0].text
 
 
 @pytest.mark.asyncio
@@ -296,6 +301,24 @@ async def test_tool_message_manager_ignores_not_modified_edit_without_re_sending
     await manager.handle(_task_list_status_output(second_status="in_progress"))
 
     assert len(root.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_keeps_claude_task_list_when_edit_fails() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_task_list_status_output(second_status="in_progress"))
+    root.sent[0].fail_next_edit = True
+    await manager.handle(_task_list_status_output(second_status="completed"))
+
+    assert len(root.sent) == 1
+    assert "当前: 2. 评估当前改动" in root.sent[0].text
+
+    await manager.handle(_task_list_status_output(second_status="completed"))
+
+    assert len(root.sent) == 1
+    assert "当前: 无（全部完成）" in root.sent[0].text
 
 
 @pytest.mark.asyncio

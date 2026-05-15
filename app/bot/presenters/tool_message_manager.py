@@ -36,12 +36,15 @@ class ToolMessageManager:
         self._lock = asyncio.Lock()
 
     async def handle(self, output: ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput) -> None:
+        resend_on_edit_failure = True
         if isinstance(output, SubagentAggregateStatusOutput):
             message_key = output.message_key
             text = build_subagent_aggregate_status_message(output)
+            resend_on_edit_failure = False
         elif isinstance(output, TaskListStatusOutput):
             message_key = output.message_key
             text = build_task_list_status_message(output)
+            resend_on_edit_failure = False
         elif output.subagent_tools:
             message_key = output.tool_use_id
             text = build_tool_task_list_message(output)
@@ -60,7 +63,7 @@ class ToolMessageManager:
                 return
 
             edited = await self._edit(existing.message, text, tool_use_id=message_key)
-            if edited:
+            if edited or not resend_on_edit_failure:
                 return
             await self._send_and_track(message_key, text)
 

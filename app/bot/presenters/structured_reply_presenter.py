@@ -24,6 +24,11 @@ _QUESTION_TEXT_LINE_LIMIT = 10
 _TASK_LIST_VISIBLE_LIMIT = 20
 _SUBAGENT_AGGREGATE_MESSAGE_KEY = "subagent-aggregate"
 _TASK_LIST_MESSAGE_KEY = "task-list"
+_TERMINAL_TOOL_STATUSES = {
+    ToolStatus.SUCCESS.value,
+    ToolStatus.ERROR.value,
+    ToolStatus.INTERRUPTED.value,
+}
 
 
 @dataclass(frozen=True)
@@ -458,7 +463,7 @@ def _select_visible_subagent_indexes(tools: tuple[SubagentToolStatusOutput, ...]
 
 
 def _select_active_task_list_item_index(items: tuple[TaskListItemStatusOutput, ...]) -> int | None:
-    for status in ("in_progress", "failed", "interrupted"):
+    for status in ("in_progress", "failed", "interrupted", "pending"):
         for index, item in enumerate(items):
             if item.status == status:
                 return index
@@ -549,14 +554,18 @@ def _task_list_status_output(tools: tuple[_ToolStateSnapshot, ...]) -> TaskListS
         tool_name = (tool.tool_name or "").strip().lower()
         if tool_name == "taskcreate":
             task_id = _task_create_task_id(tool) or f"create:{tool.tool_use_id}"
-            if task_id not in items:
+            existing = items.get(task_id)
+            if existing is None:
                 order.append(task_id)
             subject = _task_create_subject(tool, task_id=task_id)
-            active_form = _task_list_text_value(tool.tool_input, "activeForm")
+            active_form = _task_list_text_value(tool.tool_input, "activeForm") or (existing.active_form if existing else None)
+            status = existing.status if existing is not None else _task_create_status(tool.status)
+            if tool.status in {ToolStatus.ERROR.value, ToolStatus.INTERRUPTED.value}:
+                status = _task_create_status(tool.status)
             items[task_id] = TaskListItemStatusOutput(
                 task_id=task_id,
                 subject=subject,
-                status=_task_create_status(tool.status),
+                status=status,
                 active_form=active_form,
             )
             continue
@@ -715,6 +724,52 @@ def _subagent_container_outputs(tools: tuple[_ToolStateSnapshot, ...]) -> tuple[
     )
 
 
+def _merge_subagent_container_output(previous: ToolStatusOutput | None, current: ToolStatusOutput) -> ToolStatusOutput:
+    if previous is None:
+        return current
+
+    return ToolStatusOutput(
+        tool_use_id=current.tool_use_id,
+        tool_name=current.tool_name or previous.tool_name,
+        tool_input=current.tool_input or previous.tool_input,
+        status=current.status,
+        subagent_tools=_merge_subagent_tool_outputs(
+            previous.subagent_tools,
+            current.subagent_tools,
+            container_status=current.status,
+        ),
+    )
+
+
+def _merge_subagent_tool_outputs(
+    previous: tuple[SubagentToolStatusOutput, ...],
+    current: tuple[SubagentToolStatusOutput, ...],
+    *,
+    container_status: str,
+) -> tuple[SubagentToolStatusOutput, ...]:
+    tools_by_id = {tool.tool_use_id: tool for tool in previous}
+    order = [tool.tool_use_id for tool in previous]
+    current_ids: set[str] = set()
+
+    for tool in current:
+        current_ids.add(tool.tool_use_id)
+        if tool.tool_use_id not in tools_by_id:
+            order.append(tool.tool_use_id)
+        tools_by_id[tool.tool_use_id] = tool
+
+    if container_status in _TERMINAL_TOOL_STATUSES:
+        for tool_use_id, tool in tuple(tools_by_id.items()):
+            if tool_use_id not in current_ids:
+                tools_by_id[tool_use_id] = SubagentToolStatusOutput(
+                    tool_use_id=tool.tool_use_id,
+                    tool_name=tool.tool_name,
+                    tool_input=tool.tool_input,
+                    status=container_status,
+                )
+
+    return tuple(tools_by_id[tool_use_id] for tool_use_id in order if tool_use_id in tools_by_id)
+
+
 def _subagent_status_outputs(tool: _ToolStateSnapshot) -> tuple[SubagentToolStatusOutput, ...]:
     return tuple(
         SubagentToolStatusOutput(
@@ -744,6 +799,7 @@ class StructuredReplyPresenter:
         self._last_phase: str | None = None
         self._tool_fingerprint_by_id: dict[str, tuple] = {}
         self._subagent_aggregate_fingerprint: tuple | None = None
+        self._subagent_container_by_id: dict[str, ToolStatusOutput] = {}
         self._task_list_fingerprint: tuple | None = None
         self._emitted_flat_tool_ids: set[str] = set()
         self._question_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
@@ -767,7 +823,9 @@ class StructuredReplyPresenter:
         if baseline_current_snapshot:
             tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
             self._tool_fingerprint_by_id = {tool.tool_use_id: _tool_state_fingerprint(tool) for tool in snapshot.tool_states}
-            self._subagent_aggregate_fingerprint = _subagent_aggregate_fingerprint(_subagent_container_outputs(snapshot.tool_states))
+            subagent_containers = _subagent_container_outputs(snapshot.tool_states)
+            self._subagent_container_by_id = {container.tool_use_id: container for container in subagent_containers}
+            self._subagent_aggregate_fingerprint = _subagent_aggregate_fingerprint(subagent_containers)
             self._task_list_fingerprint = _task_list_status_fingerprint(_task_list_status_output(snapshot.tool_states))
             self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {
@@ -781,6 +839,7 @@ class StructuredReplyPresenter:
         else:
             self._tool_fingerprint_by_id = {}
             self._subagent_aggregate_fingerprint = None
+            self._subagent_container_by_id = {}
             self._task_list_fingerprint = None
             self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {}
@@ -800,6 +859,7 @@ class StructuredReplyPresenter:
             self._last_pending_permission_key = None
             self._tool_fingerprint_by_id = {}
             self._subagent_aggregate_fingerprint = None
+            self._subagent_container_by_id = {}
             self._task_list_fingerprint = None
             self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {}
@@ -937,6 +997,11 @@ class StructuredReplyPresenter:
             for tool in snapshot.tool_states
             for subagent_tool in tool.subagent_tools
         }
+        nested_tool_ids.update(
+            subagent_tool.tool_use_id
+            for container in self._subagent_container_by_id.values()
+            for subagent_tool in container.subagent_tools
+        )
         current_fingerprint_by_id: dict[str, tuple] = {}
         subagent_containers: list[ToolStatusOutput] = []
         for tool in snapshot.tool_states:
@@ -968,7 +1033,7 @@ class StructuredReplyPresenter:
             )
             self._emitted_flat_tool_ids.add(tool.tool_use_id)
 
-        containers = tuple(subagent_containers)
+        containers = self._merge_subagent_containers(tuple(subagent_containers))
         aggregate_fingerprint = _subagent_aggregate_fingerprint(containers)
         if containers and aggregate_fingerprint != self._subagent_aggregate_fingerprint:
             messages.append(
@@ -981,6 +1046,28 @@ class StructuredReplyPresenter:
         self._subagent_aggregate_fingerprint = aggregate_fingerprint if containers else None
         self._tool_fingerprint_by_id = current_fingerprint_by_id
         return messages
+
+    def _merge_subagent_containers(self, current_containers: tuple[ToolStatusOutput, ...]) -> tuple[ToolStatusOutput, ...]:
+        current_ids = {container.tool_use_id for container in current_containers}
+        if not current_ids:
+            self._subagent_container_by_id = {}
+            return ()
+
+        merged_containers: list[ToolStatusOutput] = []
+        for container in current_containers:
+            merged = _merge_subagent_container_output(
+                self._subagent_container_by_id.get(container.tool_use_id),
+                container,
+            )
+            self._subagent_container_by_id[container.tool_use_id] = merged
+            merged_containers.append(merged)
+
+        self._subagent_container_by_id = {
+            tool_use_id: container
+            for tool_use_id, container in self._subagent_container_by_id.items()
+            if tool_use_id in current_ids
+        }
+        return tuple(merged_containers)
 
     def _collect_user_question_updates(
         self,

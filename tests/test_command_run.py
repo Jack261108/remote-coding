@@ -430,34 +430,14 @@ async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> Non
         name="Agent",
         input={"description": "测试质量扫描"},
         status=ToolStatus.SUCCESS,
-        subagent_tools=[
-            SubagentToolCall(
-                tool_use_id="glob-1",
-                name="Glob",
-                input={"path": "tests"},
-                status=ToolStatus.SUCCESS,
-            ),
-            SubagentToolCall(
-                tool_use_id="grep-1",
-                name="Grep",
-                input={"pattern": "pytest"},
-                status=ToolStatus.SUCCESS,
-            ),
-        ],
+        subagent_tools=[],
     )
     agent_3_success = ToolCallRecord(
         tool_use_id="agent-3",
         name="Agent",
         input={"description": "安全性能扫描"},
         status=ToolStatus.SUCCESS,
-        subagent_tools=[
-            SubagentToolCall(
-                tool_use_id="read-2",
-                name="Read",
-                input={"file_path": "app/bar.py"},
-                status=ToolStatus.SUCCESS,
-            )
-        ],
+        subagent_tools=[],
     )
     duplicate_glob = ToolCallRecord(
         tool_use_id="glob-1",

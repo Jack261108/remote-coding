@@ -603,6 +603,44 @@ def test_build_task_list_status_message_marks_current_task() -> None:
     )
 
 
+def test_build_task_list_status_message_marks_first_pending_when_no_task_is_running() -> None:
+    message = build_task_list_status_message(
+        TaskListStatusOutput(
+            message_key="task-list",
+            items=(
+                TaskListItemStatusOutput(
+                    task_id="1",
+                    subject="梳理项目结构",
+                    status="completed",
+                    active_form="梳理项目结构",
+                ),
+                TaskListItemStatusOutput(
+                    task_id="2",
+                    subject="识别优化机会",
+                    status="pending",
+                    active_form="识别优化机会",
+                ),
+                TaskListItemStatusOutput(
+                    task_id="3",
+                    subject="汇总优先级建议",
+                    status="pending",
+                    active_form="汇总优先级建议",
+                ),
+            ),
+        )
+    )
+
+    assert message == (
+        "任务列表\n"
+        "当前: 2. 识别优化机会\n"
+        "\n"
+        "1. 梳理项目结构 - 完成\n"
+        "=> 2. 识别优化机会 - 待执行\n"
+        "3. 汇总优先级建议 - 待执行"
+    )
+
+
+
 def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None:
     message = build_subagent_aggregate_status_message(
         SubagentAggregateStatusOutput(
@@ -903,6 +941,107 @@ async def test_presenter_emits_subagent_aggregate_when_subagent_status_changes()
 
 
 @pytest.mark.asyncio
+async def test_presenter_preserves_subagent_tool_count_when_final_snapshot_is_empty() -> None:
+    running_agent = ToolCallRecord(
+        tool_use_id="agent-1",
+        name="Agent",
+        input={"description": "项目优化点调研"},
+        status=ToolStatus.RUNNING,
+        subagent_tools=[
+            SubagentToolCall(
+                tool_use_id="read-1",
+                name="Read",
+                input={"file_path": "app/foo.py"},
+                status=ToolStatus.SUCCESS,
+            ),
+            SubagentToolCall(
+                tool_use_id="grep-1",
+                name="Grep",
+                input={"pattern": "pytest"},
+                status=ToolStatus.RUNNING,
+            ),
+        ],
+    )
+    finished_agent = ToolCallRecord(
+        tool_use_id="agent-1",
+        name="Agent",
+        input={"description": "项目优化点调研"},
+        status=ToolStatus.SUCCESS,
+        subagent_tools=[],
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"agent-1": running_agent}),
+                _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"agent-1": finished_agent}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="agent-1",
+                    tool_name="Agent",
+                    tool_input={"description": "项目优化点调研"},
+                    status=ToolStatus.RUNNING.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="read-1",
+                            tool_name="Read",
+                            tool_input={"file_path": "app/foo.py"},
+                            status=ToolStatus.SUCCESS.value,
+                        ),
+                        SubagentToolStatusOutput(
+                            tool_use_id="grep-1",
+                            tool_name="Grep",
+                            tool_input={"pattern": "pytest"},
+                            status=ToolStatus.RUNNING.value,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    ]
+    assert second == [
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="agent-1",
+                    tool_name="Agent",
+                    tool_input={"description": "项目优化点调研"},
+                    status=ToolStatus.SUCCESS.value,
+                    subagent_tools=(
+                        SubagentToolStatusOutput(
+                            tool_use_id="read-1",
+                            tool_name="Read",
+                            tool_input={"file_path": "app/foo.py"},
+                            status=ToolStatus.SUCCESS.value,
+                        ),
+                        SubagentToolStatusOutput(
+                            tool_use_id="grep-1",
+                            tool_name="Grep",
+                            tool_input={"pattern": "pytest"},
+                            status=ToolStatus.SUCCESS.value,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    ]
+    assert "项目优化点调研 · 2 tool uses · Done" in build_subagent_aggregate_status_message(second[0])
+
+
+@pytest.mark.asyncio
 async def test_presenter_skips_flat_status_for_nested_tool_duplicate() -> None:
     task_tool = ToolCallRecord(
         tool_use_id="task-1",
@@ -1078,6 +1217,52 @@ async def test_presenter_emits_task_list_for_task_create_and_update_without_tool
                     subject="评估当前改动",
                     status="in_progress",
                     active_form="评估当前改动",
+                ),
+            ),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_presenter_keeps_task_update_status_when_update_is_before_create() -> None:
+    update_1_completed = ToolCallRecord(
+        tool_use_id="update-1-completed",
+        name="TaskUpdate",
+        input={"taskId": "1", "status": "completed"},
+        status=ToolStatus.SUCCESS,
+    )
+    create_1 = ToolCallRecord(
+        tool_use_id="create-1",
+        name="TaskCreate",
+        input={"subject": "梳理项目结构", "activeForm": "梳理项目结构"},
+        status=ToolStatus.SUCCESS,
+        structured_result={"task": {"id": "1", "subject": "梳理项目结构"}},
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(
+                    phase=SessionPhase.PROCESSING,
+                    tool_calls={"update-1-completed": update_1_completed, "create-1": create_1},
+                ),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    outputs = await presenter.poll(task_id="task-1")
+
+    assert outputs == [
+        TaskListStatusOutput(
+            message_key="task-list",
+            items=(
+                TaskListItemStatusOutput(
+                    task_id="1",
+                    subject="梳理项目结构",
+                    status="completed",
+                    active_form="梳理项目结构",
                 ),
             ),
         )
