@@ -14,7 +14,6 @@ from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import (
     CLIEvent,
-    EventType,
     ExecutionTask,
     TaskRecord,
     TaskStatus,
@@ -25,6 +24,7 @@ from app.domain.user_question_models import UserQuestionPrompt
 from app.services.permission_service import PermissionService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore, is_claude_session_id
+from app.services.task_lifecycle_service import apply_task_event
 from app.services.user_question_service import UserQuestionService
 
 logger = logging.getLogger(__name__)
@@ -678,60 +678,12 @@ class TaskService:
         return True, f"未能自动打开桌面终端: {reveal_text}"
 
     async def _apply_event(self, record: TaskRecord, event: CLIEvent) -> None:
-        if event.type == EventType.STARTED:
-            record.status = TaskStatus.RUNNING
-            record.started_at = record.started_at or utc_now()
-            return
-
-        if event.type in {EventType.STDOUT, EventType.STDERR}:
-            content = event.content or ""
-            limit = self._settings.task_output_char_limit
-
-            if record.output_chars >= limit:
-                event.content = ""
-                record.output_truncated = True
-                return
-
-            remaining = limit - record.output_chars
-            if len(content) > remaining:
-                event.content = content[:remaining]
-                record.output_chars += remaining
-                record.output_truncated = True
-            else:
-                record.output_chars += len(content)
-            return
-
-        record.ended_at = utc_now()
-
-        if event.type == EventType.EXITED:
-            record.status = TaskStatus.SUCCEEDED
-            record.exit_code = event.exit_code
-            record.failure_reason = None
-        elif event.type == EventType.CANCELED:
-            record.status = TaskStatus.CANCELED
-            record.failure_reason = event.error
-        elif event.type == EventType.TIMEOUT:
-            record.status = TaskStatus.TIMEOUT
-            record.failure_reason = event.error
-        elif event.type == EventType.FAILED:
-            record.status = TaskStatus.FAILED
-            record.exit_code = event.exit_code
-            record.failure_reason = event.error
-
-        payload = {
-            "task_id": record.task_id,
-            "user_id": record.user_id,
-            "provider": record.provider,
-            "status": record.status.value,
-            "duration_sec": record.duration_sec,
-            "exit_code": record.exit_code,
-            "failure_reason": record.failure_reason,
-        }
-
-        if record.status == TaskStatus.SUCCEEDED:
-            logger.info("task completed", extra=payload)
-        else:
-            logger.error("task completed with error", extra=payload)
+        apply_task_event(
+            record=record,
+            event=event,
+            output_char_limit=self._settings.task_output_char_limit,
+            logger=logger,
+        )
 
     def _is_workdir_allowed(self, workdir: str) -> bool:
         return is_workdir_allowed(workdir, self._settings.allowed_workdirs)
