@@ -11,6 +11,7 @@ from app.bot.handlers.command_permission import build_permission_keyboard
 from app.bot.handlers.command_user_question import build_user_question_keyboard
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import (
+    FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
     StructuredReplyPresenter,
@@ -237,7 +238,10 @@ async def run_prompt_and_stream(
                     reply_markup=build_user_question_keyboard(output),
                 )
                 continue
-            if isinstance(output, (ToolStatusOutput, SubagentAggregateStatusOutput, TaskListStatusOutput)):
+            if isinstance(
+                output,
+                (ToolStatusOutput, SubagentAggregateStatusOutput, TaskListStatusOutput, FileToolAggregateStatusOutput),
+            ):
                 await sender.flush(send_text)
                 await tool_message_manager.handle(output)
                 continue

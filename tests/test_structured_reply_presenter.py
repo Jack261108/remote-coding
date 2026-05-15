@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.bot.presenters.structured_reply_presenter import (
+    FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
     StructuredReplyPresenter,
@@ -14,6 +15,7 @@ from app.bot.presenters.structured_reply_presenter import (
     TaskListStatusOutput,
     ToolStatusOutput,
     UserQuestionOutput,
+    build_file_tool_aggregate_status_message,
     build_permission_prompt,
     build_subagent_aggregate_status_message,
     build_task_list_status_message,
@@ -638,6 +640,131 @@ def test_build_task_list_status_message_marks_first_pending_when_no_task_is_runn
         "=> ⏳ 2. 识别优化机会 - 待执行\n"
         "⏳ 3. 汇总优先级建议 - 待执行"
     )
+
+
+def test_build_file_tool_aggregate_status_message_groups_reads_and_searches() -> None:
+    message = build_file_tool_aggregate_status_message(
+        FileToolAggregateStatusOutput(
+            message_key="file-tool-aggregate",
+            tools=(
+                ToolStatusOutput(
+                    tool_use_id="grep-1",
+                    tool_name="Grep",
+                    tool_input={"pattern": "SessionStore"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+                ToolStatusOutput(
+                    tool_use_id="read-1",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/services/session_store.py"},
+                    status=ToolStatus.RUNNING.value,
+                ),
+                ToolStatusOutput(
+                    tool_use_id="read-2",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/bot/handlers/command_run.py"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+            ),
+        )
+    )
+
+    assert message == (
+        "文件检索 · 执行中\n"
+        "搜索 1 次，读取 2 个文件\n"
+        "当前: 🔄 Read · 文件: app/services/session_store.py\n"
+        "\n"
+        "✅ 1. Grep - 完成 · 内容: SessionStore\n"
+        "🔄 2. Read - 执行中 · 文件: app/services/session_store.py\n"
+        "✅ 3. Read - 完成 · 文件: app/bot/handlers/command_run.py"
+    )
+
+
+@pytest.mark.asyncio
+async def test_presenter_aggregates_top_level_file_tools_without_read_spam() -> None:
+    grep_tool = ToolCallRecord(
+        tool_use_id="grep-1",
+        name="Grep",
+        input={"pattern": "SessionStore"},
+        status=ToolStatus.SUCCESS,
+    )
+    read_1_running = ToolCallRecord(
+        tool_use_id="read-1",
+        name="Read",
+        input={"file_path": "app/services/session_store.py"},
+        status=ToolStatus.RUNNING,
+    )
+    read_1_success = ToolCallRecord(
+        tool_use_id="read-1",
+        name="Read",
+        input={"file_path": "app/services/session_store.py"},
+        status=ToolStatus.SUCCESS,
+    )
+    read_2_success = ToolCallRecord(
+        tool_use_id="read-2",
+        name="Read",
+        input={"file_path": "app/bot/handlers/command_run.py"},
+        status=ToolStatus.SUCCESS,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.PROCESSING, tool_calls={"grep-1": grep_tool, "read-1": read_1_running}),
+                _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"grep-1": grep_tool, "read-1": read_1_success, "read-2": read_2_success}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        FileToolAggregateStatusOutput(
+            message_key="file-tool-aggregate",
+            tools=(
+                ToolStatusOutput(
+                    tool_use_id="grep-1",
+                    tool_name="Grep",
+                    tool_input={"pattern": "SessionStore"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+                ToolStatusOutput(
+                    tool_use_id="read-1",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/services/session_store.py"},
+                    status=ToolStatus.RUNNING.value,
+                ),
+            ),
+        )
+    ]
+    assert second == [
+        FileToolAggregateStatusOutput(
+            message_key="file-tool-aggregate",
+            tools=(
+                ToolStatusOutput(
+                    tool_use_id="grep-1",
+                    tool_name="Grep",
+                    tool_input={"pattern": "SessionStore"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+                ToolStatusOutput(
+                    tool_use_id="read-1",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/services/session_store.py"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+                ToolStatusOutput(
+                    tool_use_id="read-2",
+                    tool_name="Read",
+                    tool_input={"file_path": "app/bot/handlers/command_run.py"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+            ),
+        )
+    ]
 
 
 def test_build_subagent_aggregate_status_message_shows_subagent_type() -> None:
@@ -1551,11 +1678,16 @@ async def test_presenter_emits_error_and_interrupted_tool_statuses() -> None:
         )
     ]
     assert interrupted_output == [
-        ToolStatusOutput(
-            tool_use_id="tool-2",
-            tool_name="Read",
-            tool_input={"file_path": "/tmp/a.txt"},
-            status=ToolStatus.INTERRUPTED.value,
+        FileToolAggregateStatusOutput(
+            message_key="file-tool-aggregate",
+            tools=(
+                ToolStatusOutput(
+                    tool_use_id="tool-2",
+                    tool_name="Read",
+                    tool_input={"file_path": "/tmp/a.txt"},
+                    status=ToolStatus.INTERRUPTED.value,
+                ),
+            ),
         )
     ]
 

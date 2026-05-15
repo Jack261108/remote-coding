@@ -8,9 +8,11 @@ from aiogram.enums import ParseMode
 from aiogram.types import Message
 
 from app.bot.presenters.structured_reply_presenter import (
+    FileToolAggregateStatusOutput,
     SubagentAggregateStatusOutput,
     TaskListStatusOutput,
     ToolStatusOutput,
+    build_file_tool_aggregate_status_message,
     build_subagent_aggregate_status_message,
     build_task_list_status_message,
     build_tool_status_message,
@@ -35,11 +37,18 @@ class ToolMessageManager:
         self._messages: dict[str, _TrackedToolMessage] = {}
         self._lock = asyncio.Lock()
 
-    async def handle(self, output: ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput) -> None:
+    async def handle(
+        self,
+        output: ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput | FileToolAggregateStatusOutput,
+    ) -> None:
         resend_on_edit_failure = True
         if isinstance(output, SubagentAggregateStatusOutput):
             message_key = output.message_key
             text = build_subagent_aggregate_status_message(output)
+            resend_on_edit_failure = False
+        elif isinstance(output, FileToolAggregateStatusOutput):
+            message_key = output.message_key
+            text = build_file_tool_aggregate_status_message(output)
             resend_on_edit_failure = False
         elif isinstance(output, TaskListStatusOutput):
             message_key = output.message_key

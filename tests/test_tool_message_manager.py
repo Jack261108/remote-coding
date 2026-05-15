@@ -6,6 +6,7 @@ import pytest
 from aiogram.enums import ParseMode
 
 from app.bot.presenters.structured_reply_presenter import (
+    FileToolAggregateStatusOutput,
     SubagentAggregateStatusOutput,
     SubagentToolStatusOutput,
     TaskListItemStatusOutput,
@@ -140,6 +141,26 @@ def _task_list_status_output(*, second_status: str = "pending") -> TaskListStatu
     )
 
 
+def _file_tool_aggregate_output(*, read_status: ToolStatus = ToolStatus.RUNNING) -> FileToolAggregateStatusOutput:
+    return FileToolAggregateStatusOutput(
+        message_key="file-tool-aggregate",
+        tools=(
+            ToolStatusOutput(
+                tool_use_id="grep-1",
+                tool_name="Grep",
+                tool_input={"pattern": "SessionStore"},
+                status=ToolStatus.SUCCESS.value,
+            ),
+            ToolStatusOutput(
+                tool_use_id="read-1",
+                tool_name="Read",
+                tool_input={"file_path": "app/services/session_store.py"},
+                status=read_status.value,
+            ),
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_tool_message_manager_sends_first_status_message() -> None:
     root = DummyRootMessage()
@@ -262,6 +283,38 @@ async def test_tool_message_manager_tracks_aggregate_and_flat_tool_separately() 
     assert len(root.sent) == 2
     assert "2 agents finished" in root.sent[0].text
     assert "工具: Bash" in root.sent[1].text
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_edits_file_tool_aggregate_message() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_file_tool_aggregate_output(read_status=ToolStatus.RUNNING))
+    await manager.handle(_file_tool_aggregate_output(read_status=ToolStatus.SUCCESS))
+
+    assert len(root.sent) == 1
+    assert "文件检索 · 完成" in root.sent[0].text
+    assert root.sent[0].edits
+    assert "✅ 2. Read - 完成" in root.sent[0].edits[-1]
+
+
+@pytest.mark.asyncio
+async def test_tool_message_manager_keeps_file_tool_aggregate_when_edit_fails() -> None:
+    root = DummyRootMessage()
+    manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
+
+    await manager.handle(_file_tool_aggregate_output(read_status=ToolStatus.RUNNING))
+    root.sent[0].fail_next_edit = True
+    await manager.handle(_file_tool_aggregate_output(read_status=ToolStatus.SUCCESS))
+
+    assert len(root.sent) == 1
+    assert "文件检索 · 执行中" in root.sent[0].text
+
+    await manager.handle(_file_tool_aggregate_output(read_status=ToolStatus.SUCCESS))
+
+    assert len(root.sent) == 1
+    assert "文件检索 · 完成" in root.sent[0].text
 
 
 @pytest.mark.asyncio

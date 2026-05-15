@@ -341,6 +341,72 @@ async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_prompt_and_stream_aggregates_top_level_file_tools() -> None:
+    grep_tool = ToolCallRecord(
+        tool_use_id="grep-1",
+        name="Grep",
+        input={"pattern": "SessionStore"},
+        status=ToolStatus.SUCCESS,
+    )
+    read_1_running = ToolCallRecord(
+        tool_use_id="read-1",
+        name="Read",
+        input={"file_path": "app/services/session_store.py"},
+        status=ToolStatus.RUNNING,
+    )
+    read_1_success = ToolCallRecord(
+        tool_use_id="read-1",
+        name="Read",
+        input={"file_path": "app/services/session_store.py"},
+        status=ToolStatus.SUCCESS,
+    )
+    read_2_success = ToolCallRecord(
+        tool_use_id="read-2",
+        name="Read",
+        input={"file_path": "app/bot/handlers/command_run.py"},
+        status=ToolStatus.SUCCESS,
+    )
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_sessions=[
+            _structured_session(phase=SessionPhase.WAITING_FOR_INPUT),
+            _structured_session(phase=SessionPhase.PROCESSING, tool_calls={"grep-1": grep_tool, "read-1": read_1_running}),
+            _structured_session(phase=SessionPhase.PROCESSING, tool_calls={"grep-1": grep_tool, "read-1": read_1_running}),
+            _structured_session(
+                phase=SessionPhase.WAITING_FOR_INPUT,
+                tool_calls={"grep-1": grep_tool, "read-1": read_1_success, "read-2": read_2_success},
+            ),
+            _structured_session(
+                phase=SessionPhase.WAITING_FOR_INPUT,
+                tool_calls={"grep-1": grep_tool, "read-1": read_1_success, "read-2": read_2_success},
+            ),
+        ],
+        event_delays=[0.0, 0.16],
+    )
+
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25)
+
+    file_tool_messages = [
+        sent
+        for sent in message.sent_messages
+        if "文件检索" in sent.text or any("文件检索" in edit for edit in sent.edits)
+    ]
+    assert len(file_tool_messages) == 1
+    assert any("文件检索 · 执行中" in answer for answer in message.answers)
+    assert "文件检索 · 完成" in file_tool_messages[0].text
+    assert "读取 2 个文件" in file_tool_messages[0].text
+    all_tool_messages = "\n".join(message.answers + [edit for sent in message.sent_messages for edit in sent.edits])
+    assert "工具: Read" not in all_tool_messages
+    assert "工具: Grep" not in all_tool_messages
+
+
+@pytest.mark.asyncio
 async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> None:
     agent_1_running = ToolCallRecord(
         tool_use_id="agent-1",
