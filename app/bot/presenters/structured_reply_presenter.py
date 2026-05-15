@@ -150,62 +150,50 @@ def normalize_stream_text(text: str) -> str:
     return normalized.strip()
 
 
-def preview_stream_text(text: str) -> str:
-    normalized = normalize_stream_text(text)
+def _truncate_text(text: str, *, char_limit: int, line_limit: int, suffix: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized:
         return ""
 
     lines = normalized.split("\n")
-    needs_line_truncation = len(lines) > _STREAM_PREVIEW_LINE_LIMIT
-    preview_lines = lines[:_STREAM_PREVIEW_LINE_LIMIT]
+    needs_line_truncation = len(lines) > line_limit
+    preview_lines = lines[:line_limit]
     preview = "\n".join(preview_lines)
 
-    needs_char_truncation = len(preview) > _STREAM_PREVIEW_CHAR_LIMIT
+    needs_char_truncation = len(preview) > char_limit
     if needs_char_truncation:
-        preview = preview[:_STREAM_PREVIEW_CHAR_LIMIT].rstrip()
+        preview = preview[:char_limit].rstrip()
 
     if needs_line_truncation or needs_char_truncation:
-        preview = f"{preview}\n...[输出片段过长，已截断本条消息]"
-
+        preview = f"{preview}{suffix}"
     return preview
+
+
+def preview_stream_text(text: str) -> str:
+    return _truncate_text(
+        normalize_stream_text(text),
+        char_limit=_STREAM_PREVIEW_CHAR_LIMIT,
+        line_limit=_STREAM_PREVIEW_LINE_LIMIT,
+        suffix="\n...[输出片段过长，已截断本条消息]",
+    )
 
 
 def _truncate_permission_text(text: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized:
-        return ""
-
-    lines = normalized.split("\n")
-    needs_line_truncation = len(lines) > _PERMISSION_INPUT_LINE_LIMIT
-    preview_lines = lines[:_PERMISSION_INPUT_LINE_LIMIT]
-    preview = "\n".join(preview_lines)
-
-    needs_char_truncation = len(preview) > _PERMISSION_INPUT_CHAR_LIMIT
-    if needs_char_truncation:
-        preview = preview[:_PERMISSION_INPUT_CHAR_LIMIT].rstrip()
-
-    if needs_line_truncation or needs_char_truncation:
-        preview = f"{preview}..."
-    return preview
+    return _truncate_text(
+        text,
+        char_limit=_PERMISSION_INPUT_CHAR_LIMIT,
+        line_limit=_PERMISSION_INPUT_LINE_LIMIT,
+        suffix="...",
+    )
 
 
 def _truncate_question_text(text: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized:
-        return ""
-
-    lines = normalized.split("\n")
-    needs_line_truncation = len(lines) > _QUESTION_TEXT_LINE_LIMIT
-    preview_lines = lines[:_QUESTION_TEXT_LINE_LIMIT]
-    preview = "\n".join(preview_lines)
-
-    needs_char_truncation = len(preview) > _QUESTION_TEXT_CHAR_LIMIT
-    if needs_char_truncation:
-        preview = preview[:_QUESTION_TEXT_CHAR_LIMIT].rstrip()
-
-    if needs_line_truncation or needs_char_truncation:
-        preview = f"{preview}..."
-    return preview
+    return _truncate_text(
+        text,
+        char_limit=_QUESTION_TEXT_CHAR_LIMIT,
+        line_limit=_QUESTION_TEXT_LINE_LIMIT,
+        suffix="...",
+    )
 
 
 def _format_tool_input_detail(tool_name: str | None, tool_input: dict | None) -> tuple[str, str] | None:
