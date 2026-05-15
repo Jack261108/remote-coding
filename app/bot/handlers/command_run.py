@@ -3,29 +3,18 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from app.bot.handlers.command_permission import build_permission_keyboard
-from app.bot.handlers.command_user_question import build_user_question_keyboard
+from app.bot.handlers.run_event_streamer import RunEventStreamer, _build_created_message
+from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
+from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import (
-    FileToolAggregateStatusOutput,
-    PermissionRequestOutput,
-    ProgressUpdateOutput,
-    StructuredReplyOutput,
     StructuredReplyPresenter,
-    SubagentAggregateStatusOutput,
-    TaskListStatusOutput,
-    ToolStatusOutput,
-    UserQuestionOutput,
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
-    normalize_stream_text,
 )
-from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
 from app.bot.presenters.tool_message_manager import ToolMessageManager
-from app.domain.models import EventType
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -47,63 +36,6 @@ def parse_run_args(text: str | None) -> tuple[str | None, str]:
     if not prompt:
         raise ValueError("task text 不能为空")
     return provider, prompt
-
-
-async def _load_status_summary(task_service: TaskService, task_id: str, user_id: int) -> tuple[str, bool]:
-    status = await task_service.get_status(task_id, user_id)
-    duration = f"{status.duration_sec:.2f}s" if status and status.duration_sec is not None else "-"
-    truncated = bool(status and status.output_truncated)
-    return duration, truncated
-
-
-def _build_created_message(*, task_id: str, provider: str, session_id: str) -> str:
-    return (
-        "任务已接收\n"
-        f"task_id: {task_id}\n"
-        f"provider: {provider}\n"
-        f"session_id: {session_id}\n"
-        "status: 等待启动"
-    )
-
-
-def _build_started_message(*, task_id: str) -> str:
-    return "\n".join(["任务开始执行", f"task_id: {task_id}", "status: 正在处理"])
-
-
-def _build_success_message(*, task_id: str, exit_code: int | None, duration: str, truncated: bool) -> str:
-    lines = [
-        "任务执行完成",
-        f"task_id: {task_id}",
-        "status: 成功",
-        f"exit_code: {exit_code if exit_code is not None else '-'}",
-        f"duration: {duration}",
-    ]
-    if truncated:
-        lines.append("output: truncated")
-    return "\n".join(lines)
-
-
-def _build_error_message(*, event_type: EventType, task_id: str, error_text: str, duration: str, truncated: bool) -> str:
-    heading_map = {
-        EventType.FAILED: "任务执行失败",
-        EventType.TIMEOUT: "任务执行超时",
-        EventType.CANCELED: "任务已取消",
-    }
-    status_map = {
-        EventType.FAILED: "失败",
-        EventType.TIMEOUT: "超时",
-        EventType.CANCELED: "已取消",
-    }
-    lines = [
-        heading_map[event_type],
-        f"task_id: {task_id}",
-        f"status: {status_map[event_type]}",
-        f"error: {error_text}",
-        f"duration: {duration}",
-    ]
-    if truncated:
-        lines.append("output: truncated")
-    return "\n".join(lines)
 
 
 async def run_prompt_and_stream(
@@ -157,48 +89,14 @@ async def run_prompt_and_stream(
             "interactive": start.interactive,
         },
     )
-    async def send_message_safely(text: str, *, reply_markup=None) -> Message | None:
-        if not text:
-            return None
-        try:
-            rendered = render_markdownish_to_telegram_html(text)
-            chunks = split_telegram_html(rendered, 4096)
-            sent_message = None
-            for index, chunk in enumerate(chunks):
-                sent_message = await message.answer(
-                    chunk,
-                    reply_markup=reply_markup if index == len(chunks) - 1 else None,
-                    parse_mode=ParseMode.HTML,
-                )
-            return sent_message
-        except Exception:
-            logger.exception(
-                "telegram answer failed",
-                extra={"task_id": start.task.task_id, "user_id": user_id, "provider": start.task.provider},
-            )
-            return None
 
-    async def answer_safely(text: str, *, reply_markup=None) -> bool:
-        return await send_message_safely(text, reply_markup=reply_markup) is not None
-
-    async def edit_message_safely(target_message: Message | None, text: str) -> bool:
-        if target_message is None or not text:
-            return False
-        try:
-            rendered = render_markdownish_to_telegram_html(text)
-            chunks = split_telegram_html(rendered, 4096)
-            if len(chunks) != 1:
-                return False
-            await target_message.edit_text(chunks[0], parse_mode=ParseMode.HTML)
-            return True
-        except Exception:
-            logger.exception(
-                "telegram edit failed",
-                extra={"task_id": start.task.task_id, "user_id": user_id, "provider": start.task.provider},
-            )
-            return False
-
-    lifecycle_message = await send_message_safely(
+    messenger = RunTelegramMessenger(
+        root_message=message,
+        task_id=start.task.task_id,
+        user_id=user_id,
+        provider=start.task.provider,
+    )
+    lifecycle_message = await messenger.send_message_safely(
         _build_created_message(
             task_id=start.task.task_id,
             provider=start.task.provider,
@@ -214,159 +112,25 @@ async def run_prompt_and_stream(
         user_id=user_id,
         provider=start.task.provider,
     )
+    dispatcher = PresenterOutputDispatcher(
+        presenter=presenter,
+        sender=sender,
+        messenger=messenger,
+        tool_message_manager=tool_message_manager,
+        task_id=start.task.task_id,
+    )
+    streamer = RunEventStreamer(
+        start=start,
+        task_service=task_service,
+        user_id=user_id,
+        presenter=presenter,
+        dispatcher=dispatcher,
+        messenger=messenger,
+        lifecycle_message=lifecycle_message,
+    )
     await presenter.prime(baseline_current_snapshot=True)
-    interactive_pump: asyncio.Task | None = None
 
-    async def send_text(text: str) -> None:
-        normalized = normalize_stream_text(text)
-        if not normalized:
-            return
-        await answer_safely(normalized)
-
-    async def emit_presenter_messages(*, final: bool = False, log_missing: bool) -> None:
-        for output in await presenter.poll(task_id=start.task.task_id, final=final, log_missing=log_missing):
-            if isinstance(output, PermissionRequestOutput):
-                await sender.flush(send_text)
-                sent = await answer_safely(
-                    output.text,
-                    reply_markup=build_permission_keyboard(tool_use_id=output.tool_use_id) if output.tool_use_id else None,
-                )
-                if sent:
-                    await presenter.acknowledge_delivery(output)
-                continue
-            if isinstance(output, UserQuestionOutput):
-                await sender.flush(send_text)
-                sent = await answer_safely(
-                    output.text,
-                    reply_markup=build_user_question_keyboard(output),
-                )
-                if sent:
-                    await presenter.acknowledge_delivery(output)
-                continue
-            if isinstance(output, StructuredReplyOutput):
-                await sender.flush(send_text)
-                delivered = True
-
-                async def send_structured_text(text: str) -> None:
-                    nonlocal delivered
-                    normalized = normalize_stream_text(text)
-                    if not normalized:
-                        return
-                    if not await answer_safely(normalized):
-                        delivered = False
-
-                await sender.push(output.text, send_structured_text)
-                await sender.flush(send_structured_text)
-                if delivered:
-                    await presenter.acknowledge_delivery(output)
-                continue
-            if isinstance(
-                output,
-                (ToolStatusOutput, SubagentAggregateStatusOutput, TaskListStatusOutput, FileToolAggregateStatusOutput),
-            ):
-                await sender.flush(send_text)
-                await tool_message_manager.handle(output)
-                continue
-            if isinstance(output, ProgressUpdateOutput):
-                await sender.flush(send_text)
-                await answer_safely(output.text)
-                continue
-            await sender.push(output, send_text)
-
-    async def pump_structured_reply() -> None:
-        try:
-            while True:
-                changed = await presenter.wait_for_update(timeout_sec=0.05)
-                if not changed:
-                    continue
-                await emit_presenter_messages(log_missing=False)
-        except asyncio.CancelledError:
-            raise
-
-    async def stream_events() -> None:
-        nonlocal interactive_pump
-        saw_exit = False
-        try:
-            async for event in start.events:
-                if event.type in {EventType.STDOUT, EventType.STDERR}:
-                    if not event.content:
-                        continue
-                    if start.interactive and presenter.structured_session_available:
-                        continue
-                    logger.info(
-                        "[task %s][%s] %s",
-                        start.task.task_id,
-                        event.type.value,
-                        event.content.rstrip("\n"),
-                    )
-                    prefix = "" if event.type == EventType.STDOUT else "[stderr] "
-                    await sender.push(f"{prefix}{event.content}", send_text)
-                    continue
-
-                if event.type == EventType.STARTED:
-                    logger.info(
-                        "task stream started task_id=%s provider=%s user_id=%s",
-                        start.task.task_id,
-                        start.task.provider,
-                        user_id,
-                    )
-                    started_message = _build_started_message(task_id=start.task.task_id)
-                    if not await edit_message_safely(lifecycle_message, started_message):
-                        await answer_safely(started_message)
-                    if start.interactive and interactive_pump is None:
-                        interactive_pump = asyncio.create_task(pump_structured_reply())
-                    continue
-
-                if start.interactive:
-                    await emit_presenter_messages(log_missing=True)
-                await sender.flush(send_text)
-                duration, truncated = await _load_status_summary(task_service, start.task.task_id, user_id)
-
-                if event.type == EventType.EXITED:
-                    saw_exit = True
-                    await answer_safely(
-                        _build_success_message(
-                            task_id=start.task.task_id,
-                            exit_code=event.exit_code,
-                            duration=duration,
-                            truncated=truncated,
-                        )
-                    )
-                elif event.type in {EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
-                    error_text = normalize_stream_text(event.error or "") or "-"
-                    logger.error(
-                        "task event error",
-                        extra={
-                            "task_id": start.task.task_id,
-                            "user_id": user_id,
-                            "provider": start.task.provider,
-                            "event_type": event.type.value,
-                            "error": error_text,
-                            "duration": duration,
-                        },
-                    )
-                    await answer_safely(
-                        _build_error_message(
-                            event_type=event.type,
-                            task_id=start.task.task_id,
-                            error_text=error_text,
-                            duration=duration,
-                            truncated=truncated,
-                        )
-                    )
-        finally:
-            if saw_exit and start.interactive:
-                await asyncio.sleep(0.1)
-                await emit_presenter_messages(final=True, log_missing=True)
-                await sender.flush(send_text)
-            if interactive_pump is not None:
-                interactive_pump.cancel()
-                try:
-                    await interactive_pump
-                except asyncio.CancelledError:
-                    pass
-
-    task = asyncio.create_task(stream_events())
+    task = asyncio.create_task(streamer.stream_events())
     _ACTIVE_STREAM_TASKS.add(task)
     logger.info(
         "task stream spawned",
@@ -397,7 +161,7 @@ async def run_prompt_and_stream(
         )
 
         async def _notify_error() -> None:
-            await answer_safely(f"任务处理异常: {exc}")
+            await messenger.answer_safely(f"任务处理异常: {exc}")
 
         asyncio.get_running_loop().create_task(_notify_error())
 
