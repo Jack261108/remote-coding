@@ -12,22 +12,11 @@ from app.bot.handlers.command_user_question import register_user_question_handle
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
 from app.bot.router import create_router
-from app.config.settings import Settings
 from app.domain.models import TaskRecord, TaskStatus
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, PendingPermission, ToolCallRecord, ToolStatus
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
-from tests.test_task_service import StubAdapter, StubFactory
-
-
-class DummyHookSocketServer:
-    def __init__(self, *, respond_ok: bool = True) -> None:
-        self.calls: list[tuple[str, str, str | None]] = []
-        self.respond_ok = respond_ok
-
-    async def respond_to_permission(self, *, tool_use_id: str, decision: str, reason: str | None = None) -> bool:
-        self.calls.append((tool_use_id, decision, reason))
-        return self.respond_ok
+from tests.fakes.cli import DummyHookSocketServer, StubAdapter, StubFactory, make_settings
 
 
 class DummyMessage:
@@ -77,23 +66,6 @@ class DummyRouter:
         return decorator
 
 
-def make_settings(tmp_path, *, claude_tmux_mode: bool = True) -> Settings:
-    return Settings.model_validate(
-        {
-            "TG_BOT_TOKEN": "token",
-            "TG_ALLOWED_USER_IDS": "1",
-            "DEFAULT_PROVIDER": "claude_code",
-            "DEFAULT_TIMEOUT_SEC": 10,
-            "MAX_CONCURRENT_TASKS": 2,
-            "CLAUDE_TMUX_MODE": claude_tmux_mode,
-            "CLAUDE_CLI_BIN": "claude",
-            "CODEX_CLI_BIN": "codex",
-            "GEMINI_CLI_BIN": "gemini",
-            "ALLOWED_WORKDIRS": str(tmp_path),
-        }
-    )
-
-
 @pytest.mark.asyncio
 async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
     tmux_runner = TmuxRunner(data_dir=str(tmp_path))
@@ -102,7 +74,7 @@ async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -158,7 +130,7 @@ async def test_status_handler_renders_structured_snapshot(tmp_path) -> None:
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -215,7 +187,7 @@ async def test_permission_handlers_approve_current_pending_request(tmp_path) -> 
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     hook_socket_server = DummyHookSocketServer()
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -256,7 +228,7 @@ async def test_permission_handlers_report_stale_pending_request(tmp_path) -> Non
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     hook_socket_server = DummyHookSocketServer(respond_ok=False)
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -297,7 +269,7 @@ async def test_permission_callback_handler_approves_pending_request(tmp_path) ->
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     hook_socket_server = DummyHookSocketServer()
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -341,7 +313,7 @@ async def test_permission_callback_handler_rejects_stale_button(tmp_path) -> Non
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     hook_socket_server = DummyHookSocketServer()
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -385,7 +357,7 @@ async def test_permission_callback_handler_rejects_cross_user_button(tmp_path) -
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     hook_socket_server = DummyHookSocketServer()
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -442,7 +414,7 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -512,7 +484,7 @@ async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -586,7 +558,7 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=SessionService(MemorySessionStore()),
         cli_factory=factory,
@@ -666,7 +638,7 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     session_service = SessionService(MemorySessionStore())
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=session_service,
         cli_factory=factory,
@@ -710,7 +682,7 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
     run_mock = AsyncMock()
     monkeypatch.setattr("app.bot.router.run_prompt_and_stream", run_mock)
 
-    router = create_router(settings=make_settings(tmp_path), task_service=service, session_service=session_service)
+    router = create_router(settings=make_settings(tmp_path, claude_tmux_mode=True), task_service=service, session_service=session_service)
     text_handler = router.message.handlers[-1].callback
     message = DummyMessage("直接删除")
 
@@ -731,7 +703,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
     session_service = SessionService(MemorySessionStore())
     service = TaskService(
-        settings=make_settings(tmp_path),
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
         session_service=session_service,
         cli_factory=factory,
@@ -751,7 +723,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     run_mock = AsyncMock(return_value=task)
     monkeypatch.setattr("app.bot.router.run_prompt_and_stream", run_mock)
 
-    router = create_router(settings=make_settings(tmp_path), task_service=service, session_service=session_service)
+    router = create_router(settings=make_settings(tmp_path, claude_tmux_mode=True), task_service=service, session_service=session_service)
     text_handler = router.message.handlers[-1].callback
     message = DummyMessage("你好")
 
