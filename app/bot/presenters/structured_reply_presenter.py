@@ -266,7 +266,7 @@ def build_permission_prompt(*, tool_name: str | None, tool_input: dict | None = 
 
 def build_tool_status_message(*, tool_name: str | None, tool_input: dict | None = None, status: str, resumed: bool = False) -> str:
     if status == ToolStatus.SUCCESS.value:
-        heading = "执行完成"
+        heading = "🟢 执行完成"
     elif status == ToolStatus.ERROR.value:
         heading = "执行失败"
     elif status == ToolStatus.INTERRUPTED.value:

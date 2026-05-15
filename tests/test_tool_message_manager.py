@@ -184,9 +184,9 @@ async def test_tool_message_manager_edits_existing_message_to_success() -> None:
     await manager.handle(_output(ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "执行完成" in root.sent[0].text
+    assert "🟢 执行完成" in root.sent[0].text
     assert root.sent[0].edits
-    assert "执行完成" in root.sent[0].edits[-1]
+    assert "🟢 执行完成" in root.sent[0].edits[-1]
 
 
 @pytest.mark.asyncio

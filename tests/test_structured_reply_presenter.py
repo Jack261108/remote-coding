@@ -515,7 +515,7 @@ def test_build_tool_status_message_formats_final_states() -> None:
         tool_name="Bash",
         tool_input={"command": "pytest -q"},
         status=ToolStatus.SUCCESS.value,
-    ) == "执行完成\n工具: Bash\n命令: pytest -q"
+    ) == "🟢 执行完成\n工具: Bash\n命令: pytest -q"
     assert build_tool_status_message(
         tool_name="Bash",
         tool_input={"command": "pytest -q"},
