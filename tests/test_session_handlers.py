@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.types import InlineKeyboardMarkup
 
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
@@ -17,33 +16,7 @@ from app.domain.session_models import ConversationTurn, SessionEvent, SessionEve
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 from tests.fakes.cli import DummyHookSocketServer, StubAdapter, StubFactory, make_settings
-
-
-class DummyMessage:
-    def __init__(self, text: str, user_id: int = 1) -> None:
-        self.text = text
-        self.from_user = SimpleNamespace(id=user_id)
-        self.answers: list[str] = []
-        self.reply_markups: list[InlineKeyboardMarkup | None] = []
-        self.edited_reply_markups: list[InlineKeyboardMarkup | None] = []
-
-    async def answer(self, text: str, reply_markup=None) -> None:
-        self.answers.append(text)
-        self.reply_markups.append(reply_markup)
-
-    async def edit_reply_markup(self, reply_markup=None) -> None:
-        self.edited_reply_markups.append(reply_markup)
-
-
-class DummyCallbackQuery:
-    def __init__(self, data: str, *, user_id: int = 1, message: DummyMessage | None = None) -> None:
-        self.data = data
-        self.from_user = SimpleNamespace(id=user_id)
-        self.message = message
-        self.answers: list[tuple[str, bool]] = []
-
-    async def answer(self, text: str, show_alert: bool = False) -> None:
-        self.answers.append((text, show_alert))
+from tests.fakes.telegram import DummyCallbackQuery, DummyMessage
 
 
 class DummyRouter:
