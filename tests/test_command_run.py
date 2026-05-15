@@ -665,7 +665,7 @@ async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam(
     ]
     assert len(task_list_messages) == 1
     task_list_message = task_list_messages[0]
-    assert any("=&gt; 1. 梳理项目结构 - 执行中" in answer for answer in message.answers)
+    assert any("=&gt; 🔄 1. 梳理项目结构 - 执行中" in answer for answer in message.answers)
     assert task_list_message.edits
     assert "当前: 无（全部完成）" in task_list_message.text
     assert "3. 形成优化建议 - 完成" in task_list_message.text

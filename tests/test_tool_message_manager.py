@@ -273,9 +273,9 @@ async def test_tool_message_manager_sends_claude_task_list_message() -> None:
 
     assert len(root.sent) == 1
     assert "任务列表" in root.sent[0].text
-    assert "当前: 2. 评估当前改动" in root.sent[0].text
+    assert "当前: 🔄 2. 评估当前改动" in root.sent[0].text
     assert "1. 梳理项目结构 - 完成" in root.sent[0].text
-    assert "=&gt; 2. 评估当前改动 - 执行中" in root.sent[0].text
+    assert "=&gt; 🔄 2. 评估当前改动 - 执行中" in root.sent[0].text
 
 
 @pytest.mark.asyncio
@@ -313,7 +313,7 @@ async def test_tool_message_manager_keeps_claude_task_list_when_edit_fails() -> 
     await manager.handle(_task_list_status_output(second_status="completed"))
 
     assert len(root.sent) == 1
-    assert "当前: 2. 评估当前改动" in root.sent[0].text
+    assert "当前: 🔄 2. 评估当前改动" in root.sent[0].text
 
     await manager.handle(_task_list_status_output(second_status="completed"))
 

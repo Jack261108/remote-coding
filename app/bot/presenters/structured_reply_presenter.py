@@ -334,7 +334,8 @@ def build_task_list_status_message(output: TaskListStatusOutput) -> str:
     else:
         active_item = visible_items[active_index]
         active_title = active_item.active_form or active_item.subject
-        lines.append(f"当前: {active_index + 1}. {_truncate_permission_text(active_title)}")
+        icon = _task_list_item_status_icon(active_item.status)
+        lines.append(f"当前: {icon} {active_index + 1}. {_truncate_permission_text(active_title)}")
 
     lines.append("")
     display_indexes = _select_visible_task_list_item_indexes(visible_items, active_index=active_index)
@@ -342,7 +343,8 @@ def build_task_list_status_message(output: TaskListStatusOutput) -> str:
         item = visible_items[index]
         prefix = "=> " if index == active_index else ""
         subject = _truncate_permission_text(item.subject)
-        lines.append(f"{prefix}{index + 1}. {subject} - {_task_list_item_status_label(item.status)}")
+        icon = _task_list_item_status_icon(item.status)
+        lines.append(f"{prefix}{icon} {index + 1}. {subject} - {_task_list_item_status_label(item.status)}")
 
     omitted = len(visible_items) - len(display_indexes)
     if omitted > 0:
@@ -477,6 +479,20 @@ def _select_visible_task_list_item_indexes(items: tuple[TaskListItemStatusOutput
     if active_index is not None and active_index not in indexes:
         indexes[-1] = active_index
     return tuple(indexes)
+
+
+def _task_list_item_status_icon(status: str | None) -> str:
+    if status == "in_progress":
+        return "🔄"
+    if status == "completed":
+        return "✅"
+    if status == "failed":
+        return "❌"
+    if status == "interrupted":
+        return "⏹️"
+    if status == "deleted":
+        return "🗑️"
+    return "⏳"
 
 
 def _task_list_item_status_label(status: str | None) -> str:

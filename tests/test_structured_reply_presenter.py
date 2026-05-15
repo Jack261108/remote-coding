@@ -595,11 +595,11 @@ def test_build_task_list_status_message_marks_current_task() -> None:
 
     assert message == (
         "任务列表\n"
-        "当前: 2. 评估当前改动\n"
+        "当前: 🔄 2. 评估当前改动\n"
         "\n"
-        "1. 梳理项目结构 - 完成\n"
-        "=> 2. 评估当前改动 - 执行中\n"
-        "3. 形成优化建议 - 待执行"
+        "✅ 1. 梳理项目结构 - 完成\n"
+        "=> 🔄 2. 评估当前改动 - 执行中\n"
+        "⏳ 3. 形成优化建议 - 待执行"
     )
 
 
@@ -632,11 +632,11 @@ def test_build_task_list_status_message_marks_first_pending_when_no_task_is_runn
 
     assert message == (
         "任务列表\n"
-        "当前: 2. 识别优化机会\n"
+        "当前: ⏳ 2. 识别优化机会\n"
         "\n"
-        "1. 梳理项目结构 - 完成\n"
-        "=> 2. 识别优化机会 - 待执行\n"
-        "3. 汇总优先级建议 - 待执行"
+        "✅ 1. 梳理项目结构 - 完成\n"
+        "=> ⏳ 2. 识别优化机会 - 待执行\n"
+        "⏳ 3. 汇总优先级建议 - 待执行"
     )
 
 
