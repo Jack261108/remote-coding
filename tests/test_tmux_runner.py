@@ -1478,3 +1478,177 @@ async def test_cancel_returns_false_for_unknown_task() -> None:
     runner = TmuxRunner()
     canceled = await runner.cancel("not-found")
     assert canceled is False
+
+
+@pytest.mark.asyncio
+async def test_run_task_terminates_ephemeral_session_when_watch_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), cancel_grace_sec=0)
+    terminated: list[str] = []
+
+    async def fake_start(*args, **kwargs):
+        return True, ""
+
+    async def fake_watch(*, meta, timeout_sec: int):
+        raise RuntimeError("watch failed")
+        yield
+
+    async def fake_terminate(session_name: str) -> bool:
+        terminated.append(session_name)
+        return True
+
+    monkeypatch.setattr(runner, "_start_ephemeral_session", fake_start)
+    monkeypatch.setattr(runner, "_watch_task", fake_watch)
+    monkeypatch.setattr(runner, "_terminate_session", fake_terminate)
+
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_task_1",
+        log_file=tmp_path / "task.log",
+        exit_file=tmp_path / "task.exit",
+        task_id="task-1",
+        workdir=str(tmp_path),
+        command_file=tmp_path / "task.cmd.sh",
+        persistent_terminal=False,
+    )
+
+    with pytest.raises(RuntimeError, match="watch failed"):
+        await _collect_events(runner._run_task(meta=meta, timeout_sec=1, env=None, workdir=str(tmp_path), command="echo hi"))
+
+    assert terminated == ["tgcli_task_1"]
+
+
+@pytest.mark.asyncio
+async def test_run_task_terminates_ephemeral_session_when_generator_is_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), cancel_grace_sec=0)
+    terminated: list[str] = []
+
+    async def fake_start(*args, **kwargs):
+        return True, ""
+
+    async def fake_watch(*, meta, timeout_sec: int):
+        await asyncio.sleep(10)
+        yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
+
+    async def fake_terminate(session_name: str) -> bool:
+        terminated.append(session_name)
+        return True
+
+    monkeypatch.setattr(runner, "_start_ephemeral_session", fake_start)
+    monkeypatch.setattr(runner, "_watch_task", fake_watch)
+    monkeypatch.setattr(runner, "_terminate_session", fake_terminate)
+
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_task_close",
+        log_file=tmp_path / "close.log",
+        exit_file=tmp_path / "close.exit",
+        task_id="task-close",
+        workdir=str(tmp_path),
+        command_file=tmp_path / "close.cmd.sh",
+        persistent_terminal=False,
+    )
+    stream = runner._run_task(meta=meta, timeout_sec=1, env=None, workdir=str(tmp_path), command="echo hi")
+
+    first_event = await anext(stream)
+    await stream.aclose()
+
+    assert first_event.type == EventType.STARTED
+    assert terminated == ["tgcli_task_close"]
+
+
+@pytest.mark.asyncio
+async def test_run_task_does_not_terminate_persistent_session_when_watch_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), cancel_grace_sec=0)
+    terminated: list[str] = []
+
+    async def fake_ensure(*args, **kwargs):
+        return True, ""
+
+    async def fake_send(*args, **kwargs):
+        return True, ""
+
+    async def fake_watch(*, meta, timeout_sec: int):
+        raise RuntimeError("watch failed")
+        yield
+
+    async def fake_terminate(session_name: str) -> bool:
+        terminated.append(session_name)
+        return True
+
+    monkeypatch.setattr(runner, "_ensure_persistent_session", fake_ensure)
+    monkeypatch.setattr(runner, "_send_command", fake_send)
+    monkeypatch.setattr(runner, "_watch_task", fake_watch)
+    monkeypatch.setattr(runner, "_terminate_session", fake_terminate)
+
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_user_1",
+        log_file=tmp_path / "persistent.log",
+        exit_file=tmp_path / "persistent.exit",
+        task_id="task-persistent",
+        workdir=str(tmp_path),
+        command_file=tmp_path / "persistent.cmd.sh",
+        persistent_terminal=True,
+    )
+
+    with pytest.raises(RuntimeError, match="watch failed"):
+        await _collect_events(runner._run_task(meta=meta, timeout_sec=1, env=None, workdir=str(tmp_path), command="echo hi"))
+
+    assert terminated == []
+
+
+@pytest.mark.asyncio
+async def test_terminate_session_succeeds_when_session_is_already_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        calls.append(args)
+        if args and args[0] == "has-session":
+            return 1, "", "can't find session"
+        return 1, "", "can't find session"
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    assert await runner._terminate_session("missing-session") is True
+    assert ("kill-session", "-t", "missing-session") not in calls
+
+
+@pytest.mark.asyncio
+async def test_terminate_session_returns_false_when_kill_fails_and_session_remains(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        calls.append(args)
+        if args and args[0] == "has-session":
+            return 0, "", ""
+        if args and args[0] == "kill-session":
+            return 1, "", "kill failed"
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    assert await runner._terminate_session("stuck-session") is False
+    assert ("kill-session", "-t", "stuck-session") in calls
+
+
+@pytest.mark.asyncio
+async def test_cancel_returns_false_when_ephemeral_terminate_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path))
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_task_cancel",
+        log_file=tmp_path / "cancel.log",
+        exit_file=tmp_path / "cancel.exit",
+        task_id="task-cancel",
+        workdir=str(tmp_path),
+        persistent_terminal=False,
+    )
+    async with runner._lock:
+        runner._tasks[meta.task_id] = meta
+
+    async def fake_terminate(session_name: str) -> bool:
+        assert session_name == "tgcli_task_cancel"
+        return False
+
+    monkeypatch.setattr(runner, "_terminate_session", fake_terminate)
+
+    assert await runner.cancel("task-cancel") is False
+    assert meta.cancel_requested is True

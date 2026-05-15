@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shlex
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +17,8 @@ from app.services.session_store import SessionStore, is_claude_session_id
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
+logger = logging.getLogger(__name__)
+
 _RECOVERABLE_TMUX_SESSION_ERRORS = (
     "no server running",
     "can't find session",
@@ -164,6 +167,8 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             yield event
 
     async def _run_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int, env: dict[str, str] | None, workdir: str, command: str):
+        session_started = False
+        watch_completed = False
         if meta.persistent_terminal:
             if meta.interactive:
                 ready, err = await self._ensure_claude_interactive_session(session_name=meta.session_name, workdir=workdir, env=env)
@@ -188,6 +193,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             if not started:
                 yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
                 return
+            session_started = True
 
         async with self._lock:
             self._tasks[meta.task_id] = meta
@@ -203,12 +209,20 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 meta.claude_session_id = state.session_id
         else:
             self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_STARTED))
-        yield CLIEvent(type=EventType.STARTED, task_id=meta.task_id, content=f"tmux_session={meta.session_name}")
 
         try:
+            yield CLIEvent(type=EventType.STARTED, task_id=meta.task_id, content=f"tmux_session={meta.session_name}")
             async for event in self._watch_task(meta=meta, timeout_sec=timeout_sec):
                 yield event
+            watch_completed = True
         finally:
+            if session_started and not meta.persistent_terminal and not watch_completed:
+                terminated = await self._terminate_session(meta.session_name)
+                if not terminated:
+                    logger.warning(
+                        "ephemeral tmux session cleanup failed",
+                        extra={"task_id": meta.task_id, "session_name": meta.session_name},
+                    )
             async with self._lock:
                 self._tasks.pop(meta.task_id, None)
             if meta.command_file is not None:

@@ -164,11 +164,13 @@ class TmuxSessionMixin:
             await self._run_tmux("send-keys", "-t", session_name, "C-c")
             await asyncio.sleep(self._cancel_grace_sec)
             exists = await self._session_exists(session_name)
-            if exists:
-                await self._run_tmux("kill-session", "-t", session_name)
+            if not exists:
+                return True
+            await self._run_tmux("kill-session", "-t", session_name)
+            exists = await self._session_exists(session_name)
+            return not exists
         except Exception:
             return False
-        return True
 
     async def _session_exists(self, session_name: str) -> bool:
         try:
