@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from app.bot.presenters.structured_reply_presenter import (
@@ -32,6 +30,7 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
 from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
 from app.services.session_store import SessionStore
+from tests.fakes.structured import make_structured_session as _session
 
 
 class DummyTaskService:
@@ -94,23 +93,6 @@ class PersistentTaskService:
 
     async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
         return await self._store.wait_for_publish("claude-session-1", since_cursor=since_cursor, timeout_sec=timeout_sec)
-
-
-def _session(
-    *,
-    phase: SessionPhase,
-    turns: list[ConversationTurn] | None = None,
-    pending: PendingPermission | None = None,
-    tool_calls: dict[str, ToolCallRecord] | None = None,
-    session_id: str = "claude-session-1",
-):
-    return SimpleNamespace(
-        session_id=session_id,
-        phase=phase,
-        turns=turns or [],
-        pending_permission=pending,
-        tool_calls=tool_calls or {},
-    )
 
 
 @pytest.mark.asyncio

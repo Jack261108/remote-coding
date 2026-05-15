@@ -14,6 +14,7 @@ from app.bot.presenters.structured_reply_presenter import build_permission_promp
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
+from tests.fakes.structured import make_structured_session as _structured_session
 from tests.fakes.telegram import DummyMessage
 
 
@@ -143,16 +144,6 @@ async def test_run_prompt_and_stream_interactive_pump_silences_missing_structure
     assert repeated_calls
     assert any(call.kwargs.get("log_missing") is False for call in repeated_calls)
     assert repeated_calls[-1].kwargs == {"log_missing": True}
-
-
-def _structured_session(*, phase: SessionPhase, tool_calls: dict[str, ToolCallRecord] | None = None):
-    return SimpleNamespace(
-        session_id="claude-session-1",
-        phase=phase,
-        turns=[],
-        pending_permission=None,
-        tool_calls=tool_calls or {},
-    )
 
 
 def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
