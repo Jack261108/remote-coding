@@ -598,6 +598,55 @@ async def test_interactive_timeout_keeps_session_alive(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_interactive_timeout_resets_after_structured_progress(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.phase = SessionPhase.PROCESSING
+    runner._session_store._persist(state)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x-progress.exit",
+        task_id="t3-progress",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=claude_session,
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    async def update_progress_and_complete() -> None:
+        await asyncio.sleep(0.05)
+        state = runner._session_store.get(claude_session)
+        assert state is not None
+        state.checkpoint.last_offset = 1
+        runner._session_store._persist(state)
+        await asyncio.sleep(0.07)
+        state.turns.append(
+            ConversationTurn(
+                turn_id="turn-progress",
+                role="assistant",
+                text="完成",
+                is_complete=True,
+                source="jsonl",
+            )
+        )
+        state.phase = SessionPhase.WAITING_FOR_INPUT
+        state.checkpoint.last_offset = 2
+        runner._session_store._persist(state)
+
+    writer = asyncio.create_task(update_progress_and_complete())
+    events = [event async for event in runner._watch_task(meta=meta, timeout_sec=0.1)]
+    await writer
+
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
 async def test_interactive_completion_does_not_end_terminal_session_state(tmp_path: Path) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"

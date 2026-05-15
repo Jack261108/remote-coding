@@ -238,7 +238,7 @@ async def test_tool_message_manager_sends_subagent_aggregate_message() -> None:
     await manager.handle(_aggregate_output())
 
     assert len(root.sent) == 1
-    assert "🔄 2 agents running" in root.sent[0].text
+    assert "🔄 1/2 agents running" in root.sent[0].text
     assert "项目架构扫描 · 1 tool uses · Done" in root.sent[0].text
     assert "测试质量扫描 · 1 tool uses · Running" in root.sent[0].text
 
@@ -267,7 +267,7 @@ async def test_tool_message_manager_keeps_subagent_aggregate_when_edit_fails() -
     await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
 
     assert len(root.sent) == 1
-    assert "🔄 2 agents running" in root.sent[0].text
+    assert "🔄 1/2 agents running" in root.sent[0].text
 
     await manager.handle(_aggregate_output(second_status=ToolStatus.SUCCESS))
 

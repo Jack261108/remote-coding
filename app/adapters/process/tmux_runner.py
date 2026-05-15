@@ -294,7 +294,9 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         timed_out = False
         exit_code: int | None = None
         started_at = asyncio.get_running_loop().time()
+        timeout_anchor = started_at
         last_partial_emit = started_at
+        last_interactive_revision: int | None = None
         completion_candidate_key: tuple[object, ...] | None = None
         completion_candidate_seen_at: float | None = None
 
@@ -348,6 +350,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             if text:
                 position = new_position
                 if meta.interactive:
+                    timeout_anchor = now
                     self._process_interactive_chunk(meta=meta, offset=position)
                 else:
                     partial, events = self._split_to_events(task_id=meta.task_id, text=partial + text)
@@ -375,6 +378,12 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                     fallback_session_id=meta.session_name,
                     require_claude_session=True,
                 )
+                if active_state is not None:
+                    if last_interactive_revision is None:
+                        last_interactive_revision = active_state.revision
+                    elif active_state.revision != last_interactive_revision:
+                        last_interactive_revision = active_state.revision
+                        timeout_anchor = now
                 latest_completed_turn = self._latest_completed_assistant_turn(active_state) if active_state is not None else None
                 latest_completed_turn_is_current = latest_completed_turn is not None and (
                     (meta.command_started_at is not None and latest_completed_turn.started_at >= completion_started_after)
@@ -392,6 +401,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                         structured_offset_before_run = meta.baseline_offset
                         latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
                 if active_state is not None and active_state.checkpoint.last_offset > structured_offset_before_run:
+                    timeout_anchor = now
                     if latest_completed_turn is not None and not latest_completed_turn_is_current:
                         structured_offset_before_run = active_state.checkpoint.last_offset
                         latest_completed_turn_id_before_run = latest_completed_turn.turn_id
@@ -399,6 +409,8 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                         meta.baseline_completed_turn_id = latest_completed_turn_id_before_run
                     else:
                         saw_interactive_progress = True
+                        structured_offset_before_run = active_state.checkpoint.last_offset
+                        meta.baseline_offset = structured_offset_before_run
                 completion_phase = self._session_store.interactive_completion_phase(
                     terminal_id=meta.terminal_id,
                     workdir=meta.workdir,
@@ -425,7 +437,8 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 exit_code = self._read_exit_code(meta.exit_file)
                 break
 
-            if (now - started_at) >= timeout_sec:
+            timeout_started_at = timeout_anchor if meta.interactive else started_at
+            if (now - timeout_started_at) >= timeout_sec:
                 timed_out = True
                 if meta.persistent_terminal:
                     await self._interrupt_session(meta.session_name)

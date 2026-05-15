@@ -177,7 +177,10 @@ def build_subagent_aggregate_status_message(output: SubagentAggregateStatusOutpu
     containers = output.containers
     noun = _subagent_aggregate_noun(containers)
     icon = _aggregate_status_icon(_subagent_container_status_values(containers))
-    lines = [f"{icon} {len(containers)} {noun} {_subagent_aggregate_status_text(containers)}"]
+    status_text = _subagent_aggregate_status_text(containers)
+    status_count = _subagent_aggregate_status_count(containers, status_text=status_text)
+    count_text = str(len(containers)) if status_count == len(containers) else f"{status_count}/{len(containers)}"
+    lines = [f"{icon} {count_text} {noun} {status_text}"]
     display_containers = containers[:_TASK_LIST_VISIBLE_LIMIT]
     if display_containers:
         lines.append("")
@@ -299,6 +302,23 @@ def _subagent_aggregate_noun(containers: tuple[ToolStatusOutput, ...]) -> str:
 
 def _subagent_aggregate_status_text(containers: tuple[ToolStatusOutput, ...]) -> str:
     statuses = _subagent_container_status_values(containers)
+    if ToolStatus.WAITING_FOR_APPROVAL.value in statuses:
+        return "waiting"
+    if ToolStatus.RUNNING.value in statuses:
+        return "running"
+    if ToolStatus.ERROR.value in statuses:
+        return "failed"
+    if ToolStatus.INTERRUPTED.value in statuses:
+        return "interrupted"
+    return "finished"
+
+
+def _subagent_aggregate_status_count(containers: tuple[ToolStatusOutput, ...], *, status_text: str) -> int:
+    return sum(1 for container in containers if _subagent_container_aggregate_status_text(container) == status_text)
+
+
+def _subagent_container_aggregate_status_text(container: ToolStatusOutput) -> str:
+    statuses = _subagent_container_status_values((container,))
     if ToolStatus.WAITING_FOR_APPROVAL.value in statuses:
         return "waiting"
     if ToolStatus.RUNNING.value in statuses:

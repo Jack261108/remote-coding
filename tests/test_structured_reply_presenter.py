@@ -936,6 +936,44 @@ def test_build_subagent_aggregate_status_message_uses_waiting_icon_for_unknown_s
     assert message == "⏳ 1 agents finished\n\n- ⏳ 未知状态 · 0 tool uses · Done"
 
 
+def test_build_subagent_aggregate_status_message_counts_mixed_interrupted_agents() -> None:
+    message = build_subagent_aggregate_status_message(
+        SubagentAggregateStatusOutput(
+            message_key="subagent-aggregate",
+            containers=(
+                ToolStatusOutput(
+                    tool_use_id="agent-1",
+                    tool_name="Agent",
+                    tool_input={"description": "代码审查"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+                ToolStatusOutput(
+                    tool_use_id="agent-2",
+                    tool_name="Agent",
+                    tool_input={"description": "效率审查"},
+                    status=ToolStatus.INTERRUPTED.value,
+                ),
+                ToolStatusOutput(
+                    tool_use_id="agent-3",
+                    tool_name="Agent",
+                    tool_input={"description": "质量审查"},
+                    status=ToolStatus.INTERRUPTED.value,
+                ),
+                ToolStatusOutput(
+                    tool_use_id="agent-4",
+                    tool_name="Agent",
+                    tool_input={"description": "安全审查"},
+                    status=ToolStatus.SUCCESS.value,
+                ),
+            ),
+        )
+    )
+
+    assert message.startswith("⏹️ 2/4 agents interrupted")
+    assert "代码审查 · 0 tool uses · Done" in message
+    assert "效率审查 · 0 tool uses · Interrupted" in message
+
+
 def test_build_subagent_aggregate_status_message_formats_agent_summary() -> None:
     message = build_subagent_aggregate_status_message(
         SubagentAggregateStatusOutput(
