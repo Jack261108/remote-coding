@@ -25,6 +25,7 @@ from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.structured_session_resolver import StructuredSessionResolver
 from app.services.task_lifecycle_service import apply_task_event
+from app.services.terminal_session_service import TerminalSessionService
 from app.services.user_question_service import UserQuestionService
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,12 @@ class TaskService:
             get_structured_session=self._structured_session_resolver.get_structured_session,
             is_state_owned_by_user=self._structured_session_resolver.is_state_owned_by_user,
         )
+        self._terminal_session_service = TerminalSessionService(
+            settings=settings,
+            session_service=session_service,
+            cli_factory=cli_factory,
+            clear_user_questions=self._user_question_service.clear_user,
+        )
 
     async def create_and_run(
         self,
@@ -96,14 +103,12 @@ class TaskService:
         if not Path(selected_workdir).is_dir():
             raise ValueError(f"workdir 不存在或不是目录: {selected_workdir}")
 
-        terminal_mode = selected_provider == "claude_code" and self._settings.claude_tmux_mode
-
-        session = await self._session_service.get_or_create(
+        terminal_context = await self._terminal_session_service.resolve_for_task(
             user_id=user_id,
             provider=selected_provider,
             workdir=selected_workdir,
-            terminal_mode=terminal_mode,
         )
+        session = terminal_context.session
         logger.info(
             "session resolved",
             extra={
@@ -139,13 +144,8 @@ class TaskService:
         )
 
         adapter = self._cli_factory.get(record.provider)
-        terminal_key = session.terminal_id if session.terminal_mode else None
-        interactive = bool(
-            terminal_key
-            and record.provider == "claude_code"
-            and session.claude_chat_active
-            and self._settings.claude_tmux_mode
-        )
+        terminal_key = terminal_context.terminal_key
+        interactive = terminal_context.interactive
 
         if terminal_key:
             ensured, err = await self._ensure_and_reveal_terminal(
@@ -360,78 +360,10 @@ class TaskService:
         return await self._user_question_service.answer_pending_user_question_text(user_id=user_id, text=text)
 
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:
-        session = await self._session_service.get(user_id)
-        if session is None:
-            return False, "当前无 session"
-        if not session.terminal_mode or not session.terminal_id:
-            if session.claude_chat_active:
-                session.claude_session_id = None
-                await self._session_service.clear_claude_session(user_id=user_id)
-                await self._session_service.switch(user_id=user_id, claude_chat_active=False)
-                self._user_question_service.clear_user(user_id)
-                return True, "Claude 会话已退出"
-            return False, "当前没有可关闭的持久终端"
-
-        closed = await self._cli_factory.close_terminal(session.terminal_id)
-        if not closed:
-            return False, "终端不存在或关闭失败"
-
-        session.claude_session_id = None
-        await self._session_service.clear_claude_session(user_id=user_id)
-        await self._session_service.switch(user_id=user_id, terminal_mode=False, claude_chat_active=False)
-        self._user_question_service.clear_user(user_id)
-        return True, "终端已关闭"
+        return await self._terminal_session_service.close_terminal(user_id)
 
     async def open_claude_chat_session(self, user_id: int, *, workdir: str | None = None) -> tuple[bool, str]:
-        session = await self._session_service.get(user_id)
-        had_old_terminal = bool(session and session.terminal_mode and session.terminal_id)
-        self._user_question_service.clear_user(user_id)
-        if session is not None:
-            await self._session_service.clear_claude_session(user_id=user_id)
-        if had_old_terminal:
-            closed, text = await self.close_terminal(user_id)
-            if not closed and text != "终端不存在或关闭失败":
-                return False, f"旧终端关闭失败: {text}"
-
-        workdir_source = workdir or (session.workdir if session else self._settings.default_workdir)
-        selected_workdir = str(Path(workdir_source).resolve())
-        if workdir is None and not Path(selected_workdir).is_dir():
-            selected_workdir = str(Path(self._settings.default_workdir).resolve())
-        if not self._is_workdir_allowed(selected_workdir):
-            raise ValueError("workdir 不在 ALLOWED_WORKDIRS 白名单内")
-        if not Path(selected_workdir).is_dir():
-            return False, f"workdir 不存在或不是目录: {selected_workdir}"
-
-        updated_session = await self._session_service.switch(
-            user_id=user_id,
-            provider="claude_code",
-            workdir=selected_workdir,
-            terminal_mode=True,
-            claude_chat_active=True,
-        )
-
-        if not updated_session.terminal_id:
-            return False, "会话创建失败: terminal_id 为空"
-
-        ensure_result = await self._ensure_and_reveal_terminal(
-            terminal_id=updated_session.terminal_id,
-            workdir=updated_session.workdir,
-            reveal=True,
-            interactive=True,
-        )
-        if not ensure_result[0]:
-            await self._session_service.switch(user_id=user_id, terminal_mode=False, claude_chat_active=False)
-            return False, ensure_result[1]
-
-        detail = ensure_result[1]
-        if detail.startswith("未能自动打开桌面终端:"):
-            return True, detail
-
-        action = "Claude 会话已重建" if had_old_terminal else "Claude 会话已开启"
-        message = action
-        if detail:
-            message = f"{message}\n{detail}"
-        return True, message
+        return await self._terminal_session_service.open_claude_chat_session(user_id, workdir=workdir)
 
     def _extract_user_question_prompts_for_tool_use_id(
         self,
@@ -451,7 +383,7 @@ class TaskService:
         return self._is_workdir_allowed(str(Path(workdir).resolve()))
 
     async def bind_claude_session(self, *, user_id: int, claude_session_id: str, workdir: str | None = None) -> None:
-        await self._session_service.bind_claude_session(
+        await self._terminal_session_service.bind_claude_session(
             user_id=user_id,
             claude_session_id=claude_session_id,
             workdir=workdir,
@@ -480,24 +412,12 @@ class TaskService:
         reveal: bool,
         interactive: bool = False,
     ) -> tuple[bool, str]:
-        if interactive:
-            ensured, err = await self._cli_factory.ensure_claude_interactive_session(
-                terminal_key=terminal_id,
-                workdir=workdir,
-            )
-        else:
-            ensured, err = await self._cli_factory.ensure_terminal(terminal_key=terminal_id, workdir=workdir)
-
-        if not ensured:
-            return False, err
-
-        if not reveal:
-            return True, ""
-
-        revealed, reveal_text = await self._cli_factory.reveal_terminal(terminal_id)
-        if revealed:
-            return True, reveal_text
-        return True, f"未能自动打开桌面终端: {reveal_text}"
+        return await self._terminal_session_service.ensure_and_reveal_terminal(
+            terminal_id=terminal_id,
+            workdir=workdir,
+            reveal=reveal,
+            interactive=interactive,
+        )
 
     async def _apply_event(self, record: TaskRecord, event: CLIEvent) -> None:
         apply_task_event(
