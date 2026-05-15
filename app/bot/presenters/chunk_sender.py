@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramBadRequest
 from app.bot.presenters.telegram_formatting import split_markdownish_for_telegram
 
 
-SendText = Callable[[str], Awaitable[None]]
+SendText = Callable[[str], Awaitable[bool | None]]
 
 
 class ChunkSender:
@@ -21,9 +21,9 @@ class ChunkSender:
         self._last_flush = 0.0
         self._pending_flush_task: asyncio.Task | None = None
 
-    async def push(self, text: str, send_fn: SendText) -> None:
+    async def push(self, text: str, send_fn: SendText) -> bool:
         if not text:
-            return
+            return True
 
         payload_to_send = ""
         async with self._lock:
@@ -42,9 +42,10 @@ class ChunkSender:
                 self._pending_flush_task = asyncio.create_task(self._delayed_flush(send_fn))
 
         if payload_to_send:
-            await self._safe_send(payload_to_send, send_fn)
+            return await self._safe_send(payload_to_send, send_fn)
+        return True
 
-    async def flush(self, send_fn: SendText) -> None:
+    async def flush(self, send_fn: SendText) -> bool:
         payload = ""
         pending_task: asyncio.Task | None = None
         async with self._lock:
@@ -61,7 +62,8 @@ class ChunkSender:
                 pass
 
         if payload:
-            await self._safe_send(payload, send_fn)
+            return await self._safe_send(payload, send_fn)
+        return True
 
     async def _delayed_flush(self, send_fn: SendText) -> None:
         try:
@@ -95,21 +97,26 @@ class ChunkSender:
         max_len = min(4096, self._chunk_size)
         return split_markdownish_for_telegram(text, max_len)
 
-    async def _safe_send(self, payload: str, send_fn: SendText) -> None:
+    async def _safe_send(self, payload: str, send_fn: SendText) -> bool:
         if not payload:
-            return
+            return True
+        delivered = True
         for chunk in self._split(payload):
             if not chunk or not chunk.strip():
                 continue
             try:
-                await send_fn(chunk)
+                if await send_fn(chunk) is False:
+                    delivered = False
             except TelegramBadRequest as exc:
                 lowered = str(exc).lower()
                 if "text must be non-empty" in lowered:
+                    delivered = False
                     continue
                 if "message is too long" in lowered and len(chunk) > 1:
                     half = max(1, len(chunk) // 2)
-                    await self._safe_send(chunk[:half], send_fn)
-                    await self._safe_send(chunk[half:], send_fn)
+                    left_delivered = await self._safe_send(chunk[:half], send_fn)
+                    right_delivered = await self._safe_send(chunk[half:], send_fn)
+                    delivered = delivered and left_delivered and right_delivered
                 else:
                     raise
+        return delivered

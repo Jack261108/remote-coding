@@ -80,11 +80,78 @@ async def test_chunk_sender_ignores_non_empty_bad_request() -> None:
         if text.strip() == "hello":
             raise TelegramBadRequest(method="sendMessage", message="Bad Request: text must be non-empty")
 
-    await sender.push("hello", send_fn)
-    await sender.push("world", send_fn)
-    await sender.flush(send_fn)
+    assert await sender.push("hello", send_fn) is False
+    assert await sender.push("world", send_fn) is True
+    assert await sender.flush(send_fn) is True
 
     assert sent == ["hello", "world"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_sender_push_immediate_send_success_returns_true() -> None:
+    sender = ChunkSender(chunk_size=5, flush_interval_sec=100)
+    sent: list[str] = []
+
+    async def send_fn(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    assert await sender.push("hello", send_fn) is True
+    assert sent == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_sender_push_immediate_send_failure_returns_false() -> None:
+    sender = ChunkSender(chunk_size=5, flush_interval_sec=100)
+    sent: list[str] = []
+
+    async def send_fn(text: str) -> bool:
+        sent.append(text)
+        return False
+
+    assert await sender.push("hello", send_fn) is False
+    assert sent == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_sender_flush_buffered_send_failure_returns_false() -> None:
+    sender = ChunkSender(chunk_size=50, flush_interval_sec=100)
+    sent: list[str] = []
+
+    async def send_fn(text: str) -> bool:
+        sent.append(text)
+        return False
+
+    assert await sender.push("hello", send_fn) is True
+    assert await sender.flush(send_fn) is False
+    assert sent == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_sender_treats_none_send_result_as_success() -> None:
+    sender = ChunkSender(chunk_size=5, flush_interval_sec=100)
+    sent: list[str] = []
+
+    async def send_fn(text: str) -> None:
+        sent.append(text)
+
+    assert await sender.push("hello", send_fn) is True
+    assert sent == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_sender_too_long_split_propagates_child_failure() -> None:
+    sender = ChunkSender(chunk_size=10, flush_interval_sec=100)
+    sent: list[str] = []
+
+    async def send_fn(text: str) -> bool:
+        sent.append(text)
+        if text == "abcdefghij":
+            raise TelegramBadRequest(method="sendMessage", message="Bad Request: message is too long")
+        return text != "abcde"
+
+    assert await sender.push("abcdefghij", send_fn) is False
+    assert sent == ["abcdefghij", "abcde", "fghij"]
 
 
 @pytest.mark.asyncio

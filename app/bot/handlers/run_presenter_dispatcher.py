@@ -35,17 +35,17 @@ class PresenterOutputDispatcher:
         self._tool_message_manager = tool_message_manager
         self._task_id = task_id
 
-    async def send_text(self, text: str) -> None:
+    async def send_text(self, text: str) -> bool:
         normalized = normalize_stream_text(text)
         if not normalized:
-            return
-        await self._messenger.answer_safely(normalized)
+            return True
+        return await self._messenger.answer_safely(normalized)
 
-    async def push_text(self, text: str) -> None:
-        await self._sender.push(text, self.send_text)
+    async def push_text(self, text: str) -> bool:
+        return await self._sender.push(text, self.send_text)
 
-    async def flush(self) -> None:
-        await self._sender.flush(self.send_text)
+    async def flush(self) -> bool:
+        return await self._sender.flush(self.send_text)
 
     async def emit_presenter_messages(self, *, final: bool = False, log_missing: bool) -> None:
         for output in await self._presenter.poll(task_id=self._task_id, final=final, log_missing=log_missing):
@@ -69,19 +69,16 @@ class PresenterOutputDispatcher:
                 continue
             if isinstance(output, StructuredReplyOutput):
                 await self.flush()
-                delivered = True
 
-                async def send_structured_text(text: str) -> None:
-                    nonlocal delivered
+                async def send_structured_text(text: str) -> bool:
                     normalized = normalize_stream_text(text)
                     if not normalized:
-                        return
-                    if not await self._messenger.answer_safely(normalized):
-                        delivered = False
+                        return True
+                    return await self._messenger.answer_safely(normalized)
 
-                await self._sender.push(output.text, send_structured_text)
-                await self._sender.flush(send_structured_text)
-                if delivered:
+                push_ok = await self._sender.push(output.text, send_structured_text)
+                flush_ok = await self._sender.flush(send_structured_text)
+                if push_ok and flush_ok:
                     await self._presenter.acknowledge_delivery(output)
                 continue
             if isinstance(
