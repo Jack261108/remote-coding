@@ -28,6 +28,7 @@ from app.bot.presenters.structured_reply_models import (
     ToolStatusOutput,
     UserQuestionOutput,
 )
+from app.bot.presenters.structured_reply_snapshot_loader import StructuredReplySnapshotLoader
 from app.bot.presenters.structured_reply_text import (
     _MARKER_LINE_RE,
     normalize_stream_text,
@@ -76,6 +77,11 @@ class StructuredReplyPresenter:
         self._task_service = task_service
         self._user_id = user_id
         self._task_id = task_id
+        self._snapshot_loader = StructuredReplySnapshotLoader(
+            task_service=task_service,
+            user_id=user_id,
+            task_id=task_id,
+        )
         self._last_structured_turn_id: str | None = None
         self._last_pending_permission_key: str | None = None
         self._structured_session_available = False
@@ -95,7 +101,7 @@ class StructuredReplyPresenter:
         return self._structured_session_available
 
     async def prime(self, *, log_missing: bool = True, baseline_current_snapshot: bool = False) -> None:
-        snapshot = await self._load_snapshot(log_missing=log_missing)
+        snapshot = await self._snapshot_loader.load_snapshot(log_missing=log_missing)
         self._structured_session_available = snapshot.session_available
         self._current_session_id = snapshot.session_id
         self._last_phase = snapshot.phase
@@ -138,7 +144,7 @@ class StructuredReplyPresenter:
         self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
 
     async def wait_for_update(self, *, timeout_sec: float) -> bool:
-        current_session = await self._load_session(log_missing=False)
+        current_session = await self._snapshot_loader.load_session(log_missing=False)
         current_session_id = current_session.session_id if current_session is not None else None
         if current_session_id != self._current_session_id:
             self._current_session_id = current_session_id
@@ -178,7 +184,7 @@ class StructuredReplyPresenter:
         | FileToolAggregateStatusOutput
         | UserQuestionOutput
     ]:
-        snapshot = await self._load_snapshot(log_missing=log_missing)
+        snapshot = await self._snapshot_loader.load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
         tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
         self._user_question_tracker.set_cursor(
@@ -373,152 +379,3 @@ class StructuredReplyPresenter:
             tool_name=snapshot.pending_permission_tool_name,
             tool_input=snapshot.pending_permission_tool_input,
         )
-
-    async def _load_session(self, *, log_missing: bool):
-        if self._task_id is not None:
-            return await self._task_service.get_structured_session_for_task(
-                task_id=self._task_id,
-                user_id=self._user_id,
-                log_missing=log_missing,
-            )
-        return await self._task_service.get_structured_session(self._user_id, log_missing=log_missing)
-
-    async def _load_snapshot(self, *, log_missing: bool) -> _StructuredSnapshot:
-        session = await self._load_session(log_missing=log_missing)
-        if session is None:
-            if log_missing:
-                logger.info("structured reply unavailable", extra={"user_id": self._user_id, "reason": "no_structured_session"})
-            return _StructuredSnapshot(session_id=None, turn_id=None, reply="", session_available=False)
-
-        phase = session.phase.value
-        tool_states = tuple(self._collect_tool_states(session))
-        pending = getattr(session, "pending_permission", None)
-        pending_permission_key = None
-        pending_permission_tool_use_id = None
-        pending_permission_tool_name = None
-        pending_permission_tool_input = None
-        if pending is not None:
-            pending_permission_key = f"{pending.tool_use_id}:{pending.tool_name}"
-            pending_permission_tool_use_id = pending.tool_use_id
-            pending_permission_tool_name = pending.tool_name
-            pending_permission_tool_input = pending.tool_input
-
-        if not session.turns:
-            logger.info(
-                "structured reply unavailable",
-                extra={"user_id": self._user_id, "reason": "no_turns", "phase": phase},
-            )
-            return _StructuredSnapshot(
-                session_id=session.session_id,
-                turn_id=None,
-                reply="",
-                session_available=True,
-                phase=phase,
-                pending_permission_key=pending_permission_key,
-                pending_permission_tool_use_id=pending_permission_tool_use_id,
-                pending_permission_tool_name=pending_permission_tool_name,
-                pending_permission_tool_input=pending_permission_tool_input,
-                tool_states=tool_states,
-            )
-
-        for turn in reversed(session.turns):
-            if turn.role != "assistant" or not turn.is_complete:
-                continue
-            normalized_reply = normalize_stream_text(turn.text)
-            if not normalized_reply:
-                continue
-            preview = preview_stream_text(turn.text)
-            logger.info(
-                "structured reply loaded",
-                extra={
-                    "user_id": self._user_id,
-                    "turn_id": turn.turn_id,
-                    "phase": phase,
-                    "turn_count": len(session.turns),
-                    "preview_len": len(preview),
-                },
-            )
-            return _StructuredSnapshot(
-                session_id=session.session_id,
-                turn_id=turn.turn_id,
-                reply=normalized_reply,
-                session_available=True,
-                phase=phase,
-                pending_permission_key=pending_permission_key,
-                pending_permission_tool_use_id=pending_permission_tool_use_id,
-                pending_permission_tool_name=pending_permission_tool_name,
-                pending_permission_tool_input=pending_permission_tool_input,
-                tool_states=tool_states,
-            )
-
-        logger.info(
-            "structured reply unavailable",
-            extra={
-                "user_id": self._user_id,
-                "reason": "no_completed_assistant_turn",
-                "phase": phase,
-                "turn_count": len(session.turns),
-            },
-        )
-        return _StructuredSnapshot(
-            session_id=session.session_id,
-            turn_id=None,
-            reply="",
-            session_available=True,
-            phase=phase,
-            pending_permission_key=pending_permission_key,
-            pending_permission_tool_use_id=pending_permission_tool_use_id,
-            pending_permission_tool_name=pending_permission_tool_name,
-            pending_permission_tool_input=pending_permission_tool_input,
-            tool_states=tool_states,
-        )
-
-    def _collect_tool_states(self, session) -> list[_ToolStateSnapshot]:
-        tool_calls = getattr(session, "tool_calls", {}) or {}
-        if not isinstance(tool_calls, dict):
-            return []
-
-        states: list[_ToolStateSnapshot] = []
-        for tool_use_id, tool in tool_calls.items():
-            status = getattr(tool, "status", None)
-            status_value = getattr(status, "value", status)
-            tool_name = getattr(tool, "name", None)
-            tool_input = getattr(tool, "input", None)
-            if tool_input is not None and not isinstance(tool_input, dict):
-                tool_input = None
-            structured_result = getattr(tool, "structured_result", None)
-            if structured_result is not None and not isinstance(structured_result, dict):
-                structured_result = None
-            result = getattr(tool, "result", None)
-            states.append(
-                _ToolStateSnapshot(
-                    tool_use_id=str(tool_use_id),
-                    tool_name=str(tool_name) if tool_name is not None else None,
-                    tool_input=tool_input,
-                    status=str(status_value) if status_value is not None else None,
-                    result=str(result) if result is not None else None,
-                    structured_result=structured_result,
-                    subagent_tools=tuple(self._collect_subagent_tool_states(tool)),
-                )
-            )
-        return states
-
-    def _collect_subagent_tool_states(self, tool) -> list[_SubagentToolStateSnapshot]:
-        subagent_tools = getattr(tool, "subagent_tools", ()) or ()
-        states: list[_SubagentToolStateSnapshot] = []
-        for subagent_tool in subagent_tools:
-            status = getattr(subagent_tool, "status", None)
-            status_value = getattr(status, "value", status)
-            tool_name = getattr(subagent_tool, "name", None)
-            tool_input = getattr(subagent_tool, "input", None)
-            if tool_input is not None and not isinstance(tool_input, dict):
-                tool_input = None
-            states.append(
-                _SubagentToolStateSnapshot(
-                    tool_use_id=str(getattr(subagent_tool, "tool_use_id", "")),
-                    tool_name=str(tool_name) if tool_name is not None else None,
-                    tool_input=tool_input,
-                    status=str(status_value) if status_value is not None else None,
-                )
-            )
-        return states
