@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.bot.presenters.structured_reply_messages import _format_tool_input_detail, _is_user_question_tool
+from app.bot.presenters.structured_reply_messages import _format_tool_input_detail, _is_user_question_tool, build_user_question_prompt
 from app.bot.presenters.structured_reply_models import (
     _SubagentToolStateSnapshot,
     _ToolStateSnapshot,
@@ -12,8 +12,11 @@ from app.bot.presenters.structured_reply_models import (
     TaskListItemStatusOutput,
     TaskListStatusOutput,
     ToolStatusOutput,
+    UserQuestionOutput,
 )
 from app.domain.session_models import ToolStatus
+from app.domain.user_question_models import UserQuestionPrompt
+from app.services.session_store import parse_user_question_key
 
 _TASK_LIST_MESSAGE_KEY = "task-list"
 _SUBAGENT_AGGREGATE_MESSAGE_KEY = "subagent-aggregate"
@@ -286,6 +289,82 @@ def _subagent_status_outputs(tool: _ToolStateSnapshot) -> tuple[SubagentToolStat
         for subagent_tool in tool.subagent_tools
         if subagent_tool.status is not None and not _is_user_question_tool(subagent_tool.tool_name, subagent_tool.tool_input)
     )
+
+
+class UserQuestionTracker:
+    def __init__(self) -> None:
+        self._last_question_key: str | None = None
+        self._question_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
+
+    @property
+    def last_question_key(self) -> str | None:
+        return self._last_question_key
+
+    def reset(self) -> None:
+        self._last_question_key = None
+        self._question_keys_by_tool_id = {}
+
+    def set_cursor(self, question_key: str | None) -> None:
+        self._last_question_key = question_key
+
+    def baseline(
+        self,
+        *,
+        tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
+        pending_prompts: tuple[UserQuestionPrompt, ...],
+    ) -> None:
+        self._question_keys_by_tool_id = {
+            tool_use_id: tuple(prompt.key for prompt in prompts)
+            for tool_use_id, prompts in tool_question_prompts.items()
+            if prompts
+        }
+        if pending_prompts:
+            self._question_keys_by_tool_id[pending_prompts[0].tool_use_id] = tuple(prompt.key for prompt in pending_prompts)
+
+    def acknowledge(self, question: UserQuestionPrompt) -> None:
+        self._last_question_key = question.key
+        previous_keys = self._question_keys_by_tool_id.get(question.tool_use_id, ())
+        if question.key not in previous_keys:
+            self._question_keys_by_tool_id[question.tool_use_id] = (*previous_keys, question.key)
+
+    def collect_updates(
+        self,
+        *,
+        tool_states: tuple[_ToolStateSnapshot, ...],
+        tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
+        pending_question_prompts: tuple[UserQuestionPrompt, ...] = (),
+    ) -> list[UserQuestionOutput]:
+        messages: list[UserQuestionOutput] = []
+
+        active_prompt_group: tuple[UserQuestionPrompt, ...] = pending_question_prompts
+        active_tool_use_id: str | None = pending_question_prompts[0].tool_use_id if pending_question_prompts else None
+        if not active_prompt_group:
+            for tool in tool_states:
+                if tool.status != ToolStatus.RUNNING.value:
+                    continue
+                prompts = tool_question_prompts.get(tool.tool_use_id, ())
+                if not prompts:
+                    continue
+                active_prompt_group = prompts
+                active_tool_use_id = tool.tool_use_id
+
+        if active_tool_use_id is not None and active_prompt_group:
+            previous_keys = self._question_keys_by_tool_id.get(active_tool_use_id, ())
+            selected_prompt = active_prompt_group[0]
+            current_question_cursor = parse_user_question_key(self._last_question_key)
+            if current_question_cursor is not None and current_question_cursor[0] == active_tool_use_id:
+                matched_prompt = next((prompt for prompt in active_prompt_group if prompt.key == self._last_question_key), None)
+                if matched_prompt is not None:
+                    selected_prompt = matched_prompt
+            if selected_prompt.key not in previous_keys and selected_prompt.key != self._last_question_key:
+                messages.append(
+                    UserQuestionOutput(
+                        text=build_user_question_prompt(selected_prompt),
+                        question=selected_prompt,
+                    )
+                )
+
+        return messages
 
 
 class FlatToolTracker:

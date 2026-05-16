@@ -39,6 +39,7 @@ from app.bot.presenters.structured_reply_trackers import (
     FlatToolTracker,
     SubagentAggregateTracker,
     TaskListTracker,
+    UserQuestionTracker,
     _is_file_tool,
     _is_subagent_container_tool,
     _is_task_list_tool,
@@ -47,7 +48,6 @@ from app.bot.presenters.structured_reply_trackers import (
 )
 from app.domain.session_models import SessionPhase, ToolStatus
 from app.domain.user_question_models import UserQuestionPrompt, extract_user_question_prompts
-from app.services.session_store import parse_user_question_key
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -83,13 +83,12 @@ class StructuredReplyPresenter:
         self._fallback_announced = False
         self._revision = 0
         self._current_session_id: str | None = None
-        self._last_user_question_key: str | None = None
         self._last_phase: str | None = None
+        self._user_question_tracker = UserQuestionTracker()
         self._flat_tool_tracker = FlatToolTracker()
         self._task_list_tracker = TaskListTracker()
         self._subagent_tracker = SubagentAggregateTracker()
         self._file_tool_tracker = FileToolAggregateTracker()
-        self._question_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
 
     @property
     def structured_session_available(self) -> bool:
@@ -106,6 +105,7 @@ class StructuredReplyPresenter:
         if self._last_structured_turn_id is None and baseline_current_snapshot:
             self._last_structured_turn_id = snapshot.turn_id
         self._last_pending_permission_key = persisted_permission_key
+        pending_prompts: tuple[UserQuestionPrompt, ...] = ()
 
         if baseline_current_snapshot:
             tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
@@ -118,24 +118,22 @@ class StructuredReplyPresenter:
             )
             self._file_tool_tracker.baseline(file_tools)
             self._task_list_tracker.baseline(snapshot.tool_states)
-            self._question_keys_by_tool_id = {
-                tool_use_id: tuple(prompt.key for prompt in prompts)
-                for tool_use_id, prompts in tool_question_prompts.items()
-                if prompts
-            }
             pending_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
-            if pending_prompts:
-                self._question_keys_by_tool_id[pending_prompts[0].tool_use_id] = tuple(prompt.key for prompt in pending_prompts)
+            self._user_question_tracker.baseline(
+                tool_question_prompts=tool_question_prompts,
+                pending_prompts=pending_prompts,
+            )
         else:
             self._flat_tool_tracker.reset()
             self._task_list_tracker.reset()
             self._subagent_tracker.reset()
             self._file_tool_tracker.reset()
-            self._question_keys_by_tool_id = {}
+            self._user_question_tracker.reset()
 
-        self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
-        if self._last_user_question_key is None and baseline_current_snapshot and pending_prompts:
-            self._last_user_question_key = pending_prompts[0].key
+        question_cursor = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
+        if question_cursor is None and baseline_current_snapshot and pending_prompts:
+            question_cursor = pending_prompts[0].key
+        self._user_question_tracker.set_cursor(question_cursor)
 
         self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
 
@@ -150,7 +148,7 @@ class StructuredReplyPresenter:
             self._task_list_tracker.reset()
             self._subagent_tracker.reset()
             self._file_tool_tracker.reset()
-            self._question_keys_by_tool_id = {}
+            self._user_question_tracker.reset()
             self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
             return True
         changed = await self._task_service.wait_for_structured_session_update(
@@ -183,7 +181,9 @@ class StructuredReplyPresenter:
         snapshot = await self._load_snapshot(log_missing=log_missing)
         self._structured_session_available = self._structured_session_available or snapshot.session_available
         tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
-        self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
+        self._user_question_tracker.set_cursor(
+            await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
+        )
 
         messages: list[
             str
@@ -197,8 +197,8 @@ class StructuredReplyPresenter:
             | UserQuestionOutput
         ] = []
         pending_question_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
-        question_updates = self._collect_user_question_updates(
-            snapshot=snapshot,
+        question_updates = self._user_question_tracker.collect_updates(
+            tool_states=snapshot.tool_states,
             tool_question_prompts=tool_question_prompts,
             pending_question_prompts=pending_question_prompts,
         )
@@ -255,10 +255,7 @@ class StructuredReplyPresenter:
             question_key=output.question.key,
             task_id=self._task_id,
         )
-        self._last_user_question_key = output.question.key
-        previous_keys = self._question_keys_by_tool_id.get(output.question.tool_use_id, ())
-        if output.question.key not in previous_keys:
-            self._question_keys_by_tool_id[output.question.tool_use_id] = (*previous_keys, output.question.key)
+        self._user_question_tracker.acknowledge(output.question)
 
     async def _collect_reply(self, *, task_id: str, snapshot: _StructuredSnapshot, log_missing: bool) -> StructuredReplyOutput | None:
         if not snapshot.turn_id:
@@ -351,45 +348,6 @@ class StructuredReplyPresenter:
         subagent_output = self._subagent_tracker.update(tuple(subagent_containers))
         if subagent_output is not None:
             messages.append(subagent_output)
-
-        return messages
-
-    def _collect_user_question_updates(
-        self,
-        *,
-        snapshot: _StructuredSnapshot,
-        tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
-        pending_question_prompts: tuple[UserQuestionPrompt, ...] = (),
-    ) -> list[UserQuestionOutput]:
-        messages: list[UserQuestionOutput] = []
-
-        active_prompt_group: tuple[UserQuestionPrompt, ...] = pending_question_prompts
-        active_tool_use_id: str | None = pending_question_prompts[0].tool_use_id if pending_question_prompts else None
-        if not active_prompt_group:
-            for tool in snapshot.tool_states:
-                if tool.status != ToolStatus.RUNNING.value:
-                    continue
-                prompts = tool_question_prompts.get(tool.tool_use_id, ())
-                if not prompts:
-                    continue
-                active_prompt_group = prompts
-                active_tool_use_id = tool.tool_use_id
-
-        if active_tool_use_id is not None and active_prompt_group:
-            previous_keys = self._question_keys_by_tool_id.get(active_tool_use_id, ())
-            selected_prompt = active_prompt_group[0]
-            current_question_cursor = parse_user_question_key(self._last_user_question_key)
-            if current_question_cursor is not None and current_question_cursor[0] == active_tool_use_id:
-                matched_prompt = next((prompt for prompt in active_prompt_group if prompt.key == self._last_user_question_key), None)
-                if matched_prompt is not None:
-                    selected_prompt = matched_prompt
-            if selected_prompt.key not in previous_keys and selected_prompt.key != self._last_user_question_key:
-                messages.append(
-                    UserQuestionOutput(
-                        text=build_user_question_prompt(selected_prompt),
-                        question=selected_prompt,
-                    )
-                )
 
         return messages
 
