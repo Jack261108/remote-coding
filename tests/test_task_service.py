@@ -9,7 +9,6 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolCallRecord, ToolStatus
-from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 from tests.fakes.cli import DummyHookSocketServer, StubAdapter, StubFactory, expected_terminal_id, make_file_backed_session_service, make_settings
