@@ -288,6 +288,50 @@ def _subagent_status_outputs(tool: _ToolStateSnapshot) -> tuple[SubagentToolStat
     )
 
 
+class FlatToolTracker:
+    def __init__(self) -> None:
+        self._fingerprint_by_id: dict[str, tuple] = {}
+        self._emitted_tool_ids: set[str] = set()
+
+    def reset(self) -> None:
+        self._fingerprint_by_id = {}
+        self._emitted_tool_ids = set()
+
+    def baseline(self, tool_states: tuple[_ToolStateSnapshot, ...]) -> None:
+        self._fingerprint_by_id = {
+            tool.tool_use_id: _tool_state_fingerprint(tool)
+            for tool in tool_states
+            if tool.status is not None
+        }
+        self._emitted_tool_ids = set()
+
+    def update(
+        self,
+        *,
+        all_tool_states: tuple[_ToolStateSnapshot, ...],
+        flat_tools: tuple[_ToolStateSnapshot, ...],
+        suppress_new: bool,
+    ) -> tuple[ToolStatusOutput, ...]:
+        current_fingerprint_by_id = {
+            tool.tool_use_id: _tool_state_fingerprint(tool)
+            for tool in all_tool_states
+            if tool.status is not None
+        }
+        outputs: list[ToolStatusOutput] = []
+        for tool in flat_tools:
+            if tool.status is None:
+                continue
+            if suppress_new and tool.tool_use_id not in self._emitted_tool_ids:
+                continue
+            fingerprint = current_fingerprint_by_id.get(tool.tool_use_id)
+            if self._fingerprint_by_id.get(tool.tool_use_id) == fingerprint:
+                continue
+            outputs.append(_tool_status_output(tool))
+            self._emitted_tool_ids.add(tool.tool_use_id)
+        self._fingerprint_by_id = current_fingerprint_by_id
+        return tuple(outputs)
+
+
 class TaskListTracker:
     def __init__(self) -> None:
         self._fingerprint: tuple | None = None

@@ -36,13 +36,13 @@ from app.bot.presenters.structured_reply_text import (
 )
 from app.bot.presenters.structured_reply_trackers import (
     FileToolAggregateTracker,
+    FlatToolTracker,
     SubagentAggregateTracker,
     TaskListTracker,
     _is_file_tool,
     _is_subagent_container_tool,
     _is_task_list_tool,
     _subagent_container_output,
-    _tool_state_fingerprint,
     _tool_status_output,
 )
 from app.domain.session_models import SessionPhase, ToolStatus
@@ -85,11 +85,10 @@ class StructuredReplyPresenter:
         self._current_session_id: str | None = None
         self._last_user_question_key: str | None = None
         self._last_phase: str | None = None
-        self._tool_fingerprint_by_id: dict[str, tuple] = {}
+        self._flat_tool_tracker = FlatToolTracker()
         self._task_list_tracker = TaskListTracker()
         self._subagent_tracker = SubagentAggregateTracker()
         self._file_tool_tracker = FileToolAggregateTracker()
-        self._emitted_flat_tool_ids: set[str] = set()
         self._question_keys_by_tool_id: dict[str, tuple[str, ...]] = {}
 
     @property
@@ -110,7 +109,7 @@ class StructuredReplyPresenter:
 
         if baseline_current_snapshot:
             tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
-            self._tool_fingerprint_by_id = {tool.tool_use_id: _tool_state_fingerprint(tool) for tool in snapshot.tool_states}
+            self._flat_tool_tracker.baseline(snapshot.tool_states)
             self._subagent_tracker.baseline(snapshot.tool_states)
             file_tools = tuple(
                 _tool_status_output(tool)
@@ -119,7 +118,6 @@ class StructuredReplyPresenter:
             )
             self._file_tool_tracker.baseline(file_tools)
             self._task_list_tracker.baseline(snapshot.tool_states)
-            self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {
                 tool_use_id: tuple(prompt.key for prompt in prompts)
                 for tool_use_id, prompts in tool_question_prompts.items()
@@ -129,11 +127,10 @@ class StructuredReplyPresenter:
             if pending_prompts:
                 self._question_keys_by_tool_id[pending_prompts[0].tool_use_id] = tuple(prompt.key for prompt in pending_prompts)
         else:
-            self._tool_fingerprint_by_id = {}
+            self._flat_tool_tracker.reset()
             self._task_list_tracker.reset()
             self._subagent_tracker.reset()
             self._file_tool_tracker.reset()
-            self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {}
 
         self._last_user_question_key = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
@@ -149,11 +146,10 @@ class StructuredReplyPresenter:
             self._current_session_id = current_session_id
             self._last_phase = None
             self._last_pending_permission_key = None
-            self._tool_fingerprint_by_id = {}
+            self._flat_tool_tracker.reset()
             self._task_list_tracker.reset()
             self._subagent_tracker.reset()
             self._file_tool_tracker.reset()
-            self._emitted_flat_tool_ids = set()
             self._question_keys_by_tool_id = {}
             self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
             return True
@@ -320,14 +316,12 @@ class StructuredReplyPresenter:
             for subagent_tool in tool.subagent_tools
         }
         nested_tool_ids.update(self._subagent_tracker.known_nested_tool_ids())
-        current_fingerprint_by_id: dict[str, tuple] = {}
         subagent_containers: list[ToolStatusOutput] = []
         file_tools: list[ToolStatusOutput] = []
+        flat_tools: list[_ToolStateSnapshot] = []
         for tool in snapshot.tool_states:
             if tool.status is None:
                 continue
-            fingerprint = _tool_state_fingerprint(tool)
-            current_fingerprint_by_id[tool.tool_use_id] = fingerprint
             if tool.tool_use_id in nested_tool_ids:
                 continue
             if tool_question_prompts.get(tool.tool_use_id):
@@ -340,20 +334,15 @@ class StructuredReplyPresenter:
             if _is_file_tool(tool.tool_name) and not suppress_flat_tools:
                 file_tools.append(_tool_status_output(tool))
                 continue
-            if suppress_flat_tools and tool.tool_use_id not in self._emitted_flat_tool_ids:
-                continue
-            previous_fingerprint = self._tool_fingerprint_by_id.get(tool.tool_use_id)
-            if previous_fingerprint == fingerprint:
-                continue
-            messages.append(
-                ToolStatusOutput(
-                    tool_use_id=tool.tool_use_id,
-                    tool_name=tool.tool_name,
-                    tool_input=tool.tool_input,
-                    status=tool.status,
-                )
+            flat_tools.append(tool)
+
+        messages.extend(
+            self._flat_tool_tracker.update(
+                all_tool_states=snapshot.tool_states,
+                flat_tools=tuple(flat_tools),
+                suppress_new=suppress_flat_tools,
             )
-            self._emitted_flat_tool_ids.add(tool.tool_use_id)
+        )
 
         file_tool_output = self._file_tool_tracker.update(tuple(file_tools))
         if file_tool_output is not None:
@@ -363,7 +352,6 @@ class StructuredReplyPresenter:
         if subagent_output is not None:
             messages.append(subagent_output)
 
-        self._tool_fingerprint_by_id = current_fingerprint_by_id
         return messages
 
     def _collect_user_question_updates(
