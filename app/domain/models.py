@@ -100,6 +100,8 @@ class SessionContext:
     claude_chat_active: bool = False
     claude_session_id: str | None = None
     updated_at: datetime = field(default_factory=utc_now)
+    attached_user_ids: list[int] = field(default_factory=list)
+    is_owner: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -112,6 +114,8 @@ class SessionContext:
             "claude_chat_active": self.claude_chat_active,
             "claude_session_id": self.claude_session_id,
             "updated_at": self.updated_at.isoformat(),
+            "attached_user_ids": list(self.attached_user_ids),
+            "is_owner": self.is_owner,
         }
 
     @classmethod
