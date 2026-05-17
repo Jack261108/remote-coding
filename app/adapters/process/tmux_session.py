@@ -7,18 +7,38 @@ from pathlib import Path
 from app.domain.user_question_models import USER_QUESTION_TUI_FALLBACK_ERROR
 
 
+_TMUX_TERMINAL_DEFAULTS: dict[str, str] = {
+    "TERM": "xterm-256color",
+    "COLORTERM": "truecolor",
+}
+
+
 class TmuxSessionMixin:
     _tmux_bin: str
     _cancel_grace_sec: float
     _enter_delay_sec: float
 
+    @staticmethod
+    def _build_tmux_env(env: dict[str, str] | None) -> dict[str, str]:
+        """Merge caller env with terminal defaults and clear tmux-specific vars.
+
+        Detached tmux sessions overwrite terminal env vars, which prevents
+        Claude CLI's Ink framework from enabling features like the kitty
+        keyboard protocol.  This method injects sensible defaults and removes
+        ``TMUX`` / ``TMUX_PANE`` so the CLI sees a normal terminal.
+        """
+        merged = {**_TMUX_TERMINAL_DEFAULTS, **(env or {})}
+        merged.pop("TMUX", None)
+        merged.pop("TMUX_PANE", None)
+        return merged
+
     async def _start_ephemeral_session(self, session_name: str, *, workdir: str, env: dict[str, str] | None, command: str) -> tuple[bool, str]:
         if not Path(workdir).is_dir():
             return False, f"workdir 不存在或不是目录: {workdir}"
+        merged_env = self._build_tmux_env(env)
         args = ["new-session", "-d", "-s", session_name, "-c", workdir]
-        if env:
-            for key, value in env.items():
-                args.extend(["-e", f"{key}={value}"])
+        for key, value in merged_env.items():
+            args.extend(["-e", f"{key}={value}"])
         args.append(command)
         try:
             code, _, err_text = await self._run_tmux(*args)
@@ -37,10 +57,10 @@ class TmuxSessionMixin:
         exists = await self._session_exists(session_name)
         if exists:
             return True, ""
+        merged_env = self._build_tmux_env(env)
         args = ["new-session", "-d", "-s", session_name, "-c", workdir]
-        if env:
-            for key, value in env.items():
-                args.extend(["-e", f"{key}={value}"])
+        for key, value in merged_env.items():
+            args.extend(["-e", f"{key}={value}"])
         try:
             code, _, err_text = await self._run_tmux(*args)
         except FileNotFoundError:
