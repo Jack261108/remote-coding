@@ -53,6 +53,20 @@ class _TmuxTaskMeta:
     command_started_at: datetime | None = None
 
 
+@dataclass
+class _InteractiveWatchState:
+    """Mutable state for interactive completion detection across ticks."""
+
+    watch_started_at: datetime
+    completion_started_after: datetime
+    latest_completed_turn_id_before_run: str | None = None
+    saw_interactive_progress: bool = False
+    structured_offset_before_run: int = 0
+    last_interactive_revision: int | None = None
+    completion_candidate_key: tuple[object, ...] | None = None
+    completion_candidate_seen_at: float | None = None
+
+
 class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
     def __init__(
         self,
@@ -314,59 +328,25 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
 
     async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
         watch_started_at = utc_now()
-        completion_started_after = meta.command_started_at or watch_started_at
+        watch_state = _InteractiveWatchState(
+            watch_started_at=watch_started_at,
+            completion_started_after=meta.command_started_at or watch_started_at,
+            latest_completed_turn_id_before_run=meta.baseline_completed_turn_id,
+            structured_offset_before_run=meta.baseline_offset,
+        )
         position = 0
-        latest_completed_turn_id_before_run: str | None = meta.baseline_completed_turn_id
-        saw_interactive_progress = False
-        structured_offset_before_run = meta.baseline_offset
         partial = ""
         timed_out = False
         exit_code: int | None = None
         started_at = asyncio.get_running_loop().time()
         timeout_anchor = started_at
         last_partial_emit = started_at
-        last_interactive_revision: int | None = None
-        completion_candidate_key: tuple[object, ...] | None = None
-        completion_candidate_seen_at: float | None = None
-
-        def completion_turn_ready(state: SessionState, turn: ConversationTurn, *, observed_at: float) -> bool:
-            nonlocal completion_candidate_key, completion_candidate_seen_at
-            candidate_key = self._interactive_completion_candidate_key(state, turn)
-            if candidate_key is None:
-                completion_candidate_key = None
-                completion_candidate_seen_at = None
-                return False
-            if candidate_key != completion_candidate_key:
-                completion_candidate_key = candidate_key
-                completion_candidate_seen_at = observed_at
-                return self._interactive_completion_grace_sec <= 0
-            return completion_candidate_seen_at is not None and (observed_at - completion_candidate_seen_at) >= self._interactive_completion_grace_sec
 
         if meta.interactive:
-            state = self._session_store.mark_interactive_turn_processing(
-                terminal_id=meta.terminal_id,
-                workdir=meta.workdir,
-                claude_session_id=meta.claude_session_id,
-                fallback_session_id=meta.session_name,
-            )
-            if state is not None:
-                if is_claude_session_id(state.session_id):
-                    meta.claude_session_id = state.session_id
-                    if not meta.baseline_captured:
-                        latest_completed_turn = self._latest_completed_assistant_turn(state)
-                        current_completed_turn = latest_completed_turn is not None and latest_completed_turn.started_at >= completion_started_after
-                        if current_completed_turn and latest_completed_turn is not None:
-                            if completion_turn_ready(state, latest_completed_turn, observed_at=started_at):
-                                exit_code = 0
-                        else:
-                            self._record_interactive_baseline(meta=meta, state=state)
-                            structured_offset_before_run = meta.baseline_offset
-                            latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
-                elif not meta.baseline_captured:
-                    structured_offset_before_run = state.checkpoint.last_offset
+            exit_code = self._init_interactive_watch(meta=meta, watch_state=watch_state, now=started_at)
             position = self._interactive_log_position(meta.log_file)
-            if latest_completed_turn_id_before_run is None and not meta.baseline_captured:
-                latest_completed_turn_id_before_run = self._session_store.latest_completed_assistant_turn_id(
+            if watch_state.latest_completed_turn_id_before_run is None and not meta.baseline_captured:
+                watch_state.latest_completed_turn_id_before_run = self._session_store.latest_completed_assistant_turn_id(
                     terminal_id=meta.terminal_id,
                     workdir=meta.workdir,
                     claude_session_id=meta.claude_session_id,
@@ -375,7 +355,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
 
         while exit_code is None:
             now = asyncio.get_running_loop().time()
-            active_state: SessionState | None = None
             text, new_position = self._read_new_text(meta.log_file, position)
             if text:
                 position = new_position
@@ -393,75 +372,16 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 last_partial_emit = now
 
             if meta.interactive:
-                resolved_session_id = self._session_store.resolve_interactive_session_id(
-                    terminal_id=meta.terminal_id,
-                    claude_session_id=meta.claude_session_id,
-                    fallback_session_id=meta.session_name,
-                    require_claude_session=True,
-                )
-                if resolved_session_id is not None:
-                    meta.claude_session_id = resolved_session_id
-                active_state = self._session_store.get_interactive_state(
-                    terminal_id=meta.terminal_id,
-                    workdir=meta.workdir,
-                    claude_session_id=meta.claude_session_id,
-                    fallback_session_id=meta.session_name,
-                    require_claude_session=True,
-                )
-                if active_state is not None:
-                    if last_interactive_revision is None:
-                        last_interactive_revision = active_state.revision
-                    elif active_state.revision != last_interactive_revision:
-                        last_interactive_revision = active_state.revision
-                        timeout_anchor = now
-                latest_completed_turn = self._latest_completed_assistant_turn(active_state) if active_state is not None else None
-                latest_completed_turn_is_current = latest_completed_turn is not None and (
-                    (meta.command_started_at is not None and latest_completed_turn.started_at >= completion_started_after)
-                    or (meta.command_started_at is None and meta.baseline_captured and latest_completed_turn.turn_id != latest_completed_turn_id_before_run)
-                    or (meta.command_started_at is None and not meta.baseline_captured and latest_completed_turn.started_at >= watch_started_at)
-                )
-                if active_state is not None and is_claude_session_id(active_state.session_id) and not meta.baseline_captured:
-                    meta.claude_session_id = active_state.session_id
-                    if latest_completed_turn_is_current and latest_completed_turn is not None:
-                        if completion_turn_ready(active_state, latest_completed_turn, observed_at=now):
-                            exit_code = 0
-                            break
-                    else:
-                        self._record_interactive_baseline(meta=meta, state=active_state)
-                        structured_offset_before_run = meta.baseline_offset
-                        latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
-                if active_state is not None and active_state.checkpoint.last_offset > structured_offset_before_run:
-                    timeout_anchor = now
-                    if latest_completed_turn is not None and not latest_completed_turn_is_current:
-                        structured_offset_before_run = active_state.checkpoint.last_offset
-                        latest_completed_turn_id_before_run = latest_completed_turn.turn_id
-                        meta.baseline_offset = structured_offset_before_run
-                        meta.baseline_completed_turn_id = latest_completed_turn_id_before_run
-                    else:
-                        saw_interactive_progress = True
-                        structured_offset_before_run = active_state.checkpoint.last_offset
-                        meta.baseline_offset = structured_offset_before_run
-                completion_phase = self._session_store.interactive_completion_phase(
-                    terminal_id=meta.terminal_id,
-                    workdir=meta.workdir,
-                    claude_session_id=meta.claude_session_id,
-                    fallback_session_id=meta.session_name,
-                )
-                completion_ready = latest_completed_turn is None or (
-                    latest_completed_turn_is_current
-                    and active_state is not None
-                    and completion_turn_ready(active_state, latest_completed_turn, observed_at=now)
-                )
-                if completion_phase is not None and saw_interactive_progress and completion_ready:
-                    exit_code = 0
+                tick_result, active_state = self._tick_interactive_watch(meta=meta, watch_state=watch_state, now=now)
+                if tick_result is not None:
+                    exit_code = tick_result
                     break
-                if latest_completed_turn is not None and latest_completed_turn_is_current:
-                    if active_state is not None and completion_turn_ready(active_state, latest_completed_turn, observed_at=now):
-                        exit_code = 0
-                        break
-                elif latest_completed_turn is not None and latest_completed_turn.turn_id != latest_completed_turn_id_before_run:
-                    latest_completed_turn_id_before_run = latest_completed_turn.turn_id
-                    meta.baseline_completed_turn_id = latest_completed_turn_id_before_run
+                if active_state is not None:
+                    if watch_state.last_interactive_revision is None:
+                        watch_state.last_interactive_revision = active_state.revision
+                    elif active_state.revision != watch_state.last_interactive_revision:
+                        watch_state.last_interactive_revision = active_state.revision
+                        timeout_anchor = now
 
             if meta.exit_file.exists():
                 exit_code = self._read_exit_code(meta.exit_file)
@@ -482,9 +402,9 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                         log_position=position,
                         baseline_captured=meta.baseline_captured,
                         baseline_offset=meta.baseline_offset,
-                        last_interactive_revision=last_interactive_revision,
-                        saw_interactive_progress=saw_interactive_progress,
-                        **self._structured_state_log_extra(active_state),
+                        last_interactive_revision=watch_state.last_interactive_revision,
+                        saw_interactive_progress=watch_state.saw_interactive_progress,
+                        **self._structured_state_log_extra(None),
                     ),
                 )
                 if meta.persistent_terminal:
@@ -502,7 +422,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                         action=action,
                         log_position=position,
                         elapsed_sec=round(now - started_at, 3),
-                        **self._structured_state_log_extra(active_state),
                     ),
                 )
                 if meta.persistent_terminal:
@@ -852,3 +771,139 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             if any(subtool.started_at >= turn_completed_at for subtool in tool.subagent_tools):
                 return True
         return False
+
+    def _init_interactive_watch(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        watch_state: _InteractiveWatchState,
+        now: float,
+    ) -> int | None:
+        """Initialize interactive watch state before the main loop. Returns exit_code if already complete."""
+        state = self._session_store.mark_interactive_turn_processing(
+            terminal_id=meta.terminal_id,
+            workdir=meta.workdir,
+            claude_session_id=meta.claude_session_id,
+            fallback_session_id=meta.session_name,
+        )
+        if state is not None:
+            if is_claude_session_id(state.session_id):
+                meta.claude_session_id = state.session_id
+                if not meta.baseline_captured:
+                    latest_completed_turn = self._latest_completed_assistant_turn(state)
+                    is_current = self._is_current_completed_turn(latest_completed_turn, meta=meta, watch_state=watch_state)
+                    if is_current and latest_completed_turn is not None:
+                        if self._is_interactive_completion_turn_ready(state, latest_completed_turn, watch_state, observed_at=now):
+                            return 0
+                    else:
+                        self._record_interactive_baseline(meta=meta, state=state)
+                        watch_state.structured_offset_before_run = meta.baseline_offset
+                        watch_state.latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
+            elif not meta.baseline_captured:
+                watch_state.structured_offset_before_run = state.checkpoint.last_offset
+        return None
+
+    def _is_interactive_completion_turn_ready(
+        self,
+        state: SessionState,
+        turn: ConversationTurn,
+        watch_state: _InteractiveWatchState,
+        *,
+        observed_at: float,
+    ) -> bool:
+        candidate_key = self._interactive_completion_candidate_key(state, turn)
+        if candidate_key is None:
+            watch_state.completion_candidate_key = None
+            watch_state.completion_candidate_seen_at = None
+            return False
+        if candidate_key != watch_state.completion_candidate_key:
+            watch_state.completion_candidate_key = candidate_key
+            watch_state.completion_candidate_seen_at = observed_at
+            return self._interactive_completion_grace_sec <= 0
+        return watch_state.completion_candidate_seen_at is not None and (observed_at - watch_state.completion_candidate_seen_at) >= self._interactive_completion_grace_sec
+
+    def _is_current_completed_turn(
+        self,
+        turn: ConversationTurn | None,
+        *,
+        meta: _TmuxTaskMeta,
+        watch_state: _InteractiveWatchState,
+    ) -> bool:
+        if turn is None:
+            return False
+        if meta.command_started_at is not None:
+            return turn.started_at >= watch_state.completion_started_after
+        if meta.baseline_captured:
+            return turn.turn_id != watch_state.latest_completed_turn_id_before_run
+        return turn.started_at >= watch_state.watch_started_at
+
+    def _tick_interactive_watch(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        watch_state: _InteractiveWatchState,
+        now: float,
+    ) -> tuple[int | None, SessionState | None]:
+        """Process one interactive watch tick.
+
+        Returns (exit_code, active_state). exit_code is set if completion detected.
+        active_state is returned so the caller can check revision changes for timeout reset.
+        """
+        resolved_session_id = self._session_store.resolve_interactive_session_id(
+            terminal_id=meta.terminal_id,
+            claude_session_id=meta.claude_session_id,
+            fallback_session_id=meta.session_name,
+            require_claude_session=True,
+        )
+        if resolved_session_id is not None:
+            meta.claude_session_id = resolved_session_id
+        active_state = self._session_store.get_interactive_state(
+            terminal_id=meta.terminal_id,
+            workdir=meta.workdir,
+            claude_session_id=meta.claude_session_id,
+            fallback_session_id=meta.session_name,
+            require_claude_session=True,
+        )
+        latest_completed_turn = self._latest_completed_assistant_turn(active_state) if active_state is not None else None
+        latest_completed_turn_is_current = self._is_current_completed_turn(
+            latest_completed_turn, meta=meta, watch_state=watch_state,
+        )
+        if active_state is not None and is_claude_session_id(active_state.session_id) and not meta.baseline_captured:
+            meta.claude_session_id = active_state.session_id
+            if latest_completed_turn_is_current and latest_completed_turn is not None:
+                if self._is_interactive_completion_turn_ready(active_state, latest_completed_turn, watch_state, observed_at=now):
+                    return 0, active_state
+            else:
+                self._record_interactive_baseline(meta=meta, state=active_state)
+                watch_state.structured_offset_before_run = meta.baseline_offset
+                watch_state.latest_completed_turn_id_before_run = meta.baseline_completed_turn_id
+        if active_state is not None and active_state.checkpoint.last_offset > watch_state.structured_offset_before_run:
+            if latest_completed_turn is not None and not latest_completed_turn_is_current:
+                watch_state.structured_offset_before_run = active_state.checkpoint.last_offset
+                watch_state.latest_completed_turn_id_before_run = latest_completed_turn.turn_id
+                meta.baseline_offset = watch_state.structured_offset_before_run
+                meta.baseline_completed_turn_id = watch_state.latest_completed_turn_id_before_run
+            else:
+                watch_state.saw_interactive_progress = True
+                watch_state.structured_offset_before_run = active_state.checkpoint.last_offset
+                meta.baseline_offset = watch_state.structured_offset_before_run
+        completion_phase = self._session_store.interactive_completion_phase(
+            terminal_id=meta.terminal_id,
+            workdir=meta.workdir,
+            claude_session_id=meta.claude_session_id,
+            fallback_session_id=meta.session_name,
+        )
+        completion_ready = latest_completed_turn is None or (
+            latest_completed_turn_is_current
+            and active_state is not None
+            and self._is_interactive_completion_turn_ready(active_state, latest_completed_turn, watch_state, observed_at=now)
+        )
+        if completion_phase is not None and watch_state.saw_interactive_progress and completion_ready:
+            return 0, active_state
+        if latest_completed_turn is not None and latest_completed_turn_is_current:
+            if active_state is not None and self._is_interactive_completion_turn_ready(active_state, latest_completed_turn, watch_state, observed_at=now):
+                return 0, active_state
+        elif latest_completed_turn is not None and latest_completed_turn.turn_id != watch_state.latest_completed_turn_id_before_run:
+            watch_state.latest_completed_turn_id_before_run = latest_completed_turn.turn_id
+            meta.baseline_completed_turn_id = watch_state.latest_completed_turn_id_before_run
+        return None, active_state
