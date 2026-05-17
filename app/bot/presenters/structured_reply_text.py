@@ -4,6 +4,7 @@ import re
 
 _MARKER_LINE_RE = re.compile(r"^\s*_*(?:TGCLI_BEGIN|TGCLI_DONE)_*(?:\s*[:：]?\s*[A-Za-z0-9_-]+)?\s*$", re.IGNORECASE)
 _BLANK_LINE_BURST_RE = re.compile(r"\n{3,}")
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _STREAM_PREVIEW_CHAR_LIMIT = 1800
 _STREAM_PREVIEW_LINE_LIMIT = 60
 _PERMISSION_INPUT_CHAR_LIMIT = 280
@@ -24,8 +25,12 @@ def strip_bridge_markers(text: str) -> str:
     return "\n".join(kept)
 
 
+def strip_ansi_escapes(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
 def normalize_stream_text(text: str) -> str:
-    cleaned = strip_bridge_markers(text).replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = strip_ansi_escapes(strip_bridge_markers(text)).replace("\r\n", "\n").replace("\r", "\n")
     if not cleaned.strip():
         return ""
 
