@@ -6,9 +6,11 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.bot.handlers.command_attach import register_attach_handler
 from app.bot.handlers.command_cancel import register_cancel_handler
 from app.bot.handlers.command_claude import register_claude_handler
 from app.bot.handlers.command_exit import register_exit_handler
+from app.bot.handlers.command_list import register_list_handler
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
@@ -16,13 +18,20 @@ from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
+from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 
 
-def create_router(*, settings: Settings, task_service: TaskService, session_service: SessionService) -> Router:
+def create_router(
+    *,
+    settings: Settings,
+    task_service: TaskService,
+    session_service: SessionService,
+    registry_service: SessionRegistryService | None = None,
+) -> Router:
     router = Router()
 
     @router.message(Command("start"))
@@ -43,6 +52,9 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
             "命令:\n"
             "/run <provider> <task text>\n"
             "/claude [workdir] (开启 Claude 会话模式)\n"
+            "/list (查看活跃会话)\n"
+            "/attach <terminal_id> (连接到会话)\n"
+            "/detach (断开当前会话)\n"
             "/status [task_id]\n"
             "/cancel <task_id>\n"
             "/session [provider] [workdir]\n"
@@ -70,6 +82,9 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
     register_permission_handlers(router, task_service=task_service)
     register_user_question_handlers(router, task_service=task_service)
     register_exit_handler(router, task_service=task_service)
+    if registry_service is not None:
+        register_list_handler(router, registry_service=registry_service)
+        register_attach_handler(router, registry_service=registry_service)
 
     @router.message(F.text & ~F.text.startswith("/"))
     async def command_claude_chat_text(message: Message) -> None:
@@ -96,6 +111,12 @@ def create_router(*, settings: Settings, task_service: TaskService, session_serv
         if session is None or not session.claude_chat_active:
             await message.answer("请先发送 /claude")
             return
+
+        # Auto-reattach: validate tmux session is still alive
+        if registry_service is not None and session.terminal_id:
+            reattached = await registry_service.validate_or_reattach(user_id)
+            if reattached is not None:
+                session = reattached
 
         stream_task = await run_prompt_and_stream(
             message=message,

@@ -63,6 +63,8 @@ class Settings(BaseSettings):
 
     task_output_char_limit: int = Field(120_000, alias="TASK_OUTPUT_CHAR_LIMIT")
 
+    session_health_check_interval_sec: float = Field(30.0, alias="SESSION_HEALTH_CHECK_INTERVAL_SEC")
+
     @field_validator("tg_allowed_user_ids", mode="before")
     @classmethod
     def parse_user_ids(cls, value: Any) -> list[int]:

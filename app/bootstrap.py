@@ -27,6 +27,7 @@ from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.interrupt_watcher import InterruptWatcher
 from app.services.session_service import SessionService
+from app.services.session_registry import SessionRegistryService
 from app.services.session_store import SessionStore
 from app.domain.hook_models import HookEvent
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
@@ -108,6 +109,13 @@ class AppContainer:
             structured_session_store=self.structured_session_store,
             hook_socket_server=self.hook_socket_server,
         )
+        self.session_registry = SessionRegistryService(
+            session_service=self.session_service,
+            session_store=self.structured_session_store,
+            tmux_runner=self.tmux_runner,
+            file_session_store=self.file_session_store,
+            health_check_interval_sec=settings.session_health_check_interval_sec,
+        )
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
         self._jsonl_sync_requests: dict[str, str] = {}
         self._jsonl_sync_locks: dict[str, asyncio.Lock] = {}
@@ -125,12 +133,14 @@ class AppContainer:
         self._start_interrupt_watchers()
         self._start_agent_file_watchers()
         self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
+        await self.session_registry.start_health_check()
         self._started = True
 
     async def stop(self) -> None:
         if not self._started:
             await self.bot.session.close()
             return
+        await self.session_registry.stop_health_check()
         await self._stop_periodic_recheck_task()
         await self._stop_jsonl_sync_tasks()
         await self.agent_file_watcher.stop_all()
@@ -624,5 +634,6 @@ class AppContainer:
             settings=self.settings,
             task_service=self.task_service,
             session_service=self.session_service,
+            registry_service=self.session_registry,
         )
         self.dispatcher.include_router(router)

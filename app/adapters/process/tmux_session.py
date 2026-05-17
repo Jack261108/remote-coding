@@ -179,6 +179,16 @@ class TmuxSessionMixin:
         except Exception:
             return False
 
+    async def _list_managed_sessions(self) -> list[str]:
+        """List all tmux sessions with the tgcli_ prefix."""
+        try:
+            code, stdout, _ = await self._run_tmux("list-sessions", "-F", "#{session_name}")
+            if code != 0:
+                return []
+            return [line for line in stdout.strip().split("\n") if line.startswith("tgcli_")]
+        except Exception:
+            return []
+
     async def _session_current_command(self, session_name: str) -> str:
         try:
             code, stdout, _ = await self._run_tmux("display-message", "-p", "-t", session_name, "#{pane_current_command}")

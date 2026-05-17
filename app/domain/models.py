@@ -130,4 +130,19 @@ class SessionContext:
             claude_chat_active=bool(payload.get("claude_chat_active", False)),
             claude_session_id=str(payload["claude_session_id"]) if payload.get("claude_session_id") is not None else None,
             updated_at=datetime.fromisoformat(str(payload["updated_at"])),
+            attached_user_ids=[int(uid) for uid in payload.get("attached_user_ids", [])],
+            is_owner=bool(payload.get("is_owner", True)),
         )
+
+
+@dataclass
+class TerminalSessionInfo:
+    """View-model for session listing (/list command)."""
+
+    terminal_id: str
+    tmux_session_name: str
+    workdir: str
+    phase: str
+    owner_user_id: int | None
+    attached_user_ids: list[int]
+    is_alive: bool
