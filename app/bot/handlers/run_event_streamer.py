@@ -58,7 +58,8 @@ def _build_error_message(*, event_type: EventType, task_id: str, error_text: str
 
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-_SPINNER_INTERVAL_SEC = 0.6
+_SPINNER_INTERVAL_SEC = 1.0
+_SPINNER_INITIAL_DELAY_SEC = 3.0
 
 
 class RunEventStreamer:
@@ -106,12 +107,14 @@ class RunEventStreamer:
         short_id = self._start.task.task_id[:8]
         frame_idx = 0
         try:
+            # Skip animation for short tasks: wait before the first frame.
+            await asyncio.sleep(_SPINNER_INITIAL_DELAY_SEC)
             while True:
-                await asyncio.sleep(_SPINNER_INTERVAL_SEC)
                 frame = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
                 frame_idx += 1
                 text = f"{frame} 处理中… [{short_id}]"
                 await self._messenger.edit_message_safely(self._lifecycle_message, text)
+                await asyncio.sleep(_SPINNER_INTERVAL_SEC)
         except asyncio.CancelledError:
             raise
 
