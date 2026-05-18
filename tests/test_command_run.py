@@ -878,8 +878,10 @@ async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_st
 
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12)
 
-    assert "原始输出" in "\n".join(message.answers)
-    assert "结构化回复暂不可用，已回退为原始输出。" not in message.answers
+    # Interactive mode always suppresses raw STDOUT to prevent duplicates
+    # with the structured reply system. Only lifecycle messages are sent.
+    assert "原始输出" not in "\n".join(message.answers)
+    assert any("任务执行完成" in a for a in message.answers)
 
 
 @pytest.mark.asyncio

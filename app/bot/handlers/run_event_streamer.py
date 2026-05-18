@@ -92,6 +92,7 @@ class RunEventStreamer:
         self._messenger = messenger
         self._lifecycle_message = lifecycle_message
         self._interactive_pump: asyncio.Task | None = None
+        self._emit_lock = asyncio.Lock()
 
     async def pump_structured_reply(self) -> None:
         try:
@@ -99,7 +100,8 @@ class RunEventStreamer:
                 changed = await self._presenter.wait_for_update(timeout_sec=0.05)
                 if not changed:
                     continue
-                await self._dispatcher.emit_presenter_messages(log_missing=False)
+                async with self._emit_lock:
+                    await self._dispatcher.emit_presenter_messages(log_missing=False)
         except asyncio.CancelledError:
             raise
 
@@ -110,7 +112,7 @@ class RunEventStreamer:
                 if event.type in {EventType.STDOUT, EventType.STDERR}:
                     if not event.content:
                         continue
-                    if self._start.interactive and self._presenter.structured_session_available:
+                    if self._start.interactive:
                         continue
                     logger.info(
                         "[task %s][%s] %s",
@@ -137,7 +139,8 @@ class RunEventStreamer:
                     continue
 
                 if self._start.interactive:
-                    await self._dispatcher.emit_presenter_messages(log_missing=True)
+                    async with self._emit_lock:
+                        await self._dispatcher.emit_presenter_messages(log_missing=True)
                 await self._dispatcher.flush()
                 duration, truncated = await _load_status_summary(self._task_service, self._start.task.task_id, self._user_id)
 
@@ -176,7 +179,8 @@ class RunEventStreamer:
         finally:
             if saw_exit and self._start.interactive:
                 await asyncio.sleep(0.1)
-                await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
+                async with self._emit_lock:
+                    await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
                 await self._dispatcher.flush()
             if self._interactive_pump is not None:
                 self._interactive_pump.cancel()
