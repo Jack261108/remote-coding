@@ -122,25 +122,9 @@ class StructuredReplyPresenter:
         pending_prompts: tuple[UserQuestionPrompt, ...] = ()
 
         if baseline_current_snapshot:
-            tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
-            self._flat_tool_tracker.baseline(snapshot.tool_states)
-            self._subagent_tracker.baseline(snapshot.tool_states)
-            file_tools = tuple(
-                _tool_status_output(tool) for tool in snapshot.tool_states if tool.status is not None and _is_file_tool(tool.tool_name)
-            )
-            self._file_tool_tracker.baseline(file_tools)
-            self._task_list_tracker.baseline(snapshot.tool_states)
-            pending_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
-            self._user_question_tracker.baseline(
-                tool_question_prompts=tool_question_prompts,
-                pending_prompts=pending_prompts,
-            )
+            pending_prompts = self._baseline_trackers(snapshot)
         else:
-            self._flat_tool_tracker.reset()
-            self._task_list_tracker.reset()
-            self._subagent_tracker.reset()
-            self._file_tool_tracker.reset()
-            self._user_question_tracker.reset()
+            self._reset_trackers()
 
         question_cursor = await self._task_service.get_structured_user_question_cursor(self._user_id, task_id=self._task_id)
         if question_cursor is None and baseline_current_snapshot and pending_prompts:
@@ -161,19 +145,7 @@ class StructuredReplyPresenter:
             # The reply cursor is left untouched: if the user already acknowledged
             # a turn it stays acknowledged; genuinely new turns will still emit.
             snapshot = await self._snapshot_loader.load_snapshot(log_missing=False)
-            tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
-            self._flat_tool_tracker.baseline(snapshot.tool_states)
-            self._subagent_tracker.baseline(snapshot.tool_states)
-            file_tools = tuple(
-                _tool_status_output(tool) for tool in snapshot.tool_states if tool.status is not None and _is_file_tool(tool.tool_name)
-            )
-            self._file_tool_tracker.baseline(file_tools)
-            self._task_list_tracker.baseline(snapshot.tool_states)
-            pending_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
-            self._user_question_tracker.baseline(
-                tool_question_prompts=tool_question_prompts,
-                pending_prompts=pending_prompts,
-            )
+            self._baseline_trackers(snapshot)
             self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
             return True
         changed = await self._task_service.wait_for_structured_session_update(
@@ -185,6 +157,34 @@ class StructuredReplyPresenter:
         if changed:
             self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
         return changed
+
+    def _baseline_trackers(self, snapshot: _StructuredSnapshot) -> tuple[UserQuestionPrompt, ...]:
+        """Baseline all tool/UI trackers against the given snapshot.
+
+        Returns the pending user-question prompts extracted from the snapshot,
+        which callers may use to seed the question cursor.
+        """
+        tool_question_prompts = _extract_tool_question_prompts_by_id(snapshot)
+        self._flat_tool_tracker.baseline(snapshot.tool_states)
+        self._subagent_tracker.baseline(snapshot.tool_states)
+        file_tools = tuple(
+            _tool_status_output(tool) for tool in snapshot.tool_states if tool.status is not None and _is_file_tool(tool.tool_name)
+        )
+        self._file_tool_tracker.baseline(file_tools)
+        self._task_list_tracker.baseline(snapshot.tool_states)
+        pending_prompts = self._extract_pending_user_question_prompts(snapshot, tool_question_prompts=tool_question_prompts)
+        self._user_question_tracker.baseline(
+            tool_question_prompts=tool_question_prompts,
+            pending_prompts=pending_prompts,
+        )
+        return pending_prompts
+
+    def _reset_trackers(self) -> None:
+        self._flat_tool_tracker.reset()
+        self._task_list_tracker.reset()
+        self._subagent_tracker.reset()
+        self._file_tool_tracker.reset()
+        self._user_question_tracker.reset()
 
     async def poll(
         self,
