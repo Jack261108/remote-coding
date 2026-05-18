@@ -27,7 +27,11 @@ def test_session_store_persists_checkpoint_and_turns(tmp_path) -> None:
     checkpoint = ParserCheckpoint(in_reply_block=True, pending_buffer="abc", current_turn_id="turn-1")
     store.save_checkpoint("s1", checkpoint)
     store.process(SessionEvent(session_id="s1", type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"}))
-    store.process(SessionEvent(session_id="s1", type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": False}))
+    store.process(
+        SessionEvent(
+            session_id="s1", type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": False}
+        )
+    )
 
     reloaded = SessionStore(FileSessionStore(str(tmp_path))).get("s1")
 
@@ -224,7 +228,9 @@ def test_session_store_find_by_active_user_question_tool_use_id_hits_disk_snapsh
     assert matched.tool_calls["tool-ask-1"].status == ToolStatus.RUNNING
 
 
-def test_session_store_find_by_active_user_question_tool_use_id_accepts_waiting_for_approval_tool_without_pending_snapshot(tmp_path) -> None:
+def test_session_store_find_by_active_user_question_tool_use_id_accepts_waiting_for_approval_tool_without_pending_snapshot(
+    tmp_path,
+) -> None:
     file_store = FileSessionStore(str(tmp_path))
     disk_store = SessionStore(file_store)
     disk_state = disk_store.get_or_create(
@@ -290,7 +296,7 @@ def test_session_store_find_by_active_user_question_key_hits_disk_snapshot(tmp_p
 
 def test_mark_structured_user_question_emitted_does_not_regress_same_tool_cursor(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
-    state = store.get_or_create(session_id="claude-session-ask-key", workdir="/tmp")
+    store.get_or_create(session_id="claude-session-ask-key", workdir="/tmp")
 
     store.mark_structured_user_question_emitted("claude-session-ask-key", question_key="tool-ask-key:2")
     store.mark_structured_user_question_emitted("claude-session-ask-key", question_key="tool-ask-key:0")
@@ -468,7 +474,11 @@ def test_session_store_file_synced_records_claude_identity_and_history(tmp_path)
 def test_session_store_clear_detected_resets_runtime_state(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     store.process(SessionEvent(session_id="s1", type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"}))
-    store.process(SessionEvent(session_id="s1", type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}))
+    store.process(
+        SessionEvent(
+            session_id="s1", type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}
+        )
+    )
 
     state = store.process(SessionEvent(session_id="s1", type=SessionEventType.CLEAR_DETECTED))
 
@@ -644,9 +654,13 @@ def test_file_session_store_writes_checkpoint_atomically(tmp_path) -> None:
 
 def test_file_session_store_writes_state_and_conversation_atomically(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
-    state = store.get_or_create(session_id="s1", user_id=1, workdir="/tmp", terminal_id="user_1_8c393341f536")
+    store.get_or_create(session_id="s1", user_id=1, workdir="/tmp", terminal_id="user_1_8c393341f536")
     store.process(SessionEvent(session_id="s1", type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"}))
-    store.process(SessionEvent(session_id="s1", type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}))
+    store.process(
+        SessionEvent(
+            session_id="s1", type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}
+        )
+    )
 
     storage = FileSessionStore(str(tmp_path))
     state_path = storage.state_path("s1")

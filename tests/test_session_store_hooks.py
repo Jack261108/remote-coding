@@ -430,11 +430,11 @@ def test_session_store_tracks_subagent_tools_from_hook_and_snapshot(tmp_path) ->
                                 "result": "done",
                                 "structured_result": {"stdout": "done"},
                                 "started_at": "2026-04-16T10:00:01+00:00",
-                                "completed_at": "2026-04-16T10:00:02+00:00"
+                                "completed_at": "2026-04-16T10:00:02+00:00",
                             }
                         ],
                         "started_at": "2026-04-16T10:00:00+00:00",
-                        "completed_at": "2026-04-16T10:00:03+00:00"
+                        "completed_at": "2026-04-16T10:00:03+00:00",
                     }
                 },
                 "last_offset": 18,

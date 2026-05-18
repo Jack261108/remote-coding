@@ -26,6 +26,9 @@ jobs:
       - name: Lint
         run: python -m ruff check app tests
 
+      - name: Format check
+        run: python -m ruff format --check app tests
+
       - name: Type check
         run: >-
           python -m mypy

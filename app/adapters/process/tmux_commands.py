@@ -3,9 +3,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-_INTERACTIVE_SYSTEM_PROMPT = (
-    "你是 Telegram CLI 网关的后端。直接输出回复正文，不要输出 TGCLI_BEGIN/TGCLI_DONE 等标签。"
-)
+_INTERACTIVE_SYSTEM_PROMPT = "你是 Telegram CLI 网关的后端。直接输出回复正文，不要输出 TGCLI_BEGIN/TGCLI_DONE 等标签。"
 
 
 class TmuxCommandMixin:
@@ -17,7 +15,9 @@ class TmuxCommandMixin:
             sanitized = "terminal"
         return f"tgcli_{sanitized}"[:64]
 
-    def _build_shell_command(self, *, argv: list[str], workdir: str, log_file: Path, exit_file: Path, command_file: Path, hide_launcher_line: bool) -> str:
+    def _build_shell_command(
+        self, *, argv: list[str], workdir: str, log_file: Path, exit_file: Path, command_file: Path, hide_launcher_line: bool
+    ) -> str:
         cli_command = shlex.join(argv)
         workdir_target = shlex.quote(str(Path(workdir).resolve()))
         log_target = shlex.quote(str(log_file))
@@ -34,7 +34,7 @@ class TmuxCommandMixin:
         if not hide_launcher_line:
             return f"bash {shlex.quote(str(command_file))}"
         script_target = shlex.quote(str(command_file))
-        return f"bash {script_target}; exec \"${{SHELL:-bash}}\" -l"
+        return f'bash {script_target}; exec "${{SHELL:-bash}}" -l'
 
     def _build_interactive_claude_command(self, *, workdir: str) -> str:
         workdir_target = shlex.quote(str(Path(workdir).resolve()))

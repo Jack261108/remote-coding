@@ -84,7 +84,9 @@ class DummyTaskService:
     async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._structured_reply_turn_id, self._structured_permission_key
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_reply(
+        self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
+    ) -> None:
         if turn_id is not None:
             self._structured_reply_turn_id = turn_id
         if permission_key is not None:
@@ -93,10 +95,14 @@ class DummyTaskService:
     async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._structured_user_question_key
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_user_question(
+        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
+    ) -> None:
         self._structured_user_question_key = question_key
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
+    async def wait_for_structured_session_update(
+        self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
+    ) -> bool:
         await asyncio.sleep(timeout_sec)
         return True
 
@@ -206,13 +212,7 @@ async def test_run_prompt_and_stream_reports_started_output_and_success() -> Non
 
     await _run_and_wait(message=message, task_service=task_service)
 
-    assert message.answers[0] == (
-        "任务已接收\n"
-        "task_id: t1\n"
-        "provider: claude_code\n"
-        "session_id: s1\n"
-        "status: 等待启动"
-    )
+    assert message.answers[0] == ("任务已接收\ntask_id: t1\nprovider: claude_code\nsession_id: s1\nstatus: 等待启动")
     started_message = "任务开始执行\ntask_id: t1\nstatus: 正在处理"
     assert message.sent_messages[0].text == started_message
     assert message.sent_messages[0].edits == [started_message]
@@ -274,9 +274,7 @@ async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25)
 
     tool_messages = [
-        sent
-        for sent in message.sent_messages
-        if "工具: Bash" in sent.text or any("工具: Bash" in edit for edit in sent.edits)
+        sent for sent in message.sent_messages if "工具: Bash" in sent.text or any("工具: Bash" in edit for edit in sent.edits)
     ]
     assert len(tool_messages) == 1
     assert any("执行中" in answer and "工具: Bash" in answer for answer in message.answers)
@@ -336,9 +334,7 @@ async def test_run_prompt_and_stream_aggregates_top_level_file_tools() -> None:
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25)
 
     file_tool_messages = [
-        sent
-        for sent in message.sent_messages
-        if "文件检索" in sent.text or any("文件检索" in edit for edit in sent.edits)
+        sent for sent in message.sent_messages if "文件检索" in sent.text or any("文件检索" in edit for edit in sent.edits)
     ]
     assert len(file_tool_messages) == 1
     assert any("🔄 文件检索 · 执行中" in answer for answer in message.answers)
@@ -512,11 +508,7 @@ async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> Non
 
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36)
 
-    aggregate_messages = [
-        sent
-        for sent in message.sent_messages
-        if "agents" in sent.text or any("agents" in edit for edit in sent.edits)
-    ]
+    aggregate_messages = [sent for sent in message.sent_messages if "agents" in sent.text or any("agents" in edit for edit in sent.edits)]
     assert len(aggregate_messages) == 1
     aggregate_message = aggregate_messages[0]
     assert any("🔄 3 agents running" in answer for answer in message.answers)
@@ -668,9 +660,7 @@ async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam(
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36)
 
     task_list_messages = [
-        sent
-        for sent in message.sent_messages
-        if "任务列表" in sent.text or any("任务列表" in edit for edit in sent.edits)
+        sent for sent in message.sent_messages if "任务列表" in sent.text or any("任务列表" in edit for edit in sent.edits)
     ]
     assert len(task_list_messages) == 1
     task_list_message = task_list_messages[0]

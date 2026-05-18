@@ -8,10 +8,27 @@ import pytest
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolCallRecord, ToolStatus
+from app.domain.session_models import (
+    ConversationTurn,
+    ParserCheckpoint,
+    PendingPermission,
+    SessionEvent,
+    SessionEventType,
+    SessionPhase,
+    SessionState,
+    ToolCallRecord,
+    ToolStatus,
+)
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
-from tests.fakes.cli import DummyHookSocketServer, StubAdapter, StubFactory, expected_terminal_id, make_file_backed_session_service, make_settings
+from tests.fakes.cli import (
+    DummyHookSocketServer,
+    StubAdapter,
+    StubFactory,
+    expected_terminal_id,
+    make_file_backed_session_service,
+    make_settings,
+)
 
 
 @pytest.mark.asyncio
@@ -1089,7 +1106,9 @@ async def test_get_structured_session_for_task_keeps_final_task_bound_when_later
     original_state.turns.extend(
         [
             ConversationTurn(turn_id="user-original", role="user", text="hi", is_complete=True, started_at=now + timedelta(seconds=1)),
-            ConversationTurn(turn_id="resp-original", role="assistant", text="\n原任务回复\n", is_complete=True, started_at=now + timedelta(seconds=2)),
+            ConversationTurn(
+                turn_id="resp-original", role="assistant", text="\n原任务回复\n", is_complete=True, started_at=now + timedelta(seconds=2)
+            ),
         ]
     )
     structured_store._persist(original_state)
@@ -1105,7 +1124,9 @@ async def test_get_structured_session_for_task_keeps_final_task_bound_when_later
     later_state.turns.extend(
         [
             ConversationTurn(turn_id="user-later", role="user", text="hi", is_complete=True, started_at=now + timedelta(seconds=4)),
-            ConversationTurn(turn_id="resp-later", role="assistant", text="\n后续任务回复\n", is_complete=True, started_at=now + timedelta(seconds=5)),
+            ConversationTurn(
+                turn_id="resp-later", role="assistant", text="\n后续任务回复\n", is_complete=True, started_at=now + timedelta(seconds=5)
+            ),
         ]
     )
     structured_store._persist(later_state)
@@ -1990,9 +2011,7 @@ async def test_answer_pending_user_question_option_rejects_already_answered_ques
     assert ok is False
     assert text == "这个选择按钮已经过期，请等待最新的问题"
     assert next_prompt is None
-    assert factory._user_question_option_actions == [
-        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)
-    ]
+    assert factory._user_question_option_actions == [(expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)]
 
 
 @pytest.mark.asyncio
@@ -2070,9 +2089,7 @@ async def test_answer_pending_user_question_option_serializes_same_user_and_tool
     )
     await asyncio.sleep(0.03)
 
-    assert option_actions == [
-        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)
-    ]
+    assert option_actions == [(expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)]
 
     release.set()
     first_result, second_result = await asyncio.gather(first, second)
@@ -2080,9 +2097,7 @@ async def test_answer_pending_user_question_option_serializes_same_user_and_tool
     assert first_result[0] is True
     assert first_result[2] is not None
     assert second_result == (False, "这个选择按钮已经过期，请等待最新的问题", None)
-    assert option_actions == [
-        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)
-    ]
+    assert option_actions == [(expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False)]
 
 
 @pytest.mark.asyncio
@@ -2310,9 +2325,7 @@ async def test_answer_pending_user_question_option_falls_back_when_factory_lacks
     assert ok is True
     assert text == "已提交你的选择，Claude 继续执行中"
     assert next_prompt is None
-    assert factory._interactive_inputs == [
-        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), "B")
-    ]
+    assert factory._interactive_inputs == [(expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), "B")]
 
 
 @pytest.mark.asyncio
@@ -2369,9 +2382,7 @@ async def test_answer_pending_user_question_option_falls_back_on_short_tui_fallb
     assert ok is True
     assert text == "已提交你的选择，Claude 继续执行中"
     assert next_prompt is None
-    assert factory._interactive_inputs == [
-        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), "B")
-    ]
+    assert factory._interactive_inputs == [(expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), "B")]
 
 
 @pytest.mark.asyncio
@@ -2798,8 +2809,8 @@ async def test_get_structured_user_question_cursor_uses_draft_target_when_curren
     ask_state.structured_user_question_key = "tool-ask-1:1"
     structured_store._persist(ask_state)
 
-    prompts = service._extract_user_question_prompts_for_tool_use_id(ask_state, tool_use_id="tool-ask-1")
-    service._ensure_user_question_draft(user_id=1, prompts=prompts)
+    prompts = service.extract_user_question_prompts_for_tool_use_id(ask_state, tool_use_id="tool-ask-1")
+    service.ensure_user_question_draft(user_id=1, prompts=prompts)
 
     cursor = await service.get_structured_user_question_cursor(user_id=1)
 
@@ -2882,9 +2893,7 @@ async def test_answer_pending_user_question_option_uses_waiting_for_approval_too
     assert updated is not None
     assert updated.structured_user_question_key == "tool-ask-waiting:1"
     assert factory._interactive_inputs == []
-    assert factory._user_question_option_actions == [
-        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 1, False)
-    ]
+    assert factory._user_question_option_actions == [(expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 1, False)]
 
 
 @pytest.mark.asyncio
@@ -2978,9 +2987,7 @@ async def test_submit_pending_user_question_multi_select_collects_checked_option
         (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 0, False),
         (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), 2, False),
     ]
-    assert factory._user_question_multi_select_advances == [
-        (expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), True)
-    ]
+    assert factory._user_question_multi_select_advances == [(expected_terminal_id(user_id=1, workdir=str(tmp_path)), str(tmp_path), True)]
 
 
 @pytest.mark.asyncio
@@ -3053,9 +3060,7 @@ async def test_answer_pending_user_question_option_uses_button_tool_use_id_when_
     assert text == "已提交你的选择，Claude 继续执行中"
     assert next_prompt is None
     assert factory._interactive_inputs == []
-    assert factory._user_question_option_actions == [
-        (expected_terminal_id(user_id=1, workdir=active_workdir), active_workdir, 0, True)
-    ]
+    assert factory._user_question_option_actions == [(expected_terminal_id(user_id=1, workdir=active_workdir), active_workdir, 0, True)]
 
 
 @pytest.mark.asyncio
@@ -3143,9 +3148,5 @@ async def test_submit_pending_user_question_multi_select_uses_button_tool_use_id
     assert text == "已提交你的选择，Claude 继续执行中"
     assert next_prompt is None
     assert factory._interactive_inputs == []
-    assert factory._user_question_option_actions == [
-        (expected_terminal_id(user_id=1, workdir=active_workdir), active_workdir, 0, False)
-    ]
-    assert factory._user_question_multi_select_advances == [
-        (expected_terminal_id(user_id=1, workdir=active_workdir), active_workdir, True)
-    ]
+    assert factory._user_question_option_actions == [(expected_terminal_id(user_id=1, workdir=active_workdir), active_workdir, 0, False)]
+    assert factory._user_question_multi_select_advances == [(expected_terminal_id(user_id=1, workdir=active_workdir), active_workdir, True)]

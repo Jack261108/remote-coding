@@ -9,7 +9,6 @@ from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.bot.handlers.command_list import register_list_handler
-from tests.fakes.telegram import DummyMessage
 
 
 class FakeTmuxRunner:
@@ -54,19 +53,23 @@ async def test_list_shows_no_sessions(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_list_shows_active_session(tmp_path) -> None:
-    registry, session_service, session_store = _setup(
-        tmp_path, alive_sessions={"tgcli_user_1_abc123"}
-    )
+    registry, session_service, session_store = _setup(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     ctx = await session_service.get(1)
     ctx.terminal_id = "user_1_abc123"
     await session_service._store.save(ctx)
     session_store.get_or_create(
-        session_id="s1", provider="claude_code", workdir="/proj",
-        terminal_id="user_1_abc123", user_id=1,
+        session_id="s1",
+        provider="claude_code",
+        workdir="/proj",
+        terminal_id="user_1_abc123",
+        user_id=1,
     )
 
     sessions = await registry.list_active_sessions()

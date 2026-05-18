@@ -34,11 +34,7 @@ def register_list_handler(router: Router, *, registry_service: SessionRegistrySe
             owner_tag = f" (owner:{s.owner_user_id})" if s.owner_user_id else ""
             attached = f" +{len(s.attached_user_ids)}人" if s.attached_user_ids else ""
             alive_tag = "" if s.is_alive else " [已断开]"
-            lines.append(
-                f"\n{icon} `{s.terminal_id}`{owner_tag}{attached}{alive_tag}\n"
-                f"   workdir: {s.workdir}\n"
-                f"   phase: {s.phase}"
-            )
+            lines.append(f"\n{icon} `{s.terminal_id}`{owner_tag}{attached}{alive_tag}\n   workdir: {s.workdir}\n   phase: {s.phase}")
 
         lines.append("\n使用 /attach <terminal_id> 连接到会话")
         await message.answer("\n".join(lines))

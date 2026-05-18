@@ -40,12 +40,7 @@ class TerminalSessionService:
             terminal_mode=terminal_mode,
         )
         terminal_key = session.terminal_id if session.terminal_mode else None
-        interactive = bool(
-            terminal_key
-            and provider == "claude_code"
-            and session.claude_chat_active
-            and self._settings.claude_tmux_mode
-        )
+        interactive = bool(terminal_key and provider == "claude_code" and session.claude_chat_active and self._settings.claude_tmux_mode)
         return TaskTerminalContext(session=session, terminal_key=terminal_key, interactive=interactive)
 
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:

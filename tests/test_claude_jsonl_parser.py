@@ -56,9 +56,7 @@ def test_claude_jsonl_parser_reads_turns_and_tool_results(tmp_path) -> None:
                 "toolUseResult": {"stdout": "/tmp/project"},
                 "message": {
                     "id": "a2",
-                    "content": [
-                        {"type": "tool_result", "tool_use_id": "tool-1", "content": "done", "is_error": False}
-                    ],
+                    "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "done", "is_error": False}],
                 },
             },
             {
@@ -175,14 +173,19 @@ def test_claude_jsonl_parser_stops_before_invalid_complete_line(tmp_path) -> Non
 
     snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
 
-    first_line_size = len(json.dumps(
-        {
-            "type": "assistant",
-            "timestamp": "2026-04-16T10:00:00Z",
-            "message": {"id": "a1", "content": [{"type": "text", "text": "第一行"}]},
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")) + 1
+    first_line_size = (
+        len(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-04-16T10:00:00Z",
+                    "message": {"id": "a1", "content": [{"type": "text", "text": "第一行"}]},
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        + 1
+    )
     assert [turn.text for turn in snapshot.turns] == ["\n第一行\n"]
     assert snapshot.last_offset == first_line_size
 
@@ -217,7 +220,8 @@ def test_claude_jsonl_parser_reports_reset_when_file_is_truncated(tmp_path) -> N
                 "message": {"id": "a2", "content": [{"type": "text", "text": "短"}]},
             },
             ensure_ascii=False,
-        ) + "\n",
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -251,9 +255,7 @@ def test_claude_jsonl_parser_detects_interrupt_from_user_message_and_tool_result
                 "toolUseResult": {"stderr": "Interrupted by user"},
                 "message": {
                     "id": "a2",
-                    "content": [
-                        {"type": "tool_result", "tool_use_id": "tool-1", "content": "Interrupted by user", "is_error": True}
-                    ],
+                    "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "Interrupted by user", "is_error": True}],
                 },
             },
             {
@@ -285,9 +287,7 @@ def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) 
                 "timestamp": "2026-04-16T10:00:01Z",
                 "message": {
                     "id": "a-tool-1",
-                    "content": [
-                        {"type": "tool_use", "id": "sub-tool-1", "name": "Read", "input": {"file_path": "/tmp/a.py"}}
-                    ],
+                    "content": [{"type": "tool_use", "id": "sub-tool-1", "name": "Read", "input": {"file_path": "/tmp/a.py"}}],
                 },
             },
             {
@@ -296,9 +296,7 @@ def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) 
                 "toolUseResult": {"stdout": "done"},
                 "message": {
                     "id": "a-tool-2",
-                    "content": [
-                        {"type": "tool_result", "tool_use_id": "sub-tool-1", "content": "done", "is_error": False}
-                    ],
+                    "content": [{"type": "tool_result", "tool_use_id": "sub-tool-1", "content": "done", "is_error": False}],
                 },
             },
         ],
@@ -309,16 +307,12 @@ def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) 
             {
                 "type": "assistant",
                 "timestamp": "2026-04-16T10:00:03Z",
-                "toolUseResult": {
-                    "agentId": "agent-1",
-                    "status": "completed",
-                    "content": "subagent done"
-                },
+                "toolUseResult": {"agentId": "agent-1", "status": "completed", "content": "subagent done"},
                 "message": {
                     "id": "a-main",
                     "content": [
                         {"type": "tool_use", "id": "task-tool-1", "name": "Task", "input": {"description": "do thing"}},
-                        {"type": "tool_result", "tool_use_id": "task-tool-1", "content": "subagent done", "is_error": False}
+                        {"type": "tool_result", "tool_use_id": "task-tool-1", "content": "subagent done", "is_error": False},
                     ],
                 },
             },

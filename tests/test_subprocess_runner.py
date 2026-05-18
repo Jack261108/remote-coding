@@ -109,11 +109,7 @@ async def test_runner_cancel_terminates_child_process(tmp_path) -> None:
 
 def _spawn_child_that_writes_later_script() -> str:
     child_code = (
-        "import pathlib\n"
-        "import sys\n"
-        "import time\n"
-        "time.sleep(1.5)\n"
-        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')\n"
+        "import pathlib\nimport sys\nimport time\ntime.sleep(1.5)\npathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')\n"
     )
     return (
         "import subprocess\n"

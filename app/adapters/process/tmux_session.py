@@ -32,7 +32,9 @@ class TmuxSessionMixin:
         merged.pop("TMUX_PANE", None)
         return merged
 
-    async def _start_ephemeral_session(self, session_name: str, *, workdir: str, env: dict[str, str] | None, command: str) -> tuple[bool, str]:
+    async def _start_ephemeral_session(
+        self, session_name: str, *, workdir: str, env: dict[str, str] | None, command: str
+    ) -> tuple[bool, str]:
         if not Path(workdir).is_dir():
             return False, f"workdir 不存在或不是目录: {workdir}"
         merged_env = self._build_tmux_env(env)
@@ -84,7 +86,10 @@ class TmuxSessionMixin:
         if exists:
             return True, ""
         err = (retry_err_text or err_text).strip() or "unknown error"
-        return False, f"tmux 会话创建失败: {err}\ntmux_session: {session_name}\nhint: 可先发送 /claude 触发会话重建；若仍失败请检查 tmux 是否可用（tmux ls）"
+        return (
+            False,
+            f"tmux 会话创建失败: {err}\ntmux_session: {session_name}\nhint: 可先发送 /claude 触发会话重建；若仍失败请检查 tmux 是否可用（tmux ls）",
+        )
 
     async def _ensure_claude_interactive_session(self, *, session_name: str, workdir: str, env: dict[str, str] | None) -> tuple[bool, str]:
         ready, err = await self._ensure_persistent_session(session_name, workdir=workdir, env=env)
@@ -99,30 +104,42 @@ class TmuxSessionMixin:
             return False, respawn_err
         return True, ""
 
-    async def _send_command(self, session_name: str, command: str, *, workdir: str, env: dict[str, str] | None, interactive: bool = False) -> tuple[bool, str]:
+    async def _send_command(
+        self, session_name: str, command: str, *, workdir: str, env: dict[str, str] | None, interactive: bool = False
+    ) -> tuple[bool, str]:
         try:
             await self._run_tmux("send-keys", "-t", session_name, "-X", "cancel")
             code, _, err_text = await self._run_tmux("send-keys", "-t", session_name, "C-u")
             if code != 0:
                 rebuilt, rebuild_err = await self._force_rebuild_session(session_name, workdir=workdir, env=env)
                 if not rebuilt:
-                    return False, self._format_send_failure(base="tmux 清空输入失败", raw_err=err_text, session_name=session_name, rebuilt=False, rebuild_err=rebuild_err)
+                    return False, self._format_send_failure(
+                        base="tmux 清空输入失败", raw_err=err_text, session_name=session_name, rebuilt=False, rebuild_err=rebuild_err
+                    )
                 code, _, err_text = await self._run_tmux("send-keys", "-t", session_name, "C-u")
                 if code != 0:
-                    return False, self._format_send_failure(base="tmux 清空输入失败", raw_err=err_text, session_name=session_name, rebuilt=True)
+                    return False, self._format_send_failure(
+                        base="tmux 清空输入失败", raw_err=err_text, session_name=session_name, rebuilt=True
+                    )
             buffer_name = f"tgcli-{uuid.uuid4().hex}"
             code, _, err_text = await self._run_tmux("load-buffer", "-b", buffer_name, "-", input_data=command.encode("utf-8"))
             if code != 0:
-                return False, self._format_send_failure(base="tmux 加载缓冲区失败", raw_err=err_text, session_name=session_name, rebuilt=False)
+                return False, self._format_send_failure(
+                    base="tmux 加载缓冲区失败", raw_err=err_text, session_name=session_name, rebuilt=False
+                )
             try:
                 code, _, err_text = await self._run_tmux("paste-buffer", "-p", "-t", session_name, "-b", buffer_name)
                 if code != 0:
                     rebuilt, rebuild_err = await self._force_rebuild_session(session_name, workdir=workdir, env=env)
                     if not rebuilt:
-                        return False, self._format_send_failure(base="tmux 粘贴命令失败", raw_err=err_text, session_name=session_name, rebuilt=False, rebuild_err=rebuild_err)
+                        return False, self._format_send_failure(
+                            base="tmux 粘贴命令失败", raw_err=err_text, session_name=session_name, rebuilt=False, rebuild_err=rebuild_err
+                        )
                     code, _, err_text = await self._run_tmux("paste-buffer", "-p", "-t", session_name, "-b", buffer_name)
                     if code != 0:
-                        return False, self._format_send_failure(base="tmux 粘贴命令失败", raw_err=err_text, session_name=session_name, rebuilt=True)
+                        return False, self._format_send_failure(
+                            base="tmux 粘贴命令失败", raw_err=err_text, session_name=session_name, rebuilt=True
+                        )
                 if self._enter_delay_sec > 0:
                     await asyncio.sleep(self._enter_delay_sec)
                 enter_key = "C-m" if interactive else "Enter"
@@ -130,10 +147,14 @@ class TmuxSessionMixin:
                 if code != 0:
                     rebuilt, rebuild_err = await self._force_rebuild_session(session_name, workdir=workdir, env=env)
                     if not rebuilt:
-                        return False, self._format_send_failure(base="tmux 执行命令失败", raw_err=err_text, session_name=session_name, rebuilt=False, rebuild_err=rebuild_err)
+                        return False, self._format_send_failure(
+                            base="tmux 执行命令失败", raw_err=err_text, session_name=session_name, rebuilt=False, rebuild_err=rebuild_err
+                        )
                     code, _, err_text = await self._run_tmux("send-keys", "-t", session_name, enter_key)
                     if code != 0:
-                        return False, self._format_send_failure(base="tmux 执行命令失败", raw_err=err_text, session_name=session_name, rebuilt=True)
+                        return False, self._format_send_failure(
+                            base="tmux 执行命令失败", raw_err=err_text, session_name=session_name, rebuilt=True
+                        )
                 await self._run_tmux("send-keys", "-t", session_name, "C-u")
                 return True, ""
             finally:
@@ -164,7 +185,11 @@ class TmuxSessionMixin:
 
     def _format_send_failure(self, *, base: str, raw_err: str, session_name: str, rebuilt: bool, rebuild_err: str | None = None) -> str:
         err = raw_err.strip() or "unknown error"
-        hint = "自动重建已执行但仍失败，请发送 /claude 重新建立会话后再试" if rebuilt else "检测到会话可能失效，已尝试自动重建；如仍失败请发送 /claude 重建后重试"
+        hint = (
+            "自动重建已执行但仍失败，请发送 /claude 重新建立会话后再试"
+            if rebuilt
+            else "检测到会话可能失效，已尝试自动重建；如仍失败请发送 /claude 重建后重试"
+        )
         rebuilt_text = "是" if rebuilt else "否"
         lines = [f"{base}: {err}", f"tmux_session: {session_name}", f"auto_rebuilt: {rebuilt_text}"]
         if rebuild_err:
@@ -309,7 +334,7 @@ class TmuxSessionMixin:
                 break
             if not digits:
                 continue
-            remainder = candidate[len(digits):].lstrip()
+            remainder = candidate[len(digits) :].lstrip()
             if not remainder.startswith((".", ")", "）")):
                 continue
             try:

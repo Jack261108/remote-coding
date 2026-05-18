@@ -79,7 +79,12 @@ class AgentFileWatcher:
     def _should_watch(self, state: SessionState) -> bool:
         if state.provider != "claude_code":
             return False
-        if state.phase not in {SessionPhase.IDLE, SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL, SessionPhase.WAITING_FOR_INPUT}:
+        if state.phase not in {
+            SessionPhase.IDLE,
+            SessionPhase.PROCESSING,
+            SessionPhase.WAITING_FOR_APPROVAL,
+            SessionPhase.WAITING_FOR_INPUT,
+        }:
             return False
         return any(tool.is_subagent_container for tool in state.tool_calls.values())
 

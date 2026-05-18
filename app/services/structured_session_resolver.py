@@ -72,7 +72,9 @@ class StructuredSessionResolver:
                 until=task.ended_at,
                 terminal_id=terminal_id,
             )
-        if prompt_matched_state is not None and self._is_claude_session_id(prompt_matched_state.claude_session_id or prompt_matched_state.session_id):
+        if prompt_matched_state is not None and self._is_claude_session_id(
+            prompt_matched_state.claude_session_id or prompt_matched_state.session_id
+        ):
             if task.claude_session_id != prompt_matched_state.session_id:
                 task.claude_session_id = prompt_matched_state.session_id
                 await self._task_store.save(task)
@@ -267,7 +269,9 @@ class StructuredSessionResolver:
             return None, None
         return self._structured_session_store.get_structured_reply_cursor(state.session_id)
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_reply(
+        self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
+    ) -> None:
         if self._structured_session_store is None:
             return
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
@@ -295,7 +299,9 @@ class StructuredSessionResolver:
         if question_key is not None:
             self._structured_session_store.mark_structured_user_question_emitted(state.session_id, question_key=question_key)
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
+    async def wait_for_structured_session_update(
+        self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
+    ) -> bool:
         if self._structured_session_store is None:
             await asyncio.sleep(timeout_sec)
             return True

@@ -4,8 +4,6 @@ import pytest
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
-from app.domain.models import SessionContext
-from app.domain.session_models import SessionPhase
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
@@ -57,13 +55,14 @@ async def test_list_active_sessions_returns_empty_when_no_tmux(tmp_path) -> None
 
 @pytest.mark.asyncio
 async def test_list_active_sessions_returns_tmux_sessions(tmp_path) -> None:
-    registry, session_service, session_store, tmux = _make_registry(
-        tmp_path, alive_sessions={"tgcli_user_1_abc123"}
-    )
+    registry, session_service, session_store, tmux = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     # Create a SessionContext with terminal_id
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     ctx = await session_service.get(1)
     # Override terminal_id to match the tmux session
@@ -71,8 +70,11 @@ async def test_list_active_sessions_returns_tmux_sessions(tmp_path) -> None:
     await session_service._store.save(ctx)
     # Create a SessionState
     session_store.get_or_create(
-        session_id="s1", provider="claude_code", workdir="/proj",
-        terminal_id="user_1_abc123", user_id=1,
+        session_id="s1",
+        provider="claude_code",
+        workdir="/proj",
+        terminal_id="user_1_abc123",
+        user_id=1,
     )
 
     result = await registry.list_active_sessions()
@@ -85,13 +87,14 @@ async def test_list_active_sessions_returns_tmux_sessions(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_list_active_sessions_includes_attached_users(tmp_path) -> None:
-    registry, session_service, _, tmux = _make_registry(
-        tmp_path, alive_sessions={"tgcli_user_1_abc123"}
-    )
+    registry, session_service, _, tmux = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     # Owner
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     owner = await session_service.get(1)
     owner.terminal_id = "user_1_abc123"
@@ -100,8 +103,11 @@ async def test_list_active_sessions_includes_attached_users(tmp_path) -> None:
 
     # Attached user
     await session_service.switch(
-        user_id=2, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=2,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     attached = await session_service.get(2)
     attached.terminal_id = "user_1_abc123"
@@ -127,13 +133,14 @@ async def test_attach_user_fails_when_session_not_alive(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_attach_user_succeeds(tmp_path) -> None:
-    registry, session_service, _, tmux = _make_registry(
-        tmp_path, alive_sessions={"tgcli_user_1_abc123"}
-    )
+    registry, session_service, _, tmux = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     # Create owner context
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     owner = await session_service.get(1)
     owner.terminal_id = "user_1_abc123"
@@ -157,12 +164,13 @@ async def test_attach_user_succeeds(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_attach_user_noop_if_already_attached(tmp_path) -> None:
-    registry, session_service, _, _ = _make_registry(
-        tmp_path, alive_sessions={"tgcli_user_1_abc123"}
-    )
+    registry, session_service, _, _ = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     owner = await session_service.get(1)
     owner.terminal_id = "user_1_abc123"
@@ -190,13 +198,14 @@ async def test_detach_user_fails_when_not_attached(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_detach_user_succeeds(tmp_path) -> None:
-    registry, session_service, _, _ = _make_registry(
-        tmp_path, alive_sessions={"tgcli_user_1_abc123"}
-    )
+    registry, session_service, _, _ = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     # Setup: owner + attached user
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     owner = await session_service.get(1)
     owner.terminal_id = "user_1_abc123"
@@ -231,12 +240,13 @@ async def test_validate_or_reattach_returns_none_when_no_context(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_validate_or_reattach_returns_context_when_alive(tmp_path) -> None:
-    registry, session_service, _, _ = _make_registry(
-        tmp_path, alive_sessions={"tgcli_user_1_abc123"}
-    )
+    registry, session_service, _, _ = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     ctx = await session_service.get(1)
     ctx.terminal_id = "user_1_abc123"
@@ -251,8 +261,11 @@ async def test_validate_or_reattach_returns_context_when_alive(tmp_path) -> None
 async def test_validate_or_reattach_returns_none_when_dead_and_no_recovery(tmp_path) -> None:
     registry, session_service, _, _ = _make_registry(tmp_path, alive_sessions=set())
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     ctx = await session_service.get(1)
     ctx.terminal_id = "user_1_abc123"
@@ -275,19 +288,23 @@ async def test_get_session_info_returns_none_when_dead(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_get_session_info_returns_info_when_alive(tmp_path) -> None:
-    registry, session_service, session_store, _ = _make_registry(
-        tmp_path, alive_sessions={"tgcli_user_1_abc123"}
-    )
+    registry, session_service, session_store, _ = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     await session_service.switch(
-        user_id=1, provider="claude_code", workdir="/proj",
-        terminal_mode=True, claude_chat_active=True,
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
     )
     owner = await session_service.get(1)
     owner.terminal_id = "user_1_abc123"
     await session_service._store.save(owner)
     session_store.get_or_create(
-        session_id="s1", provider="claude_code", workdir="/proj",
-        terminal_id="user_1_abc123", user_id=1,
+        session_id="s1",
+        provider="claude_code",
+        workdir="/proj",
+        terminal_id="user_1_abc123",
+        user_id=1,
     )
 
     result = await registry.get_session_info("user_1_abc123")

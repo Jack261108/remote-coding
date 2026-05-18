@@ -65,11 +65,7 @@ def _extract_tool_question_prompts(tool: _ToolStateSnapshot) -> tuple[UserQuesti
 
 
 def _extract_tool_question_prompts_by_id(snapshot: _StructuredSnapshot) -> dict[str, tuple[UserQuestionPrompt, ...]]:
-    return {
-        tool.tool_use_id: _extract_tool_question_prompts(tool)
-        for tool in snapshot.tool_states
-    }
-
+    return {tool.tool_use_id: _extract_tool_question_prompts(tool) for tool in snapshot.tool_states}
 
 
 class StructuredReplyPresenter:
@@ -106,7 +102,9 @@ class StructuredReplyPresenter:
         self._current_session_id = snapshot.session_id
         self._last_phase = snapshot.phase
 
-        persisted_turn_id, persisted_permission_key = await self._task_service.get_structured_reply_cursor(self._user_id, task_id=self._task_id)
+        persisted_turn_id, persisted_permission_key = await self._task_service.get_structured_reply_cursor(
+            self._user_id, task_id=self._task_id
+        )
         if baseline_current_snapshot:
             self._last_structured_turn_id = snapshot.turn_id
         else:
@@ -119,9 +117,7 @@ class StructuredReplyPresenter:
             self._flat_tool_tracker.baseline(snapshot.tool_states)
             self._subagent_tracker.baseline(snapshot.tool_states)
             file_tools = tuple(
-                _tool_status_output(tool)
-                for tool in snapshot.tool_states
-                if tool.status is not None and _is_file_tool(tool.tool_name)
+                _tool_status_output(tool) for tool in snapshot.tool_states if tool.status is not None and _is_file_tool(tool.tool_name)
             )
             self._file_tool_tracker.baseline(file_tools)
             self._task_list_tracker.baseline(snapshot.tool_states)
@@ -235,7 +231,13 @@ class StructuredReplyPresenter:
         if reply:
             messages.append(reply)
 
-        if final and self._structured_session_available and reply is None and not self._structured_reply_emitted_in_run and not self._fallback_announced:
+        if (
+            final
+            and self._structured_session_available
+            and reply is None
+            and not self._structured_reply_emitted_in_run
+            and not self._fallback_announced
+        ):
             self._fallback_announced = True
             logger.warning(
                 "structured reply fallback emitted",
@@ -253,7 +255,9 @@ class StructuredReplyPresenter:
             return
 
         if isinstance(output, PermissionRequestOutput):
-            await self._task_service.acknowledge_structured_reply(self._user_id, permission_key=output.permission_key, task_id=self._task_id)
+            await self._task_service.acknowledge_structured_reply(
+                self._user_id, permission_key=output.permission_key, task_id=self._task_id
+            )
             self._last_pending_permission_key = output.permission_key
             return
 
@@ -293,18 +297,10 @@ class StructuredReplyPresenter:
         snapshot: _StructuredSnapshot,
         tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
     ) -> list[
-        ProgressUpdateOutput
-        | ToolStatusOutput
-        | SubagentAggregateStatusOutput
-        | TaskListStatusOutput
-        | FileToolAggregateStatusOutput
+        ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput | FileToolAggregateStatusOutput
     ]:
         messages: list[
-            ProgressUpdateOutput
-            | ToolStatusOutput
-            | SubagentAggregateStatusOutput
-            | TaskListStatusOutput
-            | FileToolAggregateStatusOutput
+            ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput | FileToolAggregateStatusOutput
         ] = []
         if snapshot.phase == SessionPhase.COMPACTING.value and self._last_phase != SessionPhase.COMPACTING.value:
             messages.append(ProgressUpdateOutput(text=build_compacting_progress_message()))
@@ -314,11 +310,7 @@ class StructuredReplyPresenter:
         if task_list_output is not None:
             messages.append(task_list_output)
 
-        nested_tool_ids = {
-            subagent_tool.tool_use_id
-            for tool in snapshot.tool_states
-            for subagent_tool in tool.subagent_tools
-        }
+        nested_tool_ids = {subagent_tool.tool_use_id for tool in snapshot.tool_states for subagent_tool in tool.subagent_tools}
         nested_tool_ids.update(self._subagent_tracker.known_nested_tool_ids())
         subagent_containers: list[ToolStatusOutput] = []
         file_tools: list[ToolStatusOutput] = []

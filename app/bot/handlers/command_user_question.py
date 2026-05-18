@@ -131,7 +131,9 @@ def build_user_question_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _acknowledge_and_send_next_prompt(*, message: Message, task_service: TaskService, user_id: int, next_prompt: UserQuestionPrompt | None) -> None:
+async def _acknowledge_and_send_next_prompt(
+    *, message: Message, task_service: TaskService, user_id: int, next_prompt: UserQuestionPrompt | None
+) -> None:
     if next_prompt is None:
         return
     await message.answer(
@@ -216,7 +218,9 @@ def register_user_question_handlers(router, *, task_service: TaskService):
                         },
                     )
                 await callback.message.answer(text)
-                await _acknowledge_and_send_next_prompt(message=callback.message, task_service=task_service, user_id=user_id, next_prompt=next_prompt)
+                await _acknowledge_and_send_next_prompt(
+                    message=callback.message, task_service=task_service, user_id=user_id, next_prompt=next_prompt
+                )
             elif callback.message is not None and not ok:
                 await callback.message.answer(f"选择失败: {text}")
             await callback.answer(text, show_alert=not ok)
@@ -242,7 +246,9 @@ def register_user_question_handlers(router, *, task_service: TaskService):
                         },
                     )
                 await callback.message.answer(text)
-                await _acknowledge_and_send_next_prompt(message=callback.message, task_service=task_service, user_id=user_id, next_prompt=next_prompt)
+                await _acknowledge_and_send_next_prompt(
+                    message=callback.message, task_service=task_service, user_id=user_id, next_prompt=next_prompt
+                )
             else:
                 await callback.message.answer(f"选择失败: {text}")
         await callback.answer(text, show_alert=not ok)

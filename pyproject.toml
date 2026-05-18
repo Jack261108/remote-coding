@@ -38,8 +38,6 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.ruff.lint.per-file-ignores]
 "app/bot/router.py" = ["E731"]
-"tests/test_claude_chat_flow.py" = ["F401"]
-"tests/test_session_store.py" = ["F841"]
 
 [tool.mypy]
 python_version = "3.11"

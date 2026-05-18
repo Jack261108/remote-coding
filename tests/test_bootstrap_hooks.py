@@ -180,9 +180,7 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_workdir(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_workdir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
     session = await container.session_service.switch(
@@ -461,9 +459,7 @@ async def test_handle_hook_event_runs_bind_before_dispatch_and_sync(tmp_path, mo
     monkeypatch.setattr(container, "_dispatch_session_event", fake_dispatch)
     monkeypatch.setattr(container, "_schedule_jsonl_sync", fake_schedule)
 
-    await container._handle_hook_event(
-        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running")
-    )
+    await container._handle_hook_event(HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running"))
 
     assert seen == [
         "bind:claude-session-1",
@@ -513,12 +509,8 @@ async def test_handle_hook_event_debounces_jsonl_sync(tmp_path, monkeypatch: pyt
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
 
-    await container._handle_hook_event(
-        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running")
-    )
-    await container._handle_hook_event(
-        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running")
-    )
+    await container._handle_hook_event(HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running"))
+    await container._handle_hook_event(HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running"))
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
     assert seen == [("claude-session-1", str(tmp_path))]
@@ -677,9 +669,7 @@ async def test_session_end_keeps_pending_sync_until_flushed(tmp_path, monkeypatc
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
 
-    await container._handle_hook_event(
-        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionEnd", status="ended")
-    )
+    await container._handle_hook_event(HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionEnd", status="ended"))
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
     assert seen == [("claude-session-1", str(tmp_path))]
@@ -696,13 +686,15 @@ async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_
         terminal_mode=True,
         claude_chat_active=True,
     )
-    session_two = type(session_one).from_dict({
-        **session_one.to_dict(),
-        "user_id": 2,
-        "session_id": "session-2",
-        "terminal_id": "user_2",
-        "claude_session_id": None,
-    })
+    session_two = type(session_one).from_dict(
+        {
+            **session_one.to_dict(),
+            "user_id": 2,
+            "session_id": "session-2",
+            "terminal_id": "user_2",
+            "claude_session_id": None,
+        }
+    )
 
     async def fake_list_all():
         return [session_one, session_two]
@@ -806,13 +798,12 @@ async def test_interrupt_watcher_dispatches_interrupt_event(tmp_path) -> None:
                 "toolUseResult": {"stderr": "Interrupted by user"},
                 "message": {
                     "id": "a1",
-                    "content": [
-                        {"type": "tool_result", "tool_use_id": "tool-1", "content": "Interrupted by user", "is_error": True}
-                    ],
+                    "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "Interrupted by user", "is_error": True}],
                 },
             },
             ensure_ascii=False,
-        ) + "\n",
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -1064,9 +1055,7 @@ async def test_start_clears_stale_claude_session_binding_when_only_empty_termina
 
 
 @pytest.mark.asyncio
-async def test_start_keeps_claude_session_binding_when_terminal_state_has_content(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_start_keeps_claude_session_binding_when_terminal_state_has_content(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = make_settings(tmp_path, install_hooks=False)
     first = AppContainer(settings)
     session = await first.session_service.switch(
@@ -1089,9 +1078,7 @@ async def test_start_keeps_claude_session_binding_when_terminal_state_has_conten
         user_id=1,
     )
     terminal_state.phase = SessionPhase.PROCESSING
-    terminal_state.turns = [
-        ConversationTurn(turn_id="a1", role="assistant", text="\n恢复中\n", is_complete=True)
-    ]
+    terminal_state.turns = [ConversationTurn(turn_id="a1", role="assistant", text="\n恢复中\n", is_complete=True)]
     first.structured_session_store._persist(terminal_state)
 
     second = AppContainer(settings)
@@ -1186,13 +1173,12 @@ async def test_agent_file_watcher_syncs_when_subagent_file_changes(tmp_path) -> 
                 "timestamp": "2026-04-16T10:00:02Z",
                 "message": {
                     "id": "a3",
-                    "content": [
-                        {"type": "tool_use", "id": "nested-1", "name": "Bash", "input": {"command": "pwd"}}
-                    ],
+                    "content": [{"type": "tool_use", "id": "nested-1", "name": "Bash", "input": {"command": "pwd"}}],
                 },
             },
             ensure_ascii=False,
-        ) + "\n",
+        )
+        + "\n",
         encoding="utf-8",
     )
 

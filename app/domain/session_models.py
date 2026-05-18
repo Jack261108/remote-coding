@@ -424,7 +424,9 @@ class SessionState:
             subagent_state=SubagentState.from_dict(data.get("subagent_state")),
             structured_reply_turn_id=str(data["structured_reply_turn_id"]) if data.get("structured_reply_turn_id") is not None else None,
             structured_permission_key=str(data["structured_permission_key"]) if data.get("structured_permission_key") is not None else None,
-            structured_user_question_key=str(data["structured_user_question_key"]) if data.get("structured_user_question_key") is not None else None,
+            structured_user_question_key=str(data["structured_user_question_key"])
+            if data.get("structured_user_question_key") is not None
+            else None,
             revision=int(data.get("revision", 0)),
             history_loaded=bool(data.get("history_loaded", False)),
             clear_detected=bool(data.get("clear_detected", False)),

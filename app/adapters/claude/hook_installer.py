@@ -120,7 +120,9 @@ class HookInstaller:
         cleaned_hooks: dict[str, object] = {}
         for event_name, config in hooks.items():
             if isinstance(config, list):
-                cleaned_entries = [entry for entry in (self._clean_entry(item) for item in config if isinstance(item, dict)) if entry is not None]
+                cleaned_entries = [
+                    entry for entry in (self._clean_entry(item) for item in config if isinstance(item, dict)) if entry is not None
+                ]
                 if cleaned_entries:
                     cleaned_hooks[event_name] = cleaned_entries
             else:
@@ -156,7 +158,7 @@ class HookInstaller:
         return f"{shlex.quote(self._python_bin)} {shlex.quote(str(self._paths.hook_script_path(self.HOOK_SCRIPT_NAME)))}"
 
     def _render_hook_script(self) -> str:
-        return f'''#!/usr/bin/env python3
+        return f"""#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
@@ -300,4 +302,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-'''
+"""

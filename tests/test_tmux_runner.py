@@ -252,7 +252,11 @@ async def test_answer_user_question_with_text_uses_type_something_path(monkeypat
 
     async def fake_run_tmux(*args: str, input_data: bytes | None = None):
         if args and args[0] == "capture-pane":
-            return 0, "› 1. 今天\n  2. 明天\n  3. 后天\n  4. Type something.\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n", ""
+            return (
+                0,
+                "› 1. 今天\n  2. 明天\n  3. 后天\n  4. Type something.\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n",
+                "",
+            )
         if args and args[0] == "load-buffer" and input_data is not None:
             buffer_inputs.append(input_data)
         if args and args[0] == "send-keys":
@@ -373,7 +377,9 @@ async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_interactive_run_rebuilds_and_retries_pipe_when_tmux_server_is_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_interactive_run_rebuilds_and_retries_pipe_when_tmux_server_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
     ensure_calls: list[str] = []
     pipe_bind_calls: list[tuple[str, ...]] = []

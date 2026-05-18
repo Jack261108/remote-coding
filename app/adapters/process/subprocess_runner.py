@@ -70,8 +70,12 @@ class SubprocessRunner:
         )
         yield CLIEvent(type=EventType.STARTED, task_id=task_id)
 
-        stdout_task = asyncio.create_task(self._pump_stream(task_id=task_id, stream=process.stdout, event_type=EventType.STDOUT, queue=queue))
-        stderr_task = asyncio.create_task(self._pump_stream(task_id=task_id, stream=process.stderr, event_type=EventType.STDERR, queue=queue))
+        stdout_task = asyncio.create_task(
+            self._pump_stream(task_id=task_id, stream=process.stdout, event_type=EventType.STDOUT, queue=queue)
+        )
+        stderr_task = asyncio.create_task(
+            self._pump_stream(task_id=task_id, stream=process.stderr, event_type=EventType.STDERR, queue=queue)
+        )
         wait_task = asyncio.create_task(asyncio.wait_for(process.wait(), timeout=timeout_sec))
 
         stream_done = 0

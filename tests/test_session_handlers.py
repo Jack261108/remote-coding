@@ -12,7 +12,15 @@ from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
 from app.bot.router import create_router
 from app.domain.models import TaskRecord, TaskStatus
-from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, PendingPermission, ToolCallRecord, ToolStatus
+from app.domain.session_models import (
+    ConversationTurn,
+    SessionEvent,
+    SessionEventType,
+    SessionPhase,
+    PendingPermission,
+    ToolCallRecord,
+    ToolStatus,
+)
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 from tests.fakes.cli import DummyHookSocketServer, StubAdapter, StubFactory, make_settings
@@ -118,7 +126,9 @@ async def test_status_handler_renders_structured_snapshot(tmp_path) -> None:
         claude_chat_active=True,
     )
     await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
-    state = tmux_runner._session_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f")
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f"
+    )
     state.phase = SessionPhase.WAITING_FOR_INPUT
     state.turns.append(ConversationTurn(turn_id="turn-1", role="assistant", text="\n你好\n", is_complete=True))
     tmux_runner._session_store._persist(state)
@@ -176,7 +186,9 @@ async def test_permission_handlers_approve_current_pending_request(tmp_path) -> 
         claude_chat_active=True,
     )
     await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
-    state = tmux_runner._session_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f")
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f"
+    )
     state.pending_permission = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     state.phase = SessionPhase.WAITING_FOR_APPROVAL
     tmux_runner._session_store._persist(state)
@@ -217,7 +229,9 @@ async def test_permission_handlers_report_stale_pending_request(tmp_path) -> Non
         claude_chat_active=True,
     )
     await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
-    state = tmux_runner._session_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f")
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f"
+    )
     state.pending_permission = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     state.phase = SessionPhase.WAITING_FOR_APPROVAL
     tmux_runner._session_store._persist(state)
@@ -258,7 +272,9 @@ async def test_permission_callback_handler_approves_pending_request(tmp_path) ->
         claude_chat_active=True,
     )
     await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
-    state = tmux_runner._session_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f")
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f"
+    )
     state.pending_permission = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     state.phase = SessionPhase.WAITING_FOR_APPROVAL
     tmux_runner._session_store._persist(state)
@@ -302,7 +318,9 @@ async def test_permission_callback_handler_rejects_stale_button(tmp_path) -> Non
         claude_chat_active=True,
     )
     await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
-    state = tmux_runner._session_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f")
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f"
+    )
     state.pending_permission = PendingPermission(tool_use_id="tool-2", tool_name="Bash", tool_input={"command": "pwd"})
     state.phase = SessionPhase.WAITING_FOR_APPROVAL
     tmux_runner._session_store._persist(state)
@@ -402,7 +420,9 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
         claude_chat_active=True,
     )
     await service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
-    state = tmux_runner._session_store.get_or_create(session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f")
+    state = tmux_runner._session_store.get_or_create(
+        session_id="claude-session-1", workdir=str(tmp_path), terminal_id="user_1_36d00faeb25f"
+    )
     state.phase = SessionPhase.PROCESSING
     state.tool_calls["tool-ask-1"] = ToolCallRecord(
         tool_use_id="tool-ask-1",
@@ -603,7 +623,9 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
 
 
 @pytest.mark.asyncio
-async def test_router_text_chat_answers_pending_user_question_instead_of_creating_new_task(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_text_chat_answers_pending_user_question_instead_of_creating_new_task(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     tmux_runner = TmuxRunner(data_dir=str(tmp_path))
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner

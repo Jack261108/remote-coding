@@ -113,7 +113,9 @@ class SessionEventProcessingMixin:
                     state.tool_calls[current_task.task_tool_id].subagent_tools = current_task.subagent_tools
             elif state.tool_calls[hook.tool_use_id].is_subagent_container:
                 description = hook.tool_input.get("description") if isinstance(hook.tool_input, dict) else None
-                state.subagent_state.start_task(task_tool_id=hook.tool_use_id, description=str(description) if description is not None else None)
+                state.subagent_state.start_task(
+                    task_tool_id=hook.tool_use_id, description=str(description) if description is not None else None
+                )
             state.phase = SessionPhase.PROCESSING
         elif hook.event == "PermissionRequest" and hook.tool_use_id:
             existing = state.tool_calls.get(hook.tool_use_id)
@@ -146,7 +148,9 @@ class SessionEventProcessingMixin:
             elif state.subagent_state.has_active_subagent:
                 current_task = state.subagent_state.current_task()
                 if current_task is not None:
-                    state.subagent_state.update_subagent_tool_status(current_task.task_tool_id, hook.tool_use_id, ToolStatus.SUCCESS if hook.event == "PostToolUse" else ToolStatus.ERROR)
+                    state.subagent_state.update_subagent_tool_status(
+                        current_task.task_tool_id, hook.tool_use_id, ToolStatus.SUCCESS if hook.event == "PostToolUse" else ToolStatus.ERROR
+                    )
                     container = state.tool_calls.get(current_task.task_tool_id)
                     if container is not None:
                         container.subagent_tools = current_task.subagent_tools
@@ -173,10 +177,7 @@ class SessionEventProcessingMixin:
         last_offset = int(payload["last_offset"]) if payload.get("last_offset") is not None else None
         reset_detected = bool(payload.get("reset_detected", False))
         turns_payload = payload.get("turns", [])
-        parsed_turns = [
-            item if isinstance(item, ConversationTurn) else ConversationTurn.from_dict(item)
-            for item in turns_payload
-        ]
+        parsed_turns = [item if isinstance(item, ConversationTurn) else ConversationTurn.from_dict(item) for item in turns_payload]
         tool_calls_payload = payload.get("tool_calls", {})
         parsed_tool_calls: dict[str, ToolCallRecord] = {}
         if isinstance(tool_calls_payload, dict):

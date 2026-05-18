@@ -289,7 +289,9 @@ class HookSocketServer:
             if emit_failure:
                 await self._emit_permission_failure(item.session_id, item.tool_use_id)
 
-    async def _expire_pending_permissions(self, items: list[PendingPermissionRequest], *, reason: str = "permission request expired") -> None:
+    async def _expire_pending_permissions(
+        self, items: list[PendingPermissionRequest], *, reason: str = "permission request expired"
+    ) -> None:
         for item in items:
             success = await self._write_response(pending=item, decision="deny", reason=reason)
             if success:
@@ -408,11 +410,7 @@ class HookSocketServer:
     def _prune_tool_use_id_cache_locked(self) -> None:
         now = utc_now()
         for key, queue in list(self._tool_use_id_cache.items()):
-            fresh = [
-                cached
-                for cached in queue
-                if (now - cached.cached_at).total_seconds() < self._pending_permission_ttl_sec
-            ]
+            fresh = [cached for cached in queue if (now - cached.cached_at).total_seconds() < self._pending_permission_ttl_sec]
             if fresh:
                 self._tool_use_id_cache[key] = fresh
             else:
@@ -468,15 +466,9 @@ class HookSocketServer:
                 return True
 
         requested_items = {
-            key: value
-            for key, value in requested.items()
-            if isinstance(value, (str, int, float, bool)) and value is not None
+            key: value for key, value in requested.items() if isinstance(value, (str, int, float, bool)) and value is not None
         }
-        cached_items = {
-            key: value
-            for key, value in cached.items()
-            if isinstance(value, (str, int, float, bool)) and value is not None
-        }
+        cached_items = {key: value for key, value in cached.items() if isinstance(value, (str, int, float, bool)) and value is not None}
         if requested_items and all(cached_items.get(key) == value for key, value in requested_items.items()):
             return True
         if cached_items and all(requested_items.get(key) == value for key, value in cached_items.items()):

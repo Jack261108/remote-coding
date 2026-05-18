@@ -225,9 +225,7 @@ def _subagent_container_output(tool: _ToolStateSnapshot) -> ToolStatusOutput:
 
 def _subagent_container_outputs(tools: tuple[_ToolStateSnapshot, ...]) -> tuple[ToolStatusOutput, ...]:
     return tuple(
-        _subagent_container_output(tool)
-        for tool in tools
-        if tool.status is not None and _is_subagent_container_tool(tool.tool_name)
+        _subagent_container_output(tool) for tool in tools if tool.status is not None and _is_subagent_container_tool(tool.tool_name)
     )
 
 
@@ -313,9 +311,7 @@ class UserQuestionTracker:
         pending_prompts: tuple[UserQuestionPrompt, ...],
     ) -> None:
         self._question_keys_by_tool_id = {
-            tool_use_id: tuple(prompt.key for prompt in prompts)
-            for tool_use_id, prompts in tool_question_prompts.items()
-            if prompts
+            tool_use_id: tuple(prompt.key for prompt in prompts) for tool_use_id, prompts in tool_question_prompts.items() if prompts
         }
         if pending_prompts:
             self._question_keys_by_tool_id[pending_prompts[0].tool_use_id] = tuple(prompt.key for prompt in pending_prompts)
@@ -376,11 +372,7 @@ class FlatToolTracker:
         self._emitted_tool_ids = set()
 
     def baseline(self, tool_states: tuple[_ToolStateSnapshot, ...]) -> None:
-        self._fingerprint_by_id = {
-            tool.tool_use_id: _tool_state_fingerprint(tool)
-            for tool in tool_states
-            if tool.status is not None
-        }
+        self._fingerprint_by_id = {tool.tool_use_id: _tool_state_fingerprint(tool) for tool in tool_states if tool.status is not None}
         self._emitted_tool_ids = set()
 
     def update(
@@ -390,11 +382,7 @@ class FlatToolTracker:
         flat_tools: tuple[_ToolStateSnapshot, ...],
         suppress_new: bool,
     ) -> tuple[ToolStatusOutput, ...]:
-        current_fingerprint_by_id = {
-            tool.tool_use_id: _tool_state_fingerprint(tool)
-            for tool in all_tool_states
-            if tool.status is not None
-        }
+        current_fingerprint_by_id = {tool.tool_use_id: _tool_state_fingerprint(tool) for tool in all_tool_states if tool.status is not None}
         outputs: list[ToolStatusOutput] = []
         for tool in flat_tools:
             if tool.status is None:
@@ -444,11 +432,7 @@ class SubagentAggregateTracker:
         self._fingerprint = _subagent_aggregate_fingerprint(containers)
 
     def known_nested_tool_ids(self) -> set[str]:
-        return {
-            subagent_tool.tool_use_id
-            for container in self._container_by_id.values()
-            for subagent_tool in container.subagent_tools
-        }
+        return {subagent_tool.tool_use_id for container in self._container_by_id.values() for subagent_tool in container.subagent_tools}
 
     def update(self, current_containers: tuple[ToolStatusOutput, ...]) -> SubagentAggregateStatusOutput | None:
         containers = self._merge(current_containers)
@@ -478,9 +462,7 @@ class SubagentAggregateTracker:
             merged_containers.append(merged)
 
         self._container_by_id = {
-            tool_use_id: container
-            for tool_use_id, container in self._container_by_id.items()
-            if tool_use_id in current_ids
+            tool_use_id: container for tool_use_id, container in self._container_by_id.items() if tool_use_id in current_ids
         }
         return tuple(merged_containers)
 

@@ -547,7 +547,9 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         async with session_lock:
             return await self._ensure_persistent_session(session_name, workdir=workdir, env=env)
 
-    async def ensure_claude_interactive_session(self, *, terminal_key: str, workdir: str, env: dict[str, str] | None = None) -> tuple[bool, str]:
+    async def ensure_claude_interactive_session(
+        self, *, terminal_key: str, workdir: str, env: dict[str, str] | None = None
+    ) -> tuple[bool, str]:
         session_name = self._build_session_name(terminal_key)
         session_lock = self._get_session_lock(session_name)
         async with session_lock:
@@ -820,7 +822,10 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             watch_state.completion_candidate_key = candidate_key
             watch_state.completion_candidate_seen_at = observed_at
             return self._interactive_completion_grace_sec <= 0
-        return watch_state.completion_candidate_seen_at is not None and (observed_at - watch_state.completion_candidate_seen_at) >= self._interactive_completion_grace_sec
+        return (
+            watch_state.completion_candidate_seen_at is not None
+            and (observed_at - watch_state.completion_candidate_seen_at) >= self._interactive_completion_grace_sec
+        )
 
     def _is_current_completed_turn(
         self,
@@ -866,7 +871,9 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         )
         latest_completed_turn = self._latest_completed_assistant_turn(active_state) if active_state is not None else None
         latest_completed_turn_is_current = self._is_current_completed_turn(
-            latest_completed_turn, meta=meta, watch_state=watch_state,
+            latest_completed_turn,
+            meta=meta,
+            watch_state=watch_state,
         )
         if active_state is not None and is_claude_session_id(active_state.session_id) and not meta.baseline_captured:
             meta.claude_session_id = active_state.session_id
@@ -901,7 +908,9 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         if completion_phase is not None and watch_state.saw_interactive_progress and completion_ready:
             return 0, active_state
         if latest_completed_turn is not None and latest_completed_turn_is_current:
-            if active_state is not None and self._is_interactive_completion_turn_ready(active_state, latest_completed_turn, watch_state, observed_at=now):
+            if active_state is not None and self._is_interactive_completion_turn_ready(
+                active_state, latest_completed_turn, watch_state, observed_at=now
+            ):
                 return 0, active_state
         elif latest_completed_turn is not None and latest_completed_turn.turn_id != watch_state.latest_completed_turn_id_before_run:
             watch_state.latest_completed_turn_id_before_run = latest_completed_turn.turn_id

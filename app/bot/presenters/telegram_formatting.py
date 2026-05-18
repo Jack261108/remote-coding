@@ -157,9 +157,7 @@ def _render_inline(text: str) -> str:
 
     parts: list[str] = []
     cursor = 0
-    token_re = re.compile(
-        rf"{_LINK_RE.pattern}|{_INLINE_CODE_RE.pattern}|{_BOLD_RE.pattern}|{_STRIKE_RE.pattern}|{_ITALIC_RE.pattern}"
-    )
+    token_re = re.compile(rf"{_LINK_RE.pattern}|{_INLINE_CODE_RE.pattern}|{_BOLD_RE.pattern}|{_STRIKE_RE.pattern}|{_ITALIC_RE.pattern}")
     for match in token_re.finditer(text):
         if match.start() > cursor:
             parts.append(html.escape(text[cursor : match.start()]))

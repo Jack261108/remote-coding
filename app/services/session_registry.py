@@ -71,15 +71,17 @@ class SessionRegistryService:
             if owner and owner.attached_user_ids:
                 attached = list(set(attached) | set(owner.attached_user_ids))
 
-            results.append(TerminalSessionInfo(
-                terminal_id=terminal_id,
-                tmux_session_name=tmux_name,
-                workdir=workdir,
-                phase=phase,
-                owner_user_id=owner.user_id if owner else None,
-                attached_user_ids=attached,
-                is_alive=alive,
-            ))
+            results.append(
+                TerminalSessionInfo(
+                    terminal_id=terminal_id,
+                    tmux_session_name=tmux_name,
+                    workdir=workdir,
+                    phase=phase,
+                    owner_user_id=owner.user_id if owner else None,
+                    attached_user_ids=attached,
+                    is_alive=alive,
+                )
+            )
 
         return results
 
@@ -159,7 +161,6 @@ class SessionRegistryService:
         if updated and updated.terminal_id != terminal_id:
             updated.terminal_id = terminal_id
             updated.is_owner = False
-            from app.adapters.storage.memory import SessionContextStore
             # We need to save through the store directly since SessionService builds terminal_id deterministically
             await self._session_service.save_session_context(updated)
 
@@ -313,13 +314,3 @@ class SessionRegistryService:
                 # Owner: keep terminal_id for potential recreation, but clear session
                 pass
             await self._session_service.save_session_context(ctx)
-
-        # Clean up attached_user_ids referencing dead terminals
-        dead_terminal_ids = {ctx.terminal_id for ctx in stale if ctx.terminal_id}
-        for ctx in all_contexts:
-            if ctx.attached_user_ids:
-                original_len = len(ctx.attached_user_ids)
-                # We can't easily check which attached users point to dead terminals
-                # without loading all their contexts. Instead, attached users will be
-                # cleaned up when they try to send a message (validate_or_reattach).
-                # Just log for now.

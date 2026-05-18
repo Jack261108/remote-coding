@@ -411,13 +411,7 @@ async def test_tool_message_manager_sends_task_list_message() -> None:
     root = DummyRootMessage()
     manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
 
-    await manager.handle(
-        _task_output(
-            subagent_statuses=(
-                ("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),
-            )
-        )
-    )
+    await manager.handle(_task_output(subagent_statuses=(("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),)))
 
     assert len(root.sent) == 1
     assert "任务列表" in root.sent[0].text
@@ -431,13 +425,7 @@ async def test_tool_message_manager_edits_task_list_when_current_subagent_change
     root = DummyRootMessage()
     manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
 
-    await manager.handle(
-        _task_output(
-            subagent_statuses=(
-                ("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),
-            )
-        )
-    )
+    await manager.handle(_task_output(subagent_statuses=(("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),)))
     await manager.handle(
         _task_output(
             subagent_statuses=(
@@ -458,13 +446,7 @@ async def test_tool_message_manager_re_sends_task_list_when_edit_fails() -> None
     root = DummyRootMessage()
     manager = ToolMessageManager(root_message=root, task_id="task-1", user_id=1, provider="claude_code")
 
-    await manager.handle(
-        _task_output(
-            subagent_statuses=(
-                ("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),
-            )
-        )
-    )
+    await manager.handle(_task_output(subagent_statuses=(("read-1", "Read", {"file_path": "app/foo.py"}, ToolStatus.RUNNING),)))
     root.sent[0].fail_next_edit = True
     await manager.handle(
         _task_output(

@@ -136,7 +136,9 @@ def build_tool_task_list_message(output: ToolStatusOutput) -> str:
         prefix = "=> " if index == active_index else ""
         detail = _format_tool_input_detail(tool.tool_name, tool.tool_input)
         detail_text = f" - {detail[0]}: {detail[1]}" if detail is not None else ""
-        lines.append(f"{prefix}{_tool_status_icon(tool.status)} {index + 1}. {tool.tool_name or 'Unknown'} - {_tool_status_label(tool.status)}{detail_text}")
+        lines.append(
+            f"{prefix}{_tool_status_icon(tool.status)} {index + 1}. {tool.tool_name or 'Unknown'} - {_tool_status_label(tool.status)}{detail_text}"
+        )
 
     omitted = len(visible_tools) - len(display_indexes)
     if omitted > 0:
@@ -223,7 +225,9 @@ def build_file_tool_aggregate_status_message(output: FileToolAggregateStatusOutp
     for index, tool in enumerate(display_tools, start=1):
         detail = _file_tool_detail(tool)
         detail_text = f" · {detail}" if detail else ""
-        lines.append(f"{_tool_status_icon(tool.status)} {index}. {tool.tool_name or 'Unknown'} - {_tool_status_label(tool.status)}{detail_text}")
+        lines.append(
+            f"{_tool_status_icon(tool.status)} {index}. {tool.tool_name or 'Unknown'} - {_tool_status_label(tool.status)}{detail_text}"
+        )
 
     omitted = len(tools) - len(display_tools)
     if omitted > 0:
@@ -233,11 +237,7 @@ def build_file_tool_aggregate_status_message(output: FileToolAggregateStatusOutp
 
 
 def _visible_subagent_tools(subagent_tools: tuple[SubagentToolStatusOutput, ...]) -> tuple[SubagentToolStatusOutput, ...]:
-    return tuple(
-        tool
-        for tool in subagent_tools
-        if not _is_user_question_tool(tool.tool_name, tool.tool_input)
-    )
+    return tuple(tool for tool in subagent_tools if not _is_user_question_tool(tool.tool_name, tool.tool_input))
 
 
 def _aggregate_status_icon(statuses: tuple[str, ...]) -> str:

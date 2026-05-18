@@ -219,11 +219,7 @@ class UserQuestionService:
             if not selected_option_indexes:
                 return False, "请至少勾选一项再提交", None
 
-            answer = "、".join(
-                prompt.options[index].label
-                for index in range(len(prompt.options))
-                if index in selected_option_indexes
-            )
+            answer = "、".join(prompt.options[index].label for index in range(len(prompt.options)) if index in selected_option_indexes)
             remaining = self._remaining_user_question_prompts(draft=draft, prompt=prompt)
             if not draft.use_text_transport:
                 advanced, text = await self._advance_user_question_after_multi_select(
@@ -363,9 +359,7 @@ class UserQuestionService:
         draft.prompts = prompts
         prompt_by_index = {prompt.question_index: prompt for prompt in prompts}
         draft.answers_by_index = {
-            question_index: answer
-            for question_index, answer in draft.answers_by_index.items()
-            if question_index in prompt_by_index
+            question_index: answer for question_index, answer in draft.answers_by_index.items() if question_index in prompt_by_index
         }
         filtered_selected_option_indexes_by_question: dict[int, set[int]] = {}
         for question_index, selected_option_indexes in draft.selected_option_indexes_by_question.items():
@@ -373,9 +367,7 @@ class UserQuestionService:
             if prompt is None or not prompt.multi_select:
                 continue
             valid_selected_option_indexes = {
-                option_index
-                for option_index in selected_option_indexes
-                if 0 <= option_index < len(prompt.options)
+                option_index for option_index in selected_option_indexes if 0 <= option_index < len(prompt.options)
             }
             if valid_selected_option_indexes:
                 filtered_selected_option_indexes_by_question[question_index] = valid_selected_option_indexes

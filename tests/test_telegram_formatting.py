@@ -8,30 +8,12 @@ from app.bot.presenters.telegram_formatting import (
 
 class TestTableRendering:
     def test_markdown_table_wrapped_in_pre_code(self) -> None:
-        text = (
-            "| Name  | Value |\n"
-            "|-------|-------|\n"
-            "| foo   | 42    |\n"
-            "| bar   | 108   |"
-        )
+        text = "| Name  | Value |\n|-------|-------|\n| foo   | 42    |\n| bar   | 108   |"
         result = render_markdownish_to_telegram_html(text)
-        assert result == (
-            "<pre><code>| Name  | Value |\n"
-            "|-------|-------|\n"
-            "| foo   | 42    |\n"
-            "| bar   | 108   |</code></pre>"
-        )
+        assert result == ("<pre><code>| Name  | Value |\n|-------|-------|\n| foo   | 42    |\n| bar   | 108   |</code></pre>")
 
     def test_table_with_text_before_and_after(self) -> None:
-        text = (
-            "Here is a table:\n"
-            "\n"
-            "| A | B |\n"
-            "|---|---|\n"
-            "| 1 | 2 |\n"
-            "\n"
-            "And some text after."
-        )
+        text = "Here is a table:\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nAnd some text after."
         result = render_markdownish_to_telegram_html(text)
         assert "<pre><code>" in result
         assert "| A | B |" in result
@@ -48,51 +30,27 @@ class TestTableRendering:
         assert "<pre><code>" not in result
 
     def test_table_with_alignment_colons(self) -> None:
-        text = (
-            "| Left | Center | Right |\n"
-            "|:-----|:------:|------:|\n"
-            "| a    | b      | c     |"
-        )
+        text = "| Left | Center | Right |\n|:-----|:------:|------:|\n| a    | b      | c     |"
         result = render_markdownish_to_telegram_html(text)
         assert result.startswith("<pre><code>")
         assert result.endswith("</code></pre>")
 
     def test_multiple_tables(self) -> None:
-        text = (
-            "| A | B |\n"
-            "|---|---|\n"
-            "| 1 | 2 |\n"
-            "\n"
-            "Some text\n"
-            "\n"
-            "| X | Y |\n"
-            "|---|---|\n"
-            "| 3 | 4 |"
-        )
+        text = "| A | B |\n|---|---|\n| 1 | 2 |\n\nSome text\n\n| X | Y |\n|---|---|\n| 3 | 4 |"
         result = render_markdownish_to_telegram_html(text)
         # Should have two pre/code blocks
         assert result.count("<pre><code>") == 2
         assert result.count("</code></pre>") == 2
 
     def test_table_inside_fenced_code_unchanged(self) -> None:
-        text = (
-            "```\n"
-            "| A | B |\n"
-            "|---|---|\n"
-            "| 1 | 2 |\n"
-            "```"
-        )
+        text = "```\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
         result = render_markdownish_to_telegram_html(text)
         # Should be wrapped once (by fenced code), not double-wrapped
         assert result.count("<pre><code>") == 1
         assert "| A | B |" in result
 
     def test_table_html_escaped(self) -> None:
-        text = (
-            "| A & B | C |\n"
-            "|-------|---|\n"
-            "| <tag> | 1 |"
-        )
+        text = "| A & B | C |\n|-------|---|\n| <tag> | 1 |"
         result = render_markdownish_to_telegram_html(text)
         assert "A &amp; B" in result
         assert "&lt;tag&gt;" in result

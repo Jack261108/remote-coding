@@ -23,13 +23,7 @@ async def _load_status_summary(task_service: TaskService, task_id: str, user_id:
 
 
 def _build_created_message(*, task_id: str, provider: str, session_id: str) -> str:
-    return (
-        "任务已接收\n"
-        f"task_id: {task_id}\n"
-        f"provider: {provider}\n"
-        f"session_id: {session_id}\n"
-        "status: 等待启动"
-    )
+    return f"任务已接收\ntask_id: {task_id}\nprovider: {provider}\nsession_id: {session_id}\nstatus: 等待启动"
 
 
 def _build_started_message(*, task_id: str) -> str:

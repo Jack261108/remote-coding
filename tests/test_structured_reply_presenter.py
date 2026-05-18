@@ -27,7 +27,17 @@ from app.bot.presenters.structured_reply_presenter import (
     strip_bridge_markers,
 )
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, PendingPermission, SessionEvent, SessionEventType, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
+from app.domain.session_models import (
+    ConversationTurn,
+    ParserCheckpoint,
+    PendingPermission,
+    SessionEvent,
+    SessionEventType,
+    SessionPhase,
+    SubagentToolCall,
+    ToolCallRecord,
+    ToolStatus,
+)
 from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
 from app.services.session_store import SessionStore
 from tests.fakes.structured import make_structured_session as _session
@@ -52,16 +62,22 @@ class DummyTaskService:
     async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
         return None, None
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_reply(
+        self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
+    ) -> None:
         return None
 
     async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._question_key
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_user_question(
+        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
+    ) -> None:
         self._question_key = question_key
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
+    async def wait_for_structured_session_update(
+        self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
+    ) -> bool:
         return True
 
 
@@ -78,7 +94,9 @@ class PersistentTaskService:
     async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._store.get_structured_reply_cursor("claude-session-1")
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_reply(
+        self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
+    ) -> None:
         if turn_id is not None:
             self._store.mark_structured_reply_emitted("claude-session-1", turn_id=turn_id)
         if permission_key is not None:
@@ -87,11 +105,15 @@ class PersistentTaskService:
     async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
         return self._store.get_structured_user_question_cursor("claude-session-1")
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_user_question(
+        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
+    ) -> None:
         if question_key is not None:
             self._store.mark_structured_user_question_emitted("claude-session-1", question_key=question_key)
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
+    async def wait_for_structured_session_update(
+        self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
+    ) -> bool:
         return await self._store.wait_for_publish("claude-session-1", since_cursor=since_cursor, timeout_sec=timeout_sec)
 
 
@@ -608,37 +630,55 @@ def test_build_tool_progress_message_includes_specific_bash_command() -> None:
 
 
 def test_build_tool_status_message_formats_final_states() -> None:
-    assert build_tool_status_message(
-        tool_name="Bash",
-        tool_input={"command": "pytest -q"},
-        status=ToolStatus.SUCCESS.value,
-    ) == "✅ 执行完成\n工具: Bash\n命令: pytest -q"
-    assert build_tool_status_message(
-        tool_name="Bash",
-        tool_input={"command": "pytest -q"},
-        status=ToolStatus.ERROR.value,
-    ) == "❌ 执行失败\n工具: Bash\n命令: pytest -q"
-    assert build_tool_status_message(
-        tool_name="Bash",
-        tool_input={"command": "pytest -q"},
-        status=ToolStatus.INTERRUPTED.value,
-    ) == "⏹️ 已中断\n工具: Bash\n命令: pytest -q"
-    assert build_tool_status_message(
-        tool_name="Bash",
-        tool_input={"command": "rm file"},
-        status=ToolStatus.WAITING_FOR_APPROVAL.value,
-    ) == "⏳ 等待权限\n工具: Bash\n命令: rm file"
-    assert build_tool_status_message(
-        tool_name="Bash",
-        tool_input={"command": "pytest -q"},
-        status=ToolStatus.RUNNING.value,
-        resumed=True,
-    ) == "🔄 继续执行\n工具: Bash\n命令: pytest -q"
-    assert build_tool_status_message(
-        tool_name="Bash",
-        tool_input={"command": "pytest -q"},
-        status="unknown",
-    ) == "⏳ 执行中\n工具: Bash\n命令: pytest -q"
+    assert (
+        build_tool_status_message(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.SUCCESS.value,
+        )
+        == "✅ 执行完成\n工具: Bash\n命令: pytest -q"
+    )
+    assert (
+        build_tool_status_message(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.ERROR.value,
+        )
+        == "❌ 执行失败\n工具: Bash\n命令: pytest -q"
+    )
+    assert (
+        build_tool_status_message(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.INTERRUPTED.value,
+        )
+        == "⏹️ 已中断\n工具: Bash\n命令: pytest -q"
+    )
+    assert (
+        build_tool_status_message(
+            tool_name="Bash",
+            tool_input={"command": "rm file"},
+            status=ToolStatus.WAITING_FOR_APPROVAL.value,
+        )
+        == "⏳ 等待权限\n工具: Bash\n命令: rm file"
+    )
+    assert (
+        build_tool_status_message(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status=ToolStatus.RUNNING.value,
+            resumed=True,
+        )
+        == "🔄 继续执行\n工具: Bash\n命令: pytest -q"
+    )
+    assert (
+        build_tool_status_message(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            status="unknown",
+        )
+        == "⏳ 执行中\n工具: Bash\n命令: pytest -q"
+    )
 
 
 def test_build_tool_task_list_message_marks_current_task() -> None:
@@ -704,12 +744,7 @@ def test_build_task_list_status_message_marks_current_task() -> None:
     )
 
     assert message == (
-        "任务列表\n"
-        "当前: 🔄 2. 评估当前改动\n"
-        "\n"
-        "✅ 1. 梳理项目结构 - 完成\n"
-        "=> 🔄 2. 评估当前改动 - 执行中\n"
-        "⏳ 3. 形成优化建议 - 待执行"
+        "任务列表\n当前: 🔄 2. 评估当前改动\n\n✅ 1. 梳理项目结构 - 完成\n=> 🔄 2. 评估当前改动 - 执行中\n⏳ 3. 形成优化建议 - 待执行"
     )
 
 
@@ -741,12 +776,7 @@ def test_build_task_list_status_message_marks_first_pending_when_no_task_is_runn
     )
 
     assert message == (
-        "任务列表\n"
-        "当前: ⏳ 2. 识别优化机会\n"
-        "\n"
-        "✅ 1. 梳理项目结构 - 完成\n"
-        "=> ⏳ 2. 识别优化机会 - 待执行\n"
-        "⏳ 3. 汇总优先级建议 - 待执行"
+        "任务列表\n当前: ⏳ 2. 识别优化机会\n\n✅ 1. 梳理项目结构 - 完成\n=> ⏳ 2. 识别优化机会 - 待执行\n⏳ 3. 汇总优先级建议 - 待执行"
     )
 
 
@@ -819,7 +849,10 @@ async def test_presenter_aggregates_top_level_file_tools_without_read_spam() -> 
             [
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"grep-1": grep_tool, "read-1": read_1_running}),
-                _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"grep-1": grep_tool, "read-1": read_1_success, "read-2": read_2_success}),
+                _session(
+                    phase=SessionPhase.WAITING_FOR_INPUT,
+                    tool_calls={"grep-1": grep_tool, "read-1": read_1_success, "read-2": read_2_success},
+                ),
             ]
         ),
         user_id=1,
@@ -910,12 +943,7 @@ def test_build_subagent_aggregate_status_message_shows_subagent_type() -> None:
         )
     )
 
-    assert message == (
-        "🔄 1 agents running\n"
-        "\n"
-        "- 🔄 Explore(项目优化点审计) · 3 tool uses · Running\n"
-        "  名称: Read ×2、Glob"
-    )
+    assert message == ("🔄 1 agents running\n\n- 🔄 Explore(项目优化点审计) · 3 tool uses · Running\n  名称: Read ×2、Glob")
 
 
 def test_build_subagent_aggregate_status_message_uses_waiting_icon_for_unknown_status() -> None:
@@ -1995,16 +2023,22 @@ class SwitchingTaskService:
     async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
         return None, None
 
-    async def acknowledge_structured_reply(self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_reply(
+        self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
+    ) -> None:
         return None
 
     async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
         return None
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_user_question(
+        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
+    ) -> None:
         return None
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
+    async def wait_for_structured_session_update(
+        self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
+    ) -> bool:
         return self._cursors[self.current.session_id] > since_cursor
 
 
@@ -2030,8 +2064,16 @@ async def test_presenter_wait_for_update_detects_session_switch_with_lower_revis
 async def test_presenter_persists_reply_cursor_across_restarts(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     state = store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")
-    store.process(SessionEvent(session_id=state.session_id, type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"}))
-    store.process(SessionEvent(session_id=state.session_id, type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}))
+    store.process(
+        SessionEvent(session_id=state.session_id, type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"})
+    )
+    store.process(
+        SessionEvent(
+            session_id=state.session_id,
+            type=SessionEventType.PARSER_UPDATED,
+            payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True},
+        )
+    )
 
     presenter = StructuredReplyPresenter(task_service=PersistentTaskService(store), user_id=1)
     await presenter.prime()
@@ -2051,8 +2093,16 @@ async def test_presenter_persists_reply_cursor_across_restarts(tmp_path) -> None
 async def test_presenter_restart_with_ack_only_persist_does_not_emit(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     state = store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")
-    store.process(SessionEvent(session_id=state.session_id, type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"}))
-    store.process(SessionEvent(session_id=state.session_id, type=SessionEventType.PARSER_UPDATED, payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True}))
+    store.process(
+        SessionEvent(session_id=state.session_id, type=SessionEventType.TURN_STARTED, payload={"turn_id": "turn-1", "role": "assistant"})
+    )
+    store.process(
+        SessionEvent(
+            session_id=state.session_id,
+            type=SessionEventType.PARSER_UPDATED,
+            payload={"turn_id": "turn-1", "text": "\n你好\n", "is_complete": True},
+        )
+    )
     store.mark_structured_reply_emitted("claude-session-1", turn_id="turn-1")
 
     reloaded = SessionStore(FileSessionStore(str(tmp_path)))

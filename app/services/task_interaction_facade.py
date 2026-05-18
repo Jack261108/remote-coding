@@ -92,7 +92,9 @@ class TaskInteractionFacade:
             return await self._structured_session_resolver.get_structured_user_question_cursor_for_task(user_id, task_id=task_id)
         return await self._user_question_service.get_structured_user_question_cursor(user_id)
 
-    async def acknowledge_structured_user_question(self, user_id: int, *, question_key: str | None = None, task_id: str | None = None) -> None:
+    async def acknowledge_structured_user_question(
+        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
+    ) -> None:
         if task_id is not None:
             await self._structured_session_resolver.acknowledge_structured_user_question_for_task(
                 user_id,
@@ -102,7 +104,9 @@ class TaskInteractionFacade:
             return
         await self._user_question_service.acknowledge_structured_user_question(user_id, question_key=question_key)
 
-    async def wait_for_structured_session_update(self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None) -> bool:
+    async def wait_for_structured_session_update(
+        self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
+    ) -> bool:
         return await self._structured_session_resolver.wait_for_structured_session_update(
             user_id=user_id,
             since_cursor=since_cursor,

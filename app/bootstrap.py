@@ -62,8 +62,7 @@ class AppContainer(
         except RuntimeError as exc:
             if settings.tg_proxy_url and "aiohttp-socks" in str(exc):
                 raise RuntimeError(
-                    "检测到 TG_PROXY_URL，但缺少 aiohttp-socks。请执行: "
-                    "python3 -m pip install aiohttp-socks，或移除 TG_PROXY_URL"
+                    "检测到 TG_PROXY_URL，但缺少 aiohttp-socks。请执行: python3 -m pip install aiohttp-socks，或移除 TG_PROXY_URL"
                 ) from exc
             raise
 

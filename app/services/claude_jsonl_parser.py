@@ -140,7 +140,7 @@ class ClaudeJSONLParser:
 
         for raw_line in agent_file.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
-            if not line or "\"tool_result\"" not in line:
+            if not line or '"tool_result"' not in line:
                 continue
             try:
                 payload = json.loads(line)
@@ -166,7 +166,7 @@ class ClaudeJSONLParser:
 
         for raw_line in agent_file.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
-            if not line or "\"tool_use\"" not in line:
+            if not line or '"tool_use"' not in line:
                 continue
             try:
                 payload = json.loads(line)
@@ -284,7 +284,9 @@ class ClaudeJSONLParser:
                     tool_use_id=tool_use_id,
                     name=str(block.get("name") or "Tool"),
                     input=dict(block.get("input", {})) if isinstance(block.get("input"), dict) else {},
-                    status=state.tool_calls.get(tool_use_id, ToolCallRecord(tool_use_id=tool_use_id, name=str(block.get("name") or "Tool"))).status,
+                    status=state.tool_calls.get(
+                        tool_use_id, ToolCallRecord(tool_use_id=tool_use_id, name=str(block.get("name") or "Tool"))
+                    ).status,
                     result=state.tool_calls.get(tool_use_id).result if tool_use_id in state.tool_calls else None,
                     structured_result=state.tool_calls.get(tool_use_id).structured_result if tool_use_id in state.tool_calls else None,
                     started_at=state.tool_calls.get(tool_use_id).started_at if tool_use_id in state.tool_calls else timestamp,
@@ -374,7 +376,8 @@ class ClaudeJSONLParser:
             if existing is None:
                 tool_use_block = next(
                     (
-                        item for item in content
+                        item
+                        for item in content
                         if isinstance(item, dict) and item.get("type") == "tool_use" and str(item.get("id") or "") == tool_use_id
                     ),
                     None,

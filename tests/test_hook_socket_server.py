@@ -618,7 +618,9 @@ async def test_hook_socket_server_rejects_oversized_message(tmp_path) -> None:
 
     await server.start(on_event)
     try:
-        reader, writer = await _send_raw(socket_path, b'{"session_id":"s1","cwd":"/tmp/project","event":"SessionStart","status":"starting"}')
+        reader, writer = await _send_raw(
+            socket_path, b'{"session_id":"s1","cwd":"/tmp/project","event":"SessionStart","status":"starting"}'
+        )
         assert await asyncio.wait_for(reader.read(), timeout=1) == b""
         writer.close()
         await writer.wait_closed()
