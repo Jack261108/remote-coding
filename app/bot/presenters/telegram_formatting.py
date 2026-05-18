@@ -13,6 +13,8 @@ _ITALIC_RE = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", re.DOTALL)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 _HTML_TOKEN_RE = re.compile(r"(<[^>]+>)")
 _HTML_TAG_NAME_RE = re.compile(r"^</?([a-zA-Z0-9]+)")
+_TABLE_SEPARATOR_RE = re.compile(r"^\|[\s\-:]+(\|[\s\-:]+)+\|?\s*$")
+_TABLE_ROW_RE = re.compile(r"^\|.+\|")
 
 
 def render_markdownish_to_telegram_html(text: str) -> str:
@@ -24,13 +26,75 @@ def render_markdownish_to_telegram_html(text: str) -> str:
     cursor = 0
     for match in _FENCED_CODE_RE.finditer(normalized):
         if match.start() > cursor:
-            parts.append(_render_normal_block(normalized[cursor : match.start()]))
+            parts.append(_render_non_code_block(normalized[cursor : match.start()]))
         code = match.group(2).strip("\n")
         parts.append(f"<pre><code>{html.escape(code)}</code></pre>")
         cursor = match.end()
     if cursor < len(normalized):
-        parts.append(_render_normal_block(normalized[cursor:]))
+        parts.append(_render_non_code_block(normalized[cursor:]))
     return "".join(parts)
+
+
+def _render_non_code_block(text: str) -> str:
+    """Render a block that is not inside fenced code, splitting out tables."""
+    segments = _extract_table_segments(text)
+    parts: list[str] = []
+    for is_table, content in segments:
+        if is_table:
+            parts.append(f"<pre><code>{html.escape(content)}</code></pre>")
+        else:
+            parts.append(_render_normal_block(content))
+    return "".join(parts)
+
+
+def _extract_table_segments(text: str) -> list[tuple[bool, str]]:
+    """Split text into (is_table, content) segments.
+
+    A table is a contiguous block of lines where every line matches
+    the pipe-row pattern and at least one line is a separator (dashes).
+    """
+    lines = text.split("\n")
+    segments: list[tuple[bool, str]] = []
+    table_lines: list[str] = []
+    non_table_lines: list[str] = []
+
+    def flush_non_table() -> None:
+        if non_table_lines:
+            segments.append((False, "\n".join(non_table_lines)))
+            non_table_lines.clear()
+
+    def flush_table() -> None:
+        if table_lines:
+            segments.append((True, "\n".join(table_lines)))
+            table_lines.clear()
+
+    for line in lines:
+        if _TABLE_ROW_RE.match(line):
+            table_lines.append(line)
+        else:
+            if table_lines:
+                # Check if accumulated lines form a real table (has separator)
+                if any(_TABLE_SEPARATOR_RE.match(row) for row in table_lines):
+                    flush_non_table()
+                    flush_table()
+                else:
+                    # Not a real table, merge back into non-table
+                    non_table_lines.extend(table_lines)
+                    table_lines.clear()
+                    non_table_lines.append(line)
+            else:
+                non_table_lines.append(line)
+
+    # Handle trailing table lines
+    if table_lines:
+        if any(_TABLE_SEPARATOR_RE.match(row) for row in table_lines):
+            flush_non_table()
+            flush_table()
+        else:
+            non_table_lines.extend(table_lines)
+    flush_non_table()
+
+    return segments
 
 
 def _render_normal_block(text: str) -> str:
@@ -108,7 +172,7 @@ def split_markdownish_for_telegram(text: str, max_len: int) -> list[str]:
     cursor = 0
     for match in _FENCED_CODE_RE.finditer(normalized):
         if match.start() > cursor:
-            parts.extend(_split_plain_text(normalized[cursor : match.start()], max_len))
+            parts.extend(_split_non_code_segment(normalized[cursor : match.start()], max_len))
         parts.extend(
             _split_fenced_code_block(
                 language=match.group(1) or "",
@@ -119,8 +183,40 @@ def split_markdownish_for_telegram(text: str, max_len: int) -> list[str]:
         )
         cursor = match.end()
     if cursor < len(normalized):
-        parts.extend(_split_plain_text(normalized[cursor:], max_len))
+        parts.extend(_split_non_code_segment(normalized[cursor:], max_len))
     return _merge_markdownish_chunks(parts, max_len)
+
+
+def _split_non_code_segment(text: str, max_len: int) -> list[str]:
+    """Split a non-code segment, keeping tables together like code blocks."""
+    segments = _extract_table_segments(text)
+    parts: list[str] = []
+    for is_table, content in segments:
+        if is_table:
+            parts.extend(_split_table_block(content, max_len))
+        else:
+            parts.extend(_split_plain_text(content, max_len))
+    return parts
+
+
+def _split_table_block(table: str, max_len: int) -> list[str]:
+    """Split a table block, keeping rows together if possible."""
+    if len(table) <= max_len or max_len <= 0:
+        return [table]
+    # Split by rows, keep contiguous groups within max_len
+    lines = table.split("\n")
+    chunks: list[str] = []
+    current = ""
+    for line in lines:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > max_len and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def split_telegram_html(text: str, max_len: int) -> list[str]:
