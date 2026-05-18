@@ -91,10 +91,19 @@ class StructuredReplyPresenter:
         self._task_list_tracker = TaskListTracker()
         self._subagent_tracker = SubagentAggregateTracker()
         self._file_tool_tracker = FileToolAggregateTracker()
+        self._reply_frozen = False
 
     @property
     def structured_session_available(self) -> bool:
         return self._structured_session_available
+
+    def freeze_reply_cursor(self) -> None:
+        """Prevent _collect_reply from emitting any turn newer than what has already been seen.
+
+        Call this after task exit to avoid sending post-completion messages
+        (e.g., idle greetings) that arrive via session sync after the task finishes.
+        """
+        self._reply_frozen = True
 
     async def prime(self, *, log_missing: bool = True, baseline_current_snapshot: bool = False) -> None:
         snapshot = await self._snapshot_loader.load_snapshot(log_missing=log_missing)
@@ -286,6 +295,12 @@ class StructuredReplyPresenter:
                     "structured reply skipped",
                     extra={"task_id": task_id, "user_id": self._user_id, "turn_id": snapshot.turn_id, "reason": "duplicate_turn"},
                 )
+            return None
+        if self._reply_frozen:
+            logger.info(
+                "structured reply skipped",
+                extra={"task_id": task_id, "user_id": self._user_id, "turn_id": snapshot.turn_id, "reason": "reply_frozen_after_exit"},
+            )
             return None
 
         logger.info("[task %s][structured] %s", task_id, snapshot.reply.rstrip("\n"))

@@ -23,47 +23,42 @@ async def _load_status_summary(task_service: TaskService, task_id: str, user_id:
 
 
 def _build_created_message(*, task_id: str, provider: str, session_id: str) -> str:
-    return f"任务已接收\ntask_id: {task_id}\nprovider: {provider}\nsession_id: {session_id}\nstatus: 等待启动"
-
-
-def _build_started_message(*, task_id: str) -> str:
-    return "\n".join(["任务开始执行", f"task_id: {task_id}", "status: 正在处理"])
+    short_id = task_id[:8]
+    return f"⏳ 处理中… [{short_id}]"
 
 
 def _build_success_message(*, task_id: str, exit_code: int | None, duration: str, truncated: bool) -> str:
-    lines = [
-        "任务执行完成",
-        f"task_id: {task_id}",
-        "status: 成功",
-        f"exit_code: {exit_code if exit_code is not None else '-'}",
-        f"duration: {duration}",
-    ]
+    short_id = task_id[:8]
+    parts = [f"✅ 完成 [{short_id}] {duration}"]
     if truncated:
-        lines.append("output: truncated")
-    return "\n".join(lines)
+        parts.append("（输出已截断）")
+    return " ".join(parts)
 
 
 def _build_error_message(*, event_type: EventType, task_id: str, error_text: str, duration: str, truncated: bool) -> str:
-    heading_map = {
-        EventType.FAILED: "任务执行失败",
-        EventType.TIMEOUT: "任务执行超时",
-        EventType.CANCELED: "任务已取消",
+    short_id = task_id[:8]
+    icon_map = {
+        EventType.FAILED: "❌",
+        EventType.TIMEOUT: "⏰",
+        EventType.CANCELED: "🚫",
     }
-    status_map = {
+    label_map = {
         EventType.FAILED: "失败",
         EventType.TIMEOUT: "超时",
         EventType.CANCELED: "已取消",
     }
-    lines = [
-        heading_map[event_type],
-        f"task_id: {task_id}",
-        f"status: {status_map[event_type]}",
-        f"error: {error_text}",
-        f"duration: {duration}",
-    ]
+    icon = icon_map.get(event_type, "❌")
+    label = label_map.get(event_type, "错误")
+    parts = [f"{icon} {label} [{short_id}] {duration}"]
+    if error_text and error_text != "-":
+        parts.append(f"\n{error_text}")
     if truncated:
-        lines.append("output: truncated")
-    return "\n".join(lines)
+        parts.append("（输出已截断）")
+    return "".join(parts)
+
+
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_SPINNER_INTERVAL_SEC = 0.6
 
 
 class RunEventStreamer:
@@ -86,7 +81,39 @@ class RunEventStreamer:
         self._messenger = messenger
         self._lifecycle_message = lifecycle_message
         self._interactive_pump: asyncio.Task | None = None
+        self._spinner_task: asyncio.Task | None = None
         self._emit_lock = asyncio.Lock()
+
+    def _start_spinner(self) -> None:
+        if self._lifecycle_message is None:
+            return
+        if self._spinner_task is not None and not self._spinner_task.done():
+            return
+        self._spinner_task = asyncio.create_task(self._spin())
+
+    async def _stop_spinner(self) -> None:
+        task = self._spinner_task
+        self._spinner_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _spin(self) -> None:
+        short_id = self._start.task.task_id[:8]
+        frame_idx = 0
+        try:
+            while True:
+                await asyncio.sleep(_SPINNER_INTERVAL_SEC)
+                frame = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
+                frame_idx += 1
+                text = f"{frame} 处理中… [{short_id}]"
+                await self._messenger.edit_message_safely(self._lifecycle_message, text)
+        except asyncio.CancelledError:
+            raise
 
     async def pump_structured_reply(self) -> None:
         try:
@@ -125,9 +152,7 @@ class RunEventStreamer:
                         self._start.task.provider,
                         self._user_id,
                     )
-                    started_message = _build_started_message(task_id=self._start.task.task_id)
-                    if not await self._messenger.edit_message_safely(self._lifecycle_message, started_message):
-                        await self._messenger.answer_safely(started_message)
+                    self._start_spinner()
                     if self._start.interactive and self._interactive_pump is None:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
                     continue
@@ -136,18 +161,19 @@ class RunEventStreamer:
                     async with self._emit_lock:
                         await self._dispatcher.emit_presenter_messages(log_missing=True)
                 await self._dispatcher.flush()
+                await self._stop_spinner()
                 duration, truncated = await _load_status_summary(self._task_service, self._start.task.task_id, self._user_id)
 
                 if event.type == EventType.EXITED:
                     saw_exit = True
-                    await self._messenger.answer_safely(
-                        _build_success_message(
-                            task_id=self._start.task.task_id,
-                            exit_code=event.exit_code,
-                            duration=duration,
-                            truncated=truncated,
-                        )
+                    success_msg = _build_success_message(
+                        task_id=self._start.task.task_id,
+                        exit_code=event.exit_code,
+                        duration=duration,
+                        truncated=truncated,
                     )
+                    if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
+                        await self._messenger.answer_safely(success_msg)
                 elif event.type in {EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
                     error_text = normalize_stream_text(event.error or "") or "-"
                     logger.error(
@@ -161,18 +187,22 @@ class RunEventStreamer:
                             "duration": duration,
                         },
                     )
-                    await self._messenger.answer_safely(
-                        _build_error_message(
-                            event_type=event.type,
-                            task_id=self._start.task.task_id,
-                            error_text=error_text,
-                            duration=duration,
-                            truncated=truncated,
-                        )
+                    error_msg = _build_error_message(
+                        event_type=event.type,
+                        task_id=self._start.task.task_id,
+                        error_text=error_text,
+                        duration=duration,
+                        truncated=truncated,
                     )
+                    if not await self._messenger.edit_message_safely(self._lifecycle_message, error_msg):
+                        await self._messenger.answer_safely(error_msg)
         finally:
+            await self._stop_spinner()
             if saw_exit and self._start.interactive:
                 await asyncio.sleep(0.1)
+                # Freeze the presenter's last turn ID to prevent emitting
+                # new turns that arrive after task completion (e.g., idle greetings).
+                self._presenter.freeze_reply_cursor()
                 async with self._emit_lock:
                     await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
                 await self._dispatcher.flush()

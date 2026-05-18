@@ -212,13 +212,10 @@ async def test_run_prompt_and_stream_reports_started_output_and_success() -> Non
 
     await _run_and_wait(message=message, task_service=task_service)
 
-    assert message.answers[0] == ("任务已接收\ntask_id: t1\nprovider: claude_code\nsession_id: s1\nstatus: 等待启动")
-    started_message = "任务开始执行\ntask_id: t1\nstatus: 正在处理"
-    assert message.sent_messages[0].text == started_message
-    assert message.sent_messages[0].edits == [started_message]
-    assert started_message not in message.answers
+    assert message.answers[0] == "⏳ 处理中… [t1]"
+    lifecycle = message.sent_messages[0]
     assert message.answers[1] == "hello\nworld"
-    assert message.answers[2].startswith("任务执行完成\ntask_id: t1\nstatus: 成功\nexit_code: 0\nduration: ")
+    assert "✅ 完成 [t1]" in lifecycle.edits[-1]
 
 
 @pytest.mark.asyncio
@@ -234,9 +231,9 @@ async def test_run_prompt_and_stream_sends_started_message_when_lifecycle_edit_f
 
     await _run_and_wait(message=message, task_service=task_service)
 
-    assert message.sent_messages[0].edits == []
-    assert "任务开始执行\ntask_id: t1\nstatus: 正在处理" in message.answers
-    assert any(answer.startswith("任务执行完成") for answer in message.answers)
+    # When first edit fails, started message is sent as answer, but completion still edits lifecycle
+    assert "⏳ 处理中… [t1]" in message.answers
+    assert any("✅ 完成" in edit for msg in message.sent_messages for edit in msg.edits) or any("✅ 完成" in a for a in message.answers)
 
 
 @pytest.mark.asyncio
@@ -707,8 +704,10 @@ async def test_run_prompt_and_stream_reports_failed_with_hint_and_truncation() -
 
     await _run_and_wait(message=message, task_service=task_service)
 
-    assert message.answers[1].startswith("任务执行失败\ntask_id: t1\nstatus: 失败\nerror: tmux session lost\nduration: ")
-    assert message.answers[1].endswith("output: truncated")
+    assert len(message.sent_messages) >= 1
+    lifecycle = message.sent_messages[0]
+    assert any("❌ 失败 [t1]" in edit for edit in lifecycle.edits)
+    assert any("（输出已截断）" in edit for edit in lifecycle.edits)
 
 
 @pytest.mark.asyncio
@@ -723,7 +722,8 @@ async def test_run_prompt_and_stream_reports_timeout() -> None:
 
     await _run_and_wait(message=message, task_service=task_service)
 
-    assert message.answers[1].startswith("任务执行超时\ntask_id: t1\nstatus: 超时\nerror: deadline exceeded\nduration: ")
+    lifecycle = message.sent_messages[0]
+    assert any("⏰ 超时 [t1]" in edit for edit in lifecycle.edits)
 
 
 @pytest.mark.asyncio
@@ -738,7 +738,8 @@ async def test_run_prompt_and_stream_reports_canceled() -> None:
 
     await _run_and_wait(message=message, task_service=task_service)
 
-    assert message.answers[1].startswith("任务已取消\ntask_id: t1\nstatus: 已取消\nerror: user canceled\nduration: ")
+    lifecycle = message.sent_messages[0]
+    assert any("🚫 已取消 [t1]" in edit for edit in lifecycle.edits)
 
 
 @pytest.mark.asyncio
@@ -848,7 +849,9 @@ async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn()
     assert all("半截回复" not in item for item in message.answers)
     assert all("tmux 噪音" not in item for item in message.answers)
     assert "结构化回复暂不可用，已回退为原始输出。" in message.answers
-    assert message.answers[-2].startswith("任务执行完成")
+    # Success is now edited into the lifecycle message, not a separate answer
+    lifecycle = message.sent_messages[0]
+    assert any("✅ 完成" in edit for edit in lifecycle.edits)
 
 
 @pytest.mark.asyncio
@@ -871,7 +874,8 @@ async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_st
     # Interactive mode always suppresses raw STDOUT to prevent duplicates
     # with the structured reply system. Only lifecycle messages are sent.
     assert "原始输出" not in "\n".join(message.answers)
-    assert any("任务执行完成" in a for a in message.answers)
+    lifecycle = message.sent_messages[0]
+    assert any("✅ 完成" in edit for edit in lifecycle.edits)
 
 
 @pytest.mark.asyncio
@@ -888,9 +892,10 @@ async def test_run_prompt_and_stream_continues_after_message_send_failure() -> N
 
     await _run_and_wait(message=message, task_service=task_service)
 
-    assert message.answers[0].startswith("任务开始执行")
+    # lifecycle_message send failed (call 1), so ⏳ never appears in answers.
+    # Output and completion still get through.
     assert "hello\nworld" in message.answers
-    assert any(item.startswith("任务执行完成") for item in message.answers)
+    assert any("✅ 完成" in a for a in message.answers) or any("✅ 完成" in edit for msg in message.sent_messages for edit in msg.edits)
 
 
 @pytest.mark.asyncio
