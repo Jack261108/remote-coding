@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tg-cli-gateway"
-version = "0.1.0"
+version = "0.1.2"
 description = "Telegram 交互式远程 CLI 执行网关"
 readme = "README.md"
 requires-python = ">=3.11"
