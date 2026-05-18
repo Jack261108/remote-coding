@@ -10,13 +10,20 @@ class TestTableRendering:
     def test_markdown_table_wrapped_in_pre_code(self) -> None:
         text = "| Name  | Value |\n|-------|-------|\n| foo   | 42    |\n| bar   | 108   |"
         result = render_markdownish_to_telegram_html(text)
-        assert result == ("<pre><code>| Name  | Value |\n|-------|-------|\n| foo   | 42    |\n| bar   | 108   |</code></pre>")
+        assert "<pre><code>" in result
+        assert "</code></pre>" in result
+        # Should contain aligned content without separator dashes
+        assert "Name" in result
+        assert "foo" in result
+        assert "│" in result  # Uses box-drawing character for separator
+        assert "|-------|" not in result  # Separator row removed
 
     def test_table_with_text_before_and_after(self) -> None:
         text = "Here is a table:\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nAnd some text after."
         result = render_markdownish_to_telegram_html(text)
         assert "<pre><code>" in result
-        assert "| A | B |" in result
+        assert "A" in result
+        assert "1" in result
         assert "Here is a table:" in result
         assert "And some text after." in result
         # Table part should be in pre/code

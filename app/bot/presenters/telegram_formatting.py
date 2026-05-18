@@ -41,10 +41,73 @@ def _render_non_code_block(text: str) -> str:
     parts: list[str] = []
     for is_table, content in segments:
         if is_table:
-            parts.append(f"<pre><code>{html.escape(content)}</code></pre>")
+            parts.append(_render_table_as_pre(content))
         else:
             parts.append(_render_normal_block(content))
     return "".join(parts)
+
+
+def _display_width(text: str) -> int:
+    """Calculate the display width of a string, accounting for wide (CJK) characters."""
+    import unicodedata
+
+    width = 0
+    for ch in text:
+        eaw = unicodedata.east_asian_width(ch)
+        if eaw in ("W", "F"):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _ljust_display(text: str, width: int) -> str:
+    """Left-justify text to a given display width, accounting for wide characters."""
+    current_width = _display_width(text)
+    padding = width - current_width
+    if padding <= 0:
+        return text
+    return text + " " * padding
+
+
+def _render_table_as_pre(table_text: str) -> str:
+    """Convert a markdown table to a well-aligned monospace block.
+
+    Removes the separator row (---) and pads columns so they align neatly,
+    accounting for CJK wide characters.
+    """
+    lines = table_text.split("\n")
+    rows: list[list[str]] = []
+    for line in lines:
+        if _TABLE_SEPARATOR_RE.match(line):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        rows.append(cells)
+
+    if not rows:
+        return f"<pre><code>{html.escape(table_text)}</code></pre>"
+
+    # Calculate max display width per column
+    num_cols = max(len(row) for row in rows)
+    col_widths = [0] * num_cols
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], _display_width(cell))
+
+    # Build aligned rows
+    formatted_lines: list[str] = []
+    for row_idx, row in enumerate(rows):
+        cells_padded: list[str] = []
+        for i in range(num_cols):
+            cell = row[i] if i < len(row) else ""
+            cells_padded.append(_ljust_display(cell, col_widths[i]))
+        formatted_lines.append(" │ ".join(cells_padded))
+        # Add a thin separator after the header row
+        if row_idx == 0:
+            sep = "─┼─".join("─" * w for w in col_widths)
+            formatted_lines.append(sep)
+
+    return f"<pre><code>{html.escape(chr(10).join(formatted_lines))}</code></pre>"
 
 
 _CONCAT_TABLE_SEP_RE = re.compile(r"^\|[\s\-:]+(\|[\s\-:]+)+\|?\s*$")
