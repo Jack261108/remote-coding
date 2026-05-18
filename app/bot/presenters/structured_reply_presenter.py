@@ -107,9 +107,10 @@ class StructuredReplyPresenter:
         self._last_phase = snapshot.phase
 
         persisted_turn_id, persisted_permission_key = await self._task_service.get_structured_reply_cursor(self._user_id, task_id=self._task_id)
-        self._last_structured_turn_id = persisted_turn_id
-        if self._last_structured_turn_id is None and baseline_current_snapshot:
+        if baseline_current_snapshot:
             self._last_structured_turn_id = snapshot.turn_id
+        else:
+            self._last_structured_turn_id = persisted_turn_id
         self._last_pending_permission_key = persisted_permission_key
         pending_prompts: tuple[UserQuestionPrompt, ...] = ()
 
