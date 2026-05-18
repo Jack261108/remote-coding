@@ -161,12 +161,12 @@ class SessionRegistryService:
             updated.is_owner = False
             from app.adapters.storage.memory import SessionContextStore
             # We need to save through the store directly since SessionService builds terminal_id deterministically
-            await self._session_service._store.save(updated)
+            await self._session_service.save_session_context(updated)
 
         # Add user to owner's attached_user_ids
         if owner and user_id not in owner.attached_user_ids:
             owner.attached_user_ids.append(user_id)
-            await self._session_service._store.save(owner)
+            await self._session_service.save_session_context(owner)
 
         logger.info(
             "user attached to session",
@@ -195,7 +195,7 @@ class SessionRegistryService:
             for ctx in all_contexts:
                 if ctx.terminal_id == terminal_id and ctx.is_owner and user_id in ctx.attached_user_ids:
                     ctx.attached_user_ids.remove(user_id)
-                    await self._session_service._store.save(ctx)
+                    await self._session_service.save_session_context(ctx)
                     break
 
         # Reset user's session
@@ -312,7 +312,7 @@ class SessionRegistryService:
             else:
                 # Owner: keep terminal_id for potential recreation, but clear session
                 pass
-            await self._session_service._store.save(ctx)
+            await self._session_service.save_session_context(ctx)
 
         # Clean up attached_user_ids referencing dead terminals
         dead_terminal_ids = {ctx.terminal_id for ctx in stale if ctx.terminal_id}

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
-from app.domain.hook_models import HookEvent, PendingPermission
+from app.domain.hook_models import HookEvent, PendingPermissionRequest
 
 
 def _socket_path() -> Path:
@@ -546,7 +546,7 @@ async def test_hook_socket_server_returns_false_and_emits_failure_when_writer_br
         tool_input={"command": "pwd"},
         tool_use_id="tool-1",
     )
-    server._pending_permissions["tool-1"] = PendingPermission(
+    server._pending_permissions["tool-1"] = PendingPermissionRequest(
         session_id="s1",
         tool_use_id="tool-1",
         writer=BrokenWriter(),

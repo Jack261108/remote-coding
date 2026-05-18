@@ -3,16 +3,8 @@ from __future__ import annotations
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.presenters.session_text import render_structured_session
 from app.services.task_service import TaskService
-
-
-def _render_structured_session(state) -> str:
-    return (
-        "structured_session:\n"
-        f"phase: {state.phase.value}\n"
-        f"turns: {len(state.turns)}\n"
-        f"current_turn_id: {state.current_turn_id or '-'}"
-    )
 
 
 def _render_task(task) -> str:
@@ -43,7 +35,7 @@ def register_status_handler(router, *, task_service: TaskService):
                 structured = await task_service.get_structured_session_for_task(task_id=task.task_id, user_id=user_id)
                 if structured is not None:
                     lines.append("")
-                    lines.append(_render_structured_session(structured))
+                    lines.append(render_structured_session(structured, include_last_reply=False))
             await message.answer("\n".join(lines))
             return
 

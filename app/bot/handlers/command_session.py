@@ -5,22 +5,9 @@ from pathlib import Path
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.bot.presenters.session_text import render_structured_session
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
-
-
-def _render_structured_session(state) -> str:
-    last_turn = state.turns[-1] if state.turns else None
-    last_reply = (last_turn.text.strip() if last_turn else "") or "-"
-    if len(last_reply) > 200:
-        last_reply = f"{last_reply[:200].rstrip()}..."
-    return (
-        "structured_session:\n"
-        f"phase: {state.phase.value}\n"
-        f"turns: {len(state.turns)}\n"
-        f"current_turn_id: {state.current_turn_id or '-'}\n"
-        f"last_reply: {last_reply}"
-    )
 
 
 def register_session_handler(router, *, task_service: TaskService, session_service: SessionService):
@@ -43,7 +30,7 @@ def register_session_handler(router, *, task_service: TaskService, session_servi
             structured = await task_service.get_structured_session(user_id)
             if structured is not None:
                 lines.append("")
-                lines.append(_render_structured_session(structured))
+                lines.append(render_structured_session(structured))
             await message.answer("\n".join(lines))
             return
 

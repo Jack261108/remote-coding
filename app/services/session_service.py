@@ -116,6 +116,10 @@ class SessionService:
     async def get(self, user_id: int) -> SessionContext | None:
         return await self._store.get(user_id)
 
+    async def save_session_context(self, session: SessionContext) -> None:
+        """Save a session context directly (for cross-user attach/detach)."""
+        await self._store.save(session)
+
     async def list_all(self) -> list[SessionContext]:
         return await self._store.list_all()
 

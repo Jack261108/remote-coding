@@ -416,6 +416,14 @@ class SessionStore(SessionEventProcessingMixin):
             return None
         return self._hydrate_and_cache_state(loaded)
 
+    def values(self) -> list[SessionState]:
+        """Return all currently cached session states (snapshot)."""
+        return list(self._states.values())
+
+    def save(self, state: SessionState, *, publish: bool = True) -> None:
+        """Persist and optionally publish a session state change."""
+        self._persist(state, publish=publish)
+
     def get_cursor(self, session_id: str) -> int:
         session_id = validate_session_id(session_id)
         state = self._states.get(session_id)

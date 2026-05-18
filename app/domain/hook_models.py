@@ -190,7 +190,7 @@ class HookResponse:
 
 
 @dataclass(slots=True)
-class PendingPermission:
+class PendingPermissionRequest:
     session_id: str
     tool_use_id: str
     writer: Any

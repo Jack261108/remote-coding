@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config.settings import is_workdir_allowed
-from app.domain.hook_models import HookEvent, HookResponse, PendingPermission
+from app.domain.hook_models import HookEvent, HookResponse, PendingPermissionRequest
 from app.domain.models import utc_now
 
 HookEventHandler = Callable[[HookEvent], Awaitable[None] | None]
@@ -58,7 +58,7 @@ class HookSocketServer:
         self._server: asyncio.AbstractServer | None = None
         self._event_handler: HookEventHandler | None = None
         self._permission_failure_handler: PermissionFailureHandler | None = None
-        self._pending_permissions: dict[str, PendingPermission] = {}
+        self._pending_permissions: dict[str, PendingPermissionRequest] = {}
         self._pending_expiration_tasks: dict[str, asyncio.Task[None]] = {}
         self._tool_use_id_cache: dict[str, list[_CachedToolUseId]] = {}
         self._lock = asyncio.Lock()
@@ -104,7 +104,7 @@ class HookSocketServer:
             self._socket_path.unlink()
 
     async def respond_to_permission(self, *, tool_use_id: str, decision: str, reason: str | None = None) -> bool:
-        expired: list[PendingPermission]
+        expired: list[PendingPermissionRequest]
         async with self._lock:
             expired = self._pop_expired_pending_permissions_locked()
             pending = self._pending_permissions.pop(tool_use_id, None)
@@ -116,7 +116,7 @@ class HookSocketServer:
         return await self._write_response(pending=pending, decision=decision, reason=reason)
 
     async def respond_to_permission_by_session(self, *, session_id: str, decision: str, reason: str | None = None) -> bool:
-        expired: list[PendingPermission]
+        expired: list[PendingPermissionRequest]
         async with self._lock:
             expired = self._pop_expired_pending_permissions_locked()
             candidates = [item for item in self._pending_permissions.values() if item.session_id == session_id]
@@ -222,7 +222,7 @@ class HookSocketServer:
                     previous = self._pending_permissions.pop(tool_id, None)
                     if previous is not None:
                         self._cancel_pending_expiration_locked(tool_id)
-                    self._pending_permissions[tool_id] = PendingPermission(
+                    self._pending_permissions[tool_id] = PendingPermissionRequest(
                         session_id=emit_event.session_id,
                         tool_use_id=tool_id,
                         writer=writer,
@@ -236,7 +236,7 @@ class HookSocketServer:
                     extra={"session_id": emit_event.session_id, "max_pending_permissions": self._max_pending_permissions},
                 )
                 await self._write_response(
-                    pending=PendingPermission(
+                    pending=PendingPermissionRequest(
                         session_id=emit_event.session_id,
                         tool_use_id=emit_event.tool_use_id or "",
                         writer=writer,
@@ -255,7 +255,7 @@ class HookSocketServer:
 
         await self._emit_event(emit_event)
 
-    async def _write_response(self, *, pending: PendingPermission, decision: str, reason: str | None) -> bool:
+    async def _write_response(self, *, pending: PendingPermissionRequest, decision: str, reason: str | None) -> bool:
         response = HookResponse(decision=decision, reason=reason)
         data = json.dumps(response.to_dict(), ensure_ascii=False).encode("utf-8")
         success = True
@@ -283,13 +283,13 @@ class HookSocketServer:
         if inspect.isawaitable(result):
             await result
 
-    async def _close_pending_permissions(self, items: list[PendingPermission], *, emit_failure: bool) -> None:
+    async def _close_pending_permissions(self, items: list[PendingPermissionRequest], *, emit_failure: bool) -> None:
         for item in items:
             await self._close_writer(item.writer)
             if emit_failure:
                 await self._emit_permission_failure(item.session_id, item.tool_use_id)
 
-    async def _expire_pending_permissions(self, items: list[PendingPermission], *, reason: str = "permission request expired") -> None:
+    async def _expire_pending_permissions(self, items: list[PendingPermissionRequest], *, reason: str = "permission request expired") -> None:
         for item in items:
             success = await self._write_response(pending=item, decision="deny", reason=reason)
             if success:
@@ -300,7 +300,7 @@ class HookSocketServer:
         with suppress(Exception):
             await writer.wait_closed()
 
-    def _pop_expired_pending_permissions_locked(self) -> list[PendingPermission]:
+    def _pop_expired_pending_permissions_locked(self) -> list[PendingPermissionRequest]:
         now = utc_now()
         expired = [
             item
