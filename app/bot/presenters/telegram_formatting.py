@@ -47,13 +47,17 @@ def _render_non_code_block(text: str) -> str:
     return "".join(parts)
 
 
+_CONCAT_TABLE_SEP_RE = re.compile(r"^\|[\s\-:]+(\|[\s\-:]+)+\|?\s*$")
+_TEXT_BEFORE_TABLE_RE = re.compile(r"^(.*?)((?:\|[^|]+)+\|)$")
+
+
 def _extract_table_segments(text: str) -> list[tuple[bool, str]]:
     """Split text into (is_table, content) segments.
 
-    A table is a contiguous block of lines where every line matches
-    the pipe-row pattern and at least one line is a separator (dashes).
+    A table is a contiguous block of lines containing pipe-rows and at least
+    one separator row (dashes). Handles concatenated rows joined by '||'.
     """
-    lines = text.split("\n")
+    expanded_lines = _expand_concatenated_lines(text.split("\n"))
     segments: list[tuple[bool, str]] = []
     table_lines: list[str] = []
     non_table_lines: list[str] = []
@@ -68,33 +72,62 @@ def _extract_table_segments(text: str) -> list[tuple[bool, str]]:
             segments.append((True, "\n".join(table_lines)))
             table_lines.clear()
 
-    for line in lines:
+    for line in expanded_lines:
         if _TABLE_ROW_RE.match(line):
             table_lines.append(line)
         else:
-            if table_lines:
-                # Check if accumulated lines form a real table (has separator)
-                if any(_TABLE_SEPARATOR_RE.match(row) for row in table_lines):
-                    flush_non_table()
-                    flush_table()
-                else:
-                    # Not a real table, merge back into non-table
-                    non_table_lines.extend(table_lines)
-                    table_lines.clear()
-                    non_table_lines.append(line)
-            else:
-                non_table_lines.append(line)
+            if table_lines and _has_separator_line(table_lines):
+                flush_non_table()
+                flush_table()
+            elif table_lines:
+                non_table_lines.extend(table_lines)
+                table_lines.clear()
+            non_table_lines.append(line)
 
-    # Handle trailing table lines
-    if table_lines:
-        if any(_TABLE_SEPARATOR_RE.match(row) for row in table_lines):
-            flush_non_table()
-            flush_table()
-        else:
-            non_table_lines.extend(table_lines)
+    if table_lines and _has_separator_line(table_lines):
+        flush_non_table()
+        flush_table()
+    elif table_lines:
+        non_table_lines.extend(table_lines)
     flush_non_table()
 
     return segments
+
+
+def _has_separator_line(lines: list[str]) -> bool:
+    """Check if any line contains a table separator."""
+    return any(_TABLE_SEPARATOR_RE.match(line) for line in lines)
+
+
+def _expand_concatenated_lines(lines: list[str]) -> list[str]:
+    """Pre-process lines: split '||' concatenation and text-embedded table rows."""
+    result: list[str] = []
+    for line in lines:
+        # Split 'header||separator' into separate lines
+        if "||" in line:
+            parts = line.split("||", 1)
+            after = f"|{parts[1]}" if not parts[1].startswith("|") else parts[1]
+            if _CONCAT_TABLE_SEP_RE.match(after):
+                before = parts[0] + "|"
+                # Split text prefix from table row in the 'before' part
+                text_match = _TEXT_BEFORE_TABLE_RE.match(before)
+                if text_match:
+                    if text_match.group(1).strip():
+                        result.append(text_match.group(1).rstrip())
+                    result.append(text_match.group(2))
+                else:
+                    result.append(before)
+                result.append(after)
+                continue
+        # Split 'text:| A | B |' into text and table row
+        text_match = _TEXT_BEFORE_TABLE_RE.match(line)
+        if text_match and "|" in text_match.group(2):
+            if text_match.group(1).strip():
+                result.append(text_match.group(1).rstrip())
+            result.append(text_match.group(2))
+            continue
+        result.append(line)
+    return result
 
 
 def _render_normal_block(text: str) -> str:
