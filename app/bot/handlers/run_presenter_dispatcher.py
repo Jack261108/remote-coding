@@ -51,10 +51,19 @@ class PresenterOutputDispatcher:
         for output in await self._presenter.poll(task_id=self._task_id, final=final, log_missing=log_missing):
             if isinstance(output, PermissionRequestOutput):
                 await self.flush()
-                sent = await self._messenger.answer_safely(
-                    output.text,
-                    reply_markup=build_permission_keyboard(tool_use_id=output.tool_use_id) if output.tool_use_id else None,
-                )
+                keyboard = build_permission_keyboard(tool_use_id=output.tool_use_id) if output.tool_use_id else None
+                # Try editing the existing tool status message into the permission prompt
+                edited = False
+                if output.tool_use_id:
+                    edited = await self._tool_message_manager.edit_with_keyboard(
+                        tool_use_id=output.tool_use_id,
+                        text=output.text,
+                        reply_markup=keyboard,
+                    )
+                if edited:
+                    await self._presenter.acknowledge_delivery(output)
+                    continue
+                sent = await self._messenger.answer_safely(output.text, reply_markup=keyboard)
                 if sent:
                     await self._presenter.acknowledge_delivery(output)
                 continue

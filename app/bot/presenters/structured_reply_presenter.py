@@ -330,6 +330,7 @@ class StructuredReplyPresenter:
         subagent_containers: list[ToolStatusOutput] = []
         file_tools: list[ToolStatusOutput] = []
         flat_tools: list[_ToolStateSnapshot] = []
+        pending_tool_use_id = snapshot.pending_permission_tool_use_id
         for tool in snapshot.tool_states:
             if tool.status is None:
                 continue
@@ -338,6 +339,9 @@ class StructuredReplyPresenter:
             if tool_question_prompts.get(tool.tool_use_id):
                 continue
             if _is_task_list_tool(tool.tool_name):
+                continue
+            # Skip the tool that will be shown in the PermissionRequestOutput
+            if pending_tool_use_id and tool.tool_use_id == pending_tool_use_id:
                 continue
             if _is_subagent_container_tool(tool.tool_name):
                 subagent_containers.append(_subagent_container_output(tool))
