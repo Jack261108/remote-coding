@@ -15,6 +15,7 @@ from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
+from app.adapters.storage.upload_store import UploadStoreAdapter
 from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.router import create_router
@@ -31,11 +32,16 @@ from app.bootstrap_mixins import (
 )
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
+from app.services.context_builder import ContextBuilderService
+from app.services.diff_generator import DiffGeneratorService
+from app.services.file_receiver import FileReceiverService
 from app.services.interrupt_watcher import InterruptWatcher
+from app.services.result_exporter import ResultExporterService
 from app.services.session_service import SessionService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
+from app.services.upload_cleanup import UploadCleanupService
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +117,21 @@ class AppContainer(
             tmux_runner=self.tmux_runner,
         )
 
+        self.upload_store = UploadStoreAdapter(base_dir=settings.default_workdir)
+        self.file_receiver = FileReceiverService(
+            upload_store=self.upload_store,
+            allowed_extensions=set(settings.allowed_file_extensions),
+            max_file_size_bytes=settings.upload_max_file_size_mb * 1024 * 1024,
+        )
+        self.context_builder = ContextBuilderService(upload_store=self.upload_store)
+        self.result_exporter = ResultExporterService(settings=settings)
+        self.diff_generator = DiffGeneratorService()
+        self.upload_cleanup = UploadCleanupService(
+            upload_store=self.upload_store,
+            interval_minutes=settings.upload_cleanup_interval_min,
+            max_age_hours=settings.upload_expiry_hours,
+        )
+
         self.session_service = SessionService(store=self.session_context_store)
         self.task_service = TaskService(
             settings=settings,
@@ -120,6 +141,7 @@ class AppContainer(
             semaphore=asyncio.Semaphore(settings.max_concurrent_tasks),
             structured_session_store=self.structured_session_store,
             hook_socket_server=self.hook_socket_server,
+            context_builder=self.context_builder,
         )
         self.session_registry = SessionRegistryService(
             session_service=self.session_service,
@@ -146,12 +168,14 @@ class AppContainer(
         self._start_agent_file_watchers()
         self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
         await self.session_registry.start_health_check()
+        await self.upload_cleanup.start()
         self._started = True
 
     async def stop(self) -> None:
         if not self._started:
             await self.bot.session.close()
             return
+        await self.upload_cleanup.stop()
         await self.session_registry.stop_health_check()
         await self._stop_periodic_recheck_task()
         await self._stop_jsonl_sync_tasks()
@@ -180,5 +204,8 @@ class AppContainer(
             task_service=self.task_service,
             session_service=self.session_service,
             registry_service=self.session_registry,
+            file_receiver=self.file_receiver,
+            result_exporter=self.result_exporter,
+            diff_generator=self.diff_generator,
         )
         self.dispatcher.include_router(router)

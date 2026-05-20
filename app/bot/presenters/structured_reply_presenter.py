@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from app.bot.presenters.structured_reply_messages import (
     build_compacting_progress_message,
@@ -69,10 +70,18 @@ def _extract_tool_question_prompts_by_id(snapshot: _StructuredSnapshot) -> dict[
 
 
 class StructuredReplyPresenter:
-    def __init__(self, *, task_service: TaskService, user_id: int, task_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        task_service: TaskService,
+        user_id: int,
+        task_id: str | None = None,
+        task_started_at: datetime | None = None,
+    ) -> None:
         self._task_service = task_service
         self._user_id = user_id
         self._task_id = task_id
+        self._task_started_at = task_started_at
         self._snapshot_loader = StructuredReplySnapshotLoader(
             task_service=task_service,
             user_id=user_id,
@@ -115,7 +124,7 @@ class StructuredReplyPresenter:
             self._user_id, task_id=self._task_id
         )
         if baseline_current_snapshot:
-            self._last_structured_turn_id = snapshot.turn_id
+            self._last_structured_turn_id = snapshot.turn_id or persisted_turn_id
         else:
             self._last_structured_turn_id = persisted_turn_id
         self._last_pending_permission_key = persisted_permission_key
@@ -307,6 +316,20 @@ class StructuredReplyPresenter:
                 logger.info(
                     "structured reply skipped",
                     extra={"task_id": task_id, "user_id": self._user_id, "turn_id": snapshot.turn_id, "reason": "duplicate_turn"},
+                )
+            return None
+        if self._task_started_at is not None and snapshot.turn_ended_at is not None and snapshot.turn_ended_at < self._task_started_at:
+            if log_missing:
+                logger.info(
+                    "structured reply skipped",
+                    extra={
+                        "task_id": task_id,
+                        "user_id": self._user_id,
+                        "turn_id": snapshot.turn_id,
+                        "reason": "pre_task_turn",
+                        "turn_ended_at": snapshot.turn_ended_at.isoformat(),
+                        "task_started_at": self._task_started_at.isoformat(),
+                    },
                 )
             return None
         if self._reply_frozen:

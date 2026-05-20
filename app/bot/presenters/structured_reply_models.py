@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.domain.user_question_models import UserQuestionPrompt
 
@@ -36,6 +37,7 @@ class _StructuredSnapshot:
     pending_permission_tool_name: str | None = None
     pending_permission_tool_input: dict | None = None
     tool_states: tuple[_ToolStateSnapshot, ...] = ()
+    turn_ended_at: datetime | None = None
 
 
 @dataclass(frozen=True)

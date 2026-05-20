@@ -44,7 +44,14 @@ class DummyTaskService:
         self._structured_user_question_key: str | None = None
 
     async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
-        task = SimpleNamespace(task_id="t1", provider="claude_code", session_id="s1")
+        task = SimpleNamespace(
+            task_id="t1",
+            provider="claude_code",
+            session_id="s1",
+            workdir=workdir or "/tmp",
+            started_at=None,
+            created_at="2025-01-01T00:00:00Z",
+        )
         return SimpleNamespace(task=task, events=self._stream(), interactive=self._interactive)
 
     async def get_status(self, task_id: str, user_id: int):

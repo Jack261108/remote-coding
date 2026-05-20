@@ -15,6 +15,8 @@ from app.bot.presenters.structured_reply_presenter import (
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
+from app.services.diff_generator import DiffGeneratorService
+from app.services.result_exporter import ResultExporterService
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,8 @@ async def run_prompt_and_stream(
     provider: str | None,
     prompt: str,
     workdir: str | None = None,
+    diff_generator: DiffGeneratorService | None = None,
+    result_exporter: ResultExporterService | None = None,
 ) -> asyncio.Task | None:
     logger.info(
         "run prompt requested",
@@ -105,7 +109,12 @@ async def run_prompt_and_stream(
     )
 
     sender: ChunkSender = sender_factory()
-    presenter = StructuredReplyPresenter(task_service=task_service, user_id=user_id, task_id=start.task.task_id)
+    presenter = StructuredReplyPresenter(
+        task_service=task_service,
+        user_id=user_id,
+        task_id=start.task.task_id,
+        task_started_at=start.task.started_at or start.task.created_at,
+    )
     tool_message_manager = ToolMessageManager(
         root_message=message,
         task_id=start.task.task_id,
@@ -127,6 +136,8 @@ async def run_prompt_and_stream(
         dispatcher=dispatcher,
         messenger=messenger,
         lifecycle_message=lifecycle_message,
+        diff_generator=diff_generator,
+        result_exporter=result_exporter,
     )
     await presenter.prime(baseline_current_snapshot=True)
 
@@ -169,7 +180,14 @@ async def run_prompt_and_stream(
     return task
 
 
-def register_run_handler(router, *, task_service: TaskService, sender_factory):
+def register_run_handler(
+    router,
+    *,
+    task_service: TaskService,
+    sender_factory,
+    diff_generator: DiffGeneratorService | None = None,
+    result_exporter: ResultExporterService | None = None,
+):
     @router.message(Command("run"))
     async def command_run(message: Message, command: CommandObject) -> None:
         try:
@@ -186,4 +204,6 @@ def register_run_handler(router, *, task_service: TaskService, sender_factory):
             user_id=user_id,
             provider=provider,
             prompt=prompt,
+            diff_generator=diff_generator,
+            result_exporter=result_exporter,
         )

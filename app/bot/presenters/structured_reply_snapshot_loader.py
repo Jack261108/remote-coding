@@ -93,6 +93,7 @@ class StructuredReplySnapshotLoader:
                 pending_permission_tool_name=pending_permission_tool_name,
                 pending_permission_tool_input=pending_permission_tool_input,
                 tool_states=tool_states,
+                turn_ended_at=turn.ended_at,
             )
 
         logger.info(

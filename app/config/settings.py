@@ -8,6 +8,38 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
+DEFAULT_ALLOWED_EXTENSIONS: list[str] = [
+    ".txt",
+    ".md",
+    ".py",
+    ".js",
+    ".ts",
+    ".java",
+    ".go",
+    ".rs",
+    ".c",
+    ".cpp",
+    ".h",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".html",
+    ".css",
+    ".sql",
+    ".sh",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".pdf",
+    ".csv",
+    ".log",
+]
+
+
 def is_workdir_allowed(workdir: str, allowed_workdirs: Sequence[str]) -> bool:
     try:
         target = Path(workdir).resolve()
@@ -65,6 +97,19 @@ class Settings(BaseSettings):
 
     session_health_check_interval_sec: float = Field(30.0, alias="SESSION_HEALTH_CHECK_INTERVAL_SEC")
 
+    # File upload settings
+    upload_max_file_size_mb: int = Field(20, alias="UPLOAD_MAX_FILE_SIZE_MB")
+    allowed_file_extensions: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_ALLOWED_EXTENSIONS),
+        alias="ALLOWED_FILE_EXTENSIONS",
+    )
+    upload_expiry_hours: int = Field(24, alias="UPLOAD_EXPIRY_HOURS")
+    upload_cleanup_interval_min: int = Field(60, alias="UPLOAD_CLEANUP_INTERVAL_MIN")
+
+    # Export settings
+    auto_export_threshold_chars: int = Field(4096, alias="AUTO_EXPORT_THRESHOLD_CHARS")
+    zip_max_size_mb: int = Field(50, alias="ZIP_MAX_SIZE_MB")
+
     @field_validator("tg_allowed_user_ids", mode="before")
     @classmethod
     def parse_user_ids(cls, value: Any) -> list[int]:
@@ -108,6 +153,15 @@ class Settings(BaseSettings):
             return dirs
         raise ValueError("ALLOWED_WORKDIRS 格式错误，需为逗号分隔路径")
 
+    @field_validator("allowed_file_extensions", mode="before")
+    @classmethod
+    def parse_file_extensions(cls, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [ext.strip().lower() for ext in value if str(ext).strip()]
+        if isinstance(value, str):
+            return [ext.strip().lower() for ext in value.split(",") if ext.strip()]
+        raise ValueError("ALLOWED_FILE_EXTENSIONS 格式错误，需为逗号分隔扩展名")
+
     @field_validator("claude_tmux_mode", "claude_install_hooks", mode="before")
     @classmethod
     def parse_bool_flag(cls, value: Any) -> bool:
@@ -149,6 +203,11 @@ class Settings(BaseSettings):
         "claude_hook_max_pending_permissions",
         "claude_jsonl_sync_debounce_ms",
         "claude_periodic_recheck_ms",
+        "upload_max_file_size_mb",
+        "upload_expiry_hours",
+        "upload_cleanup_interval_min",
+        "auto_export_threshold_chars",
+        "zip_max_size_mb",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:

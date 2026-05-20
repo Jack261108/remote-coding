@@ -38,6 +38,7 @@ class DummyMessage:
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
         self.sent_messages: list[DummyAnswerMessage] = []
+        self.sent_documents: list[dict] = []
         self.reply_markups: list[InlineKeyboardMarkup | None] = []
         self.parse_modes: list[ParseMode | None] = []
         self.edited_reply_markups: list[InlineKeyboardMarkup | None] = []
@@ -64,6 +65,13 @@ class DummyMessage:
 
     async def edit_reply_markup(self, reply_markup=None) -> None:
         self.edited_reply_markups.append(reply_markup)
+
+    async def answer_document(self, document, caption: str | None = None) -> DummyAnswerMessage:
+        filename = getattr(document, "filename", None) or "unknown"
+        self.sent_documents.append({"document": document, "filename": filename, "caption": caption})
+        sent = DummyAnswerMessage(caption or "", reply_markup=None)
+        self.sent_messages.append(sent)
+        return sent
 
 
 class DummyCallbackQuery:

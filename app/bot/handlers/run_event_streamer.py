@@ -2,17 +2,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, FSInputFile, Message
 
 from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter, normalize_stream_text
 from app.domain.models import EventType
+from app.services.diff_generator import DiffGeneratorService
+from app.services.result_exporter import ResultExporterService
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
+
+
+def _load_gitignore_patterns(workdir: str) -> list[str]:
+    """Load gitignore patterns from workdir/.gitignore."""
+    gitignore_path = Path(workdir) / ".gitignore"
+    if not gitignore_path.is_file():
+        return []
+    patterns: list[str] = []
+    try:
+        for line in gitignore_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            patterns.append(line)
+    except OSError:
+        logger.warning("Failed to read .gitignore at %s", gitignore_path)
+    return patterns
 
 
 async def _load_status_summary(task_service: TaskService, task_id: str, user_id: int) -> tuple[str, bool]:
@@ -73,6 +93,8 @@ class RunEventStreamer:
         dispatcher: PresenterOutputDispatcher,
         messenger: RunTelegramMessenger,
         lifecycle_message: Message | None,
+        diff_generator: DiffGeneratorService | None = None,
+        result_exporter: ResultExporterService | None = None,
     ) -> None:
         self._start = start
         self._task_service = task_service
@@ -81,9 +103,13 @@ class RunEventStreamer:
         self._dispatcher = dispatcher
         self._messenger = messenger
         self._lifecycle_message = lifecycle_message
+        self._diff_generator = diff_generator
+        self._result_exporter = result_exporter
         self._interactive_pump: asyncio.Task | None = None
         self._spinner_task: asyncio.Task | None = None
         self._emit_lock = asyncio.Lock()
+        self._pre_snapshot: dict[Path, float] | None = None
+        self._gitignore_patterns: list[str] = []
 
     def _start_spinner(self) -> None:
         if self._lifecycle_message is None:
@@ -129,6 +155,72 @@ class RunEventStreamer:
         except asyncio.CancelledError:
             raise
 
+    def _capture_diff_snapshot(self) -> None:
+        """Capture pre-task filesystem snapshot for diff generation (non-blocking)."""
+        if self._diff_generator is None:
+            return
+        try:
+            workdir = self._start.task.workdir
+            self._gitignore_patterns = _load_gitignore_patterns(workdir)
+            self._pre_snapshot = self._diff_generator.capture_snapshot(workdir, self._gitignore_patterns)
+        except Exception:
+            logger.exception("diff snapshot capture failed, skipping diff generation")
+            self._pre_snapshot = None
+
+    async def _generate_and_send_diff(self) -> None:
+        """Generate diff after successful task and send via Telegram (non-blocking)."""
+        if self._diff_generator is None or self._pre_snapshot is None:
+            return
+        try:
+            workdir = self._start.task.workdir
+            modified_files = self._diff_generator.detect_modified_files(
+                workdir=workdir,
+                pre_snapshot=self._pre_snapshot,
+                gitignore_patterns=self._gitignore_patterns,
+            )
+            diff_result = self._diff_generator.generate_unified_diff(modified_files, self._pre_snapshot)
+            if diff_result is None:
+                return
+
+            if diff_result.is_patch_file:
+                # Send as .patch file attachment
+                patch_bytes = diff_result.content.encode("utf-8")
+                short_id = self._start.task.task_id[:8]
+                filename = f"{short_id}.patch"
+                doc = BufferedInputFile(file=patch_bytes, filename=filename)
+                await self._messenger._root_message.answer_document(doc, caption=f"📎 Diff ({diff_result.file_count} files)")
+            else:
+                # Send as code-block formatted message
+                diff_msg = f"```diff\n{diff_result.content}\n```"
+                await self._messenger.send_message_safely(diff_msg)
+        except Exception:
+            logger.exception("diff generation/send failed, skipping")
+
+    async def _maybe_auto_export(self) -> None:
+        """Check output size and auto-export as Markdown document if threshold exceeded."""
+        if self._result_exporter is None:
+            return
+        try:
+            record = await self._task_service.get_status(self._start.task.task_id, self._user_id)
+            if record is None:
+                return
+            if not self._result_exporter.should_auto_export(record.output_chars):
+                return
+            export_result = await self._result_exporter.export_markdown(record)
+            try:
+                doc = FSInputFile(path=export_result.file_path, filename=export_result.filename)
+                await self._messenger._root_message.answer_document(doc)
+            finally:
+                # Clean up temp file
+                export_result.file_path.unlink(missing_ok=True)
+                export_result.file_path.parent.rmdir()
+        except Exception:
+            logger.warning(
+                "auto-export failed",
+                extra={"task_id": self._start.task.task_id, "user_id": self._user_id},
+                exc_info=True,
+            )
+
     async def stream_events(self) -> None:
         saw_exit = False
         try:
@@ -155,6 +247,7 @@ class RunEventStreamer:
                         self._start.task.provider,
                         self._user_id,
                     )
+                    self._capture_diff_snapshot()
                     self._start_spinner()
                     if self._start.interactive and self._interactive_pump is None:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
@@ -177,6 +270,9 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
                         await self._messenger.answer_safely(success_msg)
+                    await self._maybe_auto_export()
+                    # Generate and send diff on successful completion
+                    await self._generate_and_send_diff()
                 elif event.type in {EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
                     error_text = normalize_stream_text(event.error or "") or "-"
                     logger.error(

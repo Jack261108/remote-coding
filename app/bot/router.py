@@ -10,14 +10,19 @@ from app.bot.handlers.command_attach import register_attach_handler
 from app.bot.handlers.command_cancel import register_cancel_handler
 from app.bot.handlers.command_claude import register_claude_handler
 from app.bot.handlers.command_exit import register_exit_handler
+from app.bot.handlers.command_export import register_export_handler
 from app.bot.handlers.command_list import register_list_handler
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
+from app.bot.handlers.file_upload import register_file_upload_handler
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
+from app.services.diff_generator import DiffGeneratorService
+from app.services.file_receiver import FileReceiverService
+from app.services.result_exporter import ResultExporterService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
@@ -31,6 +36,9 @@ def create_router(
     task_service: TaskService,
     session_service: SessionService,
     registry_service: SessionRegistryService | None = None,
+    file_receiver: FileReceiverService | None = None,
+    result_exporter: ResultExporterService | None = None,
+    diff_generator: DiffGeneratorService | None = None,
 ) -> Router:
     router = Router()
 
@@ -74,6 +82,8 @@ def create_router(
         router,
         task_service=task_service,
         sender_factory=sender_factory,
+        diff_generator=diff_generator,
+        result_exporter=result_exporter,
     )
     register_claude_handler(router, task_service=task_service)
     register_cancel_handler(router, task_service=task_service)
@@ -85,6 +95,21 @@ def create_router(
     if registry_service is not None:
         register_list_handler(router, registry_service=registry_service)
         register_attach_handler(router, registry_service=registry_service)
+
+    if file_receiver is not None:
+        register_file_upload_handler(
+            router,
+            file_receiver=file_receiver,
+            session_service=session_service,
+            task_service=task_service,
+        )
+
+    if result_exporter is not None:
+        register_export_handler(
+            router,
+            task_service=task_service,
+            result_exporter=result_exporter,
+        )
 
     @router.message(F.text & ~F.text.startswith("/"))
     async def command_claude_chat_text(message: Message) -> None:
@@ -126,6 +151,8 @@ def create_router(
             provider="claude_code",
             prompt=text,
             workdir=session.workdir,
+            diff_generator=diff_generator,
+            result_exporter=result_exporter,
         )
         logger.info(
             "claude chat stream spawned",

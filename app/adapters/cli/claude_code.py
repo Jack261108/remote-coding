@@ -50,6 +50,8 @@ class ClaudeCodeAdapter(BaseCLIAdapter):
             argv = [task.prompt]
         else:
             argv = [self._cli_bin, "-p", task.prompt]
+            if task.extra_cli_args:
+                argv.extend(task.extra_cli_args)
 
         async for event in self._runner.run(
             task_id=task.task_id,

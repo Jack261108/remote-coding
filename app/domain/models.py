@@ -56,6 +56,7 @@ class ExecutionTask:
     workdir: str
     timeout_sec: int
     claude_session_id: str | None = None
+    extra_cli_args: list[str] = field(default_factory=list)
 
 
 @dataclass

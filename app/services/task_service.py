@@ -5,6 +5,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,8 @@ from app.services.terminal_session_service import TerminalSessionService
 from app.services.user_question_service import UserQuestionService
 
 if TYPE_CHECKING:
+    from app.services.context_builder import ContextBuilderService
+
     from app.domain.session_models import SessionState
     from app.domain.user_question_models import UserQuestionPrompt
 
@@ -116,12 +119,14 @@ class TaskService:
         semaphore: asyncio.Semaphore,
         structured_session_store: SessionStore | None = None,
         hook_socket_server: HookSocketServer | None = None,
+        context_builder: ContextBuilderService | None = None,
     ) -> None:
         self._settings = settings
         self._task_store = task_store
         self._session_service = session_service
         self._cli_factory = cli_factory
         self._semaphore = semaphore
+        self._context_builder = context_builder
         self._structured_session_resolver = StructuredSessionResolver(
             session_service=session_service,
             task_store=task_store,
@@ -214,15 +219,31 @@ class TaskService:
         )
         await self._task_store.add(record)
 
+        # Build file context if ContextBuilderService is available
+        effective_prompt = prompt
+        extra_cli_args: list[str] = []
+        if self._context_builder is not None:
+            since = await self._get_last_task_ended_at(user_id)
+            task_context = self._context_builder.build_context(
+                user_id=user_id,
+                workdir=selected_workdir,
+                provider=selected_provider,
+                prompt=prompt,
+                since=since,
+            )
+            effective_prompt = task_context.augmented_prompt
+            extra_cli_args = task_context.cli_args
+
         execution = ExecutionTask(
             task_id=record.task_id,
             session_id=record.session_id,
             user_id=record.user_id,
             provider=record.provider,
-            prompt=record.prompt,
+            prompt=effective_prompt,
             workdir=record.workdir,
             timeout_sec=record.timeout_sec,
             claude_session_id=session.claude_session_id,
+            extra_cli_args=extra_cli_args,
         )
 
         adapter = self._cli_factory.get(record.provider)
@@ -340,6 +361,17 @@ class TaskService:
             logger=logger,
             log_extra=log_extra,
         )
+        # Cleanup uploaded files when task reaches final state
+        if record.is_final and self._context_builder is not None:
+            await self._context_builder.cleanup_after_task(record.user_id, record.workdir)
+
+    async def _get_last_task_ended_at(self, user_id: int) -> datetime:
+        """Return the ended_at timestamp of the user's most recently completed task, or epoch if none."""
+        tasks = await self._task_store.list_by_user(user_id=user_id, limit=10)
+        for task in tasks:
+            if task.is_final and task.ended_at is not None:
+                return task.ended_at
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
     def _is_workdir_allowed(self, workdir: str) -> bool:
         return is_workdir_allowed(workdir, self._settings.allowed_workdirs)
