@@ -155,7 +155,8 @@ class TmuxSessionMixin:
                         return False, self._format_send_failure(
                             base="tmux 执行命令失败", raw_err=err_text, session_name=session_name, rebuilt=True
                         )
-                await self._run_tmux("send-keys", "-t", session_name, "C-u")
+                if not interactive:
+                    await self._run_tmux("send-keys", "-t", session_name, "C-u")
                 return True, ""
             finally:
                 await self._run_tmux("delete-buffer", "-b", buffer_name)

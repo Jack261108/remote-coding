@@ -65,6 +65,7 @@ class _InteractiveWatchState:
     last_interactive_revision: int | None = None
     completion_candidate_key: tuple[object, ...] | None = None
     completion_candidate_seen_at: float | None = None
+    last_progress_at: float | None = None
 
 
 class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
@@ -89,6 +90,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         self._enter_delay_sec = max(0.0, enter_delay_sec)
         self._partial_flush_sec = max(0.0, partial_flush_sec)
         self._interactive_completion_grace_sec = max(0.0, interactive_completion_grace_sec)
+        self._interactive_idle_check_sec = 5.0
         self._claude_cli_bin = claude_cli_bin
         self._tasks: dict[str, _TmuxTaskMeta] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -375,13 +377,31 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 tick_result, active_state = self._tick_interactive_watch(meta=meta, watch_state=watch_state, now=now)
                 if tick_result is not None:
                     exit_code = tick_result
+                    # If session was interrupted (Esc), mark as canceled so the
+                    # lifecycle message shows "中断" instead of "完成".
+                    if active_state is not None and active_state.interrupted:
+                        meta.cancel_requested = True
                     break
                 if active_state is not None:
                     if watch_state.last_interactive_revision is None:
                         watch_state.last_interactive_revision = active_state.revision
                     elif active_state.revision != watch_state.last_interactive_revision:
                         watch_state.last_interactive_revision = active_state.revision
+                        watch_state.last_progress_at = now
                         timeout_anchor = now
+                # Fallback: if we have been idle for a while, check pane content
+                # to detect manual Esc cancellation that did not produce a hook
+                # event (including fast Esc before any progress was observed).
+                # Skip the first few seconds to avoid false positives during
+                # initial prompt submission.
+                idle_anchor = watch_state.last_progress_at or started_at
+                if (now - started_at) >= self._interactive_idle_check_sec and (now - idle_anchor) >= self._interactive_idle_check_sec:
+                    if await self._is_claude_idle_in_pane(meta.session_name):
+                        meta.cancel_requested = True
+                        exit_code = 0
+                        break
+                    # Don't check again for another interval
+                    watch_state.last_progress_at = now
 
             if meta.exit_file.exists():
                 exit_code = self._read_exit_code(meta.exit_file)
@@ -536,6 +556,11 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
 
     async def close_terminal(self, terminal_key: str) -> bool:
         session_name = self._build_session_name(terminal_key)
+        # Cancel any tasks running on this terminal so they release the session lock.
+        async with self._lock:
+            for meta in self._tasks.values():
+                if meta.session_name == session_name and not meta.cancel_requested:
+                    meta.cancel_requested = True
         exists = await self._session_exists(session_name)
         if not exists:
             return False
@@ -682,6 +707,33 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             lock = asyncio.Lock()
             self._session_locks[session_name] = lock
         return lock
+
+    async def _is_claude_idle_in_pane(self, session_name: str) -> bool:
+        """Check if Claude Code TUI is showing an input prompt (idle state).
+
+        This is a fallback detection for when Esc cancellation doesn't produce
+        a hook event. Claude Code shows a specific pattern when idle:
+        - A prompt line starting with ❯ or ›
+        - Followed by a horizontal rule (────) separator
+        - Followed by a status bar (model | branch | files)
+        """
+        pane_text = await self._capture_pane_text(session_name, start_line=-15)
+        if not pane_text:
+            return False
+        lines = pane_text.splitlines()
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith(("›", "❯")):
+                continue
+            # Found a prompt line; check if the next non-empty line is a separator
+            for j in range(i + 1, min(i + 3, len(lines))):
+                next_stripped = lines[j].strip()
+                if not next_stripped:
+                    continue
+                if next_stripped.startswith("─") and len(next_stripped) >= 10:
+                    return True
+                break
+        return False
 
     def _capture_interactive_baseline(self, *, meta: _TmuxTaskMeta) -> None:
         resolved_session_id = self._session_store.resolve_interactive_session_id(
@@ -906,6 +958,17 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             and self._is_interactive_completion_turn_ready(active_state, latest_completed_turn, watch_state, observed_at=now)
         )
         if completion_phase is not None and watch_state.saw_interactive_progress and completion_ready:
+            return 0, active_state
+        # Detect manual cancellation (Esc in Claude Code): session returned to
+        # WAITING_FOR_INPUT after we observed processing activity, but no new
+        # completed turn was produced for the current run (i.e. the request was
+        # interrupted before producing a response).
+        if (
+            completion_phase == SessionPhase.WAITING_FOR_INPUT
+            and watch_state.saw_interactive_progress
+            and not latest_completed_turn_is_current
+        ):
+            meta.cancel_requested = True
             return 0, active_state
         if latest_completed_turn is not None and latest_completed_turn_is_current:
             if active_state is not None and self._is_interactive_completion_turn_ready(

@@ -46,4 +46,7 @@ class TmuxCommandMixin:
         safe_prompt = prompt.replace("\r", "").strip()
         if not safe_prompt:
             raise ValueError("prompt 不能为空")
+        # Claude Code TUI may not submit multi-line pastes with C-m;
+        # collapse to a single line to ensure reliable submission.
+        safe_prompt = " ".join(safe_prompt.split("\n"))
         return safe_prompt
