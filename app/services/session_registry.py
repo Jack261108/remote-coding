@@ -5,10 +5,10 @@ import logging
 from contextlib import suppress
 
 from app.adapters.process.tmux_runner import TmuxRunner
-from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import SessionContext, TerminalSessionInfo
+from app.services.session_lookup_service import SessionLookupService
 from app.services.session_service import SessionService
-from app.services.session_store import SessionStore
+from app.services.session_state_repository import SessionStateRepository
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +20,15 @@ class SessionRegistryService:
         self,
         *,
         session_service: SessionService,
-        session_store: SessionStore,
+        lookup: SessionLookupService,
         tmux_runner: TmuxRunner,
-        file_session_store: FileSessionStore,
+        repository: SessionStateRepository,
         health_check_interval_sec: float = 30.0,
     ) -> None:
         self._session_service = session_service
-        self._session_store = session_store
+        self._lookup = lookup
         self._tmux_runner = tmux_runner
-        self._file_session_store = file_session_store
+        self._repository = repository
         self._health_check_interval_sec = health_check_interval_sec
         self._health_check_task: asyncio.Task[None] | None = None
 
@@ -61,7 +61,7 @@ class SessionRegistryService:
             alive = await self._tmux_runner._session_exists(tmux_name)
 
             # Find SessionState for phase/workdir
-            state = self._session_store.find_by_terminal_id(terminal_id)
+            state = self._lookup.find_by_terminal_id(terminal_id)
             workdir = state.workdir if state else "unknown"
             phase = state.phase.value if state else "unknown"
 
@@ -92,7 +92,7 @@ class SessionRegistryService:
         if not alive:
             return None
 
-        state = self._session_store.find_by_terminal_id(terminal_id)
+        state = self._lookup.find_by_terminal_id(terminal_id)
         workdir = state.workdir if state else "unknown"
         phase = state.phase.value if state else "unknown"
 
@@ -145,7 +145,7 @@ class SessionRegistryService:
                 break
 
         # Get workdir from SessionState
-        state = self._session_store.find_by_terminal_id(terminal_id)
+        state = self._lookup.find_by_terminal_id(terminal_id)
         workdir = state.workdir if state else (owner.workdir if owner else ".")
 
         # Update user's SessionContext
@@ -232,7 +232,7 @@ class SessionRegistryService:
         )
 
         # Search persisted SessionState records
-        all_states = self._file_session_store.list_session_states()
+        all_states = self._repository.list_states()
         for state in all_states:
             if state.terminal_id == terminal_id:
                 state_tmux = self._tmux_runner._build_session_name(state.terminal_id)

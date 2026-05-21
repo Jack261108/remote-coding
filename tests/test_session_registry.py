@@ -6,7 +6,9 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
-from app.services.session_store import SessionStore
+from app.services.session_lookup_service import SessionLookupService
+from app.services.session_state_cache import SessionStateCache
+from app.services.session_state_repository import SessionStateRepository
 
 
 class FakeTmuxRunner:
@@ -30,17 +32,19 @@ def _make_registry(tmp_path, *, alive_sessions: set[str] | None = None):
     file_store = FileSessionStore(str(tmp_path))
     ctx_store = FileSessionContextStore(file_store)
     session_service = SessionService(store=ctx_store)
-    session_store = SessionStore(file_store)
+    repository = SessionStateRepository(file_store)
+    cache = SessionStateCache(repository)
+    lookup = SessionLookupService(cache, repository)
     tmux = FakeTmuxRunner()
     if alive_sessions:
         tmux._alive_sessions = alive_sessions
     registry = SessionRegistryService(
         session_service=session_service,
-        session_store=session_store,
+        lookup=lookup,
         tmux_runner=tmux,
-        file_session_store=file_store,
+        repository=repository,
     )
-    return registry, session_service, session_store, tmux
+    return registry, session_service, cache, tmux
 
 
 # ── list_active_sessions ──────────────────────────────────────────────────────
@@ -55,7 +59,7 @@ async def test_list_active_sessions_returns_empty_when_no_tmux(tmp_path) -> None
 
 @pytest.mark.asyncio
 async def test_list_active_sessions_returns_tmux_sessions(tmp_path) -> None:
-    registry, session_service, session_store, tmux = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
+    registry, session_service, cache, tmux = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     # Create a SessionContext with terminal_id
     await session_service.switch(
         user_id=1,
@@ -69,7 +73,7 @@ async def test_list_active_sessions_returns_tmux_sessions(tmp_path) -> None:
     ctx.terminal_id = "user_1_abc123"
     await session_service._store.save(ctx)
     # Create a SessionState
-    session_store.get_or_create(
+    cache.get_or_create(
         session_id="s1",
         provider="claude_code",
         workdir="/proj",
@@ -288,7 +292,7 @@ async def test_get_session_info_returns_none_when_dead(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_get_session_info_returns_info_when_alive(tmp_path) -> None:
-    registry, session_service, session_store, _ = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
+    registry, session_service, cache, _ = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     await session_service.switch(
         user_id=1,
         provider="claude_code",
@@ -299,7 +303,7 @@ async def test_get_session_info_returns_info_when_alive(tmp_path) -> None:
     owner = await session_service.get(1)
     owner.terminal_id = "user_1_abc123"
     await session_service._store.save(owner)
-    session_store.get_or_create(
+    cache.get_or_create(
         session_id="s1",
         provider="claude_code",
         workdir="/proj",

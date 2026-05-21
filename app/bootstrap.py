@@ -145,9 +145,9 @@ class AppContainer(
         )
         self.session_registry = SessionRegistryService(
             session_service=self.session_service,
-            session_store=self.structured_session_store,
+            lookup=self.structured_session_store._lookup,
             tmux_runner=self.tmux_runner,
-            file_session_store=self.file_session_store,
+            repository=self.structured_session_store._repository,
             health_check_interval_sec=settings.session_health_check_interval_sec,
         )
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}

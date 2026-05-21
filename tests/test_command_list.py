@@ -7,7 +7,9 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
-from app.services.session_store import SessionStore
+from app.services.session_lookup_service import SessionLookupService
+from app.services.session_state_cache import SessionStateCache
+from app.services.session_state_repository import SessionStateRepository
 from app.bot.handlers.command_list import register_list_handler
 
 
@@ -29,19 +31,21 @@ def _setup(tmp_path, *, alive_sessions: set[str] | None = None):
     file_store = FileSessionStore(str(tmp_path))
     ctx_store = FileSessionContextStore(file_store)
     session_service = SessionService(store=ctx_store)
-    session_store = SessionStore(file_store)
+    repository = SessionStateRepository(file_store)
+    cache = SessionStateCache(repository)
+    lookup = SessionLookupService(cache, repository)
     tmux = FakeTmuxRunner()
     if alive_sessions:
         tmux._alive_sessions = alive_sessions
     registry = SessionRegistryService(
         session_service=session_service,
-        session_store=session_store,
+        lookup=lookup,
         tmux_runner=tmux,
-        file_session_store=file_store,
+        repository=repository,
     )
     router = Router()
     register_list_handler(router, registry_service=registry)
-    return registry, session_service, session_store
+    return registry, session_service, cache
 
 
 @pytest.mark.asyncio
@@ -53,7 +57,7 @@ async def test_list_shows_no_sessions(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_list_shows_active_session(tmp_path) -> None:
-    registry, session_service, session_store = _setup(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
+    registry, session_service, cache = _setup(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
     await session_service.switch(
         user_id=1,
         provider="claude_code",
@@ -64,7 +68,7 @@ async def test_list_shows_active_session(tmp_path) -> None:
     ctx = await session_service.get(1)
     ctx.terminal_id = "user_1_abc123"
     await session_service._store.save(ctx)
-    session_store.get_or_create(
+    cache.get_or_create(
         session_id="s1",
         provider="claude_code",
         workdir="/proj",

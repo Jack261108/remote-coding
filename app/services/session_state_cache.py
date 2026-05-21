@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import logging
+import re
+
+from app.domain.hook_models import validate_session_id
+from app.domain.session_models import (
+    SessionPhase,
+    SessionState,
+)
+from app.services.session_state_repository import SessionStateRepository
+
+logger = logging.getLogger(__name__)
+
+CLAUDE_SESSION_PREFIX = "claude-session-"
+_UUID_SESSION_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def is_claude_session_id(session_id: str | None) -> bool:
+    """Check if a session_id looks like a Claude-originated session identifier."""
+    if not session_id:
+        return False
+    text = str(session_id).strip()
+    if not text:
+        return False
+    return text.startswith(CLAUDE_SESSION_PREFIX) or bool(_UUID_SESSION_RE.match(text))
+
+
+class SessionStateCache:
+    """In-memory cache for SessionState objects with load-on-miss from repository.
+
+    Single responsibility: store and retrieve SessionState objects in memory,
+    delegating to SessionStateRepository for persistence on miss.
+    """
+
+    def __init__(self, repository: SessionStateRepository) -> None:
+        self._repository = repository
+        self._states: dict[str, SessionState] = {}
+
+    def get(self, session_id: str) -> SessionState | None:
+        """Retrieve a cached SessionState by session_id.
+
+        Checks the in-memory cache first, then falls back to the repository.
+        Returns None if not found in either location.
+        """
+        session_id = validate_session_id(session_id)
+        state = self._states.get(session_id)
+        if state is not None:
+            return state
+        loaded = self._repository.load(session_id)
+        if loaded is None:
+            return None
+        self._states[session_id] = loaded
+        return loaded
+
+    def get_or_create(
+        self,
+        *,
+        session_id: str,
+        user_id: int | None = None,
+        provider: str = "claude_code",
+        workdir: str = ".",
+        terminal_id: str | None = None,
+        claude_session_id: str | None = None,
+    ) -> SessionState:
+        """Get a cached state, load from repository, or create a new one.
+
+        If the state is already cached, updates its mutable fields and returns it.
+        If found in the repository, hydrates, caches, and returns it.
+        Otherwise, creates a fresh SessionState with the provided parameters.
+        """
+        session_id = validate_session_id(session_id)
+        resolved_claude_session_id = claude_session_id or (session_id if is_claude_session_id(session_id) else None)
+
+        state = self._states.get(session_id)
+        if state is not None:
+            if user_id is not None:
+                state.user_id = user_id
+            state.provider = provider
+            state.workdir = workdir
+            if terminal_id is not None:
+                state.terminal_id = terminal_id
+            state.claude_session_id = resolved_claude_session_id or state.claude_session_id or state.session_id
+            return state
+
+        loaded = self._repository.load(session_id)
+        if loaded is not None:
+            state = self._hydrate_and_merge(loaded)
+            if user_id is not None:
+                state.user_id = user_id
+            state.provider = provider
+            state.workdir = workdir
+            if terminal_id is not None:
+                state.terminal_id = terminal_id
+            state.claude_session_id = resolved_claude_session_id or state.claude_session_id or state.session_id
+        else:
+            state = SessionState(
+                session_id=session_id,
+                user_id=user_id,
+                provider=provider,
+                workdir=workdir,
+                terminal_id=terminal_id,
+                claude_session_id=resolved_claude_session_id or session_id,
+            )
+            checkpoint = self._repository.load_checkpoint(session_id)
+            state.checkpoint = checkpoint
+            state.turns = self._repository.load_conversation(session_id)
+            if state.turns:
+                current = state.turns[-1]
+                if not current.is_complete:
+                    state.current_turn_id = current.turn_id
+                    state.phase = SessionPhase.PROCESSING
+                else:
+                    state.last_reply = current.text.strip() or None
+                    state.last_reply_role = current.role
+
+        state.history_loaded = _has_loaded_history(state)
+        self._states[session_id] = state
+        return state
+
+    def put(self, state: SessionState) -> None:
+        """Store a SessionState in the cache, overwriting any existing entry."""
+        self._states[state.session_id] = state
+
+    def values(self) -> list[SessionState]:
+        """Return all currently cached session states (snapshot)."""
+        return list(self._states.values())
+
+    def hydrate_and_cache(self, state: SessionState) -> SessionState:
+        """Hydrate a SessionState from persistence and cache it.
+
+        If the state is already cached, merges new fields from the persisted state
+        into the cached version. Otherwise, loads checkpoint and conversation data
+        from the repository and caches the result.
+        """
+        return self._hydrate_and_merge(state)
+
+    def _hydrate_and_merge(self, state: SessionState) -> SessionState:
+        """Internal hydration logic: merge persisted data into cache.
+
+        Handles the case where a state is already cached (merges fields from the
+        persisted version) and the case where it's new (loads checkpoint + turns).
+        """
+        loaded_checkpoint = self._repository.load_checkpoint(state.session_id)
+        loaded_turns = state.turns or self._repository.load_conversation(state.session_id)
+
+        cached = self._states.get(state.session_id)
+        if cached is not None:
+            if not cached.turns and loaded_turns:
+                cached.turns = loaded_turns
+            if not cached.tool_calls and state.tool_calls:
+                cached.tool_calls = state.tool_calls
+            if cached.pending_permission is None and state.pending_permission is not None:
+                cached.pending_permission = state.pending_permission
+            if cached.user_id is None and state.user_id is not None:
+                cached.user_id = state.user_id
+            if cached.terminal_id is None and state.terminal_id is not None:
+                cached.terminal_id = state.terminal_id
+            if cached.claude_session_id is None and state.claude_session_id is not None:
+                cached.claude_session_id = state.claude_session_id
+            if cached.checkpoint.last_offset == 0 and loaded_checkpoint.last_offset != 0:
+                cached.checkpoint = loaded_checkpoint
+            cached.history_loaded = _has_loaded_history(cached)
+            return cached
+
+        state.checkpoint = loaded_checkpoint
+        if not state.turns:
+            state.turns = loaded_turns
+        state.history_loaded = _has_loaded_history(state)
+        self._states[state.session_id] = state
+        return state
+
+
+def _has_loaded_history(state: SessionState) -> bool:
+    """Check if a state has any loaded history content."""
+    return bool(state.turns or state.tool_calls or state.pending_permission is not None)

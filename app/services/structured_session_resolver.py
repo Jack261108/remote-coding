@@ -8,8 +8,11 @@ from pathlib import Path
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.storage.memory import MemoryTaskStore
 from app.domain.session_models import SessionState
+from app.services.session_lookup_service import SessionLookupService
+from app.services.session_notifier import SessionNotifier
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore, is_claude_session_id
+from app.services.structured_reply_tracker import StructuredReplyTracker
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +24,30 @@ class StructuredSessionResolver:
         session_service: SessionService,
         task_store: MemoryTaskStore,
         cli_factory: CLIAdapterFactory,
-        structured_session_store: SessionStore | None,
+        lookup: SessionLookupService | None = None,
+        tracker: StructuredReplyTracker | None = None,
+        notifier: SessionNotifier | None = None,
+        # Backward compat: accept old kwarg and extract components
+        structured_session_store: SessionStore | None = None,
     ) -> None:
         self._session_service = session_service
         self._task_store = task_store
         self._cli_factory = cli_factory
-        self._structured_session_store = structured_session_store
+
+        # If new-style dependencies are provided, use them directly.
+        # Otherwise, extract from the old SessionStore facade for backward compat.
+        if lookup is not None or tracker is not None or notifier is not None:
+            self._lookup = lookup
+            self._tracker = tracker
+            self._notifier = notifier
+        elif structured_session_store is not None:
+            self._lookup = structured_session_store._lookup
+            self._tracker = structured_session_store._tracker
+            self._notifier = structured_session_store._notifier
+        else:
+            self._lookup = None
+            self._tracker = None
+            self._notifier = None
 
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True) -> SessionState | None:
         session = await self._session_service.get(user_id)
@@ -63,8 +84,8 @@ class StructuredSessionResolver:
             claude_chat_active = session.claude_chat_active
 
         prompt_matched_state = None
-        if self._structured_session_store is not None and terminal_id and task.prompt and task.started_at is not None:
-            prompt_matched_state = self._structured_session_store.find_by_user_turn_text(
+        if self._lookup is not None and terminal_id and task.prompt and task.started_at is not None:
+            prompt_matched_state = self._lookup.find_by_user_turn_text(
                 user_id=user_id,
                 workdir=task.workdir,
                 text=task.prompt,
@@ -126,11 +147,11 @@ class StructuredSessionResolver:
 
         explicit_claude_session_id = claude_session_id if self._is_claude_session_id(claude_session_id) else None
 
-        if self._structured_session_store is not None:
+        if self._lookup is not None:
             state = None
             matched_by = None
             if explicit_claude_session_id is not None:
-                state = self._structured_session_store.get(explicit_claude_session_id)
+                state = self._lookup._get(explicit_claude_session_id)
                 matched_by = "claude_session_id"
                 if state is not None and str(Path(state.workdir).resolve()) != str(Path(workdir).resolve()):
                     if log_missing:
@@ -147,7 +168,7 @@ class StructuredSessionResolver:
                     state = None
                     matched_by = None
             if state is None and terminal_id:
-                candidate = self._structured_session_store.find_by_terminal_id(terminal_id)
+                candidate = self._lookup.find_by_terminal_id(terminal_id)
                 if candidate is not None and self._is_claude_session_id(candidate.claude_session_id or candidate.session_id):
                     if str(Path(candidate.workdir).resolve()) == str(Path(workdir).resolve()):
                         state = candidate
@@ -251,65 +272,65 @@ class StructuredSessionResolver:
         return False
 
     async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
-        if self._structured_session_store is None:
+        if self._lookup is None:
             return 0
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return 0
-        return self._structured_session_store.get_cursor(state.session_id)
+        return self._lookup.get_cursor(state.session_id)
 
     async def get_structured_session_revision(self, user_id: int) -> int:
         return await self.get_structured_session_cursor(user_id)
 
     async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None) -> tuple[str | None, str | None]:
-        if self._structured_session_store is None:
+        if self._tracker is None:
             return None, None
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return None, None
-        return self._structured_session_store.get_structured_reply_cursor(state.session_id)
+        return self._tracker.get_structured_reply_cursor(state.session_id)
 
     async def acknowledge_structured_reply(
         self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
     ) -> None:
-        if self._structured_session_store is None:
+        if self._tracker is None:
             return
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return
         if turn_id is not None:
-            self._structured_session_store.mark_structured_reply_emitted(state.session_id, turn_id=turn_id)
+            self._tracker.mark_structured_reply_emitted(state.session_id, turn_id=turn_id)
         if permission_key is not None:
-            self._structured_session_store.mark_structured_permission_emitted(state.session_id, permission_key=permission_key)
+            self._tracker.mark_structured_permission_emitted(state.session_id, permission_key=permission_key)
 
     async def get_structured_user_question_cursor_for_task(self, user_id: int, *, task_id: str) -> str | None:
-        if self._structured_session_store is None:
+        if self._tracker is None:
             return None
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return None
-        return self._structured_session_store.get_structured_user_question_cursor(state.session_id)
+        return self._tracker.get_structured_user_question_cursor(state.session_id)
 
     async def acknowledge_structured_user_question_for_task(self, user_id: int, *, question_key: str | None, task_id: str) -> None:
-        if self._structured_session_store is None:
+        if self._tracker is None:
             return
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return
         if question_key is not None:
-            self._structured_session_store.mark_structured_user_question_emitted(state.session_id, question_key=question_key)
+            self._tracker.mark_structured_user_question_emitted(state.session_id, question_key=question_key)
 
     async def wait_for_structured_session_update(
         self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
     ) -> bool:
-        if self._structured_session_store is None:
+        if self._notifier is None:
             await asyncio.sleep(timeout_sec)
             return True
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             await asyncio.sleep(timeout_sec)
             return True
-        return await self._structured_session_store.wait_for_publish(state.session_id, since_cursor=since_cursor, timeout_sec=timeout_sec)
+        return await self._notifier.wait_for_publish(state.session_id, since_cursor=since_cursor, timeout_sec=timeout_sec)
 
     async def wait_for_structured_session_change(self, *, user_id: int, since_revision: int, timeout_sec: float) -> bool:
         return await self.wait_for_structured_session_update(user_id=user_id, since_cursor=since_revision, timeout_sec=timeout_sec)

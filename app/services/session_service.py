@@ -7,7 +7,9 @@ from app.adapters.storage.memory import SessionContextStore
 from app.domain.models import SessionContext, utc_now
 
 
-class SessionService:
+class UserSessionContextService:
+    """Manages user-level session context (provider, workdir, terminal_mode)."""
+
     def __init__(self, store: SessionContextStore) -> None:
         self._store = store
 
@@ -144,3 +146,7 @@ class SessionService:
         current.updated_at = utc_now()
         await self._store.save(current)
         return current
+
+
+# Backward-compat alias
+SessionService = UserSessionContextService
