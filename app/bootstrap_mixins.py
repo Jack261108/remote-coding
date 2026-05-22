@@ -9,6 +9,7 @@ from app.config.settings import is_workdir_allowed
 from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
+from app.domain.user_question_models import extract_user_question_prompts
 from app.bootstrap_base import AppContainerBase
 
 logger = logging.getLogger(__name__)
@@ -179,15 +180,28 @@ class HookHandlingMixin(AppContainerBase):
             # AskUserQuestion just needs auto-allow — user answers in terminal directly
             if event.tool == "AskUserQuestion":
                 await self._auto_allow_ask_user_question(event)
-                short_id = event.session_id[:8]
-                question = ""
-                if event.tool_input:
-                    question = event.tool_input.get("question", "")
-                text = f"❓ [{short_id}] 等待用户输入 — 请查看终端"
-                if question:
-                    truncated = question[:150] + ("..." if len(question) > 150 else "")
-                    text += f"\n{truncated}"
-                await self.push_notifier.notify_info(user_id=user_id, text=text)
+                prompts = extract_user_question_prompts(
+                    tool_use_id=event.tool_use_id or "",
+                    tool_name=event.tool,
+                    tool_input=event.tool_input,
+                )
+                if prompts:
+                    await self.push_notifier.notify_user_question(
+                        user_id=user_id,
+                        session_id=event.session_id,
+                        prompts=prompts,
+                    )
+                else:
+                    # Fallback: couldn't parse structured prompts
+                    short_id = event.session_id[:8]
+                    question = ""
+                    if event.tool_input:
+                        question = event.tool_input.get("question", "")
+                    text = f"❓ [{short_id}] 等待用户输入 — 请在终端中选择"
+                    if question:
+                        truncated = question[:150] + ("..." if len(question) > 150 else "")
+                        text += f"\n{truncated}"
+                    await self.push_notifier.notify_info(user_id=user_id, text=text)
                 return
             await self.push_notifier.notify_permission_request(
                 user_id=user_id,

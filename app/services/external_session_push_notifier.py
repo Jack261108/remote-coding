@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from aiogram import Bot
 
     from app.domain.session_models import SessionPhase
+    from app.domain.user_question_models import UserQuestionPrompt
     from app.services.external_binding_store import ExternalBindingStore
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,37 @@ class ExternalSessionPushNotifier:
         """Send session ended notification. Returns True if delivered."""
         short_id = session_id[:8]
         text = f"🔚 [{short_id}] 会话已结束\n路径: {cwd}"
+        return await self._send_with_retry(chat_id=user_id, text=text)
+
+    async def notify_user_question(
+        self,
+        *,
+        user_id: int,
+        session_id: str,
+        prompts: tuple[UserQuestionPrompt, ...],
+    ) -> bool:
+        """Send a read-only notification showing AskUserQuestion options.
+
+        The user answers in their terminal directly; this is informational only.
+        Returns True if delivered.
+        """
+        if not prompts:
+            return False
+        short_id = session_id[:8]
+        lines: list[str] = []
+        for prompt in prompts:
+            lines.append(f"❓ [{short_id}] 用户选择")
+            lines.append(f"问题: {prompt.question}")
+            if prompt.options:
+                lines.append("选项:")
+                for i, option in enumerate(prompt.options, start=1):
+                    label = option.label
+                    if option.description:
+                        label += f" — {option.description}"
+                    lines.append(f"  {i}. {label}")
+            lines.append("请在终端中选择")
+            lines.append("")
+        text = "\n".join(lines).rstrip()
         return await self._send_with_retry(chat_id=user_id, text=text)
 
     async def notify_info(
