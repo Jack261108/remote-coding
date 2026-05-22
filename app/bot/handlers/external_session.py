@@ -14,6 +14,35 @@ from app.services.session_store import SessionStore
 logger = logging.getLogger(__name__)
 
 
+def _resolve_session_id(
+    session_id_prefix: str,
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> tuple[str | None, str | None]:
+    """Resolve a partial session_id prefix to a full session_id.
+
+    Searches both unbound discovery list and bound sessions.
+    Returns (full_session_id, error_message). If ambiguous, returns error.
+    """
+    prefix = session_id_prefix.rstrip(".")
+    candidates: list[str] = []
+
+    for s in discovery.list_unbound():
+        if s.session_id == prefix or s.session_id.startswith(prefix):
+            candidates.append(s.session_id)
+
+    for b in binder._binding_store.load_all().values():
+        if b.session_id == prefix or b.session_id.startswith(prefix):
+            if b.session_id not in candidates:
+                candidates.append(b.session_id)
+
+    if len(candidates) == 1:
+        return candidates[0], None
+    if len(candidates) == 0:
+        return None, "Session not found"
+    return None, f"Ambiguous prefix, {len(candidates)} matches. Be more specific."
+
+
 def _time_ago(dt) -> str:  # noqa: ANN001
     """Format a datetime as a human-readable 'X ago' string."""
     delta = utc_now() - dt
@@ -60,11 +89,11 @@ def register_external_session_handler(
         if subcommand == "list":
             await _handle_list(message, user_id=user_id, discovery=discovery, binder=binder)
         elif subcommand == "bind":
-            await _handle_bind(message, user_id=user_id, session_id=arg, binder=binder)
+            await _handle_bind(message, user_id=user_id, session_id=arg, binder=binder, discovery=discovery)
         elif subcommand == "unbind":
-            await _handle_unbind(message, user_id=user_id, session_id=arg, binder=binder)
+            await _handle_unbind(message, user_id=user_id, session_id=arg, binder=binder, discovery=discovery)
         elif subcommand == "status":
-            await _handle_status(message, user_id=user_id, session_id=arg, binder=binder, session_store=session_store)
+            await _handle_status(message, user_id=user_id, session_id=arg, binder=binder, discovery=discovery, session_store=session_store)
         else:
             await message.answer(f"未知子命令: {subcommand}")
 
@@ -108,15 +137,21 @@ async def _handle_bind(
     user_id: int,
     session_id: str,
     binder: ExternalSessionBinder,
+    discovery: ExternalSessionDiscoveryService,
 ) -> None:
     if not session_id:
         await message.answer("用法: /external bind <session_id>")
         return
 
-    result = await binder.bind(user_id=user_id, session_id=session_id)
+    resolved, error = _resolve_session_id(session_id, discovery, binder)
+    if error:
+        await message.answer(f"❌ {error}")
+        return
+
+    result = await binder.bind(user_id=user_id, session_id=resolved)
     if result.success:
         conv_status = "✅ conversation available" if result.conversation_available else "⏳ waiting for JSONL"
-        await message.answer(f"🔗 Bound session {session_id[:12]}...\n{conv_status}")
+        await message.answer(f"🔗 Bound session {resolved[:12]}...\n{conv_status}")
     else:
         await message.answer(f"❌ {result.message}")
 
@@ -127,14 +162,20 @@ async def _handle_unbind(
     user_id: int,
     session_id: str,
     binder: ExternalSessionBinder,
+    discovery: ExternalSessionDiscoveryService,
 ) -> None:
     if not session_id:
         await message.answer("用法: /external unbind <session_id>")
         return
 
-    result = await binder.unbind(user_id=user_id, session_id=session_id)
+    resolved, error = _resolve_session_id(session_id, discovery, binder)
+    if error:
+        await message.answer(f"❌ {error}")
+        return
+
+    result = await binder.unbind(user_id=user_id, session_id=resolved)
     if result.success:
-        await message.answer(f"🔓 Unbound session {session_id[:12]}...")
+        await message.answer(f"🔓 Unbound session {resolved[:12]}...")
     else:
         await message.answer(f"❌ {result.message}")
 
@@ -145,25 +186,31 @@ async def _handle_status(
     user_id: int,
     session_id: str,
     binder: ExternalSessionBinder,
+    discovery: ExternalSessionDiscoveryService,
     session_store: SessionStore,
 ) -> None:
     if not session_id:
         await message.answer("用法: /external status <session_id>")
         return
 
+    resolved, error = _resolve_session_id(session_id, discovery, binder)
+    if error:
+        await message.answer(f"❌ {error}")
+        return
+
     # Verify user owns this binding
     binding = binder.list_bound_for_user(user_id)
-    owned = any(b.session_id == session_id for b in binding)
+    owned = any(b.session_id == resolved for b in binding)
     if not owned:
         await message.answer("❌ Session not bound to you")
         return
 
-    state = session_store.get(session_id)
+    state = session_store.get(resolved)
     if state is None:
-        await message.answer(f"📊 Session {session_id[:12]}...\n  phase: unknown\n  (no state available)")
+        await message.answer(f"📊 Session {resolved[:12]}...\n  phase: unknown\n  (no state available)")
         return
 
-    lines = [f"📊 Session {session_id[:12]}..."]
+    lines = [f"📊 Session {resolved[:12]}..."]
     lines.append(f"  phase: {state.phase.value}")
     if state.last_tool_name:
         lines.append(f"  last tool: {state.last_tool_name}")
