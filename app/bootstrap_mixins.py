@@ -482,17 +482,17 @@ class PeriodicRecheckMixin(AppContainerBase):
             if session.provider != "claude_code" or not session.claude_chat_active:
                 continue
             if not session.claude_session_id:
-                logger.info("periodic recheck skipped", extra={"user_id": session.user_id, "reason": "no_claude_session_id"})
+                logger.debug("periodic recheck skipped", extra={"user_id": session.user_id, "reason": "no_claude_session_id"})
                 continue
             state = self.structured_session_store.get(session.claude_session_id)
             if state is None:
-                logger.info(
+                logger.debug(
                     "periodic recheck skipped",
                     extra={"user_id": session.user_id, "claude_session_id": session.claude_session_id, "reason": "no_state"},
                 )
                 continue
             if state.phase not in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
-                logger.info(
+                logger.debug(
                     "periodic recheck skipped",
                     extra={
                         "user_id": session.user_id,
