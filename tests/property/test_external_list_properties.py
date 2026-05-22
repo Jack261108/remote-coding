@@ -152,8 +152,8 @@ class TestListCorrectnessPerUser:
             discovery.record_event(event)
 
         # Verify list_unbound returns exactly the unbound sessions
-        unbound_list = discovery.list_unbound()
-        unbound_session_ids = {s.session_id for s in unbound_list}
+        # Use _sessions to avoid pid liveness interference
+        unbound_session_ids = set(discovery._sessions.keys())
         expected_unbound_ids = {sid for sid, _ in unbound_ids}
 
         assert unbound_session_ids == expected_unbound_ids

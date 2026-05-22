@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config.settings import is_workdir_allowed
@@ -110,6 +111,10 @@ class HookHandlingMixin(AppContainerBase):
             },
         )
 
+        # Clear auto-approve state on session end
+        if event.event == "SessionEnd" and hasattr(self, "auto_approve_service"):
+            self.auto_approve_service.clear_session(event.session_id)
+
         # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior
         if not hasattr(self, "ownership_resolver"):
             await self._bind_hook_session(event)
@@ -137,6 +142,11 @@ class HookHandlingMixin(AppContainerBase):
 
         if ownership.ownership_state == "owned":
             # Tmux-launched session: existing bind + dispatch + sync flow
+            # Auto-approve check: intercept before notification flow
+            if event.expects_response and event.tool != "AskUserQuestion":
+                if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
+                    await self._handle_auto_approved_permission(event)
+                    return
             await self._bind_hook_session(event)
             await self._dispatch_session_event(
                 SessionEvent(
@@ -149,6 +159,11 @@ class HookHandlingMixin(AppContainerBase):
 
         elif ownership.ownership_state == "bound":
             # Externally-bound session: dispatch event + schedule JSONL sync + push notifications
+            # Auto-approve check: intercept before push notification
+            if event.expects_response and event.tool != "AskUserQuestion":
+                if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
+                    await self._handle_auto_approved_permission(event)
+                    return
             await self._dispatch_session_event(
                 SessionEvent(
                     session_id=event.session_id,
@@ -170,6 +185,10 @@ class HookHandlingMixin(AppContainerBase):
                 if event.tool == "AskUserQuestion":
                     await self._auto_allow_ask_user_question(event)
                 else:
+                    # Auto-approve check for unbound sessions
+                    if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
+                        await self._handle_auto_approved_permission(event)
+                        return
                     await self.unbound_permission_handler.handle_unbound_permission(event)
 
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
@@ -257,6 +276,56 @@ class HookHandlingMixin(AppContainerBase):
             decision="allow",
             reason="AskUserQuestion auto-allowed",
         )
+
+    async def _handle_auto_approved_permission(self, event: HookEvent) -> None:
+        """Auto-approve a permission request and send silent notification."""
+        tool_use_id = event.tool_use_id or ""
+        if not tool_use_id:
+            return
+
+        # Respond with allow immediately
+        await self.hook_socket_server.respond_to_permission(
+            tool_use_id=tool_use_id,
+            decision="allow",
+            reason="auto-approved",
+        )
+
+        # Send silent notification to the user who activated auto-approve
+        entry = self.auto_approve_service._sessions.get(event.session_id)
+        if entry is not None:
+            tool_name = event.tool or "Unknown"
+            input_summary = self._format_auto_approve_input_summary(event)
+            message = f"🟢 Auto-approved: {tool_name} {input_summary}".strip()
+            try:
+                await self.bot.send_message(chat_id=entry.user_id, text=message)
+            except Exception:
+                logger.warning(
+                    "Failed to send auto-approve notification",
+                    extra={"session_id": event.session_id, "tool_use_id": tool_use_id},
+                )
+
+        # Audit log
+        logger.info(
+            "permission auto-approved",
+            extra={
+                "session_id": event.session_id,
+                "tool": event.tool,
+                "tool_use_id": tool_use_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    def _format_auto_approve_input_summary(self, event: HookEvent) -> str:
+        """Format a brief summary of tool_input for auto-approve notifications."""
+        if not event.tool_input:
+            return ""
+        # Common patterns for tool inputs
+        for key in ("file_path", "path", "command", "url", "query", "description"):
+            value = event.tool_input.get(key)
+            if value and isinstance(value, str):
+                truncated = value[:80] + ("..." if len(value) > 80 else "")
+                return truncated
+        return ""
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
         logger.warning(

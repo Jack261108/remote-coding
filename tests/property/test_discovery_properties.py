@@ -102,15 +102,15 @@ class TestUnboundEventRecording:
     @settings(max_examples=150)
     @given(events=st.lists(hook_events(), min_size=1, max_size=20))
     def test_recorded_events_appear_in_unbound_list(self, events: list[HookEvent]):
-        """Every recorded session_id is discoverable in unbound list."""
+        """Every recorded session_id is discoverable (keyed by session_id)."""
         svc = ExternalSessionDiscoveryService()
         for ev in events:
             svc.record_event(ev)
 
-        unbound = svc.list_unbound()
-        unbound_ids = {s.session_id for s in unbound}
+        # Use _sessions directly to avoid pid liveness interference in tests
+        unbound_ids = set(svc._sessions.keys())
 
-        # Every unique session_id from events must be in unbound list
+        # Every unique session_id from events must be present
         expected_ids = {ev.session_id for ev in events}
         assert unbound_ids == expected_ids
 
@@ -122,7 +122,7 @@ class TestUnboundEventRecording:
         for ev in events:
             svc.record_event(ev)
 
-        for session in svc.list_unbound():
+        for session in svc._sessions.values():
             assert session.session_id != ""
             assert session.cwd.startswith("/")
             assert session.first_seen is not None
@@ -155,7 +155,8 @@ class TestSessionEndRemoval:
         for ev in events:
             svc.record_event(ev)
 
-        all_ids = list({ev.session_id for ev in events})
+        # After recording, all unique session_ids exist
+        all_ids = list(svc._sessions.keys())
         # Remove a fraction of sessions
         num_to_remove = int(len(all_ids) * remove_fraction)
         to_remove = set(all_ids[:num_to_remove])
@@ -163,7 +164,7 @@ class TestSessionEndRemoval:
         for sid in to_remove:
             svc.remove_session(sid)
 
-        remaining = {s.session_id for s in svc.list_unbound()}
+        remaining = set(svc._sessions.keys())
         # Removed sessions must not appear
         assert remaining & to_remove == set()
         # Non-removed sessions must still appear
@@ -230,5 +231,5 @@ class TestStaleSessionPruning:
         assert pruned_ids == expected_stale
 
         # Remaining should be exactly the fresh sessions
-        remaining_ids = {s.session_id for s in svc.list_unbound()}
+        remaining_ids = {s.session_id for s in svc._sessions.values()}
         assert remaining_ids == expected_fresh

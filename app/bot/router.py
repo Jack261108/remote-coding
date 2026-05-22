@@ -14,6 +14,7 @@ from app.bot.handlers.command_exit import register_exit_handler
 from app.bot.handlers.command_export import register_export_handler
 from app.bot.handlers.command_list import register_list_handler
 from app.bot.handlers.external_session import register_external_session_handler
+from app.bot.handlers.session_actions import register_session_action_handlers
 from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
@@ -35,6 +36,7 @@ from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.auto_approve_service import AutoApproveService
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
@@ -56,6 +58,7 @@ def create_router(
     hook_socket_server: HookSocketServer | None = None,
     unbound_permission_handler: UnboundPermissionHandler | None = None,
     external_uq_state: ExternalUserQuestionState | None = None,
+    auto_approve_service: AutoApproveService | None = None,
 ) -> Router:
     router = Router()
 
@@ -106,12 +109,30 @@ def create_router(
     register_cancel_handler(router, task_service=task_service)
     register_status_handler(router, task_service=task_service)
     register_session_handler(router, task_service=task_service, session_service=session_service)
-    register_permission_handlers(router, task_service=task_service)
+    register_permission_handlers(
+        router,
+        task_service=task_service,
+        auto_approve_service=auto_approve_service,
+        hook_socket_server=hook_socket_server,
+        structured_session_store=structured_session_store,
+    )
     register_user_question_handlers(router, task_service=task_service)
     register_exit_handler(router, task_service=task_service)
     if registry_service is not None:
-        register_list_handler(router, registry_service=registry_service)
+        register_list_handler(
+            router,
+            registry_service=registry_service,
+            external_discovery=external_discovery,
+            external_binder=external_binder,
+        )
         register_attach_handler(router, registry_service=registry_service)
+
+    if external_discovery is not None and external_binder is not None:
+        register_session_action_handlers(
+            router,
+            discovery=external_discovery,
+            binder=external_binder,
+        )
 
     if external_discovery is not None and external_binder is not None and structured_session_store is not None:
         register_external_session_handler(
@@ -127,6 +148,7 @@ def create_router(
             hook_socket_server=hook_socket_server,
             unbound_permission_handler=unbound_permission_handler,
             external_uq_state=external_uq_state,
+            auto_approve_service=auto_approve_service,
         )
 
     if file_receiver is not None:

@@ -58,14 +58,7 @@ class UnboundPermissionHandler:
 
         notified_user_ids: list[int] = []
         message_text = self._format_permission_message(event)
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{tool_use_id}:allow"),
-                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{tool_use_id}:deny"),
-                ]
-            ]
-        )
+        keyboard = self._build_permission_keyboard(tool_use_id)
 
         for user_id in self._allowed_user_ids:
             try:
@@ -171,6 +164,40 @@ class UnboundPermissionHandler:
     def is_unbound_permission(self, tool_use_id: str) -> bool:
         """Check if a tool_use_id belongs to an unbound permission request."""
         return tool_use_id in self._pending
+
+    def get_session_id(self, tool_use_id: str) -> str | None:
+        """Get the session_id for an unbound permission request."""
+        state = self._pending.get(tool_use_id)
+        return state.session_id if state is not None else None
+
+    def _build_permission_keyboard(self, tool_use_id: str) -> InlineKeyboardMarkup:
+        """Build inline keyboard with approve, deny, and auto-approve buttons.
+
+        Truncates tool_use_id if any callback_data would exceed 64 bytes.
+        """
+        # The longest prefix is "ext_perm:" + ":" + "auto_approve" = 22 chars
+        # Max callback_data is 64 bytes. Calculate max tool_use_id length.
+        prefix = "ext_perm:"
+        longest_action = ":auto_approve"
+        max_id_bytes = 64 - len((prefix + longest_action).encode("utf-8"))
+
+        truncated_id = tool_use_id
+        if len(f"{prefix}{tool_use_id}{longest_action}".encode("utf-8")) > 64:
+            # Truncate tool_use_id to fit within 64 bytes
+            encoded = tool_use_id.encode("utf-8")[:max_id_bytes]
+            truncated_id = encoded.decode("utf-8", errors="ignore")
+
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{truncated_id}:allow"),
+                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{truncated_id}:deny"),
+                ],
+                [
+                    InlineKeyboardButton(text="🟢 Auto-approve All", callback_data=f"ext_perm:{truncated_id}:auto_approve"),
+                ],
+            ]
+        )
 
     def _format_permission_message(self, event: HookEvent) -> str:
         """Format a human-readable permission request message."""

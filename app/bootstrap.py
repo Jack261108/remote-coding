@@ -47,6 +47,7 @@ from app.services.session_service import SessionService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
+from app.services.auto_approve_service import AutoApproveService
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
 
@@ -150,11 +151,13 @@ class AppContainer(
             hook_socket_server=self.hook_socket_server,
             context_builder=self.context_builder,
         )
+        self.auto_approve_service = AutoApproveService()
         self.session_registry = SessionRegistryService(
             session_service=self.session_service,
             lookup=self.structured_session_store._lookup,
             tmux_runner=self.tmux_runner,
             repository=self.structured_session_store._repository,
+            auto_approve_service=self.auto_approve_service,
             health_check_interval_sec=settings.session_health_check_interval_sec,
         )
 
@@ -201,6 +204,13 @@ class AppContainer(
     async def start(self) -> None:
         if self._started:
             return
+        # Register command menu (best-effort)
+        try:
+            from app.bot.commands import BOT_COMMANDS
+
+            await self.bot.set_my_commands(BOT_COMMANDS)
+        except Exception as exc:
+            logger.warning("Failed to register bot commands: %s", exc)
         if self.settings.claude_install_hooks:
             self.hook_installer.install()
         await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
@@ -254,5 +264,6 @@ class AppContainer(
             hook_socket_server=self.hook_socket_server,
             unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
+            auto_approve_service=self.auto_approve_service,
         )
         self.dispatcher.include_router(router)

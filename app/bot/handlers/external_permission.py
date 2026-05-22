@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.auto_approve_service import AutoApproveService
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
@@ -20,6 +21,7 @@ def register_external_permission_handler(
     hook_socket_server: HookSocketServer,
     unbound_permission_handler: UnboundPermissionHandler,
     external_uq_state: ExternalUserQuestionState | None = None,
+    auto_approve_service: AutoApproveService | None = None,
 ) -> None:
     @router.callback_query(F.data.startswith("ext_perm:"))
     async def handle_external_permission_callback(callback: CallbackQuery) -> None:
@@ -30,11 +32,57 @@ def register_external_permission_handler(
             return
 
         _, tool_use_id, decision = parts
-        if decision not in ("allow", "deny"):
+        if decision not in ("allow", "deny", "auto_approve"):
             await callback.answer("Invalid decision", show_alert=True)
             return
 
         user_id = callback.from_user.id if callback.from_user else 0
+
+        # For auto_approve: approve the current request + activate auto-approve for the session
+        if decision == "auto_approve":
+            # Resolve session_id from pending state
+            session_id: str | None = None
+            if unbound_permission_handler.is_unbound_permission(tool_use_id):
+                session_id = unbound_permission_handler.get_session_id(tool_use_id)
+                accepted = await unbound_permission_handler.handle_response(
+                    tool_use_id=tool_use_id,
+                    user_id=user_id,
+                    decision="allow",
+                )
+                if not accepted:
+                    await callback.answer("Already responded by another user", show_alert=True)
+                    return
+            else:
+                session_id = await hook_socket_server.get_session_id_for_tool_use_id(tool_use_id)
+                success = await hook_socket_server.respond_to_permission(
+                    tool_use_id=tool_use_id,
+                    decision="allow",
+                    reason=f"auto-approve activated by user {user_id}",
+                )
+                if not success:
+                    await callback.answer("Permission request expired or not found", show_alert=True)
+                    return
+
+            # Activate auto-approve for the session
+            if session_id and auto_approve_service is not None:
+                auto_approve_service.activate(session_id, user_id=user_id)
+
+            await callback.answer("🟢 Auto-approve activated")
+
+            # Edit original message to reflect decision
+            if callback.message:
+                original_text = callback.message.text or ""
+                await callback.message.edit_text(f"{original_text}\n\n🟢 已开启自动批准，本次会话后续权限请求将自动通过\n发送 /deny 可关闭")
+
+            logger.info(
+                "external permission auto-approve activated",
+                extra={
+                    "tool_use_id": tool_use_id,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                },
+            )
+            return
 
         # Try unbound first (first-responder-wins), then bound
         if unbound_permission_handler.is_unbound_permission(tool_use_id):

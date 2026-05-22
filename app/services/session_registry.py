@@ -6,6 +6,7 @@ from contextlib import suppress
 
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.domain.models import SessionContext, TerminalSessionInfo
+from app.services.auto_approve_service import AutoApproveService
 from app.services.session_lookup_service import SessionLookupService
 from app.services.session_service import SessionService
 from app.services.session_state_repository import SessionStateRepository
@@ -23,12 +24,14 @@ class SessionRegistryService:
         lookup: SessionLookupService,
         tmux_runner: TmuxRunner,
         repository: SessionStateRepository,
+        auto_approve_service: AutoApproveService | None = None,
         health_check_interval_sec: float = 30.0,
     ) -> None:
         self._session_service = session_service
         self._lookup = lookup
         self._tmux_runner = tmux_runner
         self._repository = repository
+        self._auto_approve_service = auto_approve_service
         self._health_check_interval_sec = health_check_interval_sec
         self._health_check_task: asyncio.Task[None] | None = None
 
@@ -304,6 +307,9 @@ class SessionRegistryService:
                 "health check: cleaning stale binding",
                 extra={"user_id": ctx.user_id, "terminal_id": ctx.terminal_id},
             )
+            # Clear auto-approve state for the stale session
+            if self._auto_approve_service is not None and ctx.claude_session_id:
+                self._auto_approve_service.clear_session(ctx.claude_session_id)
             ctx.claude_session_id = None
             if not ctx.is_owner:
                 # Non-owner: fully detach

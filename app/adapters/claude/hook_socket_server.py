@@ -157,6 +157,12 @@ class HookSocketServer:
         await self._expire_pending_permissions(expired)
         return found
 
+    async def get_session_id_for_tool_use_id(self, tool_use_id: str) -> str | None:
+        """Look up the session_id for a pending permission by tool_use_id."""
+        async with self._lock:
+            pending = self._pending_permissions.get(tool_use_id)
+            return pending.session_id if pending is not None else None
+
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         raw = await reader.read(self._max_message_bytes + 1)
         if not raw:

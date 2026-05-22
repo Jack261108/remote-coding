@@ -42,12 +42,24 @@ class ExternalSessionPushNotifier:
         """Send permission request notification to bound user. Returns True if delivered."""
         short_id = session_id[:8]
         text = f"🔐 [{short_id}] 请求权限: {tool_name}\n路径: {cwd}"
+
+        # Telegram callback_data max 64 bytes; truncate tool_use_id if needed
+        def _build_cb(action: str) -> str:
+            cb = f"ext_perm:{tool_use_id}:{action}"
+            if len(cb.encode()) > 64:
+                max_id_len = 64 - len(f"ext_perm::{action}".encode())
+                cb = f"ext_perm:{tool_use_id[:max_id_len]}:{action}"
+            return cb
+
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{tool_use_id}:allow"),
-                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{tool_use_id}:deny"),
-                ]
+                    InlineKeyboardButton(text="✅ Approve", callback_data=_build_cb("allow")),
+                    InlineKeyboardButton(text="❌ Deny", callback_data=_build_cb("deny")),
+                ],
+                [
+                    InlineKeyboardButton(text="🟢 Auto-approve All", callback_data=_build_cb("auto_approve")),
+                ],
             ]
         )
         return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=keyboard)

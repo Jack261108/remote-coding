@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from app.domain.external_session_models import UnboundExternalSession
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
@@ -32,7 +34,6 @@ class ExternalSessionDiscoveryService:
         else:
             existing.last_seen = now
             existing.event_count += 1
-            # Update cwd/pid in case they changed
             existing.cwd = event.cwd
             if event.pid is not None:
                 existing.pid = event.pid
@@ -42,8 +43,30 @@ class ExternalSessionDiscoveryService:
         self._sessions.pop(session_id, None)
 
     def list_unbound(self) -> list[UnboundExternalSession]:
-        """Return all currently-active unbound sessions."""
+        """Return all currently-active unbound sessions (pruning stale/dead ones first)."""
+        self._prune_dead()
+        self.prune_stale()
         return list(self._sessions.values())
+
+    def _prune_dead(self) -> None:
+        """Remove sessions whose pid is no longer running."""
+        dead_ids: list[str] = []
+        for session_id, session in self._sessions.items():
+            if session.pid is not None and not self._is_pid_alive(session.pid):
+                dead_ids.append(session_id)
+        for session_id in dead_ids:
+            del self._sessions[session_id]
+
+    @staticmethod
+    def _is_pid_alive(pid: int) -> bool:
+        """Check if a process is still running."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+        except OSError:
+            return False
 
     def get(self, session_id: str) -> UnboundExternalSession | None:
         """Get a specific unbound session by ID."""
