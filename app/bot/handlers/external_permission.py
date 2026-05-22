@@ -28,7 +28,7 @@ def register_external_permission_handler(
             return
 
         _, tool_use_id, decision = parts
-        if decision not in ("approve", "deny"):
+        if decision not in ("allow", "deny"):
             await callback.answer("Invalid decision", show_alert=True)
             return
 
@@ -56,8 +56,8 @@ def register_external_permission_handler(
                 return
 
         # Confirm to user
-        emoji = "✅" if decision == "approve" else "❌"
-        label = "Approved" if decision == "approve" else "Denied"
+        emoji = "✅" if decision == "allow" else "❌"
+        label = "Approved" if decision == "allow" else "Denied"
         await callback.answer(f"{emoji} {label}")
 
         # Edit original message to reflect decision

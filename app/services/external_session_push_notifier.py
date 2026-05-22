@@ -44,7 +44,7 @@ class ExternalSessionPushNotifier:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{tool_use_id}:approve"),
+                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{tool_use_id}:allow"),
                     InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{tool_use_id}:deny"),
                 ]
             ]
