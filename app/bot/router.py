@@ -12,6 +12,7 @@ from app.bot.handlers.command_claude import register_claude_handler
 from app.bot.handlers.command_exit import register_exit_handler
 from app.bot.handlers.command_export import register_export_handler
 from app.bot.handlers.command_list import register_list_handler
+from app.bot.handlers.external_session import register_external_session_handler
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
@@ -21,10 +22,13 @@ from app.bot.handlers.file_upload import register_file_upload_handler
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
 from app.services.diff_generator import DiffGeneratorService
+from app.services.external_session_binder import ExternalSessionBinder
+from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.file_receiver import FileReceiverService
 from app.services.result_exporter import ResultExporterService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
+from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -39,6 +43,9 @@ def create_router(
     file_receiver: FileReceiverService | None = None,
     result_exporter: ResultExporterService | None = None,
     diff_generator: DiffGeneratorService | None = None,
+    external_discovery: ExternalSessionDiscoveryService | None = None,
+    external_binder: ExternalSessionBinder | None = None,
+    structured_session_store: SessionStore | None = None,
 ) -> Router:
     router = Router()
 
@@ -95,6 +102,14 @@ def create_router(
     if registry_service is not None:
         register_list_handler(router, registry_service=registry_service)
         register_attach_handler(router, registry_service=registry_service)
+
+    if external_discovery is not None and external_binder is not None and structured_session_store is not None:
+        register_external_session_handler(
+            router,
+            discovery=external_discovery,
+            binder=external_binder,
+            session_store=structured_session_store,
+        )
 
     if file_receiver is not None:
         register_file_upload_handler(

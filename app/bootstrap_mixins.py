@@ -108,15 +108,83 @@ class HookHandlingMixin(AppContainerBase):
                 "tool": event.tool,
             },
         )
-        await self._bind_hook_session(event)
-        await self._dispatch_session_event(
-            SessionEvent(
-                session_id=event.session_id,
-                type=SessionEventType.HOOK_RECEIVED,
-                payload=event.to_dict(),
+
+        # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior
+        if not hasattr(self, "ownership_resolver"):
+            await self._bind_hook_session(event)
+            await self._dispatch_session_event(
+                SessionEvent(
+                    session_id=event.session_id,
+                    type=SessionEventType.HOOK_RECEIVED,
+                    payload=event.to_dict(),
+                )
             )
+            self._schedule_jsonl_sync(event.session_id, event.cwd)
+            return
+
+        # Ownership resolver as first gate
+        ownership = await self.ownership_resolver.resolve(event.session_id)
+        logger.info(
+            "hook event ownership resolved",
+            extra={
+                "session_id": event.session_id,
+                "ownership_state": ownership.ownership_state,
+                "origin": ownership.origin.value,
+                "owner_user_id": ownership.owner_user_id,
+            },
         )
-        self._schedule_jsonl_sync(event.session_id, event.cwd)
+
+        if ownership.ownership_state == "owned":
+            # Tmux-launched session: existing bind + dispatch + sync flow
+            await self._bind_hook_session(event)
+            await self._dispatch_session_event(
+                SessionEvent(
+                    session_id=event.session_id,
+                    type=SessionEventType.HOOK_RECEIVED,
+                    payload=event.to_dict(),
+                )
+            )
+            self._schedule_jsonl_sync(event.session_id, event.cwd)
+
+        elif ownership.ownership_state == "bound":
+            # Externally-bound session: dispatch event + schedule JSONL sync + push notifications
+            await self._dispatch_session_event(
+                SessionEvent(
+                    session_id=event.session_id,
+                    type=SessionEventType.HOOK_RECEIVED,
+                    payload=event.to_dict(),
+                )
+            )
+            self._schedule_jsonl_sync(event.session_id, event.cwd)
+            # Push notifications for bound external sessions (notifier may not be wired yet)
+            if hasattr(self, "push_notifier") and ownership.owner_user_id is not None:
+                await self._notify_bound_external_event(event, ownership.owner_user_id)
+
+        else:
+            # Unbound: record in discovery, handle permissions if needed
+            if hasattr(self, "external_discovery"):
+                self.external_discovery.record_event(event)
+            if event.expects_response and hasattr(self, "unbound_permission_handler"):
+                await self.unbound_permission_handler.handle_unbound_permission(event)
+
+    async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
+        """Send push notifications for bound external session events."""
+        if not hasattr(self, "push_notifier"):
+            return
+        if event.expects_response:
+            await self.push_notifier.notify_permission_request(
+                user_id=user_id,
+                session_id=event.session_id,
+                tool_name=event.tool or "",
+                tool_input=None,
+                cwd=event.cwd,
+            )
+        elif event.event == "Stop":
+            await self.push_notifier.notify_session_end(
+                user_id=user_id,
+                session_id=event.session_id,
+                cwd=event.cwd,
+            )
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
         logger.warning(

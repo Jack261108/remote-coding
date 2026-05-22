@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -34,9 +35,13 @@ from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.context_builder import ContextBuilderService
 from app.services.diff_generator import DiffGeneratorService
+from app.services.external_binding_store import ExternalBindingStore
+from app.services.external_session_binder import ExternalSessionBinder
+from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.file_receiver import FileReceiverService
 from app.services.interrupt_watcher import InterruptWatcher
 from app.services.result_exporter import ResultExporterService
+from app.services.session_ownership_resolver import SessionOwnershipResolver
 from app.services.session_service import SessionService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_store import SessionStore
@@ -150,6 +155,25 @@ class AppContainer(
             repository=self.structured_session_store._repository,
             health_check_interval_sec=settings.session_health_check_interval_sec,
         )
+
+        # External session services
+        self.external_binding_store = ExternalBindingStore(
+            data_dir=Path(settings.tmux_data_dir),
+        )
+        self.external_discovery = ExternalSessionDiscoveryService(
+            stale_timeout_sec=settings.external_session_stale_timeout_sec,
+        )
+        self.ownership_resolver = SessionOwnershipResolver(
+            session_service=self.session_service,
+            binding_store=self.external_binding_store,
+        )
+        self.external_binder = ExternalSessionBinder(
+            discovery=self.external_discovery,
+            binding_store=self.external_binding_store,
+            projects_dir=Path("~/.claude/projects").expanduser(),
+            sync_callback=self.sync_claude_session,
+        )
+
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
         self._jsonl_sync_requests: dict[str, str] = {}
         self._jsonl_sync_locks: dict[str, asyncio.Lock] = {}
@@ -207,5 +231,8 @@ class AppContainer(
             file_receiver=self.file_receiver,
             result_exporter=self.result_exporter,
             diff_generator=self.diff_generator,
+            external_discovery=self.external_discovery,
+            external_binder=self.external_binder,
+            structured_session_store=self.structured_session_store,
         )
         self.dispatcher.include_router(router)

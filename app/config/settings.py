@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     upload_expiry_hours: int = Field(24, alias="UPLOAD_EXPIRY_HOURS")
     upload_cleanup_interval_min: int = Field(60, alias="UPLOAD_CLEANUP_INTERVAL_MIN")
 
+    # External session settings
+    external_session_stale_timeout_sec: float = Field(600.0, alias="EXTERNAL_SESSION_STALE_TIMEOUT_SEC")
+    push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
+
     # Export settings
     auto_export_threshold_chars: int = Field(4096, alias="AUTO_EXPORT_THRESHOLD_CHARS")
     zip_max_size_mb: int = Field(50, alias="ZIP_MAX_SIZE_MB")
@@ -208,6 +212,7 @@ class Settings(BaseSettings):
         "upload_cleanup_interval_min",
         "auto_export_threshold_chars",
         "zip_max_size_mb",
+        "push_notification_retry_count",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:
