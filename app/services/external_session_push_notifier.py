@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 if TYPE_CHECKING:
     from aiogram import Bot
 
@@ -33,12 +35,21 @@ class ExternalSessionPushNotifier:
         session_id: str,
         tool_name: str,
         tool_input: dict | None,
+        tool_use_id: str,
         cwd: str,
     ) -> bool:
         """Send permission request notification to bound user. Returns True if delivered."""
         short_id = session_id[:8]
-        text = f"🔐 [{short_id}] 请求权限: {tool_name}\n路径: {cwd}\n[Approve] [Deny]"
-        return await self._send_with_retry(chat_id=user_id, text=text)
+        text = f"🔐 [{short_id}] 请求权限: {tool_name}\n路径: {cwd}"
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{tool_use_id}:approve"),
+                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{tool_use_id}:deny"),
+                ]
+            ]
+        )
+        return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=keyboard)
 
     async def notify_phase_change(
         self,
@@ -66,11 +77,11 @@ class ExternalSessionPushNotifier:
         text = f"🔚 [{short_id}] 会话已结束\n路径: {cwd}"
         return await self._send_with_retry(chat_id=user_id, text=text)
 
-    async def _send_with_retry(self, *, chat_id: int, text: str) -> bool:
+    async def _send_with_retry(self, *, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
         """Send message with retry on failure."""
         for attempt in range(1 + self._retry_count):
             try:
-                await self._bot.send_message(chat_id=chat_id, text=text)
+                await self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
                 return True
             except Exception:
                 if attempt < self._retry_count:

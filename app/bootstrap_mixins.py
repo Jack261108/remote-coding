@@ -177,6 +177,7 @@ class HookHandlingMixin(AppContainerBase):
                 session_id=event.session_id,
                 tool_name=event.tool or "",
                 tool_input=None,
+                tool_use_id=event.tool_use_id or "",
                 cwd=event.cwd,
             )
         elif event.event == "Stop":

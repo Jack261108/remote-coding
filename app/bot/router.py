@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -13,6 +14,7 @@ from app.bot.handlers.command_exit import register_exit_handler
 from app.bot.handlers.command_export import register_export_handler
 from app.bot.handlers.command_list import register_list_handler
 from app.bot.handlers.external_session import register_external_session_handler
+from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
@@ -31,6 +33,10 @@ from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 
+if TYPE_CHECKING:
+    from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.unbound_permission_handler import UnboundPermissionHandler
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +52,8 @@ def create_router(
     external_discovery: ExternalSessionDiscoveryService | None = None,
     external_binder: ExternalSessionBinder | None = None,
     structured_session_store: SessionStore | None = None,
+    hook_socket_server: HookSocketServer | None = None,
+    unbound_permission_handler: UnboundPermissionHandler | None = None,
 ) -> Router:
     router = Router()
 
@@ -109,6 +117,13 @@ def create_router(
             discovery=external_discovery,
             binder=external_binder,
             session_store=structured_session_store,
+        )
+
+    if hook_socket_server is not None and unbound_permission_handler is not None:
+        register_external_permission_handler(
+            router,
+            hook_socket_server=hook_socket_server,
+            unbound_permission_handler=unbound_permission_handler,
         )
 
     if file_receiver is not None:

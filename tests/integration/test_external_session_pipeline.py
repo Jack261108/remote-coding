@@ -144,6 +144,7 @@ class TestPermissionRequestForwarding:
             session_id=session_id,
             tool_name="Bash",
             tool_input={"command": "rm -rf /"},
+            tool_use_id="test-tool-use-id-123",
             cwd=cwd,
         )
 

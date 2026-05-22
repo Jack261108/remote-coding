@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from app.domain.external_session_models import UnboundPermissionState
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
@@ -56,10 +58,18 @@ class UnboundPermissionHandler:
 
         notified_user_ids: list[int] = []
         message_text = self._format_permission_message(event)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{tool_use_id}:approve"),
+                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{tool_use_id}:deny"),
+                ]
+            ]
+        )
 
         for user_id in self._allowed_user_ids:
             try:
-                await self._bot.send_message(chat_id=user_id, text=message_text)
+                await self._bot.send_message(chat_id=user_id, text=message_text, reply_markup=keyboard)
                 notified_user_ids.append(user_id)
             except Exception:
                 logger.warning(
@@ -185,7 +195,7 @@ class UnboundPermissionHandler:
                 lines.append(f"Details: {description}")
 
         lines.append("")
-        lines.append("Reply to approve or deny this permission request.")
+        lines.append("Use the buttons below to respond.")
 
         return "\n".join(lines)
 

@@ -246,5 +246,7 @@ class AppContainer(
             external_discovery=self.external_discovery,
             external_binder=self.external_binder,
             structured_session_store=self.structured_session_store,
+            hook_socket_server=self.hook_socket_server,
+            unbound_permission_handler=self.unbound_permission_handler,
         )
         self.dispatcher.include_router(router)
