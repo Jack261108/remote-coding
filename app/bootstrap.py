@@ -38,6 +38,7 @@ from app.services.diff_generator import DiffGeneratorService
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 from app.services.file_receiver import FileReceiverService
 from app.services.interrupt_watcher import InterruptWatcher
 from app.services.result_exporter import ResultExporterService
@@ -46,6 +47,7 @@ from app.services.session_service import SessionService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
+from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
 
 logger = logging.getLogger(__name__)
@@ -172,6 +174,16 @@ class AppContainer(
             binding_store=self.external_binding_store,
             projects_dir=Path("~/.claude/projects").expanduser(),
             sync_callback=self.sync_claude_session,
+        )
+        self.push_notifier = ExternalSessionPushNotifier(
+            bot=self.bot,
+            binding_store=self.external_binding_store,
+            retry_count=settings.push_notification_retry_count,
+        )
+        self.unbound_permission_handler = UnboundPermissionHandler(
+            bot=self.bot,
+            hook_socket_server=self.hook_socket_server,
+            allowed_user_ids=settings.allowed_user_id_set,
         )
 
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
