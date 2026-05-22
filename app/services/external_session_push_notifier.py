@@ -77,6 +77,15 @@ class ExternalSessionPushNotifier:
         text = f"🔚 [{short_id}] 会话已结束\n路径: {cwd}"
         return await self._send_with_retry(chat_id=user_id, text=text)
 
+    async def notify_info(
+        self,
+        *,
+        user_id: int,
+        text: str,
+    ) -> bool:
+        """Send an informational notification (no action buttons). Returns True if delivered."""
+        return await self._send_with_retry(chat_id=user_id, text=text)
+
     async def _send_with_retry(self, *, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
         """Send message with retry on failure."""
         for attempt in range(1 + self._retry_count):

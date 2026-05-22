@@ -165,13 +165,30 @@ class HookHandlingMixin(AppContainerBase):
             if hasattr(self, "external_discovery"):
                 self.external_discovery.record_event(event)
             if event.expects_response and hasattr(self, "unbound_permission_handler"):
-                await self.unbound_permission_handler.handle_unbound_permission(event)
+                # AskUserQuestion: auto-allow, don't broadcast Approve/Deny
+                if event.tool == "AskUserQuestion":
+                    await self._auto_allow_ask_user_question(event)
+                else:
+                    await self.unbound_permission_handler.handle_unbound_permission(event)
 
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""
         if not hasattr(self, "push_notifier"):
             return
         if event.expects_response:
+            # AskUserQuestion just needs auto-allow — user answers in terminal directly
+            if event.tool == "AskUserQuestion":
+                await self._auto_allow_ask_user_question(event)
+                short_id = event.session_id[:8]
+                question = ""
+                if event.tool_input:
+                    question = event.tool_input.get("question", "")
+                text = f"❓ [{short_id}] 等待用户输入 — 请查看终端"
+                if question:
+                    truncated = question[:150] + ("..." if len(question) > 150 else "")
+                    text += f"\n{truncated}"
+                await self.push_notifier.notify_info(user_id=user_id, text=text)
+                return
             await self.push_notifier.notify_permission_request(
                 user_id=user_id,
                 session_id=event.session_id,
@@ -186,6 +203,17 @@ class HookHandlingMixin(AppContainerBase):
                 session_id=event.session_id,
                 cwd=event.cwd,
             )
+
+    async def _auto_allow_ask_user_question(self, event: HookEvent) -> None:
+        """Auto-allow AskUserQuestion permission requests — user answers in terminal."""
+        tool_use_id = event.tool_use_id or ""
+        if not tool_use_id:
+            return
+        await self.hook_socket_server.respond_to_permission(
+            tool_use_id=tool_use_id,
+            decision="allow",
+            reason="AskUserQuestion auto-allowed",
+        )
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
         logger.warning(
