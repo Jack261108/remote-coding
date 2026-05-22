@@ -35,6 +35,7 @@ from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ def create_router(
     structured_session_store: SessionStore | None = None,
     hook_socket_server: HookSocketServer | None = None,
     unbound_permission_handler: UnboundPermissionHandler | None = None,
+    external_uq_state: ExternalUserQuestionState | None = None,
 ) -> Router:
     router = Router()
 
@@ -124,6 +126,7 @@ def create_router(
             router,
             hook_socket_server=hook_socket_server,
             unbound_permission_handler=unbound_permission_handler,
+            external_uq_state=external_uq_state,
         )
 
     if file_receiver is not None:

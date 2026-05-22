@@ -177,19 +177,48 @@ class HookHandlingMixin(AppContainerBase):
         if not hasattr(self, "push_notifier"):
             return
         if event.expects_response:
-            # AskUserQuestion just needs auto-allow — user answers in terminal directly
+            # AskUserQuestion: try PTY injection flow if tmux pane is available
             if event.tool == "AskUserQuestion":
-                await self._auto_allow_ask_user_question(event)
                 prompts = extract_user_question_prompts(
                     tool_use_id=event.tool_use_id or "",
                     tool_name=event.tool,
                     tool_input=event.tool_input,
                 )
+                if prompts and hasattr(self, "external_uq_state") and event.pid is not None:
+                    # Try to find tmux pane for interactive injection
+                    from app.adapters.process.pty_injector import find_tmux_pane_for_pid
+
+                    pane_id = await find_tmux_pane_for_pid(event.pid)
+                    if pane_id is not None:
+                        # Store pending state and show interactive buttons
+                        # Do NOT auto-allow — hold the permission until user clicks
+                        from app.services.external_user_question_state import PendingExternalUserQuestion
+
+                        pending = PendingExternalUserQuestion(
+                            tool_use_id=event.tool_use_id or "",
+                            session_id=event.session_id,
+                            user_id=user_id,
+                            pid=event.pid,
+                            prompts=prompts,
+                            pane_id=pane_id,
+                        )
+                        self.external_uq_state.store(pending)
+                        await self.push_notifier.notify_user_question(
+                            user_id=user_id,
+                            session_id=event.session_id,
+                            prompts=prompts,
+                            interactive=True,
+                        )
+                        return
+
+                # Fallback: no tmux pane found or no PID — auto-allow and show read-only
+                await self._auto_allow_ask_user_question(event)
                 if prompts:
                     await self.push_notifier.notify_user_question(
                         user_id=user_id,
                         session_id=event.session_id,
                         prompts=prompts,
+                        interactive=False,
                     )
                 else:
                     # Fallback: couldn't parse structured prompts

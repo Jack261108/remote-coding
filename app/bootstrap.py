@@ -186,6 +186,11 @@ class AppContainer(
             allowed_user_ids=settings.allowed_user_id_set,
         )
 
+        # External user question state for PTY injection
+        from app.services.external_user_question_state import ExternalUserQuestionState
+
+        self.external_uq_state = ExternalUserQuestionState()
+
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
         self._jsonl_sync_requests: dict[str, str] = {}
         self._jsonl_sync_locks: dict[str, asyncio.Lock] = {}
@@ -248,5 +253,6 @@ class AppContainer(
             structured_session_store=self.structured_session_store,
             hook_socket_server=self.hook_socket_server,
             unbound_permission_handler=self.unbound_permission_handler,
+            external_uq_state=self.external_uq_state,
         )
         self.dispatcher.include_router(router)

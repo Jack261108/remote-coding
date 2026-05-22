@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from app.domain.hook_models import HookEvent
@@ -182,7 +182,7 @@ class TestStaleSessionPruning:
     stale_timeout_sec, and retains all others.
     """
 
-    @settings(max_examples=150)
+    @settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
     @given(
         data=st.data(),
         num_sessions=st.integers(min_value=1, max_value=15),

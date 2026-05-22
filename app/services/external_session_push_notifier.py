@@ -84,30 +84,54 @@ class ExternalSessionPushNotifier:
         user_id: int,
         session_id: str,
         prompts: tuple[UserQuestionPrompt, ...],
+        interactive: bool = False,
     ) -> bool:
-        """Send a read-only notification showing AskUserQuestion options.
+        """Send notification showing AskUserQuestion options.
 
-        The user answers in their terminal directly; this is informational only.
+        When *interactive* is True, options are shown as clickable buttons that
+        inject the answer into the external terminal via PTY injection.
+        Otherwise, this is informational only (user answers in terminal).
         Returns True if delivered.
         """
         if not prompts:
             return False
         short_id = session_id[:8]
+        # For interactive mode, we only show the first unanswered prompt with buttons
+        prompt = prompts[0]
         lines: list[str] = []
-        for prompt in prompts:
-            lines.append(f"❓ [{short_id}] 用户选择")
-            lines.append(f"问题: {prompt.question}")
-            if prompt.options:
-                lines.append("选项:")
-                for i, option in enumerate(prompt.options, start=1):
-                    label = option.label
-                    if option.description:
-                        label += f" — {option.description}"
-                    lines.append(f"  {i}. {label}")
+        lines.append(f"❓ [{short_id}] 用户选择")
+        lines.append(f"问题: {prompt.question}")
+        if prompt.options:
+            lines.append("选项:")
+            for i, option in enumerate(prompt.options, start=1):
+                label = option.label
+                if option.description:
+                    label += f" — {option.description}"
+                lines.append(f"  {i}. {label}")
+
+        if interactive and prompt.options:
+            lines.append("")
+            lines.append("👇 点击按钮选择:")
+            text = "\n".join(lines).rstrip()
+            # Build option buttons
+            # Callback data format: ext_uq:{tool_use_id}:{option_index}
+            buttons: list[list[InlineKeyboardButton]] = []
+            tool_use_id = prompt.tool_use_id
+            for i, option in enumerate(prompt.options):
+                # Telegram callback_data max 64 bytes; truncate tool_use_id if needed
+                cb_data = f"ext_uq:{tool_use_id}:{i}"
+                if len(cb_data.encode()) > 64:
+                    # Truncate tool_use_id to fit
+                    max_id_len = 64 - len(f"ext_uq::{i}".encode())
+                    cb_data = f"ext_uq:{tool_use_id[:max_id_len]}:{i}"
+                buttons.append([InlineKeyboardButton(text=f"{i + 1}. {option.label}"[:40], callback_data=cb_data)])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=keyboard)
+        else:
             lines.append("请在终端中选择")
             lines.append("")
-        text = "\n".join(lines).rstrip()
-        return await self._send_with_retry(chat_id=user_id, text=text)
+            text = "\n".join(lines).rstrip()
+            return await self._send_with_retry(chat_id=user_id, text=text)
 
     async def notify_info(
         self,
