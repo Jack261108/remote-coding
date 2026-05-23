@@ -1733,6 +1733,41 @@ async def test_respond_to_pending_permission_serializes_same_tool_use_id_callbac
 
 
 @pytest.mark.asyncio
+async def test_permission_service_uses_configured_lock_registry(tmp_path: Path) -> None:
+    from app.config.settings import Settings
+
+    adapter = StubAdapter(events=[])
+    settings = Settings.model_validate(
+        {
+            "TG_BOT_TOKEN": "token",
+            "TG_ALLOWED_USER_IDS": "1",
+            "DEFAULT_PROVIDER": "claude_code",
+            "DEFAULT_TIMEOUT_SEC": 10,
+            "MAX_CONCURRENT_TASKS": 2,
+            "CLAUDE_CLI_BIN": "claude",
+            "CODEX_CLI_BIN": "codex",
+            "GEMINI_CLI_BIN": "gemini",
+            "ALLOWED_WORKDIRS": str(tmp_path),
+            "TASK_OUTPUT_CHAR_LIMIT": 20,
+            "PERMISSION_LOCK_TTL_SEC": 120,
+            "LOCK_CLEANUP_INTERVAL_SEC": 30,
+            "LOCK_CLEANUP_BATCH_SIZE": 10,
+        }
+    )
+    service = TaskService(
+        settings=settings,
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+    registry = service._permission_service._permission_locks
+    assert registry._ttl_sec == 120
+    assert registry._cleanup_interval_sec == 30
+    assert registry._cleanup_batch_size == 10
+
+
+@pytest.mark.asyncio
 async def test_answer_pending_user_question_option_collects_multi_question_answers_and_sends_to_tmux(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)

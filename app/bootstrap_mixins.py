@@ -20,8 +20,7 @@ class JsonlSyncMixin(AppContainerBase):
     """JSONL sync: debounced incremental parsing and event dispatch."""
 
     async def sync_claude_session(self, session_id: str, cwd: str) -> None:
-        lock = self._jsonl_sync_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with self._jsonl_sync_locks.lock(session_id):
             snapshot = self.claude_jsonl_parser.parse_incremental(session_id=session_id, cwd=cwd)
             logger.info(
                 "claude session synced",
@@ -48,7 +47,7 @@ class JsonlSyncMixin(AppContainerBase):
         tasks = list(self._jsonl_sync_tasks.values())
         self._jsonl_sync_tasks.clear()
         self._jsonl_sync_requests.clear()
-        self._jsonl_sync_locks.clear()
+        await self._jsonl_sync_locks.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -89,6 +88,8 @@ class JsonlSyncMixin(AppContainerBase):
                 self._jsonl_sync_tasks.pop(session_id, None)
                 if session_id in self._jsonl_sync_requests:
                     self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
+                else:
+                    await self._jsonl_sync_locks.cleanup_key(session_id)
 
 
 class HookHandlingMixin(AppContainerBase):
@@ -156,21 +157,7 @@ class HookHandlingMixin(AppContainerBase):
                 )
             )
             self._schedule_jsonl_sync(event.session_id, event.cwd)
-            # Auto file send for owned sessions
-            if (
-                event.event == "PostToolUse"
-                and event.tool == "Write"
-                and ownership.owner_user_id is not None
-                and hasattr(self, "file_sender")
-            ):
-                file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
-                asyncio.create_task(
-                    self.file_sender.send_if_eligible(
-                        file_path_raw=file_path_raw,
-                        cwd=event.cwd,
-                        chat_id=ownership.owner_user_id,
-                    )
-                )
+            self._maybe_auto_file_send(event, ownership.owner_user_id)
 
         elif ownership.ownership_state == "bound":
             # Externally-bound session: dispatch event + schedule JSONL sync + push notifications
@@ -190,21 +177,7 @@ class HookHandlingMixin(AppContainerBase):
             # Push notifications for bound external sessions (notifier may not be wired yet)
             if hasattr(self, "push_notifier") and ownership.owner_user_id is not None:
                 await self._notify_bound_external_event(event, ownership.owner_user_id)
-            # Auto file send for bound sessions
-            if (
-                event.event == "PostToolUse"
-                and event.tool == "Write"
-                and ownership.owner_user_id is not None
-                and hasattr(self, "file_sender")
-            ):
-                file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
-                asyncio.create_task(
-                    self.file_sender.send_if_eligible(
-                        file_path_raw=file_path_raw,
-                        cwd=event.cwd,
-                        chat_id=ownership.owner_user_id,
-                    )
-                )
+            self._maybe_auto_file_send(event, ownership.owner_user_id)
 
         else:
             # Unbound: record in discovery, handle permissions if needed
@@ -220,6 +193,18 @@ class HookHandlingMixin(AppContainerBase):
                         await self._handle_auto_approved_permission(event)
                         return
                     await self.unbound_permission_handler.handle_unbound_permission(event)
+
+    def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
+        """Send file to chat if the event is a PostToolUse/Write with an eligible file."""
+        if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
+            file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
+            asyncio.create_task(
+                self.file_sender.send_if_eligible(
+                    file_path_raw=file_path_raw,
+                    cwd=event.cwd,
+                    chat_id=owner_user_id,
+                )
+            )
 
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""
@@ -723,8 +708,7 @@ class EventDispatchMixin(AppContainerBase):
     """Session event dispatch with per-session locking."""
 
     async def _dispatch_session_event(self, event: SessionEvent) -> None:
-        lock = self._session_event_locks.setdefault(event.session_id, asyncio.Lock())
-        async with lock:
+        async with self._session_event_locks.lock(event.session_id):
             self.structured_session_store.get_or_create(
                 session_id=event.session_id,
                 provider="claude_code",
@@ -732,3 +716,5 @@ class EventDispatchMixin(AppContainerBase):
                 claude_session_id=event.session_id,
             )
             self.structured_session_store.process(event)
+        if event.type == SessionEventType.SESSION_ENDED:
+            await self._session_event_locks.cleanup_key(event.session_id, require_expired=False)

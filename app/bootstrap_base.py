@@ -16,6 +16,7 @@ from app.config.settings import Settings
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.interrupt_watcher import InterruptWatcher
+from app.services.lock_registry import RefCountedLockRegistry
 from app.services.session_service import SessionService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_store import SessionStore
@@ -49,7 +50,7 @@ class AppContainerBase:
     session_registry: SessionRegistryService
     _jsonl_sync_tasks: dict[str, asyncio.Task[None]]
     _jsonl_sync_requests: dict[str, str]
-    _jsonl_sync_locks: dict[str, asyncio.Lock]
-    _session_event_locks: dict[str, asyncio.Lock]
+    _jsonl_sync_locks: RefCountedLockRegistry
+    _session_event_locks: RefCountedLockRegistry
     _periodic_recheck_task: asyncio.Task[None] | None
     _started: bool

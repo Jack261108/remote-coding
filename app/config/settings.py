@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -89,6 +89,19 @@ class Settings(BaseSettings):
 
     rate_limit_max_requests: int = Field(6, alias="RATE_LIMIT_MAX_REQUESTS")
     rate_limit_window_sec: int = Field(20, alias="RATE_LIMIT_WINDOW_SEC")
+    rate_limit_bucket_ttl_sec: int | None = Field(None, alias="RATE_LIMIT_BUCKET_TTL_SEC")
+    rate_limit_bucket_cleanup_interval_sec: int = Field(60, alias="RATE_LIMIT_BUCKET_CLEANUP_INTERVAL_SEC")
+    rate_limit_bucket_cleanup_batch_size: int = Field(50, alias="RATE_LIMIT_BUCKET_CLEANUP_BATCH_SIZE")
+
+    # Task store settings
+    task_store_ttl_hours: int = Field(168, alias="TASK_STORE_TTL_HOURS")
+    task_store_max_records: int = Field(1000, alias="TASK_STORE_MAX_RECORDS")
+
+    # Lock settings
+    permission_lock_ttl_sec: int | None = Field(None, alias="PERMISSION_LOCK_TTL_SEC")
+    session_lock_ttl_sec: int = Field(3600, alias="SESSION_LOCK_TTL_SEC")
+    lock_cleanup_interval_sec: int = Field(60, alias="LOCK_CLEANUP_INTERVAL_SEC")
+    lock_cleanup_batch_size: int = Field(50, alias="LOCK_CLEANUP_BATCH_SIZE")
 
     chunk_size: int = Field(3800, alias="CHUNK_SIZE")
     chunk_flush_interval_sec: float = Field(1.0, alias="CHUNK_FLUSH_INTERVAL_SEC")
@@ -219,6 +232,13 @@ class Settings(BaseSettings):
     @field_validator(
         "rate_limit_max_requests",
         "rate_limit_window_sec",
+        "rate_limit_bucket_cleanup_interval_sec",
+        "rate_limit_bucket_cleanup_batch_size",
+        "task_store_ttl_hours",
+        "task_store_max_records",
+        "session_lock_ttl_sec",
+        "lock_cleanup_interval_sec",
+        "lock_cleanup_batch_size",
         "chunk_size",
         "task_output_char_limit",
         "tg_request_timeout_sec",
@@ -241,6 +261,23 @@ class Settings(BaseSettings):
             raise ValueError("配置值必须大于 0")
         return value
 
+    @field_validator("rate_limit_bucket_ttl_sec", "permission_lock_ttl_sec", mode="before")
+    @classmethod
+    def validate_optional_positive_int(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        if int(value) <= 0:
+            raise ValueError("配置值必须大于 0")
+        return value
+
+    @model_validator(mode="after")
+    def validate_rate_limit_bucket_ttl(self) -> Settings:
+        if self.rate_limit_bucket_ttl_sec is not None and self.rate_limit_bucket_ttl_sec < self.rate_limit_window_sec:
+            raise ValueError("RATE_LIMIT_BUCKET_TTL_SEC 必须大于等于 RATE_LIMIT_WINDOW_SEC")
+        return self
+
     @property
     def allow_all_users(self) -> bool:
         return len(self.tg_allowed_user_ids) == 0
@@ -252,3 +289,11 @@ class Settings(BaseSettings):
     @property
     def default_workdir(self) -> str:
         return self.allowed_workdirs[0]
+
+    @property
+    def effective_rate_limit_bucket_ttl_sec(self) -> int:
+        return self.rate_limit_bucket_ttl_sec if self.rate_limit_bucket_ttl_sec is not None else self.rate_limit_window_sec
+
+    @property
+    def effective_permission_lock_ttl_sec(self) -> int:
+        return self.permission_lock_ttl_sec if self.permission_lock_ttl_sec is not None else self.claude_hook_pending_permission_ttl_sec

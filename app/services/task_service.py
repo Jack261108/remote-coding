@@ -147,6 +147,9 @@ class TaskService:
             hook_socket_server=hook_socket_server,
             get_structured_session=self._structured_session_resolver.get_structured_session,
             is_state_owned_by_user=self._structured_session_resolver.is_state_owned_by_user,
+            permission_lock_ttl_sec=settings.effective_permission_lock_ttl_sec,
+            lock_cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            lock_cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
         self._interaction_facade = TaskInteractionFacade(
             structured_session_resolver=self._structured_session_resolver,

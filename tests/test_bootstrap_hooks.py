@@ -9,7 +9,7 @@ from app.bootstrap import AppContainer
 from app.config.settings import Settings
 from app.domain.hook_models import HookEvent
 from app.domain.models import TaskRecord, TaskStatus
-from app.domain.session_models import ConversationTurn, SessionPhase, ToolCallRecord, ToolStatus
+from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.interrupt_watcher import InterruptWatcher
 
@@ -43,6 +43,10 @@ def make_settings(tmp_path, *, install_hooks: bool = True) -> Settings:
             "ALLOWED_WORKDIRS": str(tmp_path),
         }
     )
+
+
+def use_legacy_hook_binding_path(container: AppContainer) -> None:
+    delattr(container, "ownership_resolver")
 
 
 @pytest.mark.asyncio
@@ -107,6 +111,7 @@ async def test_app_container_start_skips_install_when_disabled(tmp_path, monkeyp
 @pytest.mark.asyncio
 async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    use_legacy_hook_binding_path(container)
 
     session = await container.session_service.switch(
         user_id=1,
@@ -130,9 +135,9 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
 
     async def fake_sync(session_id: str, cwd: str) -> None:
         await container._dispatch_session_event(
-            container.structured_session_store.process.__globals__["SessionEvent"](
+            SessionEvent(
                 session_id=session_id,
-                type=container.structured_session_store.process.__globals__["SessionEventType"].FILE_SYNCED,
+                type=SessionEventType.FILE_SYNCED,
                 payload={
                     "cwd": cwd,
                     "claude_session_id": session_id,
@@ -182,6 +187,7 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
 @pytest.mark.asyncio
 async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_workdir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    use_legacy_hook_binding_path(container)
 
     session = await container.session_service.switch(
         user_id=1,
@@ -296,6 +302,7 @@ async def test_handle_hook_event_binds_session_when_terminal_state_has_content_w
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    use_legacy_hook_binding_path(container)
 
     session = await container.session_service.switch(
         user_id=1,
@@ -352,6 +359,7 @@ async def test_handle_hook_event_binds_session_when_pending_interactive_task_mat
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    use_legacy_hook_binding_path(container)
 
     session = await container.session_service.switch(
         user_id=1,
@@ -444,6 +452,7 @@ async def test_handle_hook_event_does_not_bind_session_when_only_final_task_matc
 @pytest.mark.asyncio
 async def test_handle_hook_event_runs_bind_before_dispatch_and_sync(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    use_legacy_hook_binding_path(container)
     seen: list[str] = []
 
     async def fake_bind(event: HookEvent) -> None:
@@ -502,6 +511,7 @@ async def test_handle_hook_event_rejects_workdir_outside_allowlist(tmp_path, mon
 @pytest.mark.asyncio
 async def test_handle_hook_event_debounces_jsonl_sync(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    use_legacy_hook_binding_path(container)
     seen: list[tuple[str, str]] = []
 
     async def fake_sync(session_id: str, cwd: str) -> None:
@@ -539,9 +549,8 @@ async def test_sync_claude_session_uses_per_session_lock(tmp_path, monkeypatch: 
 
     monkeypatch.setattr(container.claude_jsonl_parser, "parse_incremental", fake_parse_incremental)
 
-    lock = asyncio.Lock()
-    await lock.acquire()
-    container._jsonl_sync_locks["claude-session-1"] = lock
+    held_lock = container._jsonl_sync_locks.lock("claude-session-1")
+    await held_lock.__aenter__()
 
     first = asyncio.create_task(container.sync_claude_session("claude-session-1", str(tmp_path)))
     second = asyncio.create_task(container.sync_claude_session("claude-session-1", str(tmp_path)))
@@ -550,7 +559,7 @@ async def test_sync_claude_session_uses_per_session_lock(tmp_path, monkeypatch: 
     assert first.done() is False
     assert second.done() is False
 
-    lock.release()
+    await held_lock.__aexit__(None, None, None)
     await first
     await second
 
@@ -590,7 +599,7 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
 
     assert container._jsonl_sync_tasks == {}
     assert container._jsonl_sync_requests == {}
-    assert container._jsonl_sync_locks == {}
+    assert len(container._jsonl_sync_locks) == 0
     assert container._periodic_recheck_task is None
 
 
@@ -654,6 +663,7 @@ async def test_debounced_sync_requeues_request_after_failure(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_session_end_keeps_pending_sync_until_flushed(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    use_legacy_hook_binding_path(container)
     seen: list[tuple[str, str]] = []
 
     await container.session_service.switch(
@@ -673,6 +683,33 @@ async def test_session_end_keeps_pending_sync_until_flushed(tmp_path, monkeypatc
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
     assert seen == [("claude-session-1", str(tmp_path))]
+
+
+@pytest.mark.asyncio
+async def test_session_end_cleans_event_lock_registry(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    await container._dispatch_session_event(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.SESSION_ENDED,
+            payload={"cwd": str(tmp_path)},
+        )
+    )
+
+    assert len(container._session_event_locks) == 0
+
+
+@pytest.mark.asyncio
+async def test_container_uses_independent_session_lock_registries(tmp_path) -> None:
+    settings = make_settings(tmp_path, install_hooks=False)
+    container = AppContainer(settings)
+
+    assert container._jsonl_sync_locks._ttl_sec == settings.session_lock_ttl_sec
+    assert container._session_event_locks._ttl_sec == settings.session_lock_ttl_sec
+    assert container._jsonl_sync_locks._cleanup_interval_sec == settings.lock_cleanup_interval_sec
+    assert container._session_event_locks._cleanup_interval_sec == settings.lock_cleanup_interval_sec
+    assert container._jsonl_sync_locks is not container._session_event_locks
 
 
 @pytest.mark.asyncio
@@ -908,9 +945,9 @@ async def test_start_restores_persisted_claude_session_snapshot(tmp_path, monkey
 
     async def fake_sync(session_id: str, cwd: str) -> None:
         await second._dispatch_session_event(
-            second.structured_session_store.process.__globals__["SessionEvent"](
+            SessionEvent(
                 session_id=session_id,
-                type=second.structured_session_store.process.__globals__["SessionEventType"].FILE_SYNCED,
+                type=SessionEventType.FILE_SYNCED,
                 payload={
                     "cwd": cwd,
                     "claude_session_id": session_id,

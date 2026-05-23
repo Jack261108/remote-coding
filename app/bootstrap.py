@@ -42,6 +42,7 @@ from app.services.external_session_push_notifier import ExternalSessionPushNotif
 from app.services.file_receiver import FileReceiverService
 from app.services.file_sender import FileSenderService
 from app.services.interrupt_watcher import InterruptWatcher
+from app.services.lock_registry import RefCountedLockRegistry
 from app.services.result_exporter import ResultExporterService
 from app.services.session_ownership_resolver import SessionOwnershipResolver
 from app.services.session_service import SessionService
@@ -85,7 +86,10 @@ class AppContainer(
         self.bot = Bot(token=settings.tg_bot_token, session=session)
         self.dispatcher = Dispatcher()
 
-        self.task_store = MemoryTaskStore()
+        self.task_store = MemoryTaskStore(
+            max_records=settings.task_store_max_records,
+            ttl_hours=settings.task_store_ttl_hours,
+        )
 
         self.runner = SubprocessRunner()
         self.claude_paths = ClaudePaths.resolve(settings.claude_config_dir)
@@ -204,8 +208,16 @@ class AppContainer(
 
         self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
         self._jsonl_sync_requests: dict[str, str] = {}
-        self._jsonl_sync_locks: dict[str, asyncio.Lock] = {}
-        self._session_event_locks: dict[str, asyncio.Lock] = {}
+        self._jsonl_sync_locks = RefCountedLockRegistry(
+            ttl_sec=settings.session_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
+        self._session_event_locks = RefCountedLockRegistry(
+            ttl_sec=settings.session_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
         self._periodic_recheck_task: asyncio.Task[None] | None = None
         self._started = False
 
@@ -252,6 +264,9 @@ class AppContainer(
         rate_limit_middleware = RateLimitMiddleware(
             limit=self.settings.rate_limit_max_requests,
             window_sec=self.settings.rate_limit_window_sec,
+            bucket_ttl_sec=self.settings.effective_rate_limit_bucket_ttl_sec,
+            cleanup_interval_sec=self.settings.rate_limit_bucket_cleanup_interval_sec,
+            cleanup_batch_size=self.settings.rate_limit_bucket_cleanup_batch_size,
         )
         self.dispatcher.message.middleware(auth_middleware)
         self.dispatcher.callback_query.middleware(auth_middleware)

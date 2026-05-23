@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState
+from app.services.lock_registry import RefCountedLockRegistry
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 
@@ -20,13 +20,20 @@ class PermissionService:
         hook_socket_server: HookSocketServer | None,
         get_structured_session: Callable[..., Awaitable[SessionState | None]],
         is_state_owned_by_user: Callable[..., Awaitable[bool]],
+        permission_lock_ttl_sec: int = 600,
+        lock_cleanup_interval_sec: int = 60,
+        lock_cleanup_batch_size: int = 50,
     ) -> None:
         self._session_service = session_service
         self._structured_session_store = structured_session_store
         self._hook_socket_server = hook_socket_server
         self._get_structured_session = get_structured_session
         self._is_state_owned_by_user = is_state_owned_by_user
-        self._permission_locks: dict[str, asyncio.Lock] = {}
+        self._permission_locks = RefCountedLockRegistry(
+            ttl_sec=permission_lock_ttl_sec,
+            cleanup_interval_sec=lock_cleanup_interval_sec,
+            cleanup_batch_size=lock_cleanup_batch_size,
+        )
 
     async def respond_to_pending_permission(
         self,
@@ -54,7 +61,7 @@ class PermissionService:
                 return False, "当前没有待处理的权限请求"
             lock_tool_use_id = pending.tool_use_id
 
-        async with self._get_permission_lock(lock_tool_use_id):
+        async with self._permission_locks.lock(lock_tool_use_id):
             return await self._respond_to_pending_permission_locked(
                 user_id=user_id,
                 decision=decision,
@@ -62,13 +69,6 @@ class PermissionService:
                 expected_tool_use_id=expected_tool_use_id,
                 lock_tool_use_id=lock_tool_use_id,
             )
-
-    def _get_permission_lock(self, tool_use_id: str) -> asyncio.Lock:
-        lock = self._permission_locks.get(tool_use_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._permission_locks[tool_use_id] = lock
-        return lock
 
     async def _resolve_pending_permission_state(
         self,
