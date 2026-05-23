@@ -12,15 +12,7 @@ logger = logging.getLogger(__name__)
 BUILTIN_COMMANDS: list[tuple[str, str]] = [
     ("/compact", "压缩上下文窗口"),
     ("/clear", "清空会话历史"),
-    ("/resume", "恢复上次会话"),
-    ("/status", "显示当前会话状态"),
-    ("/memory", "查看/编辑记忆"),
     ("/model", "切换模型"),
-    ("/cost", "显示费用统计"),
-    ("/doctor", "诊断配置问题"),
-    ("/login", "登录账户"),
-    ("/logout", "登出账户"),
-    ("/help", "显示帮助"),
 ]
 
 

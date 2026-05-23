@@ -42,6 +42,13 @@ class TmuxCommandMixin:
         system_prompt = shlex.quote(_INTERACTIVE_SYSTEM_PROMPT)
         return f"cd {workdir_target} && exec {claude_bin} --append-system-prompt {system_prompt}"
 
+    def _build_interactive_claude_resume_command(self, *, workdir: str, session_id: str) -> str:
+        workdir_target = shlex.quote(str(Path(workdir).resolve()))
+        claude_bin = shlex.quote(self._claude_cli_bin)
+        system_prompt = shlex.quote(_INTERACTIVE_SYSTEM_PROMPT)
+        safe_session_id = shlex.quote(session_id)
+        return f"cd {workdir_target} && exec {claude_bin} --append-system-prompt {system_prompt} --resume {safe_session_id}"
+
     def _wrap_interactive_prompt(self, *, prompt: str) -> str:
         safe_prompt = prompt.replace("\r", "").strip()
         if not safe_prompt:

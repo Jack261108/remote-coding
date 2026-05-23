@@ -94,6 +94,12 @@ class StubFactory:
         self._ensured_interactive_workdir = workdir
         return True, ""
 
+    async def ensure_claude_resume_session(self, *, terminal_key: str, workdir: str, session_id: str) -> tuple[bool, str]:
+        self._ensured_resume_terminal_key = terminal_key
+        self._ensured_resume_workdir = workdir
+        self._ensured_resume_session_id = session_id
+        return True, ""
+
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
         self._revealed_terminal_key = terminal_key
         return True, f"已在桌面打开 Terminal 并附着到 tgcli_{terminal_key}"

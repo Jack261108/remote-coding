@@ -68,6 +68,11 @@ class CLIAdapterFactory:
 
         return False, "claude adapter 不可用"
 
+    async def ensure_claude_resume_session(self, *, terminal_key: str, workdir: str, session_id: str) -> tuple[bool, str]:
+        if not self._claude_tmux_enabled or self._tmux_runner is None:
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
+        return await self._tmux_runner.ensure_claude_resume_session(terminal_key=terminal_key, workdir=workdir, session_id=session_id)
+
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
         if not self._claude_tmux_enabled or self._tmux_runner is None:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"

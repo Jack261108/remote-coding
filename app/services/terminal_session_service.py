@@ -117,6 +117,64 @@ class TerminalSessionService:
             message = f"{message}\n{detail}"
         return True, message
 
+    async def open_claude_resume_session(self, user_id: int, session_id: str, *, workdir: str | None = None) -> tuple[bool, str]:
+        session = await self._session_service.get(user_id)
+        had_old_terminal = bool(session and session.terminal_mode and session.terminal_id)
+        self._clear_user_questions(user_id)
+        if session is not None:
+            await self._session_service.clear_claude_session(user_id=user_id)
+        if had_old_terminal:
+            closed, text = await self.close_terminal(user_id)
+            if not closed and text != "终端不存在或关闭失败":
+                return False, f"旧终端关闭失败: {text}"
+
+        workdir_source = workdir or (session.workdir if session else self._settings.default_workdir)
+        selected_workdir = str(Path(workdir_source).resolve())
+        if workdir is None and not Path(selected_workdir).is_dir():
+            selected_workdir = str(Path(self._settings.default_workdir).resolve())
+        if not self._is_workdir_allowed(selected_workdir):
+            raise ValueError("workdir 不在 ALLOWED_WORKDIRS 白名单内")
+        if not Path(selected_workdir).is_dir():
+            return False, f"workdir 不存在或不是目录: {selected_workdir}"
+
+        updated_session = await self._session_service.switch(
+            user_id=user_id,
+            provider="claude_code",
+            workdir=selected_workdir,
+            terminal_mode=True,
+            claude_chat_active=True,
+        )
+
+        if not updated_session.terminal_id:
+            return False, "会话创建失败: terminal_id 为空"
+
+        # Use the resume-specific ensure method
+        ensured, err = await self._cli_factory.ensure_claude_resume_session(
+            terminal_key=updated_session.terminal_id,
+            workdir=updated_session.workdir,
+            session_id=session_id,
+        )
+        if not ensured:
+            await self._session_service.switch(user_id=user_id, terminal_mode=False, claude_chat_active=False)
+            return False, err
+
+        # Reveal the terminal
+        revealed, reveal_text = await self._cli_factory.reveal_terminal(updated_session.terminal_id)
+
+        # Bind the claude_session_id to the resumed session
+        await self._session_service.bind_claude_session(
+            user_id=user_id,
+            claude_session_id=session_id,
+            workdir=selected_workdir,
+        )
+
+        if not revealed:
+            return True, f"Claude 会话已恢复\n未能自动打开桌面终端: {reveal_text}"
+        message = "Claude 会话已恢复"
+        if reveal_text:
+            message = f"{message}\n{reveal_text}"
+        return True, message
+
     async def bind_claude_session(self, *, user_id: int, claude_session_id: str, workdir: str | None = None) -> None:
         await self._session_service.bind_claude_session(
             user_id=user_id,

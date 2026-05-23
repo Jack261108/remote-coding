@@ -104,6 +104,18 @@ class TmuxSessionMixin:
             return False, respawn_err
         return True, ""
 
+    async def _ensure_claude_resume_session(
+        self, *, session_name: str, workdir: str, session_id: str, env: dict[str, str] | None
+    ) -> tuple[bool, str]:
+        ready, err = await self._ensure_persistent_session(session_name, workdir=workdir, env=env)
+        if not ready:
+            return False, err
+        command = self._build_interactive_claude_resume_command(workdir=workdir, session_id=session_id)
+        respawned, respawn_err = await self._respawn_and_send_command(session_name=session_name, command=command, workdir=workdir)
+        if not respawned:
+            return False, respawn_err
+        return True, ""
+
     async def _send_command(
         self, session_name: str, command: str, *, workdir: str, env: dict[str, str] | None, interactive: bool = False
     ) -> tuple[bool, str]:

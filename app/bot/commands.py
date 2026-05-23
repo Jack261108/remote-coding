@@ -12,7 +12,8 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="session", description="View/switch session"),
     BotCommand(command="approve", description="Approve pending permission"),
     BotCommand(command="deny", description="Deny pending permission"),
+    BotCommand(command="resume", description="Resume a past Claude session"),
     BotCommand(command="exit", description="Exit Claude session and close terminal"),
 ]
 
-assert len(BOT_COMMANDS) == 12, f"Expected 12 commands, got {len(BOT_COMMANDS)}"
+assert len(BOT_COMMANDS) == 13, f"Expected 13 commands, got {len(BOT_COMMANDS)}"

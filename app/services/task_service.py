@@ -316,6 +316,9 @@ class TaskService:
     async def open_claude_chat_session(self, user_id: int, *, workdir: str | None = None) -> tuple[bool, str]:
         return await self._terminal_session_service.open_claude_chat_session(user_id, workdir=workdir)
 
+    async def open_claude_resume_session(self, user_id: int, *, session_id: str, workdir: str | None = None) -> tuple[bool, str]:
+        return await self._terminal_session_service.open_claude_resume_session(user_id, session_id, workdir=workdir)
+
     def is_workdir_allowed(self, workdir: str) -> bool:
         return self._is_workdir_allowed(str(Path(workdir).resolve()))
 

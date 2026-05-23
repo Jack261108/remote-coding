@@ -580,6 +580,14 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         async with session_lock:
             return await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=env)
 
+    async def ensure_claude_resume_session(
+        self, *, terminal_key: str, workdir: str, session_id: str, env: dict[str, str] | None = None
+    ) -> tuple[bool, str]:
+        session_name = self._build_session_name(terminal_key)
+        session_lock = self._get_session_lock(session_name)
+        async with session_lock:
+            return await self._ensure_claude_resume_session(session_name=session_name, workdir=workdir, session_id=session_id, env=env)
+
     async def send_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
         session_name = self._build_session_name(terminal_key)
         prompt = self._wrap_interactive_prompt(prompt=text)

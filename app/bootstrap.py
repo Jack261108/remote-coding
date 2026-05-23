@@ -45,6 +45,7 @@ from app.services.result_exporter import ResultExporterService
 from app.services.session_ownership_resolver import SessionOwnershipResolver
 from app.services.session_service import SessionService
 from app.services.session_registry import SessionRegistryService
+from app.services.session_scanner import SessionScanner
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 from app.services.auto_approve_service import AutoApproveService
@@ -265,5 +266,7 @@ class AppContainer(
             unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
             auto_approve_service=self.auto_approve_service,
+            session_scanner=SessionScanner(),
+            claude_paths=self.claude_paths,
         )
         self.dispatcher.include_router(router)

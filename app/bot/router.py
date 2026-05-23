@@ -7,6 +7,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.adapters.claude.paths import ClaudePaths
 from app.bot.handlers.command_attach import register_attach_handler
 from app.bot.handlers.command_cancel import register_cancel_handler
 from app.bot.handlers.command_claude import register_claude_handler
@@ -14,6 +15,7 @@ from app.bot.handlers.command_cmds import register_cmds_handler
 from app.bot.handlers.command_exit import register_exit_handler
 from app.bot.handlers.command_export import register_export_handler
 from app.bot.handlers.command_list import register_list_handler
+from app.bot.handlers.command_resume import register_resume_handler
 from app.bot.handlers.external_session import register_external_session_handler
 from app.bot.handlers.session_actions import register_session_action_handlers
 from app.bot.handlers.external_permission import register_external_permission_handler
@@ -31,6 +33,7 @@ from app.services.external_session_discovery import ExternalSessionDiscoveryServ
 from app.services.file_receiver import FileReceiverService
 from app.services.result_exporter import ResultExporterService
 from app.services.session_registry import SessionRegistryService
+from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
@@ -60,6 +63,8 @@ def create_router(
     unbound_permission_handler: UnboundPermissionHandler | None = None,
     external_uq_state: ExternalUserQuestionState | None = None,
     auto_approve_service: AutoApproveService | None = None,
+    session_scanner: SessionScanner | None = None,
+    claude_paths: ClaudePaths | None = None,
 ) -> Router:
     router = Router()
 
@@ -120,6 +125,16 @@ def create_router(
     register_user_question_handlers(router, task_service=task_service)
     register_exit_handler(router, task_service=task_service)
     register_cmds_handler(router, session_service=session_service, task_service=task_service)
+
+    if session_scanner is not None and claude_paths is not None:
+        register_resume_handler(
+            router,
+            session_scanner=session_scanner,
+            task_service=task_service,
+            session_service=session_service,
+            claude_paths=claude_paths,
+        )
+
     if registry_service is not None:
         register_list_handler(
             router,
