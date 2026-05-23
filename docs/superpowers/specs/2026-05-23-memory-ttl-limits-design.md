@@ -58,6 +58,8 @@
 
 当前类已有 `self._lock: asyncio.Lock`。所有公开 async 方法继续先获取该锁，再读写 `_tasks`。淘汰 helper 命名为 `_evict_expired_and_overflow_locked()`；`locked` 后缀只表示“调用方已经持有 `self._lock`”。该 helper 是同步函数，执行过程中不允许 `await`，避免在遍历/删除 dict 时发生协程交错。
 
+`TaskRecord` 已有 `ended_at: datetime | None` 字段（`app/domain/models.py:75`），因此 TTL 起算不需要变更数据模型。
+
 清理策略：
 
 1. 在 `add()`、`save()`、`list_by_user()`、`iter_all()` 中调用 `_evict_expired_and_overflow_locked()`。
@@ -89,37 +91,60 @@ TTL 与容量的关系：
 全局陈旧桶清理必须节流并限量：
 
 1. middleware 维护 `_last_cleanup_ts`，只有距离上次全局清理超过 `cleanup_interval_sec` 时才启动一批全局清理。
-2. middleware 维护 `_cleanup_queue: deque[int]` 和 `_cleanup_queued: set[int]`；新 user_id 首次创建桶时入队一次。
-3. 每批从队列左侧最多弹出 `cleanup_batch_size` 个 user_id。
-4. 检查到空桶或最后一次请求已超过 `bucket_ttl_sec` 的桶时删除该 user_id，并从 `_cleanup_queued` 移除。
-5. 检查到仍活跃的桶时保留该桶，并把 user_id 重新放回队列尾部。
-6. 保持现有限流判断不变。
+2. middleware 维护 `_cleanup_queue: deque[int]` 和 `_cleanup_queued: set[int]`；创建桶时只有 `user_id not in _cleanup_queued` 才入队。
+3. 桶被删除时必须同步从 `_cleanup_queued` 移除，确保同一用户后续重建桶时能重新进入清理轮转。
+4. 每批从队列左侧最多弹出 `cleanup_batch_size` 个 user_id；弹出时先从 `_cleanup_queued` 移除。
+5. 检查到空桶或最后一次请求已超过 `bucket_ttl_sec` 的桶时删除该 user_id，且不重新入队。
+6. 检查到仍活跃的桶时保留该桶，并在 `user_id not in _cleanup_queued` 时重新放回队列尾部。
+7. 保持现有限流判断不变。
 
 这样即使 `allow_all_users=true` 且历史用户很多，一个活跃用户的每次请求也不会遍历全部历史桶。
+
+### RefCountedLockRegistry
+
+权限锁、JSONL sync lock、session event lock 使用同一个小型工具类，避免复制三份 `ref_count + last_used + lock` 管理逻辑。
+
+新增 `RefCountedLockRegistry`，放在 `app/services/lock_registry.py`。它只负责内存锁生命周期，不依赖业务模型。
+
+核心结构：
+
+- `key -> LockEntry`
+- `LockEntry.lock: asyncio.Lock`
+- `LockEntry.ref_count: int`
+- `LockEntry.last_used: float`
+- `_cleanup_queue: deque[str]`
+- `_cleanup_queued: set[str]`
+- `_last_cleanup_ts: float`
+
+接口语义：
+
+1. `lock(key)` 返回 async context manager。
+2. 进入 context 前，在 registry 内部锁保护下创建或获取条目，`ref_count += 1`；创建条目时如果 `key not in _cleanup_queued`，把 key 入队。
+3. context 内部持有 `LockEntry.lock`，保持同一 key 串行化。
+4. 退出 context 后释放 `LockEntry.lock`，再在 registry 内部锁保护下 `ref_count -= 1` 并更新 `last_used`。
+5. 退出 context 后必须尝试清理当前 key。
+6. 删除条目时必须同步从 `_cleanup_queued` 移除，确保同一 key 后续重建时能重新进入清理轮转。
+7. 全局清理只有在距离上次清理超过 `cleanup_interval_sec` 时运行，单批最多检查 `cleanup_batch_size` 个 key；检查时从队列弹出并移除 `_cleanup_queued` 标记，仍活跃的 key 再重新入队。
+
+三种锁各自持有一个独立 registry 实例：
+
+- `PermissionService` 使用一个 registry，TTL 为 `PERMISSION_LOCK_TTL_SEC`。
+- JSONL sync 使用一个 registry，TTL 为 `SESSION_LOCK_TTL_SEC`。
+- Session event dispatch 使用一个 registry，TTL 为 `SESSION_LOCK_TTL_SEC`。
+
+三种 registry 共用 `LOCK_CLEANUP_INTERVAL_SEC` 和 `LOCK_CLEANUP_BATCH_SIZE` 作为配置值，但各自维护独立的 `_last_cleanup_ts`、队列和条目表；清理频率参数相同，不代表共享同一个全局清理状态。
 
 ### PermissionService 锁
 
 权限锁不能简单在使用后 `pop`，否则并发等待同一把锁的协程可能仍持有旧锁引用，而新请求会创建新锁，破坏串行化。
 
-设计一个轻量锁条目：
-
-- `lock: asyncio.Lock`
-- `ref_count: int`
-- `last_used: float`
-
-`last_used` 使用事件循环单调时间，例如 `asyncio.get_running_loop().time()`，避免系统时间回拨影响 TTL 判断。
-
-获取锁时增加 `ref_count`，退出临界区后减少 `ref_count` 并更新 `last_used`。懒清理只删除满足以下条件的条目：
-
-- `ref_count == 0`
-- `lock.locked() is False`
-- `last_used` 距今超过 `PERMISSION_LOCK_TTL_SEC`
+`PermissionService` 使用 `RefCountedLockRegistry` 管理 `tool_use_id` 锁。`last_used` 使用事件循环单调时间，例如 `asyncio.get_running_loop().time()`，避免系统时间回拨影响 TTL 判断。
 
 权限响应完成后必须尝试清理当前 `tool_use_id` 的锁。全局过期锁清理受 `LOCK_CLEANUP_INTERVAL_SEC` 和 `LOCK_CLEANUP_BATCH_SIZE` 约束，不能在热路径中无上限扫描全表。
 
 ### JSONL sync locks
 
-`_jsonl_sync_locks` 使用与权限锁相同的轻量锁条目和获取/释放流程。
+`_jsonl_sync_locks` 替换为一个独立的 `RefCountedLockRegistry` 实例，使用 session_id 作为 key。
 
 清理策略：
 
@@ -133,7 +158,7 @@ TTL 与容量的关系：
 
 ### Session event locks
 
-`_session_event_locks` 使用与权限锁相同的轻量锁条目和获取/释放流程。
+`_session_event_locks` 替换为一个独立的 `RefCountedLockRegistry` 实例，使用 session_id 作为 key。
 
 清理策略：
 
@@ -198,20 +223,26 @@ TTL 与容量的关系：
    - 窗口过后当前用户空桶会被删除。
    - 历史用户桶只在 cleanup interval 到期后清理。
    - 单次全局清理最多处理 `cleanup_batch_size` 个桶。
+   - 桶删除后同步移除 `_cleanup_queued`，同一用户后续重建桶会重新入队。
    - 在大量历史桶和单个活跃用户场景下，请求路径不会扫描全部历史桶。
-3. `PermissionService`
-   - 同一 `tool_use_id` 并发响应仍串行。
-   - 当前 `tool_use_id` 锁在无引用且过期后可被懒清理。
-   - 未过期或 `ref_count > 0` 的锁不会被清理。
+3. `RefCountedLockRegistry`
+   - 同一 key 并发进入时仍串行。
+   - 当前 key 在无引用且过期后可被懒清理。
+   - 未过期或 `ref_count > 0` 的 key 不会被清理。
+   - 删除 key 时同步移除 `_cleanup_queued`，同一 key 后续重建会重新入队。
    - 全局锁清理只在 cleanup interval 到期后运行，且单批最多处理 `LOCK_CLEANUP_BATCH_SIZE` 个 key。
-4. session locks
+   - 不同 registry 实例拥有独立 `_last_cleanup_ts` 和队列状态。
+4. `PermissionService`
+   - 同一 `tool_use_id` 并发响应通过 registry 保持串行。
+5. session locks
    - JSONL sync 完成且无 pending request 后，过期 sync lock 可被清理。
    - `SessionEnd` 后 event lock 可被安全清理。
    - 活跃 session 的 lock 因 `last_used` 更新不会被 TTL 误删。
-5. 配置
+6. 配置
    - 新配置项默认值正确。
    - 派生默认值正确：`RATE_LIMIT_BUCKET_TTL_SEC` 未设置时使用 `RATE_LIMIT_WINDOW_SEC`，`PERMISSION_LOCK_TTL_SEC` 未设置时使用 `CLAUDE_HOOK_PENDING_PERMISSION_TTL_SEC`。
    - `SESSION_LOCK_TTL_SEC` 默认值独立为 3600，不受 `EXTERNAL_SESSION_STALE_TIMEOUT_SEC` 影响。
+   - `LOCK_CLEANUP_INTERVAL_SEC` 和 `LOCK_CLEANUP_BATCH_SIZE` 会传入三种 registry，但每个 registry 状态独立。
    - 非正整数配置启动校验失败。
 
 验收命令：
