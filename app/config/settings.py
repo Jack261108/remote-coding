@@ -110,6 +110,27 @@ class Settings(BaseSettings):
     external_session_stale_timeout_sec: float = Field(600.0, alias="EXTERNAL_SESSION_STALE_TIMEOUT_SEC")
     push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
 
+    # Auto file send settings
+    auto_file_send_enabled: bool = Field(True, alias="AUTO_FILE_SEND_ENABLED")
+    auto_file_send_extensions: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".svg",
+            ".pdf",
+            ".docx",
+            ".xlsx",
+            ".csv",
+            ".html",
+            ".zip",
+            ".tar.gz",
+        ],
+        alias="AUTO_FILE_SEND_EXTENSIONS",
+    )
+
     # Export settings
     auto_export_threshold_chars: int = Field(4096, alias="AUTO_EXPORT_THRESHOLD_CHARS")
     zip_max_size_mb: int = Field(50, alias="ZIP_MAX_SIZE_MB")
@@ -157,7 +178,7 @@ class Settings(BaseSettings):
             return dirs
         raise ValueError("ALLOWED_WORKDIRS 格式错误，需为逗号分隔路径")
 
-    @field_validator("allowed_file_extensions", mode="before")
+    @field_validator("allowed_file_extensions", "auto_file_send_extensions", mode="before")
     @classmethod
     def parse_file_extensions(cls, value: Any) -> list[str]:
         if isinstance(value, list):
@@ -166,7 +187,7 @@ class Settings(BaseSettings):
             return [ext.strip().lower() for ext in value.split(",") if ext.strip()]
         raise ValueError("ALLOWED_FILE_EXTENSIONS 格式错误，需为逗号分隔扩展名")
 
-    @field_validator("claude_tmux_mode", "claude_install_hooks", mode="before")
+    @field_validator("claude_tmux_mode", "claude_install_hooks", "auto_file_send_enabled", mode="before")
     @classmethod
     def parse_bool_flag(cls, value: Any) -> bool:
         if isinstance(value, bool):

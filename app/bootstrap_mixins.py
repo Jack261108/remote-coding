@@ -156,6 +156,21 @@ class HookHandlingMixin(AppContainerBase):
                 )
             )
             self._schedule_jsonl_sync(event.session_id, event.cwd)
+            # Auto file send for owned sessions
+            if (
+                event.event == "PostToolUse"
+                and event.tool == "Write"
+                and ownership.owner_user_id is not None
+                and hasattr(self, "file_sender")
+            ):
+                file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
+                asyncio.create_task(
+                    self.file_sender.send_if_eligible(
+                        file_path_raw=file_path_raw,
+                        cwd=event.cwd,
+                        chat_id=ownership.owner_user_id,
+                    )
+                )
 
         elif ownership.ownership_state == "bound":
             # Externally-bound session: dispatch event + schedule JSONL sync + push notifications
@@ -175,6 +190,21 @@ class HookHandlingMixin(AppContainerBase):
             # Push notifications for bound external sessions (notifier may not be wired yet)
             if hasattr(self, "push_notifier") and ownership.owner_user_id is not None:
                 await self._notify_bound_external_event(event, ownership.owner_user_id)
+            # Auto file send for bound sessions
+            if (
+                event.event == "PostToolUse"
+                and event.tool == "Write"
+                and ownership.owner_user_id is not None
+                and hasattr(self, "file_sender")
+            ):
+                file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
+                asyncio.create_task(
+                    self.file_sender.send_if_eligible(
+                        file_path_raw=file_path_raw,
+                        cwd=event.cwd,
+                        chat_id=ownership.owner_user_id,
+                    )
+                )
 
         else:
             # Unbound: record in discovery, handle permissions if needed

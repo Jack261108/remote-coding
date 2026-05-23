@@ -40,6 +40,7 @@ from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 from app.services.file_receiver import FileReceiverService
+from app.services.file_sender import FileSenderService
 from app.services.interrupt_watcher import InterruptWatcher
 from app.services.result_exporter import ResultExporterService
 from app.services.session_ownership_resolver import SessionOwnershipResolver
@@ -131,6 +132,12 @@ class AppContainer(
             upload_store=self.upload_store,
             allowed_extensions=set(settings.allowed_file_extensions),
             max_file_size_bytes=settings.upload_max_file_size_mb * 1024 * 1024,
+        )
+        self.file_sender = FileSenderService(
+            bot=self.bot,
+            enabled=settings.auto_file_send_enabled,
+            extensions=set(settings.auto_file_send_extensions),
+            image_extensions={".png", ".jpg", ".jpeg", ".gif", ".webp"},
         )
         self.context_builder = ContextBuilderService(upload_store=self.upload_store)
         self.result_exporter = ResultExporterService(settings=settings)
