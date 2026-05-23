@@ -110,18 +110,25 @@ def discover_commands(*, workdir: str, claude_home: Path | None = None) -> list[
 
 
 def _read_first_line(path: Path) -> str:
-    """Read the first non-empty, non-heading line from a markdown file."""
+    """Read the first non-empty, non-heading, non-frontmatter line from a markdown file."""
     try:
+        in_frontmatter = False
         with open(path, encoding="utf-8", errors="ignore") as f:
             for line in f:
                 stripped = line.strip()
                 if not stripped:
                     continue
-                # Skip markdown headings
+                # Skip YAML front matter (--- ... ---)
+                if stripped == "---":
+                    in_frontmatter = not in_frontmatter
+                    continue
+                if in_frontmatter:
+                    continue
+                # Skip markdown headings but extract their text
                 if stripped.startswith("#"):
                     stripped = stripped.lstrip("#").strip()
                 if stripped:
-                    return stripped[:60]  # Truncate for button display
+                    return stripped[:60]
         return ""
     except OSError:
         return ""

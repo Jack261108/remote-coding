@@ -68,26 +68,31 @@ def register_cmds_handler(
         for cmd in commands:
             groups.setdefault(cmd.source, []).append(cmd)
 
-        # Build keyboard: each command as a button
+        # Build keyboard: multiple buttons per row to reduce vertical space
         buttons: list[list[InlineKeyboardButton]] = []
 
         for source in ["builtin", "user", "skill", "project"]:
             cmds = groups.get(source, [])
             if not cmds:
                 continue
+            icon = _SOURCE_ICONS.get(source, "")
+            row: list[InlineKeyboardButton] = []
             for cmd in cmds:
-                icon = _SOURCE_ICONS.get(cmd.source, "")
-                label = f"{icon} {cmd.name}"
-                if cmd.description and cmd.description != cmd.name.lstrip("/"):
-                    label += f" — {cmd.description[:30]}"
-                buttons.append(
-                    [
-                        InlineKeyboardButton(
-                            text=label,
-                            callback_data=_build_callback_data(cmd.slash_text),
-                        )
-                    ]
+                # Short label: just icon + command name (no description for compactness)
+                short_name = cmd.name.lstrip("/")
+                label = f"{icon}{short_name}"
+                row.append(
+                    InlineKeyboardButton(
+                        text=label,
+                        callback_data=_build_callback_data(cmd.slash_text),
+                    )
                 )
+                # Max 3 buttons per row
+                if len(row) >= 3:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
