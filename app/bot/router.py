@@ -10,6 +10,7 @@ from aiogram.types import Message
 from app.bot.handlers.command_attach import register_attach_handler
 from app.bot.handlers.command_cancel import register_cancel_handler
 from app.bot.handlers.command_claude import register_claude_handler
+from app.bot.handlers.command_cmds import register_cmds_handler
 from app.bot.handlers.command_exit import register_exit_handler
 from app.bot.handlers.command_export import register_export_handler
 from app.bot.handlers.command_list import register_list_handler
@@ -118,6 +119,7 @@ def create_router(
     )
     register_user_question_handlers(router, task_service=task_service)
     register_exit_handler(router, task_service=task_service)
+    register_cmds_handler(router, session_service=session_service, task_service=task_service)
     if registry_service is not None:
         register_list_handler(
             router,
