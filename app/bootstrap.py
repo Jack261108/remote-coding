@@ -179,6 +179,7 @@ class AppContainer(
         )
         self.external_discovery = ExternalSessionDiscoveryService(
             stale_timeout_sec=settings.external_session_stale_timeout_sec,
+            title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
         )
         self.ownership_resolver = SessionOwnershipResolver(
             session_service=self.session_service,

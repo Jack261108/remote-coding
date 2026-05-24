@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Callable
 
 from app.domain.external_session_models import UnboundExternalSession
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
 
+logger = logging.getLogger(__name__)
+
 
 class ExternalSessionDiscoveryService:
     """Tracks unbound external sessions discovered via hook events."""
 
-    def __init__(self, *, stale_timeout_sec: float = 600.0) -> None:
+    def __init__(
+        self,
+        *,
+        stale_timeout_sec: float = 600.0,
+        title_resolver: Callable[[str, str], str | None] | None = None,
+    ) -> None:
         self._stale_timeout_sec = stale_timeout_sec
+        self._title_resolver = title_resolver
         self._sessions: dict[str, UnboundExternalSession] = {}
 
     def record_event(self, event: HookEvent) -> None:
@@ -23,6 +33,7 @@ class ExternalSessionDiscoveryService:
         now = utc_now()
         existing = self._sessions.get(event.session_id)
         if existing is None:
+            title = self._resolve_title(event.session_id, event.cwd)
             self._sessions[event.session_id] = UnboundExternalSession(
                 session_id=event.session_id,
                 cwd=event.cwd,
@@ -30,6 +41,7 @@ class ExternalSessionDiscoveryService:
                 first_seen=now,
                 last_seen=now,
                 event_count=1,
+                title=title,
             )
         else:
             existing.last_seen = now
@@ -37,6 +49,18 @@ class ExternalSessionDiscoveryService:
             existing.cwd = event.cwd
             if event.pid is not None:
                 existing.pid = event.pid
+            if existing.title is None:
+                existing.title = self._resolve_title(event.session_id, event.cwd)
+
+    def _resolve_title(self, session_id: str, cwd: str) -> str | None:
+        """Attempt to resolve session title via the injected resolver."""
+        if self._title_resolver is None:
+            return None
+        try:
+            return self._title_resolver(session_id, cwd)
+        except Exception:
+            logger.debug("title resolver failed", extra={"session_id": session_id})
+            return None
 
     def remove_session(self, session_id: str) -> None:
         """Remove a session from unbound tracking."""

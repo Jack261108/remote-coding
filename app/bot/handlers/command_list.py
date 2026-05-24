@@ -69,10 +69,16 @@ def register_list_handler(
             for ext in external_sessions:
                 short = _short_cwd(ext.cwd)
                 sid_tag = ext.session_id[:8]
+                if ext.title:
+                    btn_text = f"💬 {ext.title} ({sid_tag})"
+                else:
+                    btn_text = f"📂 {short} ({sid_tag})"
+                if len(btn_text) > 64:
+                    btn_text = btn_text[:63] + "…"
                 buttons.append(
                     [
                         InlineKeyboardButton(
-                            text=f"📂 {short} ({sid_tag})",
+                            text=btn_text,
                             callback_data=f"sess:select:{ext.session_id[:16]}",
                         )
                     ]

@@ -118,6 +118,47 @@ class ClaudeJSONLParser:
         project_dir = cwd.replace("/", "-").replace(".", "-")
         return self._paths.projects_dir / project_dir / f"{safe_session_id}.jsonl"
 
+    def extract_session_title(self, *, session_id: str, cwd: str, max_length: int = 60) -> str | None:
+        """Extract the first user message text as session title.
+
+        Skips isMeta messages and system-injected caveats (content starting with '<').
+        Uses only the first line to match Claude CLI terminal title behavior.
+        Returns None on any failure without raising.
+        """
+        try:
+            path = self.session_file_path(session_id=session_id, cwd=cwd)
+            if not path.exists():
+                return None
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    if record.get("type") != "user":
+                        continue
+                    if record.get("isMeta"):
+                        continue
+                    msg = record.get("message", {})
+                    content = msg.get("content", "")
+                    text = ""
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                                break
+                    text = text.split("\n", 1)[0].strip()
+                    if not text or text.startswith("<"):
+                        continue
+                    if len(text) > max_length:
+                        return text[:max_length] + "…"
+                    return text
+            return None
+        except Exception:
+            return None
+
     def subagent_file_path(self, *, session_id: str, agent_id: str, cwd: str) -> Path:
         safe_session_id = validate_session_id(session_id)
         safe_agent_id = validate_path_component(agent_id, field_name="agent_id")

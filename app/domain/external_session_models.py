@@ -27,6 +27,7 @@ class UnboundExternalSession:
     first_seen: datetime
     last_seen: datetime
     event_count: int
+    title: str | None = None
 
 
 @dataclass
