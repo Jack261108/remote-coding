@@ -219,6 +219,7 @@ class AppContainer(
             cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
         self._periodic_recheck_task: asyncio.Task[None] | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._started = False
 
     async def start(self) -> None:

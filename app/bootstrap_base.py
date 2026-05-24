@@ -53,4 +53,5 @@ class AppContainerBase:
     _jsonl_sync_locks: RefCountedLockRegistry
     _session_event_locks: RefCountedLockRegistry
     _periodic_recheck_task: asyncio.Task[None] | None
+    _background_tasks: set[asyncio.Task[None]]
     _started: bool

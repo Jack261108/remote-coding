@@ -197,13 +197,23 @@ class HookHandlingMixin(AppContainerBase):
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
         if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
             file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self.file_sender.send_if_eligible(
                     file_path_raw=file_path_raw,
                     cwd=event.cwd,
                     chat_id=owner_user_id,
                 )
             )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._on_background_task_done)
+
+    def _on_background_task_done(self, task: asyncio.Task[None]) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("background task failed", exc_info=exc)
 
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""
