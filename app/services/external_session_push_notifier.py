@@ -38,10 +38,14 @@ class ExternalSessionPushNotifier:
         tool_input: dict | None,
         tool_use_id: str,
         cwd: str,
+        title: str | None = None,
     ) -> bool:
         """Send permission request notification to bound user. Returns True if delivered."""
         short_id = session_id[:8]
-        text = f"🔐 [{short_id}] 请求权限: {tool_name}\n路径: {cwd}"
+        if title:
+            text = f"🔐 [{title}] 请求权限: {tool_name}\n路径: {cwd}"
+        else:
+            text = f"🔐 [{short_id}] 请求权限: {tool_name}\n路径: {cwd}"
 
         # Telegram callback_data max 64 bytes; truncate tool_use_id if needed
         def _build_cb(action: str) -> str:

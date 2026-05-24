@@ -109,10 +109,10 @@ class TestUnboundPermissionBroadcast:
         notified_user_ids = {call.kwargs["chat_id"] for call in bot.send_message.call_args_list}
         assert notified_user_ids == set(allowed_users)
 
-        # Each message should contain session_id and cwd
+        # Each message should contain session short_id and cwd
         for call in bot.send_message.call_args_list:
             text = call.kwargs["text"]
-            assert event.session_id in text
+            assert event.session_id[:8] in text
             assert event.cwd in text
 
 

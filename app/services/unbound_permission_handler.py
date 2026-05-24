@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,11 +33,13 @@ class UnboundPermissionHandler:
         hook_socket_server: HookSocketServer,
         allowed_user_ids: set[int],
         permission_ttl_sec: int = 600,
+        title_resolver: Callable[[str, str], str | None] | None = None,
     ) -> None:
         self._bot = bot
         self._hook_socket_server = hook_socket_server
         self._allowed_user_ids = allowed_user_ids
         self._permission_ttl_sec = permission_ttl_sec
+        self._title_resolver = title_resolver
         self._pending: dict[str, UnboundPermissionState] = {}
         self._expiry_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -204,13 +207,23 @@ class UnboundPermissionHandler:
         tool_name = event.tool or "unknown tool"
         cwd = event.cwd
         session_id = event.session_id
+        short_id = session_id[:8]
 
-        lines = [
-            "🔐 Permission request from unbound session",
-            f"Session: {session_id}",
-            f"Directory: {cwd}",
-            f"Tool: {tool_name}",
-        ]
+        # Resolve session title
+        title: str | None = None
+        if self._title_resolver is not None:
+            try:
+                title = self._title_resolver(session_id, cwd)
+            except Exception:
+                pass
+
+        lines = ["🔐 Permission request from unbound session"]
+        if title:
+            lines.append(f"Session: {title} ({short_id})")
+        else:
+            lines.append(f"Session: {short_id}")
+        lines.append(f"Directory: {cwd}")
+        lines.append(f"Tool: {tool_name}")
 
         if event.tool_input:
             # Include a brief description from tool_input

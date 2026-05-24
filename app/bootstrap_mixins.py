@@ -275,6 +275,13 @@ class HookHandlingMixin(AppContainerBase):
                         text += f"\n{truncated}"
                     await self.push_notifier.notify_info(user_id=user_id, text=text)
                 return
+            # Resolve title for permission notification
+            _title: str | None = None
+            if hasattr(self, "claude_jsonl_parser"):
+                try:
+                    _title = self.claude_jsonl_parser.extract_session_title(session_id=event.session_id, cwd=event.cwd)
+                except Exception:
+                    pass
             await self.push_notifier.notify_permission_request(
                 user_id=user_id,
                 session_id=event.session_id,
@@ -282,6 +289,7 @@ class HookHandlingMixin(AppContainerBase):
                 tool_input=None,
                 tool_use_id=event.tool_use_id or "",
                 cwd=event.cwd,
+                title=_title,
             )
         elif event.event == "Stop":
             await self.push_notifier.notify_session_end(
