@@ -417,18 +417,25 @@ class SessionMatchingMixin(AppContainerBase):
                 "session_count": len(sessions),
             },
         )
+
+        # O(1) lookup by claude_session_id (most common match path)
+        by_claude_session_id: dict[str, SessionContext] = {}
         for session in sessions:
-            if session.claude_session_id == event.session_id:
-                logger.info(
-                    "matched hook session by claude_session_id",
-                    extra={
-                        "hook_session_id": event.session_id,
-                        "user_id": session.user_id,
-                        "workdir": session.workdir,
-                        "terminal_id": session.terminal_id,
-                    },
-                )
-                return session
+            if session.claude_session_id:
+                by_claude_session_id[session.claude_session_id] = session
+
+        matched = by_claude_session_id.get(event.session_id)
+        if matched is not None:
+            logger.info(
+                "matched hook session by claude_session_id",
+                extra={
+                    "hook_session_id": event.session_id,
+                    "user_id": matched.user_id,
+                    "workdir": matched.workdir,
+                    "terminal_id": matched.terminal_id,
+                },
+            )
+            return matched
 
         state = self.structured_session_store.get(event.session_id)
         if state is not None:
