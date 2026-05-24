@@ -289,15 +289,16 @@ class SessionRegistryService:
     async def _run_health_check(self) -> None:
         """Scan all SessionContext records, clean up stale bindings."""
         all_contexts = await self._session_service.list_all()
-        stale: list[SessionContext] = []
 
-        for ctx in all_contexts:
-            if not ctx.terminal_id:
-                continue
-            tmux_name = self._tmux_runner._build_session_name(ctx.terminal_id)
-            alive = await self._tmux_runner._session_exists(tmux_name)
-            if not alive:
-                stale.append(ctx)
+        # Filter contexts with terminal bindings and check liveness in parallel
+        contexts_with_terminals = [ctx for ctx in all_contexts if ctx.terminal_id]
+        if not contexts_with_terminals:
+            return
+
+        tmux_names = [self._tmux_runner._build_session_name(ctx.terminal_id) for ctx in contexts_with_terminals]
+        alive_results = await asyncio.gather(*(self._tmux_runner._session_exists(name) for name in tmux_names))
+
+        stale = [ctx for ctx, alive in zip(contexts_with_terminals, alive_results) if not alive]
 
         if not stale:
             return
