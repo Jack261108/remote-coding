@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from app.domain.models import utc_now
+
+
+CLAUDE_SESSION_PREFIX = "claude-session-"
+_UUID_SESSION_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def is_claude_session_id(session_id: str | None) -> bool:
+    """Check if a session_id looks like a Claude-originated session identifier."""
+    if not session_id:
+        return False
+    text = str(session_id).strip()
+    if not text:
+        return False
+    return text.startswith(CLAUDE_SESSION_PREFIX) or bool(_UUID_SESSION_RE.match(text))
 
 
 class SessionPhase(str, Enum):

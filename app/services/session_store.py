@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime
 
 from app.adapters.storage.file_session_store import FileSessionStore
@@ -9,6 +8,7 @@ from app.domain.session_models import (
     ParserCheckpoint,
     SessionPhase,
     SessionState,
+    is_claude_session_id,
 )
 from app.services.session_event_processor import SessionEventProcessor
 from app.services.session_lookup_service import SessionLookupService
@@ -16,22 +16,6 @@ from app.services.session_notifier import SessionNotifier
 from app.services.session_state_cache import SessionStateCache
 from app.services.session_state_repository import SessionStateRepository
 from app.services.structured_reply_tracker import StructuredReplyTracker
-
-
-CLAUDE_SESSION_PREFIX = "claude-session-"
-_UUID_SESSION_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-    re.IGNORECASE,
-)
-
-
-def is_claude_session_id(session_id: str | None) -> bool:
-    if not session_id:
-        return False
-    text = str(session_id).strip()
-    if not text:
-        return False
-    return text.startswith(CLAUDE_SESSION_PREFIX) or bool(_UUID_SESSION_RE.match(text))
 
 
 def parse_user_question_key(question_key: str | None) -> tuple[str, int] | None:
