@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,18 @@ class DummyCallbackQuery:
 
     async def answer(self, text: str, show_alert: bool = False) -> None:
         self.answers.append(text)
+
+
+class SlowAnswerCallbackQuery(DummyCallbackQuery):
+    def __init__(self, user_id: int | None = 1) -> None:
+        super().__init__(user_id)
+        self.answer_started = asyncio.Event()
+        self.release_answer = asyncio.Event()
+
+    async def answer(self, text: str, show_alert: bool = False) -> None:
+        self.answer_started.set()
+        await self.release_answer.wait()
+        await super().answer(text, show_alert)
 
 
 async def _passing_handler(event, data):
@@ -261,6 +274,24 @@ async def test_rate_limit_middleware_limits_callback_query_user() -> None:
     assert first == "ok"
     assert second is None
     assert callback.answers == ["请求过于频繁，请稍后再试。"]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_slow_answer_does_not_block_other_users() -> None:
+    middleware = RateLimitMiddleware(limit=1, window_sec=20)
+    limited_user = SlowAnswerCallbackQuery(user_id=1)
+    await middleware(_passing_handler, limited_user, {})
+
+    limited_task = asyncio.create_task(middleware(_passing_handler, limited_user, {}))
+    await limited_user.answer_started.wait()
+
+    other_user = DummyCallbackQuery(user_id=2)
+    other_task = asyncio.create_task(middleware(_passing_handler, other_user, {}))
+    try:
+        assert await asyncio.wait_for(other_task, timeout=0.1) == "ok"
+    finally:
+        limited_user.release_answer.set()
+        await limited_task
 
 
 @pytest.mark.asyncio

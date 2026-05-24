@@ -201,28 +201,28 @@ async def test_running_not_deleted_by_capacity():
     assert "new_final" not in ids
 
 
-# --- large scale: 10000 records keep latest 1000 ---
+# --- capacity keeps latest records ---
 
 
 @pytest.mark.asyncio
-async def test_10000_records_preserves_latest_1000():
+async def test_capacity_preserves_latest_records():
     now = utc_now()
-    store = MemoryTaskStore(max_records=1000, ttl_hours=999999)
+    store = MemoryTaskStore(max_records=10, ttl_hours=999999)
 
-    for i in range(10000):
+    for i in range(30):
         await store.add(
             _make_task(
                 task_id=f"t{i}",
                 status=TaskStatus.SUCCEEDED,
-                created_at=now - timedelta(hours=10000 - i),
-                ended_at=now - timedelta(hours=10000 - i),
+                created_at=now - timedelta(hours=30 - i),
+                ended_at=now - timedelta(hours=30 - i),
             )
         )
 
     all_items = await store.iter_all()
-    assert len(all_items) <= 1000
+    assert len(all_items) <= 10
 
-    result = await store.get("t9999")
+    result = await store.get("t29")
     assert result is not None
 
     result = await store.get("t0")

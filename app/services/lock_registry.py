@@ -42,10 +42,6 @@ class RefCountedLockRegistry:
     def __len__(self) -> int:
         return len(self._entries)
 
-    @property
-    def queued_count(self) -> int:
-        return len(self._cleanup_queued)
-
     @asynccontextmanager
     async def lock(self, key: str) -> AsyncIterator[None]:
         entry = await self._acquire_entry(key)
@@ -109,11 +105,15 @@ class RefCountedLockRegistry:
     def _cleanup_key_locked(self, key: str, *, now: float, require_expired: bool) -> None:
         entry = self._entries.get(key)
         if entry is None:
-            self._cleanup_queued.discard(key)
+            self._discard_queued_locked(key)
             return
         if self._can_delete_entry(entry, now=now, require_expired=require_expired):
             self._entries.pop(key, None)
-            self._cleanup_queued.discard(key)
+            self._discard_queued_locked(key)
+
+    def _discard_queued_locked(self, key: str) -> None:
+        self._cleanup_queued.discard(key)
+        self._cleanup_queue = deque(queued_key for queued_key in self._cleanup_queue if queued_key != key)
 
     def _can_delete_entry(self, entry: _LockEntry, *, now: float, require_expired: bool) -> bool:
         if entry.ref_count != 0 or entry.lock.locked():

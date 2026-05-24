@@ -195,7 +195,6 @@ class HookHandlingMixin(AppContainerBase):
                     await self.unbound_permission_handler.handle_unbound_permission(event)
 
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
-        """Send file to chat if the event is a PostToolUse/Write with an eligible file."""
         if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
             file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
             asyncio.create_task(

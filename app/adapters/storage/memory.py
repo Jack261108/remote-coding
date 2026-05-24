@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from datetime import datetime, timedelta
+from heapq import nsmallest
 from typing import Protocol
 
 from app.domain.models import SessionContext, TaskRecord, utc_now
@@ -31,11 +32,12 @@ class MemoryTaskStore:
         if overflow <= 0:
             return
 
-        final_records = sorted(
+        final_records = nsmallest(
+            overflow,
             (record for record in self._tasks.values() if record.is_final),
             key=self._retention_time,
         )
-        for record in final_records[:overflow]:
+        for record in final_records:
             self._tasks.pop(record.task_id, None)
 
     def _retention_time(self, record: TaskRecord) -> datetime:

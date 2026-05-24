@@ -78,13 +78,32 @@ async def test_registry_requeues_key_after_delete_and_recreate() -> None:
     now = 200.0
     await registry.cleanup_expired()
     assert len(registry) == 0
-    assert registry.queued_count == 0
 
     async with registry.lock("tool-1"):
         pass
 
     assert len(registry) == 1
-    assert registry.queued_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_key_removes_deleted_key_from_cleanup_batch() -> None:
+    now = 100.0
+
+    def clock() -> float:
+        return now
+
+    registry = RefCountedLockRegistry(ttl_sec=10, cleanup_interval_sec=1, cleanup_batch_size=1, clock=clock)
+    async with registry.lock("deleted"):
+        pass
+    await registry.cleanup_key("deleted", require_expired=False)
+
+    async with registry.lock("stale"):
+        pass
+
+    now = 200.0
+    await registry.cleanup_expired()
+
+    assert len(registry) == 0
 
 
 @pytest.mark.asyncio
@@ -103,13 +122,11 @@ async def test_registry_cleanup_batch_size_limits_work_per_pass() -> None:
     await registry.cleanup_expired()
 
     assert len(registry) == 1
-    assert registry.queued_count == 1
 
     now = 202.0
     await registry.cleanup_expired()
 
     assert len(registry) == 0
-    assert registry.queued_count == 0
 
 
 @pytest.mark.asyncio

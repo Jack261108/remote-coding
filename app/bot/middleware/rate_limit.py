@@ -48,9 +48,6 @@ class RateLimitMiddleware(BaseMiddleware):
             self._cleanup_queue.append(user_id)
             self._cleanup_queued.add(user_id)
 
-    def _remove_from_cleanup(self, user_id: int) -> None:
-        self._cleanup_queued.discard(user_id)
-
     def _try_cleanup_stale_buckets(self, now: float) -> None:
         if now - self._last_cleanup_ts < self._cleanup_interval_sec:
             return
@@ -63,10 +60,8 @@ class RateLimitMiddleware(BaseMiddleware):
                 continue
             if not bucket or now - bucket[-1] > self._bucket_ttl_sec:
                 self._buckets.pop(uid, None)
-                self._remove_from_cleanup(uid)
             else:
-                self._cleanup_queue.append(uid)
-                self._cleanup_queued.add(uid)
+                self._enqueue_cleanup(uid)
 
     async def __call__(
         self,
@@ -79,6 +74,7 @@ class RateLimitMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         now = asyncio.get_running_loop().time()
+        limited = False
         async with self._lock:
             self._try_cleanup_stale_buckets(now)
 
@@ -93,9 +89,12 @@ class RateLimitMiddleware(BaseMiddleware):
                 bucket.popleft()
 
             if len(bucket) >= self._limit:
-                await event.answer("请求过于频繁，请稍后再试。")
-                return None
+                limited = True
+            else:
+                bucket.append(now)
 
-            bucket.append(now)
+        if limited:
+            await event.answer("请求过于频繁，请稍后再试。")
+            return None
 
         return await handler(event, data)
