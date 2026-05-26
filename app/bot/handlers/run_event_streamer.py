@@ -236,6 +236,7 @@ class RunEventStreamer:
 
     async def stream_events(self) -> None:
         saw_exit = False
+        saw_terminal = False
         try:
             async for event in self._start.events:
                 if event.type in {EventType.STDOUT, EventType.STDERR}:
@@ -273,6 +274,9 @@ class RunEventStreamer:
                 await self._stop_spinner()
                 duration, truncated = await _load_status_summary(self._task_service, self._start.task.task_id, self._user_id)
 
+                if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
+                    saw_terminal = True
+
                 if event.type == EventType.EXITED:
                     saw_exit = True
                     success_msg = _build_success_message(
@@ -283,7 +287,6 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
                         await self._messenger.answer_safely(success_msg)
-                    self._schedule_queued_uploads_once()
                     await self._maybe_auto_export()
                     # Generate and send diff on successful completion
                     await self._generate_and_send_diff()
@@ -309,7 +312,6 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, error_msg):
                         await self._messenger.answer_safely(error_msg)
-                    self._schedule_queued_uploads_once()
         finally:
             await self._stop_spinner()
             if saw_exit and self._start.interactive:
@@ -326,3 +328,5 @@ class RunEventStreamer:
                     await self._interactive_pump
                 except asyncio.CancelledError:
                     pass
+            if saw_terminal:
+                self._schedule_queued_uploads_once()

@@ -52,7 +52,7 @@ async def run_prompt_and_stream(
     workdir: str | None = None,
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
-    queued_upload_scheduler: Callable[[Message, int], None] | None = None,
+    queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
 ) -> asyncio.Task | None:
     logger.info(
         "run prompt requested",
@@ -140,7 +140,9 @@ async def run_prompt_and_stream(
         lifecycle_message=lifecycle_message,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
-        queued_upload_scheduler=((lambda: queued_upload_scheduler(message, user_id)) if queued_upload_scheduler is not None else None),
+        queued_upload_scheduler=(
+            (lambda: queued_upload_scheduler(message, user_id, start.task.task_id)) if queued_upload_scheduler is not None else None
+        ),
     )
     await presenter.prime(baseline_current_snapshot=True)
 
@@ -190,7 +192,7 @@ def register_run_handler(
     sender_factory,
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
-    queued_upload_scheduler: Callable[[Message, int], None] | None = None,
+    queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
 ):
     @router.message(Command("run"))
     async def command_run(message: Message, command: CommandObject) -> None:

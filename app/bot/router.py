@@ -109,13 +109,15 @@ def create_router(
     queued_upload_scheduler = None
     if file_receiver is not None and upload_queue is not None:
 
-        def _queued_upload_scheduler(message: Message, user_id: int) -> None:
+        def _queued_upload_scheduler(message: Message, user_id: int, completed_task_id: str) -> None:
             schedule_pending_upload_processing(
                 message,
                 file_receiver=file_receiver,
                 session_service=session_service,
                 upload_queue=upload_queue,
                 user_id=user_id,
+                task_service=task_service,
+                completed_task_id=completed_task_id,
             )
 
         queued_upload_scheduler = _queued_upload_scheduler

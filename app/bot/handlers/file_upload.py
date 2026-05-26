@@ -39,10 +39,13 @@ async def _answer_oversized(message: Message, *, filename: str, size_bytes: int,
     await message.answer(f"❌ 文件被拒绝: {filename}\n原因: 文件大小 {_format_size(size_bytes)} 超过 {upload_max_file_size_mb} MB 限制。")
 
 
-async def _user_has_running_task(task_service: TaskService, user_id: int) -> bool:
+async def _user_has_running_task(task_service: TaskService, user_id: int, *, exclude_task_id: str | None = None) -> bool:
     """Check if the user has a task currently in RUNNING or PENDING state."""
     recent = await task_service.list_recent(user_id, limit=5)
-    return any(t.status in (TaskStatus.RUNNING, TaskStatus.PENDING) for t in recent)
+    return any(
+        t.status in (TaskStatus.RUNNING, TaskStatus.PENDING) and (exclude_task_id is None or getattr(t, "task_id", None) != exclude_task_id)
+        for t in recent
+    )
 
 
 async def _process_upload(
@@ -83,8 +86,17 @@ async def process_pending_uploads(
     session_service: SessionService,
     upload_queue: UploadQueueManager,
     user_id: int,
+    task_service: TaskService | None = None,
+    completed_task_id: str | None = None,
 ) -> None:
     """Process any queued uploads for a user after their task completes."""
+    if task_service is not None and await _user_has_running_task(task_service, user_id, exclude_task_id=completed_task_id):
+        logger.info(
+            "queued upload processing deferred because another task is active",
+            extra={"user_id": user_id, "completed_task_id": completed_task_id},
+        )
+        return
+
     pending = await upload_queue.drain(user_id=user_id)
     for item in pending:
         try:
@@ -106,6 +118,8 @@ def schedule_pending_upload_processing(
     session_service: SessionService,
     upload_queue: UploadQueueManager,
     user_id: int,
+    task_service: TaskService | None = None,
+    completed_task_id: str | None = None,
 ) -> asyncio.Task[None]:
     """Schedule queued uploads to be processed in the background."""
     task: asyncio.Task[None] = asyncio.create_task(
@@ -115,6 +129,8 @@ def schedule_pending_upload_processing(
             session_service=session_service,
             upload_queue=upload_queue,
             user_id=user_id,
+            task_service=task_service,
+            completed_task_id=completed_task_id,
         )
     )
     _ACTIVE_UPLOAD_TASKS.add(task)
