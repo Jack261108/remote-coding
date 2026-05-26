@@ -14,6 +14,7 @@ from app.bot.presenters.structured_reply_presenter import build_permission_promp
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from tests.fakes.structured import make_structured_session as _structured_session
 from tests.fakes.telegram import DummyMessage
 
@@ -120,7 +121,13 @@ class DummyTaskService:
             yield event
 
 
-async def _run_and_wait(*, message: DummyMessage, task_service: DummyTaskService, wait_sec: float = 0.05) -> None:
+async def _run_and_wait(
+    *,
+    message: DummyMessage,
+    task_service: DummyTaskService,
+    wait_sec: float = 0.05,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
+) -> None:
     task = await run_prompt_and_stream(
         message=message,
         task_service=task_service,
@@ -129,6 +136,7 @@ async def _run_and_wait(*, message: DummyMessage, task_service: DummyTaskService
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        permission_callback_registry=permission_callback_registry,
     )
     await asyncio.sleep(wait_sec)
     if task is not None:
@@ -1017,6 +1025,7 @@ async def test_run_prompt_and_stream_interactive_uses_task_bound_session_after_c
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_reports_pending_permission_once() -> None:
     message = DummyMessage()
+    registry = PermissionCallbackRegistry(ttl_sec=600)
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已完成回复\n", is_complete=True)]
     task_service = DummyTaskService(
@@ -1040,7 +1049,7 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, permission_callback_registry=registry)
 
     expected_prompt = build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"})
     assert message.answers.count(expected_prompt) == 1
@@ -1048,7 +1057,17 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
     reply_markup = message.reply_markups[permission_index]
     assert reply_markup is not None
     assert [button.text for button in reply_markup.inline_keyboard[0]] == ["允许", "拒绝"]
-    assert [button.callback_data for button in reply_markup.inline_keyboard[0]] == ["perm:allow:tool-1", "perm:deny:tool-1"]
+    allow_data = reply_markup.inline_keyboard[0][0].callback_data
+    deny_data = reply_markup.inline_keyboard[0][1].callback_data
+    assert allow_data.startswith("perm:allow:")
+    assert deny_data.startswith("perm:deny:")
+    # Resolve the token back to the original tool_use_id
+    from app.bot.handlers.command_permission import parse_permission_callback_data
+
+    _, allow_token = parse_permission_callback_data(allow_data)
+    _, deny_token = parse_permission_callback_data(deny_data)
+    assert allow_token == deny_token
+    assert registry.resolve(allow_token) == "tool-1"
     assert task_service._structured_permission_key == "tool-1:Bash"
 
 
