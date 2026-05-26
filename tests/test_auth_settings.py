@@ -157,6 +157,9 @@ def test_settings_new_fields_defaults() -> None:
     assert settings.session_lock_ttl_sec == 3600
     assert settings.lock_cleanup_interval_sec == 60
     assert settings.lock_cleanup_batch_size == 50
+    assert settings.upload_queue_max_files_per_user == 5
+    assert settings.upload_queue_max_bytes_per_user is None
+    assert settings.effective_upload_queue_max_bytes_per_user == 5 * 20 * 1024 * 1024
 
 
 def test_settings_derived_defaults() -> None:
@@ -184,6 +187,8 @@ def test_settings_explicit_override_new_fields() -> None:
         "SESSION_LOCK_TTL_SEC": 7200,
         "LOCK_CLEANUP_INTERVAL_SEC": 30,
         "LOCK_CLEANUP_BATCH_SIZE": 25,
+        "UPLOAD_QUEUE_MAX_FILES_PER_USER": 2,
+        "UPLOAD_QUEUE_MAX_BYTES_PER_USER": 1234,
     }
     settings = Settings.model_validate(payload)
     assert settings.task_store_ttl_hours == 72
@@ -195,8 +200,24 @@ def test_settings_explicit_override_new_fields() -> None:
     assert settings.session_lock_ttl_sec == 7200
     assert settings.lock_cleanup_interval_sec == 30
     assert settings.lock_cleanup_batch_size == 25
+    assert settings.upload_queue_max_files_per_user == 2
+    assert settings.upload_queue_max_bytes_per_user == 1234
+    assert settings.effective_upload_queue_max_bytes_per_user == 1234
     assert settings.effective_rate_limit_bucket_ttl_sec == 30
     assert settings.effective_permission_lock_ttl_sec == 120
+
+
+def test_settings_allows_upload_queue_disabled_with_zero_files() -> None:
+    settings = Settings.model_validate({**_BASE_PAYLOAD, "UPLOAD_QUEUE_MAX_FILES_PER_USER": 0})
+    assert settings.upload_queue_max_files_per_user == 0
+    assert settings.effective_upload_queue_max_bytes_per_user == 0
+
+
+def test_settings_rejects_invalid_upload_queue_values() -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({**_BASE_PAYLOAD, "UPLOAD_QUEUE_MAX_FILES_PER_USER": -1})
+    with pytest.raises(ValidationError):
+        Settings.model_validate({**_BASE_PAYLOAD, "UPLOAD_QUEUE_MAX_BYTES_PER_USER": 0})
 
 
 def test_settings_rejects_bucket_ttl_below_rate_limit_window() -> None:
@@ -235,6 +256,9 @@ def test_env_example_contains_new_entries() -> None:
     assert "SESSION_LOCK_TTL_SEC=3600" in content
     assert "LOCK_CLEANUP_INTERVAL_SEC=60" in content
     assert "LOCK_CLEANUP_BATCH_SIZE=50" in content
+    assert "UPLOAD_MAX_FILE_SIZE_MB=20" in content
+    assert "UPLOAD_QUEUE_MAX_FILES_PER_USER=5" in content
+    assert "UPLOAD_QUEUE_MAX_BYTES_PER_USER=" in content
 
 
 @pytest.mark.asyncio
@@ -431,6 +455,8 @@ def test_container_wiring_passes_settings_to_task_store(tmp_path: Path) -> None:
 
     assert container.task_store._max_records == 500
     assert container.task_store._ttl.total_seconds() == 72 * 3600
+    assert container.upload_queue._max_files_per_user == settings.upload_queue_max_files_per_user
+    assert container.upload_queue._max_bytes_per_user == settings.effective_upload_queue_max_bytes_per_user
 
     # wire() should succeed and register RateLimitMiddleware on dispatcher
     container.wire()

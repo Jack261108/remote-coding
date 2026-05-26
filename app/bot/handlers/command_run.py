@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
@@ -16,6 +17,7 @@ from app.bot.presenters.structured_reply_presenter import (
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.services.diff_generator import DiffGeneratorService
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.result_exporter import ResultExporterService
 from app.services.task_service import TaskService
 
@@ -51,6 +53,8 @@ async def run_prompt_and_stream(
     workdir: str | None = None,
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
+    queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
 ) -> asyncio.Task | None:
     logger.info(
         "run prompt requested",
@@ -127,6 +131,7 @@ async def run_prompt_and_stream(
         messenger=messenger,
         tool_message_manager=tool_message_manager,
         task_id=start.task.task_id,
+        permission_callback_registry=permission_callback_registry,
     )
     streamer = RunEventStreamer(
         start=start,
@@ -138,6 +143,9 @@ async def run_prompt_and_stream(
         lifecycle_message=lifecycle_message,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        queued_upload_scheduler=(
+            (lambda: queued_upload_scheduler(message, user_id, start.task.task_id)) if queued_upload_scheduler is not None else None
+        ),
     )
     await presenter.prime(baseline_current_snapshot=True)
 
@@ -187,6 +195,8 @@ def register_run_handler(
     sender_factory,
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
+    queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
 ):
     @router.message(Command("run"))
     async def command_run(message: Message, command: CommandObject) -> None:
@@ -206,4 +216,6 @@ def register_run_handler(
             prompt=prompt,
             diff_generator=diff_generator,
             result_exporter=result_exporter,
+            queued_upload_scheduler=queued_upload_scheduler,
+            permission_callback_registry=permission_callback_registry,
         )

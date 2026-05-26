@@ -24,7 +24,7 @@ from app.bot.handlers.command_user_question import maybe_handle_pending_user_que
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
-from app.bot.handlers.file_upload import register_file_upload_handler
+from app.bot.handlers.file_upload import register_file_upload_handler, schedule_pending_upload_processing
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
 from app.services.diff_generator import DiffGeneratorService
@@ -37,11 +37,13 @@ from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
+from app.services.upload_queue import UploadQueueManager
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
     from app.services.auto_approve_service import AutoApproveService
     from app.services.external_user_question_state import ExternalUserQuestionState
+    from app.services.permission_callback_registry import PermissionCallbackRegistry
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 logger = logging.getLogger(__name__)
@@ -54,6 +56,7 @@ def create_router(
     session_service: SessionService,
     registry_service: SessionRegistryService | None = None,
     file_receiver: FileReceiverService | None = None,
+    upload_queue: UploadQueueManager | None = None,
     result_exporter: ResultExporterService | None = None,
     diff_generator: DiffGeneratorService | None = None,
     external_discovery: ExternalSessionDiscoveryService | None = None,
@@ -63,6 +66,7 @@ def create_router(
     unbound_permission_handler: UnboundPermissionHandler | None = None,
     external_uq_state: ExternalUserQuestionState | None = None,
     auto_approve_service: AutoApproveService | None = None,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
     session_scanner: SessionScanner | None = None,
     claude_paths: ClaudePaths | None = None,
 ) -> Router:
@@ -104,24 +108,44 @@ def create_router(
         flush_interval_sec=settings.chunk_flush_interval_sec,
     )
 
+    queued_upload_scheduler = None
+    if file_receiver is not None and upload_queue is not None:
+
+        def _queued_upload_scheduler(message: Message, user_id: int, completed_task_id: str) -> None:
+            schedule_pending_upload_processing(
+                message,
+                file_receiver=file_receiver,
+                session_service=session_service,
+                upload_queue=upload_queue,
+                user_id=user_id,
+                task_service=task_service,
+                completed_task_id=completed_task_id,
+            )
+
+        queued_upload_scheduler = _queued_upload_scheduler
+
     register_run_handler(
         router,
         task_service=task_service,
         sender_factory=sender_factory,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        queued_upload_scheduler=queued_upload_scheduler,
+        permission_callback_registry=permission_callback_registry,
     )
     register_claude_handler(router, task_service=task_service)
     register_cancel_handler(router, task_service=task_service)
     register_status_handler(router, task_service=task_service)
     register_session_handler(router, task_service=task_service, session_service=session_service)
-    register_permission_handlers(
-        router,
-        task_service=task_service,
-        auto_approve_service=auto_approve_service,
-        hook_socket_server=hook_socket_server,
-        structured_session_store=structured_session_store,
-    )
+    if permission_callback_registry is not None:
+        register_permission_handlers(
+            router,
+            task_service=task_service,
+            auto_approve_service=auto_approve_service,
+            hook_socket_server=hook_socket_server,
+            structured_session_store=structured_session_store,
+            permission_callback_registry=permission_callback_registry,
+        )
     register_user_question_handlers(router, task_service=task_service)
     register_exit_handler(router, task_service=task_service)
     register_cmds_handler(router, session_service=session_service, task_service=task_service)
@@ -159,21 +183,24 @@ def create_router(
             session_store=structured_session_store,
         )
 
-    if hook_socket_server is not None and unbound_permission_handler is not None:
+    if hook_socket_server is not None and unbound_permission_handler is not None and permission_callback_registry is not None:
         register_external_permission_handler(
             router,
             hook_socket_server=hook_socket_server,
             unbound_permission_handler=unbound_permission_handler,
+            permission_callback_registry=permission_callback_registry,
             external_uq_state=external_uq_state,
             auto_approve_service=auto_approve_service,
         )
 
-    if file_receiver is not None:
+    if file_receiver is not None and upload_queue is not None:
         register_file_upload_handler(
             router,
             file_receiver=file_receiver,
             session_service=session_service,
             task_service=task_service,
+            upload_queue=upload_queue,
+            upload_max_file_size_mb=settings.upload_max_file_size_mb,
         )
 
     if result_exporter is not None:
@@ -225,6 +252,8 @@ def create_router(
             workdir=session.workdir,
             diff_generator=diff_generator,
             result_exporter=result_exporter,
+            queued_upload_scheduler=queued_upload_scheduler,
+            permission_callback_registry=permission_callback_registry,
         )
         logger.info(
             "claude chat stream spawned",

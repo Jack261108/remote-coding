@@ -23,6 +23,7 @@ from app.domain.session_models import (
 )
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from tests.fakes.cli import DummyHookSocketServer, StubAdapter, StubFactory, make_settings
 from tests.fakes.telegram import DummyCallbackQuery, DummyMessage
 
@@ -280,10 +281,12 @@ async def test_permission_callback_handler_approves_pending_request(tmp_path) ->
     tmux_runner._session_store._persist(state)
 
     router = DummyRouter()
-    register_permission_handlers(router, task_service=service)
+    registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345", clock=lambda: 100.0)
+    token = registry.register("tool-1")
+    register_permission_handlers(router, task_service=service, permission_callback_registry=registry)
     callback_handler = router.callback_handlers[0]
     message = DummyMessage("权限请求")
-    callback = DummyCallbackQuery("perm:allow:tool-1", message=message)
+    callback = DummyCallbackQuery(f"perm:allow:{token}", message=message)
 
     await callback_handler(callback)
 
@@ -326,17 +329,19 @@ async def test_permission_callback_handler_rejects_stale_button(tmp_path) -> Non
     tmux_runner._session_store._persist(state)
 
     router = DummyRouter()
-    register_permission_handlers(router, task_service=service)
+    registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345", clock=lambda: 100.0)
+    register_permission_handlers(router, task_service=service, permission_callback_registry=registry)
     callback_handler = router.callback_handlers[0]
     message = DummyMessage("权限请求")
-    callback = DummyCallbackQuery("perm:allow:tool-1", message=message)
+    callback = DummyCallbackQuery("perm:allow:missing", message=message)
 
     await callback_handler(callback)
 
     assert hook_socket_server.calls == []
-    assert message.answers == ["权限操作失败: 这个权限按钮已经过期，请等待最新的权限请求"]
+    assert "权限按钮已失效" in message.answers[0]
+    assert "重新触发" in message.answers[0]
     assert message.edited_reply_markups == []
-    assert callback.answers == [("这个权限按钮已经过期，请等待最新的权限请求", True)]
+    assert callback.answers == [("按钮已失效", True)]
 
 
 @pytest.mark.asyncio
@@ -383,18 +388,45 @@ async def test_permission_callback_handler_rejects_cross_user_button(tmp_path) -
     tmux_runner._session_store._persist(state)
 
     router = DummyRouter()
-    register_permission_handlers(router, task_service=service)
+    registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345", clock=lambda: 100.0)
+    token = registry.register("tool-1")
+    register_permission_handlers(
+        router,
+        task_service=service,
+        hook_socket_server=hook_socket_server,
+        structured_session_store=tmux_runner._session_store,
+        permission_callback_registry=registry,
+    )
     callback_handler = router.callback_handlers[0]
     message = DummyMessage("权限请求", user_id=2)
-    callback = DummyCallbackQuery("perm:allow:tool-1", user_id=2, message=message)
+    callback = DummyCallbackQuery(f"perm:allow:{token}", user_id=2, message=message)
 
     await callback_handler(callback)
 
-    assert hook_socket_server.calls == []
-    assert message.answers == ["权限操作失败: 这个权限按钮已经过期，请等待最新的权限请求"]
-    assert message.edited_reply_markups == []
-    assert callback.answers == [("这个权限按钮已经过期，请等待最新的权限请求", True)]
-    assert tmux_runner._session_store.get("claude-session-1").pending_permission is not None
+    assert hook_socket_server.calls == [("tool-1", "allow", None)]
+    assert message.answers == ["已批准权限请求: Bash"]
+    assert message.edited_reply_markups == [None]
+    assert callback.answers == [("已批准权限请求: Bash", False)]
+    assert tmux_runner._session_store.get("claude-session-1").pending_permission is None
+
+
+def test_permission_callback_data_uses_short_token_for_long_tool_use_id() -> None:
+    from app.bot.handlers.command_permission import build_permission_callback_data, build_permission_keyboard
+
+    registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345", clock=lambda: 100.0)
+    long_tool_use_id = "toolu_" + "x" * 200
+
+    keyboard = build_permission_keyboard(tool_use_id=long_tool_use_id, permission_callback_registry=registry)
+    callback_data = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+
+    assert callback_data == [
+        "perm:allow:tok12345",
+        "perm:deny:tok12345",
+        "perm:auto_approve:tok12345",
+    ]
+    assert all(data is not None and len(data.encode("utf-8")) <= 64 for data in callback_data)
+    assert registry.resolve("tok12345") == long_tool_use_id
+    assert build_permission_callback_data(decision="allow", token="tok12345") == "perm:allow:tok12345"
 
 
 @pytest.mark.asyncio

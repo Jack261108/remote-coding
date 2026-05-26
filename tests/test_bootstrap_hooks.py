@@ -710,6 +710,7 @@ async def test_container_uses_independent_session_lock_registries(tmp_path) -> N
     assert container._jsonl_sync_locks._cleanup_interval_sec == settings.lock_cleanup_interval_sec
     assert container._session_event_locks._cleanup_interval_sec == settings.lock_cleanup_interval_sec
     assert container._jsonl_sync_locks is not container._session_event_locks
+    assert container.permission_callback_registry._ttl_sec == settings.claude_hook_pending_permission_ttl_sec
 
 
 @pytest.mark.asyncio

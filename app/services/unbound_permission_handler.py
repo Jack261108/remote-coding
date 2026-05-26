@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,8 +16,15 @@ if TYPE_CHECKING:
     from aiogram import Bot
 
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.permission_callback_registry import PermissionCallbackRegistry
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class UnboundPermissionResponseResult:
+    accepted: bool
+    forwarded: bool
 
 
 class UnboundPermissionHandler:
@@ -32,16 +40,19 @@ class UnboundPermissionHandler:
         bot: Bot,
         hook_socket_server: HookSocketServer,
         allowed_user_ids: set[int],
+        permission_callback_registry: PermissionCallbackRegistry,
         permission_ttl_sec: int = 600,
         title_resolver: Callable[[str, str], str | None] | None = None,
     ) -> None:
         self._bot = bot
         self._hook_socket_server = hook_socket_server
         self._allowed_user_ids = allowed_user_ids
+        self._permission_callback_registry = permission_callback_registry
         self._permission_ttl_sec = permission_ttl_sec
         self._title_resolver = title_resolver
         self._pending: dict[str, UnboundPermissionState] = {}
         self._expiry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._state_lock = asyncio.Lock()
 
     async def handle_unbound_permission(self, event: HookEvent) -> None:
         """Broadcast permission request to all allowed users.
@@ -73,19 +84,20 @@ class UnboundPermissionHandler:
                     extra={"user_id": user_id, "tool_use_id": tool_use_id},
                 )
 
-        state = UnboundPermissionState(
-            session_id=event.session_id,
-            tool_use_id=tool_use_id,
-            notified_user_ids=notified_user_ids,
-            responded=False,
-            responded_by=None,
-            created_at=utc_now(),
-        )
-        self._pending[tool_use_id] = state
+        async with self._state_lock:
+            state = UnboundPermissionState(
+                session_id=event.session_id,
+                tool_use_id=tool_use_id,
+                notified_user_ids=notified_user_ids,
+                responded=False,
+                responded_by=None,
+                created_at=utc_now(),
+            )
+            self._pending[tool_use_id] = state
 
-        # Schedule expiry
-        self._cancel_expiry_task(tool_use_id)
-        self._expiry_tasks[tool_use_id] = asyncio.create_task(self._expire_permission(tool_use_id))
+            # Schedule expiry
+            self._cancel_expiry_task(tool_use_id)
+            self._expiry_tasks[tool_use_id] = asyncio.create_task(self._expire_permission(tool_use_id))
 
         logger.info(
             "unbound permission broadcast sent",
@@ -96,34 +108,46 @@ class UnboundPermissionHandler:
             },
         )
 
-    async def handle_response(self, *, tool_use_id: str, user_id: int, decision: str) -> bool:
-        """Process a response from a user. Returns True if this was the first response.
+    async def handle_response(self, *, tool_use_id: str, user_id: int, decision: str) -> UnboundPermissionResponseResult:
+        """Process a response from a user.
 
-        Steps:
-        1. Check if already responded → return False (discard)
-        2. Mark as responded, record responding user
-        3. Forward decision to hook socket
-        4. Return True
+        Uses a short critical section to pop pending and cancel expiry,
+        then forwards the decision outside the lock.
         """
-        state = self._pending.get(tool_use_id)
-        if state is None:
-            return False
+        forwarded = False
+        async with self._state_lock:
+            state = self._pending.pop(tool_use_id, None)
+            if state is None or state.responded:
+                # Put it back if it was there but already responded
+                if state is not None and state.responded:
+                    self._pending[tool_use_id] = state
+                return UnboundPermissionResponseResult(accepted=False, forwarded=False)
 
-        if state.responded:
-            return False
+            state.responded = True
+            state.responded_by = user_id
 
-        state.responded = True
-        state.responded_by = user_id
+            # Cancel expiry task since we have a response
+            self._cancel_expiry_task(tool_use_id)
 
-        # Cancel expiry task since we have a response
-        self._cancel_expiry_task(tool_use_id)
+        # Forward decision outside lock
+        try:
+            await self._hook_socket_server.respond_to_permission(
+                tool_use_id=tool_use_id,
+                decision=decision,
+                reason=f"responded by user {user_id}",
+            )
+            forwarded = True
+        except Exception:
+            logger.warning(
+                "failed to forward unbound permission decision",
+                extra={"tool_use_id": tool_use_id, "user_id": user_id, "decision": decision},
+            )
 
-        # Forward decision to hook socket
-        await self._hook_socket_server.respond_to_permission(
-            tool_use_id=tool_use_id,
-            decision=decision,
-            reason=f"responded by user {user_id}",
-        )
+        if not forwarded:
+            logger.warning(
+                "unbound permission decision not forwarded",
+                extra={"tool_use_id": tool_use_id, "user_id": user_id, "decision": decision},
+            )
 
         logger.info(
             "unbound permission responded",
@@ -132,9 +156,10 @@ class UnboundPermissionHandler:
                 "user_id": user_id,
                 "decision": decision,
                 "session_id": state.session_id,
+                "forwarded": forwarded,
             },
         )
-        return True
+        return UnboundPermissionResponseResult(accepted=True, forwarded=forwarded)
 
     async def _expire_permission(self, tool_use_id: str) -> None:
         """Auto-deny on TTL expiry if no response received."""
@@ -143,25 +168,24 @@ class UnboundPermissionHandler:
         except asyncio.CancelledError:
             return
 
-        state = self._pending.get(tool_use_id)
-        if state is None or state.responded:
-            return
+        session_id: str | None = None
+        async with self._state_lock:
+            state = self._pending.pop(tool_use_id, None)
+            self._expiry_tasks.pop(tool_use_id, None)
+            if state is None or state.responded:
+                return
+            session_id = state.session_id
 
-        state.responded = True
-
-        # Auto-deny via hook socket
+        # Auto-deny outside lock
         await self._hook_socket_server.respond_to_permission(
             tool_use_id=tool_use_id,
             decision="deny",
             reason="no user responded within TTL",
         )
 
-        # Clean up
-        self._expiry_tasks.pop(tool_use_id, None)
-
         logger.info(
             "unbound permission expired, auto-denied",
-            extra={"tool_use_id": tool_use_id, "session_id": state.session_id},
+            extra={"tool_use_id": tool_use_id, "session_id": session_id},
         )
 
     def is_unbound_permission(self, tool_use_id: str) -> bool:
@@ -176,28 +200,18 @@ class UnboundPermissionHandler:
     def _build_permission_keyboard(self, tool_use_id: str) -> InlineKeyboardMarkup:
         """Build inline keyboard with approve, deny, and auto-approve buttons.
 
-        Truncates tool_use_id if any callback_data would exceed 64 bytes.
+        Uses the permission callback registry to generate short tokens.
         """
-        # The longest prefix is "ext_perm:" + ":" + "auto_approve" = 22 chars
-        # Max callback_data is 64 bytes. Calculate max tool_use_id length.
-        prefix = "ext_perm:"
-        longest_action = ":auto_approve"
-        max_id_bytes = 64 - len((prefix + longest_action).encode("utf-8"))
-
-        truncated_id = tool_use_id
-        if len(f"{prefix}{tool_use_id}{longest_action}".encode("utf-8")) > 64:
-            # Truncate tool_use_id to fit within 64 bytes
-            encoded = tool_use_id.encode("utf-8")[:max_id_bytes]
-            truncated_id = encoded.decode("utf-8", errors="ignore")
+        token = self._permission_callback_registry.register(tool_use_id)
 
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{truncated_id}:allow"),
-                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{truncated_id}:deny"),
+                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{token}:allow"),
+                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{token}:deny"),
                 ],
                 [
-                    InlineKeyboardButton(text="🟢 Auto-approve All", callback_data=f"ext_perm:{truncated_id}:auto_approve"),
+                    InlineKeyboardButton(text="🟢 Auto-approve All", callback_data=f"ext_perm:{token}:auto_approve"),
                 ],
             ]
         )

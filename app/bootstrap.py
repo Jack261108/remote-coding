@@ -51,8 +51,10 @@ from app.services.session_scanner import SessionScanner
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 from app.services.auto_approve_service import AutoApproveService
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
+from app.services.upload_queue import UploadQueueManager
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,9 @@ class AppContainer(
             pending_permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
             max_pending_permissions=settings.claude_hook_max_pending_permissions,
         )
+        self.permission_callback_registry = PermissionCallbackRegistry(
+            ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
+        )
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
         self.session_context_store = FileSessionContextStore(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
@@ -124,6 +129,9 @@ class AppContainer(
             claude_cli_bin=settings.claude_cli_bin,
             file_store=self.file_session_store,
             session_store=self.structured_session_store,
+            session_lock_ttl_sec=settings.session_lock_ttl_sec,
+            lock_cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            lock_cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
         self.cli_factory = CLIAdapterFactory(
             settings=settings,
@@ -136,6 +144,10 @@ class AppContainer(
             upload_store=self.upload_store,
             allowed_extensions=set(settings.allowed_file_extensions),
             max_file_size_bytes=settings.upload_max_file_size_mb * 1024 * 1024,
+        )
+        self.upload_queue = UploadQueueManager(
+            max_files_per_user=settings.upload_queue_max_files_per_user,
+            max_bytes_per_user=settings.effective_upload_queue_max_bytes_per_user,
         )
         self.file_sender = FileSenderService(
             bot=self.bot,
@@ -200,6 +212,7 @@ class AppContainer(
             bot=self.bot,
             hook_socket_server=self.hook_socket_server,
             allowed_user_ids=settings.allowed_user_id_set,
+            permission_callback_registry=self.permission_callback_registry,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
         )
 
@@ -282,6 +295,7 @@ class AppContainer(
             session_service=self.session_service,
             registry_service=self.session_registry,
             file_receiver=self.file_receiver,
+            upload_queue=self.upload_queue,
             result_exporter=self.result_exporter,
             diff_generator=self.diff_generator,
             external_discovery=self.external_discovery,
@@ -291,6 +305,7 @@ class AppContainer(
             unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
             auto_approve_service=self.auto_approve_service,
+            permission_callback_registry=self.permission_callback_registry,
             session_scanner=SessionScanner(),
             claude_paths=self.claude_paths,
         )
