@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.services.upload_queue import UploadQueueManager
@@ -56,3 +58,36 @@ async def test_upload_queue_disabled_with_zero_file_limit() -> None:
     assert result.accepted is False
     assert "上传队列已关闭" in result.reason
     assert await manager.queued_count(user_id=1) == 0
+
+
+@pytest.mark.asyncio
+async def test_upload_queue_rejected_first_upload_by_byte_limit_leaves_no_user_state() -> None:
+    manager = UploadQueueManager(max_files_per_user=2, max_bytes_per_user=3)
+    user_id = 42
+
+    result = await manager.enqueue(user_id=user_id, filename="too-large.txt", data=b"abcd")
+
+    assert result.accepted is False
+    assert "队列容量" in result.reason
+    assert await manager.queued_count(user_id=user_id) == 0
+    assert user_id not in manager._queues
+    assert user_id not in manager._byte_totals
+    assert await manager.drain(user_id=user_id) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_queue_concurrent_enqueues_respect_file_limit() -> None:
+    manager = UploadQueueManager(max_files_per_user=1, max_bytes_per_user=100)
+
+    first_result, second_result = await asyncio.gather(
+        manager.enqueue(user_id=1, filename="first.txt", data=b"first"),
+        manager.enqueue(user_id=1, filename="second.txt", data=b"second"),
+    )
+
+    assert [first_result.accepted, second_result.accepted].count(True) == 1
+    assert [first_result.accepted, second_result.accepted].count(False) == 1
+
+    drained = await manager.drain(user_id=1)
+
+    assert len(drained) == 1
+    assert drained[0].filename in {"first.txt", "second.txt"}
