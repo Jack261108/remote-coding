@@ -68,7 +68,7 @@ def register_permission_handlers(
     auto_approve_service: AutoApproveService | None = None,
     hook_socket_server: HookSocketServer | None = None,
     structured_session_store: SessionStore | None = None,
-    permission_callback_registry: PermissionCallbackRegistry,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
 ):
     @router.message(Command("approve"))
     async def command_approve(message: Message) -> None:
@@ -106,6 +106,10 @@ def register_permission_handlers(
             await callback.answer("无效的权限操作", show_alert=True)
             return
         decision, token = parsed
+        if permission_callback_registry is None:
+            logger.error("permission_callback_registry is not configured")
+            await callback.answer("权限服务配置错误", show_alert=True)
+            return
         tool_use_id = permission_callback_registry.resolve(token)
         if tool_use_id is None:
             if callback.message is not None:
