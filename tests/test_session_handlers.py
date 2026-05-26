@@ -341,7 +341,7 @@ async def test_permission_callback_handler_rejects_stale_button(tmp_path) -> Non
     assert "权限按钮已失效" in message.answers[0]
     assert "重新触发" in message.answers[0]
     assert message.edited_reply_markups == []
-    assert callback.answers == [(message.answers[0], True)]
+    assert callback.answers == [("按钮已失效", True)]
 
 
 @pytest.mark.asyncio
