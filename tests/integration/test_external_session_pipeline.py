@@ -16,6 +16,7 @@ from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
@@ -172,6 +173,7 @@ class TestUnboundPermissionBroadcast:
             hook_socket_server=mock_hook_socket,
             allowed_user_ids=allowed_users,
             permission_ttl_sec=60,
+            permission_callback_registry=PermissionCallbackRegistry(ttl_sec=60),
         )
 
         session_id = "sess-unbound01"
@@ -198,7 +200,7 @@ class TestUnboundPermissionBroadcast:
 
         # Step 2: First user responds with "approve"
         first_response = await handler.handle_response(tool_use_id=tool_use_id, user_id=200, decision="approve")
-        assert first_response is True
+        assert first_response.accepted is True
 
         # Verify decision forwarded to hook socket
         mock_hook_socket.respond_to_permission.assert_called_once_with(
@@ -209,7 +211,7 @@ class TestUnboundPermissionBroadcast:
 
         # Step 3: Second user tries to respond (too late)
         second_response = await handler.handle_response(tool_use_id=tool_use_id, user_id=100, decision="deny")
-        assert second_response is False
+        assert second_response.accepted is False
 
         # Verify only one decision forwarded
         mock_hook_socket.respond_to_permission.assert_called_once()
@@ -263,3 +265,65 @@ class TestServerRestartBindingsRestored:
         assert restored2.user_id == 20
         assert restored2.cwd == "/home/bob/work"
         assert restored2.jsonl_path == "/tmp/projects/-home-bob-work/sess-restart02.jsonl"
+
+
+class TestUnboundPermissionKeyboardToken:
+    """Unbound permission keyboard uses external short token from registry."""
+
+    @pytest.mark.asyncio
+    async def test_unbound_permission_keyboard_uses_external_short_token(self) -> None:
+        """Keyboard callback_data uses ext_perm:{token}:{decision} format, all <= 64 bytes,
+        and registry resolves token back to full tool_use_id."""
+        mock_bot = AsyncMock()
+        mock_hook_socket = AsyncMock()
+
+        registry = PermissionCallbackRegistry(
+            ttl_sec=300,
+            token_factory=lambda: "tok12345",
+        )
+
+        handler = UnboundPermissionHandler(
+            bot=mock_bot,
+            hook_socket_server=mock_hook_socket,
+            allowed_user_ids={42},
+            permission_ttl_sec=60,
+            permission_callback_registry=registry,
+        )
+
+        # Use a long tool_use_id that would exceed 64 bytes with old format
+        long_tool_use_id = "tooluse-" + "a" * 80
+
+        event = HookEvent(
+            session_id="sess-keyboard01",
+            cwd="/tmp/proj",
+            event="PermissionRequest",
+            status="waiting_for_approval",
+            tool="Bash",
+            tool_use_id=long_tool_use_id,
+            tool_input={"command": "echo hello"},
+        )
+
+        await handler.handle_unbound_permission(event)
+
+        # Get the keyboard that was sent
+        call_kwargs = mock_bot.send_message.call_args.kwargs
+        keyboard = call_kwargs["reply_markup"]
+
+        # Extract callback_data from all buttons
+        callback_data = []
+        for row in keyboard.inline_keyboard:
+            for button in row:
+                callback_data.append(button.callback_data)
+
+        assert callback_data == [
+            "ext_perm:tok12345:allow",
+            "ext_perm:tok12345:deny",
+            "ext_perm:tok12345:auto_approve",
+        ]
+
+        # All callback_data must be <= 64 bytes
+        for cd in callback_data:
+            assert len(cd.encode("utf-8")) <= 64
+
+        # Registry must resolve token back to full tool_use_id
+        assert registry.resolve("tok12345") == long_tool_use_id

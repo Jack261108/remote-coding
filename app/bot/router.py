@@ -183,11 +183,12 @@ def create_router(
             session_store=structured_session_store,
         )
 
-    if hook_socket_server is not None and unbound_permission_handler is not None:
+    if hook_socket_server is not None and unbound_permission_handler is not None and permission_callback_registry is not None:
         register_external_permission_handler(
             router,
             hook_socket_server=hook_socket_server,
             unbound_permission_handler=unbound_permission_handler,
+            permission_callback_registry=permission_callback_registry,
             external_uq_state=external_uq_state,
             auto_approve_service=auto_approve_service,
         )

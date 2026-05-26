@@ -10,9 +10,14 @@ if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
     from app.services.auto_approve_service import AutoApproveService
     from app.services.external_user_question_state import ExternalUserQuestionState
+    from app.services.permission_callback_registry import PermissionCallbackRegistry
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 logger = logging.getLogger(__name__)
+
+_STALE_EXTERNAL_PERMISSION_CALLBACK_TEXT = (
+    "Permission button expired or bot restarted. Trigger the action again or wait for Claude to request permission again."
+)
 
 
 def register_external_permission_handler(
@@ -20,6 +25,7 @@ def register_external_permission_handler(
     *,
     hook_socket_server: HookSocketServer,
     unbound_permission_handler: UnboundPermissionHandler,
+    permission_callback_registry: PermissionCallbackRegistry,
     external_uq_state: ExternalUserQuestionState | None = None,
     auto_approve_service: AutoApproveService | None = None,
 ) -> None:
@@ -31,9 +37,15 @@ def register_external_permission_handler(
             await callback.answer("Invalid callback data", show_alert=True)
             return
 
-        _, tool_use_id, decision = parts
+        _, token, decision = parts
         if decision not in ("allow", "deny", "auto_approve"):
             await callback.answer("Invalid decision", show_alert=True)
+            return
+
+        # Resolve short token to full tool_use_id
+        tool_use_id = permission_callback_registry.resolve(token)
+        if tool_use_id is None:
+            await callback.answer(_STALE_EXTERNAL_PERMISSION_CALLBACK_TEXT, show_alert=True)
             return
 
         user_id = callback.from_user.id if callback.from_user else 0
@@ -44,12 +56,12 @@ def register_external_permission_handler(
             session_id: str | None = None
             if unbound_permission_handler.is_unbound_permission(tool_use_id):
                 session_id = unbound_permission_handler.get_session_id(tool_use_id)
-                accepted = await unbound_permission_handler.handle_response(
+                result = await unbound_permission_handler.handle_response(
                     tool_use_id=tool_use_id,
                     user_id=user_id,
                     decision="allow",
                 )
-                if not accepted:
+                if not result.accepted:
                     await callback.answer("Already responded by another user", show_alert=True)
                     return
             else:
@@ -86,12 +98,12 @@ def register_external_permission_handler(
 
         # Try unbound first (first-responder-wins), then bound
         if unbound_permission_handler.is_unbound_permission(tool_use_id):
-            accepted = await unbound_permission_handler.handle_response(
+            result = await unbound_permission_handler.handle_response(
                 tool_use_id=tool_use_id,
                 user_id=user_id,
                 decision=decision,
             )
-            if not accepted:
+            if not result.accepted:
                 await callback.answer("Already responded by another user", show_alert=True)
                 return
         else:

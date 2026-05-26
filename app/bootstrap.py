@@ -209,6 +209,7 @@ class AppContainer(
             bot=self.bot,
             hook_socket_server=self.hook_socket_server,
             allowed_user_ids=settings.allowed_user_id_set,
+            permission_callback_registry=self.permission_callback_registry,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
         )
 

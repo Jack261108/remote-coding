@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 
 from app.domain.hook_models import HookEvent
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 # --- Strategies ---
@@ -50,6 +51,10 @@ user_ids = st.integers(min_value=1, max_value=999999999)
 allowed_user_sets = st.frozensets(user_ids, min_size=1, max_size=5)
 
 tool_names = st.sampled_from(["Read", "Write", "Bash", "Edit", "ListDir", "Grep"])
+
+
+def _registry(token: str = "tokTest123") -> PermissionCallbackRegistry:
+    return PermissionCallbackRegistry(ttl_sec=300, token_factory=lambda: token)
 
 
 def permission_events(
@@ -101,6 +106,7 @@ class TestUnboundPermissionBroadcast:
             bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids=set(allowed_users),
+            permission_callback_registry=_registry(),
         )
 
         asyncio.run(handler.handle_unbound_permission(event))
@@ -144,6 +150,7 @@ class TestFirstResponderWins:
             bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={responders[0]},
+            permission_callback_registry=_registry(),
         )
 
         asyncio.run(handler.handle_unbound_permission(event))
@@ -152,12 +159,12 @@ class TestFirstResponderWins:
 
         # First response should return True
         result_first = asyncio.run(handler.handle_response(tool_use_id=tool_use_id, user_id=responders[0], decision="approve"))
-        assert result_first is True
+        assert result_first.accepted is True
 
         # All subsequent responses should return False
         for user_id in responders[1:]:
             result = asyncio.run(handler.handle_response(tool_use_id=tool_use_id, user_id=user_id, decision="approve"))
-            assert result is False
+            assert result.accepted is False
 
         # respond_to_permission called exactly once
         assert hook_socket_server.respond_to_permission.call_count == 1
@@ -195,6 +202,7 @@ class TestPermissionApprovalNoAutoBind:
             bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={approver},
+            permission_callback_registry=_registry(),
         )
 
         # Handle permission and approve
@@ -231,6 +239,7 @@ class TestTTLExpiryAutoDenies:
             hook_socket_server=hook_socket_server,
             allowed_user_ids={12345},
             permission_ttl_sec=0,  # Expire immediately
+            permission_callback_registry=_registry(),
         )
 
         event = HookEvent(
@@ -267,6 +276,7 @@ class TestTTLExpiryAutoDenies:
             hook_socket_server=hook_socket_server,
             allowed_user_ids={12345},
             permission_ttl_sec=0,
+            permission_callback_registry=_registry(),
         )
 
         event = HookEvent(
@@ -283,4 +293,143 @@ class TestTTLExpiryAutoDenies:
 
         # Late response should return False
         result = await handler.handle_response(tool_use_id="tuid002", user_id=12345, decision="approve")
-        assert result is False
+        assert result.accepted is False
+
+
+# --- Task 6: Response removes pending and expiry, concurrent first-responder-wins ---
+
+
+class TestResponseRemovesPendingAndExpiry:
+    """After handle_response, _pending and _expiry_tasks are cleaned up."""
+
+    @pytest.mark.asyncio
+    async def test_response_removes_unbound_pending_and_expiry_task(self):
+        """handle_response returns accepted=True, forwarded=True and cleans up state."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        hook_socket_server = MagicMock()
+        hook_socket_server.respond_to_permission = AsyncMock()
+
+        handler = UnboundPermissionHandler(
+            bot=bot,
+            hook_socket_server=hook_socket_server,
+            allowed_user_ids={42},
+            permission_ttl_sec=60,
+            permission_callback_registry=_registry(),
+        )
+
+        event = HookEvent(
+            session_id="sess-cleanup01",
+            cwd="/tmp/proj",
+            event="PermissionRequest",
+            status="waiting_for_approval",
+            tool="Bash",
+            tool_use_id="tuid-cleanup01",
+        )
+
+        await handler.handle_unbound_permission(event)
+        assert "tuid-cleanup01" in handler._pending
+        assert "tuid-cleanup01" in handler._expiry_tasks
+
+        result = await handler.handle_response(tool_use_id="tuid-cleanup01", user_id=42, decision="allow")
+        assert result.accepted is True
+        assert result.forwarded is True
+
+        # State must be cleaned up
+        assert "tuid-cleanup01" not in handler._pending
+        assert "tuid-cleanup01" not in handler._expiry_tasks
+
+
+class TestExpiryRemovesPendingAndExpiry:
+    """After TTL expiry, _pending and _expiry_tasks are cleaned up."""
+
+    @pytest.mark.asyncio
+    async def test_expiry_removes_unbound_pending_and_expiry_task(self):
+        """With TTL=0, after short sleep _pending and _expiry_tasks are empty."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        hook_socket_server = MagicMock()
+        hook_socket_server.respond_to_permission = AsyncMock()
+
+        handler = UnboundPermissionHandler(
+            bot=bot,
+            hook_socket_server=hook_socket_server,
+            allowed_user_ids={42},
+            permission_ttl_sec=0,
+            permission_callback_registry=_registry(),
+        )
+
+        event = HookEvent(
+            session_id="sess-expiry01",
+            cwd="/tmp/proj",
+            event="PermissionRequest",
+            status="waiting_for_approval",
+            tool="Bash",
+            tool_use_id="tuid-expiry01",
+        )
+
+        await handler.handle_unbound_permission(event)
+        assert "tuid-expiry01" in handler._pending
+
+        await asyncio.sleep(0.05)
+
+        assert "tuid-expiry01" not in handler._pending
+        assert "tuid-expiry01" not in handler._expiry_tasks
+
+
+class TestConcurrentUnboundResponses:
+    """Concurrent responses: exactly one accepted, respond_to_permission called once."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_unbound_responses_preserve_first_responder_wins(self):
+        """Multiple concurrent handle_response tasks: exactly 1 accepted."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        hook_socket_server = MagicMock()
+        hook_socket_server.respond_to_permission = AsyncMock()
+
+        handler = UnboundPermissionHandler(
+            bot=bot,
+            hook_socket_server=hook_socket_server,
+            allowed_user_ids={100, 200, 300},
+            permission_ttl_sec=60,
+            permission_callback_registry=_registry(),
+        )
+
+        event = HookEvent(
+            session_id="sess-concurrent01",
+            cwd="/tmp/proj",
+            event="PermissionRequest",
+            status="waiting_for_approval",
+            tool="Bash",
+            tool_use_id="tuid-concurrent01",
+        )
+
+        await handler.handle_unbound_permission(event)
+
+        # Create a gate so all tasks attempt nearly simultaneously
+        gate = asyncio.Event()
+
+        async def respond(user_id: int, decision: str):
+            await gate.wait()
+            return await handler.handle_response(
+                tool_use_id="tuid-concurrent01",
+                user_id=user_id,
+                decision=decision,
+            )
+
+        tasks = [
+            asyncio.create_task(respond(100, "allow")),
+            asyncio.create_task(respond(200, "deny")),
+            asyncio.create_task(respond(300, "allow")),
+        ]
+
+        # Release all tasks at once
+        gate.set()
+        results = await asyncio.gather(*tasks)
+
+        accepted_count = sum(1 for r in results if r.accepted is True)
+        assert accepted_count == 1
+
+        # respond_to_permission called exactly once
+        hook_socket_server.respond_to_permission.assert_called_once()
