@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +15,7 @@ from app.adapters.process.tmux_session import TmuxSessionMixin
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
+from app.services.lock_registry import RefCountedLockRegistry
 from app.services.session_store import SessionStore, is_claude_session_id
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
@@ -82,6 +85,10 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         claude_cli_bin: str = "claude",
         file_store: FileSessionStore | None = None,
         session_store: SessionStore | None = None,
+        session_lock_ttl_sec: int = 3600,
+        lock_cleanup_interval_sec: int = 60,
+        lock_cleanup_batch_size: int = 50,
+        lock_clock: Callable[[], float] | None = None,
     ) -> None:
         self._tmux_bin = tmux_bin
         self._data_dir = Path(data_dir)
@@ -93,7 +100,12 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         self._interactive_idle_check_sec = 5.0
         self._claude_cli_bin = claude_cli_bin
         self._tasks: dict[str, _TmuxTaskMeta] = {}
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_locks = RefCountedLockRegistry(
+            ttl_sec=session_lock_ttl_sec,
+            cleanup_interval_sec=lock_cleanup_interval_sec,
+            cleanup_batch_size=lock_cleanup_batch_size,
+            clock=lock_clock,
+        )
         self._lock = asyncio.Lock()
         self._file_store = file_store or FileSessionStore(str(self._data_dir))
         self._session_store = session_store or SessionStore(self._file_store)
@@ -201,9 +213,8 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             terminal_id=session_id,
         )
 
-        session_lock = self._get_session_lock(session_name) if persistent_terminal else None
-        if session_lock is not None:
-            async with session_lock:
+        if persistent_terminal:
+            async with self._session_lock(session_name):
                 async for event in self._run_task(meta=meta, timeout_sec=timeout_sec, env=env, workdir=workdir, command=command):
                     yield event
             return
@@ -568,24 +579,21 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
 
     async def ensure_terminal(self, *, terminal_key: str, workdir: str, env: dict[str, str] | None = None) -> tuple[bool, str]:
         session_name = self._build_session_name(terminal_key)
-        session_lock = self._get_session_lock(session_name)
-        async with session_lock:
+        async with self._session_lock(session_name):
             return await self._ensure_persistent_session(session_name, workdir=workdir, env=env)
 
     async def ensure_claude_interactive_session(
         self, *, terminal_key: str, workdir: str, env: dict[str, str] | None = None
     ) -> tuple[bool, str]:
         session_name = self._build_session_name(terminal_key)
-        session_lock = self._get_session_lock(session_name)
-        async with session_lock:
+        async with self._session_lock(session_name):
             return await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=env)
 
     async def ensure_claude_resume_session(
         self, *, terminal_key: str, workdir: str, session_id: str, env: dict[str, str] | None = None
     ) -> tuple[bool, str]:
         session_name = self._build_session_name(terminal_key)
-        session_lock = self._get_session_lock(session_name)
-        async with session_lock:
+        async with self._session_lock(session_name):
             return await self._ensure_claude_resume_session(session_name=session_name, workdir=workdir, session_id=session_id, env=env)
 
     async def send_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
@@ -709,12 +717,10 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             meta = self._tasks.get(task_id)
             return bool(meta and meta.cancel_requested)
 
-    def _get_session_lock(self, session_name: str) -> asyncio.Lock:
-        lock = self._session_locks.get(session_name)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._session_locks[session_name] = lock
-        return lock
+    @asynccontextmanager
+    async def _session_lock(self, session_name: str) -> AsyncIterator[None]:
+        async with self._session_locks.lock(session_name):
+            yield
 
     async def _is_claude_idle_in_pane(self, session_name: str) -> bool:
         """Check if Claude Code TUI is showing an input prompt (idle state).

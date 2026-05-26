@@ -129,6 +129,9 @@ class AppContainer(
             claude_cli_bin=settings.claude_cli_bin,
             file_store=self.file_session_store,
             session_store=self.structured_session_store,
+            session_lock_ttl_sec=settings.session_lock_ttl_sec,
+            lock_cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            lock_cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
         self.cli_factory = CLIAdapterFactory(
             settings=settings,

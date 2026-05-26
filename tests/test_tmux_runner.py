@@ -1717,3 +1717,43 @@ async def test_cancel_returns_false_when_ephemeral_terminate_fails(
     assert await runner.cancel("task-cancel") is False
     assert meta.cancel_requested is True
     assert any(record.message == "tmux task cancel requested" for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_persistent_session_locks_are_ref_counted_and_cleaned(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    current = {"now": 0.0}
+
+    def clock() -> float:
+        return current["now"]
+
+    def advance(seconds: float) -> None:
+        current["now"] += seconds
+
+    runner = TmuxRunner(
+        data_dir=str(tmp_path),
+        session_lock_ttl_sec=1,
+        lock_cleanup_interval_sec=1,
+        lock_cleanup_batch_size=10,
+        lock_clock=clock,
+    )
+
+    async def fake_run_task(*, meta, timeout_sec: int, env, workdir: str, command: str):
+        yield CLIEvent(type=EventType.STARTED, task_id=meta.task_id)
+        yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
+
+    monkeypatch.setattr(runner, "_run_task", fake_run_task)
+
+    for idx in range(3):
+        events = await _collect_events(
+            runner.run(
+                task_id=f"task-{idx}",
+                argv=["echo", "ok"],
+                workdir=str(tmp_path),
+                timeout_sec=10,
+                terminal_key=f"user-{idx}",
+            )
+        )
+        assert events[-1].type == EventType.EXITED
+        advance(2.0)
+
+    assert len(runner._session_locks) <= 1
