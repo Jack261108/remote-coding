@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,7 @@ class RunEventStreamer:
         lifecycle_message: Message | None,
         diff_generator: DiffGeneratorService | None = None,
         result_exporter: ResultExporterService | None = None,
+        queued_upload_scheduler: Callable[[], None] | None = None,
     ) -> None:
         self._start = start
         self._task_service = task_service
@@ -105,6 +107,8 @@ class RunEventStreamer:
         self._lifecycle_message = lifecycle_message
         self._diff_generator = diff_generator
         self._result_exporter = result_exporter
+        self._queued_upload_scheduler = queued_upload_scheduler
+        self._queued_upload_scheduled = False
         self._interactive_pump: asyncio.Task | None = None
         self._spinner_task: asyncio.Task | None = None
         self._emit_lock = asyncio.Lock()
@@ -128,6 +132,15 @@ class RunEventStreamer:
             await task
         except asyncio.CancelledError:
             pass
+
+    def _schedule_queued_uploads_once(self) -> None:
+        if self._queued_upload_scheduler is None or self._queued_upload_scheduled:
+            return
+        self._queued_upload_scheduled = True
+        try:
+            self._queued_upload_scheduler()
+        except Exception:
+            logger.exception("failed to schedule queued upload processing", extra={"user_id": self._user_id})
 
     async def _spin(self) -> None:
         short_id = self._start.task.task_id[:8]
@@ -270,6 +283,7 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
                         await self._messenger.answer_safely(success_msg)
+                    self._schedule_queued_uploads_once()
                     await self._maybe_auto_export()
                     # Generate and send diff on successful completion
                     await self._generate_and_send_diff()
@@ -295,6 +309,7 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, error_msg):
                         await self._messenger.answer_safely(error_msg)
+                    self._schedule_queued_uploads_once()
         finally:
             await self._stop_spinner()
             if saw_exit and self._start.interactive:

@@ -24,7 +24,7 @@ from app.bot.handlers.command_user_question import maybe_handle_pending_user_que
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
-from app.bot.handlers.file_upload import register_file_upload_handler
+from app.bot.handlers.file_upload import register_file_upload_handler, schedule_pending_upload_processing
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
 from app.services.diff_generator import DiffGeneratorService
@@ -106,12 +106,27 @@ def create_router(
         flush_interval_sec=settings.chunk_flush_interval_sec,
     )
 
+    queued_upload_scheduler = None
+    if file_receiver is not None and upload_queue is not None:
+
+        def _queued_upload_scheduler(message: Message, user_id: int) -> None:
+            schedule_pending_upload_processing(
+                message,
+                file_receiver=file_receiver,
+                session_service=session_service,
+                upload_queue=upload_queue,
+                user_id=user_id,
+            )
+
+        queued_upload_scheduler = _queued_upload_scheduler
+
     register_run_handler(
         router,
         task_service=task_service,
         sender_factory=sender_factory,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        queued_upload_scheduler=queued_upload_scheduler,
     )
     register_claude_handler(router, task_service=task_service)
     register_cancel_handler(router, task_service=task_service)
@@ -229,6 +244,7 @@ def create_router(
             workdir=session.workdir,
             diff_generator=diff_generator,
             result_exporter=result_exporter,
+            queued_upload_scheduler=queued_upload_scheduler,
         )
         logger.info(
             "claude chat stream spawned",
