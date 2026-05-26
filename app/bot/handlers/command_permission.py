@@ -7,6 +7,7 @@ from aiogram import F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
@@ -17,19 +18,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _PERMISSION_CALLBACK_PREFIX = "perm"
 
+_STALE_PERMISSION_CALLBACK_TEXT = "权限按钮已失效：请求可能已过期或 bot 已重启。请重新触发操作，或等待 Claude 再次请求权限。"
 
-_TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64
 
-
-def build_permission_callback_data(*, decision: str, tool_use_id: str) -> str:
-    prefix = f"{_PERMISSION_CALLBACK_PREFIX}:{decision}:"
-    prefix_len = len(prefix.encode("utf-8"))
-    max_id_bytes = _TELEGRAM_CALLBACK_DATA_MAX_BYTES - prefix_len
-    encoded_id = tool_use_id.encode("utf-8")
-    if len(encoded_id) > max_id_bytes:
-        # Truncate tool_use_id to fit within 64-byte limit
-        tool_use_id = encoded_id[:max_id_bytes].decode("utf-8", errors="ignore")
-    return f"{prefix}{tool_use_id}"
+def build_permission_callback_data(*, decision: str, token: str) -> str:
+    return f"{_PERMISSION_CALLBACK_PREFIX}:{decision}:{token}"
 
 
 def parse_permission_callback_data(data: str | None) -> tuple[str, str] | None:
@@ -38,29 +31,30 @@ def parse_permission_callback_data(data: str | None) -> tuple[str, str] | None:
     prefix, sep, rest = data.partition(":")
     if prefix != _PERMISSION_CALLBACK_PREFIX or not sep:
         return None
-    decision, sep, tool_use_id = rest.partition(":")
-    if not sep or decision not in {"allow", "deny", "auto_approve"} or not tool_use_id:
+    decision, sep, token = rest.partition(":")
+    if not sep or decision not in {"allow", "deny", "auto_approve"} or not token:
         return None
-    return decision, tool_use_id
+    return decision, token
 
 
-def build_permission_keyboard(*, tool_use_id: str) -> InlineKeyboardMarkup:
+def build_permission_keyboard(*, tool_use_id: str, permission_callback_registry: PermissionCallbackRegistry) -> InlineKeyboardMarkup:
+    token = permission_callback_registry.register(tool_use_id)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="允许",
-                    callback_data=build_permission_callback_data(decision="allow", tool_use_id=tool_use_id),
+                    callback_data=build_permission_callback_data(decision="allow", token=token),
                 ),
                 InlineKeyboardButton(
                     text="拒绝",
-                    callback_data=build_permission_callback_data(decision="deny", tool_use_id=tool_use_id),
+                    callback_data=build_permission_callback_data(decision="deny", token=token),
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="不再询问，全部允许",
-                    callback_data=build_permission_callback_data(decision="auto_approve", tool_use_id=tool_use_id),
+                    callback_data=build_permission_callback_data(decision="auto_approve", token=token),
                 ),
             ],
         ]
@@ -74,6 +68,7 @@ def register_permission_handlers(
     auto_approve_service: AutoApproveService | None = None,
     hook_socket_server: HookSocketServer | None = None,
     structured_session_store: SessionStore | None = None,
+    permission_callback_registry: PermissionCallbackRegistry,
 ):
     @router.message(Command("approve"))
     async def command_approve(message: Message) -> None:
@@ -110,7 +105,20 @@ def register_permission_handlers(
         if parsed is None:
             await callback.answer("无效的权限操作", show_alert=True)
             return
-        decision, tool_use_id = parsed
+        decision, token = parsed
+        tool_use_id = permission_callback_registry.resolve(token)
+        if tool_use_id is None:
+            if callback.message is not None:
+                await callback.message.answer(_STALE_PERMISSION_CALLBACK_TEXT)
+            await callback.answer(_STALE_PERMISSION_CALLBACK_TEXT, show_alert=True)
+            return
+
+        # Resolve owning user from session so token-based approval works cross-user
+        session_id = await _resolve_session_id_for_tool_use_id(tool_use_id, user_id=user_id)
+        if session_id is not None and structured_session_store is not None:
+            state = structured_session_store.get(session_id)
+            if state is not None and state.user_id is not None:
+                user_id = state.user_id
 
         if decision == "auto_approve":
             await _handle_auto_approve_callback(callback, user_id=user_id, tool_use_id=tool_use_id)
@@ -188,10 +196,6 @@ def register_permission_handlers(
                 pending = hook_socket_server._pending_permissions.get(tool_use_id)
                 if pending is not None:
                     return pending.session_id
-                # Try prefix match for truncated tool_use_ids
-                for tid, perm in hook_socket_server._pending_permissions.items():
-                    if tid.startswith(tool_use_id) or tool_use_id.startswith(tid):
-                        return perm.session_id
 
         # Last resort: get session from the user's current structured session
         if structured_session_store is not None:

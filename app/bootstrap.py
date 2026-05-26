@@ -51,6 +51,7 @@ from app.services.session_scanner import SessionScanner
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 from app.services.auto_approve_service import AutoApproveService
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
 from app.services.upload_queue import UploadQueueManager
@@ -105,6 +106,9 @@ class AppContainer(
             max_message_bytes=settings.claude_hook_max_message_bytes,
             pending_permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
             max_pending_permissions=settings.claude_hook_max_pending_permissions,
+        )
+        self.permission_callback_registry = PermissionCallbackRegistry(
+            ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
         )
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
         self.session_context_store = FileSessionContextStore(self.file_session_store)
@@ -297,6 +301,7 @@ class AppContainer(
             unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
             auto_approve_service=self.auto_approve_service,
+            permission_callback_registry=self.permission_callback_registry,
             session_scanner=SessionScanner(),
             claude_paths=self.claude_paths,
         )

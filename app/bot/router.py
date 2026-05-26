@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
     from app.services.auto_approve_service import AutoApproveService
     from app.services.external_user_question_state import ExternalUserQuestionState
+    from app.services.permission_callback_registry import PermissionCallbackRegistry
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ def create_router(
     unbound_permission_handler: UnboundPermissionHandler | None = None,
     external_uq_state: ExternalUserQuestionState | None = None,
     auto_approve_service: AutoApproveService | None = None,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
     session_scanner: SessionScanner | None = None,
     claude_paths: ClaudePaths | None = None,
 ) -> Router:
@@ -134,13 +136,15 @@ def create_router(
     register_cancel_handler(router, task_service=task_service)
     register_status_handler(router, task_service=task_service)
     register_session_handler(router, task_service=task_service, session_service=session_service)
-    register_permission_handlers(
-        router,
-        task_service=task_service,
-        auto_approve_service=auto_approve_service,
-        hook_socket_server=hook_socket_server,
-        structured_session_store=structured_session_store,
-    )
+    if permission_callback_registry is not None:
+        register_permission_handlers(
+            router,
+            task_service=task_service,
+            auto_approve_service=auto_approve_service,
+            hook_socket_server=hook_socket_server,
+            structured_session_store=structured_session_store,
+            permission_callback_registry=permission_callback_registry,
+        )
     register_user_question_handlers(router, task_service=task_service)
     register_exit_handler(router, task_service=task_service)
     register_cmds_handler(router, session_service=session_service, task_service=task_service)
