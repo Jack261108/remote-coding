@@ -122,6 +122,10 @@ class UserSessionContextService:
         """Save a session context directly (for cross-user attach/detach)."""
         await self._store.save(session)
 
+    async def lookup_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None:
+        """O(1) lookup by claude_session_id via the store's index."""
+        return await self._store.get_by_claude_session_id(claude_session_id)
+
     async def list_all(self) -> list[SessionContext]:
         return await self._store.list_all()
 

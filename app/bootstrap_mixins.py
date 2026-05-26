@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from app.config.settings import is_workdir_allowed
 from app.domain.hook_models import HookEvent
@@ -12,6 +14,9 @@ from app.domain.models import SessionContext, TaskStatus
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.domain.user_question_models import extract_user_question_prompts
 from app.bootstrap_base import AppContainerBase
+
+if TYPE_CHECKING:
+    from app.domain.external_session_models import OwnershipResult
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +101,6 @@ class HookHandlingMixin(AppContainerBase):
     """Hook event handling: validate, bind session, dispatch events."""
 
     async def _handle_hook_event(self, event: HookEvent) -> None:
-        if not is_workdir_allowed(event.cwd, self.settings.allowed_workdirs):
-            logger.warning(
-                "hook event rejected by workdir allowlist",
-                extra={"session_id": event.session_id, "cwd": event.cwd, "event": event.event},
-            )
-            return
         logger.debug(
             "hook event received",
             extra={
@@ -112,87 +111,203 @@ class HookHandlingMixin(AppContainerBase):
             },
         )
 
-        # Clear auto-approve state on session end
-        if event.event == "SessionEnd" and hasattr(self, "auto_approve_service"):
-            self.auto_approve_service.clear_session(event.session_id)
-
-        # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior
-        if not hasattr(self, "ownership_resolver"):
-            await self._bind_hook_session(event)
-            await self._dispatch_session_event(
-                SessionEvent(
-                    session_id=event.session_id,
-                    type=SessionEventType.HOOK_RECEIVED,
-                    payload=event.to_dict(),
-                )
-            )
-            self._schedule_jsonl_sync(event.session_id, event.cwd)
+        # Stage 1: Ownership resolution (gate — failure halts pipeline)
+        ownership = await self._resolve_ownership_stage(event)
+        if ownership is None:
             return
 
-        # Ownership resolver as first gate
-        ownership = await self.ownership_resolver.resolve(event.session_id)
-        logger.info(
-            "hook event ownership resolved",
-            extra={
-                "session_id": event.session_id,
-                "ownership_state": ownership.ownership_state,
-                "origin": ownership.origin.value,
-                "owner_user_id": ownership.owner_user_id,
-            },
-        )
+        # Stages 2+: each wrapped independently in error boundaries
+        for stage_name, stage_coro in self._build_stage_list(event, ownership):
+            try:
+                await stage_coro
+            except Exception:
+                logger.exception(
+                    "hook pipeline stage failed",
+                    extra={
+                        "stage_name": stage_name,
+                        "session_id": getattr(event, "session_id", None),
+                        "event_type": getattr(event, "event", None),
+                        "hook_cwd": getattr(event, "cwd", None),
+                    },
+                )
+
+    async def _resolve_ownership_stage(self, event: HookEvent) -> OwnershipResult | None:
+        """Gate stage: workdir check, SessionEnd cleanup, and ownership resolution.
+
+        Returns the OwnershipResult on success, or None if the event should be
+        skipped (rejected by workdir allowlist or handled via legacy fallback).
+        Exceptions are logged as ERROR with stage_name="ownership_resolution" and
+        the method returns None so the pipeline halts gracefully.
+        """
+        try:
+            # Workdir allowlist check
+            if not is_workdir_allowed(event.cwd, self.settings.allowed_workdirs):
+                logger.warning(
+                    "hook event rejected by workdir allowlist",
+                    extra={"session_id": event.session_id, "cwd": event.cwd, "event": event.event},
+                )
+                return None
+
+            # Clear auto-approve state on session end
+            if event.event == "SessionEnd" and hasattr(self, "auto_approve_service"):
+                self.auto_approve_service.clear_session(event.session_id)
+
+            # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior
+            if not hasattr(self, "ownership_resolver"):
+                await self._bind_hook_session(event)
+                await self._dispatch_session_event(
+                    SessionEvent(
+                        session_id=event.session_id,
+                        type=SessionEventType.HOOK_RECEIVED,
+                        payload=event.to_dict(),
+                    )
+                )
+                self._schedule_jsonl_sync(event.session_id, event.cwd)
+                return None
+
+            # Resolve ownership
+            ownership = await self.ownership_resolver.resolve(event.session_id)
+            logger.info(
+                "hook event ownership resolved",
+                extra={
+                    "session_id": event.session_id,
+                    "ownership_state": ownership.ownership_state,
+                    "origin": ownership.origin.value,
+                    "owner_user_id": ownership.owner_user_id,
+                },
+            )
+            return ownership
+        except Exception:
+            logger.exception(
+                "hook pipeline stage failed",
+                extra={
+                    "stage_name": "ownership_resolution",
+                    "session_id": event.session_id,
+                    "event_type": event.event,
+                    "hook_cwd": event.cwd,
+                },
+            )
+            return None
+
+    def _build_stage_list(self, event: HookEvent, ownership: OwnershipResult) -> list[tuple[str, Awaitable[None]]]:
+        """Build the ordered list of pipeline stages based on ownership state.
+
+        Returns a list of (stage_name, coroutine) tuples. Each coroutine is a
+        zero-arg awaitable that captures the needed context from event/ownership.
+        """
+        stages: list[tuple[str, Awaitable[None]]] = []
 
         if ownership.ownership_state == "owned":
-            # Tmux-launched session: existing bind + dispatch + sync flow
-            # Auto-approve check: intercept before notification flow
-            if event.expects_response and event.tool != "AskUserQuestion":
-                if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
-                    await self._handle_auto_approved_permission(event)
-                    return
-            await self._bind_hook_session(event)
-            await self._dispatch_session_event(
-                SessionEvent(
-                    session_id=event.session_id,
-                    type=SessionEventType.HOOK_RECEIVED,
-                    payload=event.to_dict(),
+            # Auto-approve check
+            stages.append(
+                (
+                    "auto_approve_check",
+                    self._run_auto_approve_check(event),
                 )
             )
-            self._schedule_jsonl_sync(event.session_id, event.cwd)
-            self._maybe_auto_file_send(event, ownership.owner_user_id)
+            # Session binding
+            stages.append(
+                (
+                    "session_binding",
+                    self._bind_hook_session(event),
+                )
+            )
+            # Event dispatch
+            stages.append(
+                (
+                    "event_dispatch",
+                    self._dispatch_session_event(
+                        SessionEvent(
+                            session_id=event.session_id,
+                            type=SessionEventType.HOOK_RECEIVED,
+                            payload=event.to_dict(),
+                        )
+                    ),
+                )
+            )
+
+            # JSONL sync scheduling (sync, not async — wrap in a trivial coroutine)
+            async def _schedule_jsonl_owned() -> None:
+                self._schedule_jsonl_sync(event.session_id, event.cwd)
+
+            stages.append(("jsonl_sync_scheduling", _schedule_jsonl_owned()))
+
+            # Auto-file-send (sync — wrap in a trivial coroutine)
+            async def _auto_file_send_owned() -> None:
+                self._maybe_auto_file_send(event, ownership.owner_user_id)
+
+            stages.append(("auto_file_send", _auto_file_send_owned()))
 
         elif ownership.ownership_state == "bound":
-            # Externally-bound session: dispatch event + schedule JSONL sync + push notifications
-            # Auto-approve check: intercept before push notification
-            if event.expects_response and event.tool != "AskUserQuestion":
-                if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
-                    await self._handle_auto_approved_permission(event)
-                    return
-            await self._dispatch_session_event(
-                SessionEvent(
-                    session_id=event.session_id,
-                    type=SessionEventType.HOOK_RECEIVED,
-                    payload=event.to_dict(),
+            # Auto-approve check
+            stages.append(
+                (
+                    "auto_approve_check",
+                    self._run_auto_approve_check(event),
                 )
             )
-            self._schedule_jsonl_sync(event.session_id, event.cwd)
-            # Push notifications for bound external sessions (notifier may not be wired yet)
-            if hasattr(self, "push_notifier") and ownership.owner_user_id is not None:
-                await self._notify_bound_external_event(event, ownership.owner_user_id)
-            self._maybe_auto_file_send(event, ownership.owner_user_id)
+            # Event dispatch
+            stages.append(
+                (
+                    "event_dispatch",
+                    self._dispatch_session_event(
+                        SessionEvent(
+                            session_id=event.session_id,
+                            type=SessionEventType.HOOK_RECEIVED,
+                            payload=event.to_dict(),
+                        )
+                    ),
+                )
+            )
+
+            # JSONL sync scheduling
+            async def _schedule_jsonl_bound() -> None:
+                self._schedule_jsonl_sync(event.session_id, event.cwd)
+
+            stages.append(("jsonl_sync_scheduling", _schedule_jsonl_bound()))
+
+            # Push notification
+            async def _push_notification_bound() -> None:
+                if hasattr(self, "push_notifier") and ownership.owner_user_id is not None:
+                    await self._notify_bound_external_event(event, ownership.owner_user_id)
+
+            stages.append(("push_notification", _push_notification_bound()))
+
+            # Auto-file-send
+            async def _auto_file_send_bound() -> None:
+                self._maybe_auto_file_send(event, ownership.owner_user_id)
+
+            stages.append(("auto_file_send", _auto_file_send_bound()))
 
         else:
-            # Unbound: record in discovery, handle permissions if needed
-            if hasattr(self, "external_discovery"):
-                self.external_discovery.record_event(event)
-            if event.expects_response and hasattr(self, "unbound_permission_handler"):
-                # AskUserQuestion: auto-allow, don't broadcast Approve/Deny
-                if event.tool == "AskUserQuestion":
-                    await self._auto_allow_ask_user_question(event)
-                else:
-                    # Auto-approve check for unbound sessions
-                    if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
-                        await self._handle_auto_approved_permission(event)
-                        return
-                    await self.unbound_permission_handler.handle_unbound_permission(event)
+            # Unbound
+            # External discovery record
+            async def _external_discovery() -> None:
+                if hasattr(self, "external_discovery"):
+                    self.external_discovery.record_event(event)
+
+            stages.append(("external_discovery", _external_discovery()))
+
+            # Permission handling
+            async def _permission_handling() -> None:
+                if event.expects_response and hasattr(self, "unbound_permission_handler"):
+                    if event.tool == "AskUserQuestion":
+                        await self._auto_allow_ask_user_question(event)
+                    else:
+                        if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
+                            await self._handle_auto_approved_permission(event)
+                        else:
+                            await self.unbound_permission_handler.handle_unbound_permission(event)
+
+            stages.append(("permission_handling", _permission_handling()))
+
+        return stages
+
+    async def _run_auto_approve_check(self, event: HookEvent) -> None:
+        """Check if the event should be auto-approved. If so, handle and raise to short-circuit."""
+        if event.expects_response and event.tool != "AskUserQuestion":
+            if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
+                await self._handle_auto_approved_permission(event)
 
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
         if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
@@ -416,34 +531,30 @@ class SessionMatchingMixin(AppContainerBase):
     """Session matching: bind hook events to user sessions."""
 
     async def _match_session_context(self, event: HookEvent) -> SessionContext | None:
+        # O(1) index lookup by claude_session_id (most common match path)
+        indexed = await self.session_service.lookup_by_claude_session_id(event.session_id)
+        if indexed is not None:
+            logger.info(
+                "matched hook session by claude_session_id (index)",
+                extra={
+                    "hook_session_id": event.session_id,
+                    "user_id": indexed.user_id,
+                    "workdir": indexed.workdir,
+                    "terminal_id": indexed.terminal_id,
+                },
+            )
+            return indexed
+
+        # Index miss — fall back to full-scan matching logic
         sessions = await self.session_service.list_all()
         logger.info(
-            "matching hook session context",
+            "matching hook session context (fallback)",
             extra={
                 "hook_session_id": event.session_id,
                 "hook_cwd": event.cwd,
                 "session_count": len(sessions),
             },
         )
-
-        # O(1) lookup by claude_session_id (most common match path)
-        by_claude_session_id: dict[str, SessionContext] = {}
-        for session in sessions:
-            if session.claude_session_id:
-                by_claude_session_id[session.claude_session_id] = session
-
-        matched = by_claude_session_id.get(event.session_id)
-        if matched is not None:
-            logger.info(
-                "matched hook session by claude_session_id",
-                extra={
-                    "hook_session_id": event.session_id,
-                    "user_id": matched.user_id,
-                    "workdir": matched.workdir,
-                    "terminal_id": matched.terminal_id,
-                },
-            )
-            return matched
 
         state = self.structured_session_store.get(event.session_id)
         if state is not None:

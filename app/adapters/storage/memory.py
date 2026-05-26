@@ -78,6 +78,8 @@ class SessionContextStore(Protocol):
 
     async def save(self, session: SessionContext) -> None: ...
 
+    async def get_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None: ...
+
 
 class MemorySessionStore:
     def __init__(self) -> None:
@@ -91,6 +93,13 @@ class MemorySessionStore:
     async def list_all(self) -> list[SessionContext]:
         async with self._lock:
             return list(self._sessions.values())
+
+    async def get_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None:
+        async with self._lock:
+            for session in self._sessions.values():
+                if session.claude_session_id == claude_session_id:
+                    return session
+            return None
 
     async def save(self, session: SessionContext) -> None:
         async with self._lock:
