@@ -114,7 +114,7 @@ def register_permission_handlers(
         if tool_use_id is None:
             if callback.message is not None:
                 await callback.message.answer(_STALE_PERMISSION_CALLBACK_TEXT)
-            await callback.answer(_STALE_PERMISSION_CALLBACK_TEXT, show_alert=True)
+            await callback.answer("按钮已失效", show_alert=True)
             return
 
         # Resolve owning user from session so token-based approval works cross-user

@@ -17,6 +17,7 @@ from app.bot.presenters.structured_reply_presenter import (
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.services.diff_generator import DiffGeneratorService
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.result_exporter import ResultExporterService
 from app.services.task_service import TaskService
 
@@ -53,6 +54,7 @@ async def run_prompt_and_stream(
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
 ) -> asyncio.Task | None:
     logger.info(
         "run prompt requested",
@@ -129,6 +131,7 @@ async def run_prompt_and_stream(
         messenger=messenger,
         tool_message_manager=tool_message_manager,
         task_id=start.task.task_id,
+        permission_callback_registry=permission_callback_registry,
     )
     streamer = RunEventStreamer(
         start=start,
@@ -193,6 +196,7 @@ def register_run_handler(
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
 ):
     @router.message(Command("run"))
     async def command_run(message: Message, command: CommandObject) -> None:
@@ -213,4 +217,5 @@ def register_run_handler(
             diff_generator=diff_generator,
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
+            permission_callback_registry=permission_callback_registry,
         )
