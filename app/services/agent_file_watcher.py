@@ -37,11 +37,28 @@ class AgentFileWatcher:
             return
         self._tasks[session_id] = asyncio.create_task(self._watch_session(session_id=session_id, workdir=workdir))
 
+    def _clear_seen_mtimes_for_session(self, session_id: str) -> None:
+        prefix = f"{session_id}:"
+        stale_keys = [key for key in self._seen_mtimes if key == session_id or key.startswith(prefix)]
+        for key in stale_keys:
+            self._seen_mtimes.pop(key, None)
+
+    def _cleanup_finished_session(self, *, session_id: str, task: asyncio.Task[None] | None) -> None:
+        active_task = self._tasks.get(session_id)
+        if active_task is not None and active_task is not task:
+            return
+        if active_task is task:
+            self._tasks.pop(session_id, None)
+        self._clear_seen_mtimes_for_session(session_id)
+        self._session_locks.pop(session_id, None)
+
     def forget(self, session_id: str) -> None:
         task = self._tasks.pop(session_id, None)
-        self._seen_mtimes.pop(session_id, None)
-        if task is not None:
-            task.cancel()
+        self._clear_seen_mtimes_for_session(session_id)
+        if task is None or task.done():
+            self._session_locks.pop(session_id, None)
+            return
+        task.cancel()
 
     async def stop_all(self) -> None:
         self._active = False
@@ -53,6 +70,7 @@ class AgentFileWatcher:
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
+        self._session_locks.clear()
 
     async def _watch_session(self, *, session_id: str, workdir: str) -> None:
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
@@ -73,8 +91,7 @@ class AgentFileWatcher:
         except Exception:
             logger.exception("agent file watcher failed", extra={"session_id": session_id, "workdir": workdir})
         finally:
-            if task is not None and self._tasks.get(session_id) is task:
-                self._tasks.pop(session_id, None)
+            self._cleanup_finished_session(session_id=session_id, task=task)
 
     def _should_watch(self, state: SessionState) -> bool:
         if state.provider != "claude_code":
