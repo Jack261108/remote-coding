@@ -112,6 +112,8 @@ class Settings(BaseSettings):
 
     # File upload settings
     upload_max_file_size_mb: int = Field(20, alias="UPLOAD_MAX_FILE_SIZE_MB")
+    upload_queue_max_files_per_user: int = Field(5, alias="UPLOAD_QUEUE_MAX_FILES_PER_USER")
+    upload_queue_max_bytes_per_user: int | None = Field(None, alias="UPLOAD_QUEUE_MAX_BYTES_PER_USER")
     allowed_file_extensions: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_ALLOWED_EXTENSIONS),
         alias="ALLOWED_FILE_EXTENSIONS",
@@ -261,7 +263,14 @@ class Settings(BaseSettings):
             raise ValueError("配置值必须大于 0")
         return value
 
-    @field_validator("rate_limit_bucket_ttl_sec", "permission_lock_ttl_sec", mode="before")
+    @field_validator("upload_queue_max_files_per_user")
+    @classmethod
+    def validate_upload_queue_max_files_per_user(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("UPLOAD_QUEUE_MAX_FILES_PER_USER 必须大于等于 0")
+        return value
+
+    @field_validator("rate_limit_bucket_ttl_sec", "permission_lock_ttl_sec", "upload_queue_max_bytes_per_user", mode="before")
     @classmethod
     def validate_optional_positive_int(cls, value: Any) -> Any:
         if value is None:
@@ -297,3 +306,9 @@ class Settings(BaseSettings):
     @property
     def effective_permission_lock_ttl_sec(self) -> int:
         return self.permission_lock_ttl_sec if self.permission_lock_ttl_sec is not None else self.claude_hook_pending_permission_ttl_sec
+
+    @property
+    def effective_upload_queue_max_bytes_per_user(self) -> int:
+        if self.upload_queue_max_bytes_per_user is not None:
+            return self.upload_queue_max_bytes_per_user
+        return self.upload_queue_max_files_per_user * self.upload_max_file_size_mb * 1024 * 1024
