@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.bot.handlers.file_upload import (
     _format_size,
-    _pending_uploads,
     _user_has_running_task,
 )
 from app.domain.file_models import FileUploadResult, FileValidationError
 from app.domain.models import TaskRecord, TaskStatus
+from app.services.upload_queue import UploadQueueManager
 
 
 # --- Unit tests for helper functions ---
@@ -68,6 +69,18 @@ async def test_user_has_running_task_false_when_no_tasks() -> None:
 # --- Integration tests for the handler ---
 
 
+class DummyRouter:
+    def __init__(self) -> None:
+        self.handlers = []
+
+    def message(self, *filters, **kwargs):
+        def decorator(handler):
+            self.handlers.append(handler)
+            return handler
+
+        return decorator
+
+
 def _make_message(user_id: int = 42) -> MagicMock:
     message = AsyncMock(spec=["from_user", "bot", "document", "photo", "answer"])
     message.from_user = MagicMock()
@@ -78,25 +91,88 @@ def _make_message(user_id: int = 42) -> MagicMock:
 
 def _make_services():
     file_receiver = AsyncMock()
+    file_receiver.receive_file = AsyncMock()
     session_service = AsyncMock()
     task_service = AsyncMock()
     task_service.list_recent = AsyncMock(return_value=[])
     return file_receiver, session_service, task_service
 
 
-@pytest.fixture(autouse=True)
-def clear_pending_uploads():
-    """Clear the in-memory pending uploads between tests."""
-    _pending_uploads.clear()
-    yield
-    _pending_uploads.clear()
+def _running_task() -> MagicMock:
+    running_task = MagicMock(spec=TaskRecord)
+    running_task.status = TaskStatus.RUNNING
+    return running_task
+
+
+def _register_upload_handlers(
+    *,
+    upload_max_file_size_mb: int = 20,
+    upload_queue_max_files_per_user: int = 5,
+    upload_queue_max_bytes_per_user: int = 20 * 1024 * 1024,
+):
+    from app.bot.handlers.file_upload import register_file_upload_handler
+
+    router = DummyRouter()
+    file_receiver, session_service, task_service = _make_services()
+    upload_queue = UploadQueueManager(
+        max_files_per_user=upload_queue_max_files_per_user,
+        max_bytes_per_user=upload_queue_max_bytes_per_user,
+    )
+
+    register_file_upload_handler(
+        router,
+        file_receiver=file_receiver,
+        session_service=session_service,
+        task_service=task_service,
+        upload_queue=upload_queue,
+        upload_max_file_size_mb=upload_max_file_size_mb,
+    )
+
+    assert len(router.handlers) == 2
+    document_handler, photo_handler = router.handlers
+    return document_handler, photo_handler, upload_queue, file_receiver, session_service, task_service
+
+
+def _attach_document(
+    message: MagicMock, *, filename: str = "test.py", file_size: int | None = 11, data: bytes = b"hello world"
+) -> AsyncMock:
+    message.document = MagicMock()
+    message.document.file_name = filename
+    message.document.file_id = f"file-{filename}"
+    message.document.file_size = file_size
+
+    bot = AsyncMock()
+    message.bot = bot
+    file_obj = MagicMock()
+    file_obj.file_path = f"documents/{filename}"
+    bot.get_file = AsyncMock(return_value=file_obj)
+    bot.download_file = AsyncMock(return_value=io.BytesIO(data))
+    return bot
+
+
+def _attach_photo(message: MagicMock, *, largest_file_size: int | None = 11, data: bytes = b"hello world") -> AsyncMock:
+    small = MagicMock()
+    small.file_id = "small-photo"
+    small.file_unique_id = "small"
+    small.file_size = 5
+    largest = MagicMock()
+    largest.file_id = "large-photo"
+    largest.file_unique_id = "large"
+    largest.file_size = largest_file_size
+    message.photo = [small, largest]
+
+    bot = AsyncMock()
+    message.bot = bot
+    file_obj = MagicMock()
+    file_obj.file_path = "photos/large.jpg"
+    bot.get_file = AsyncMock(return_value=file_obj)
+    bot.download_file = AsyncMock(return_value=io.BytesIO(data))
+    return bot
 
 
 @pytest.mark.asyncio
 async def test_handle_document_success() -> None:
     """Document upload should download, process, and reply with confirmation."""
-    from pathlib import Path
-
     file_receiver, session_service, task_service = _make_services()
 
     session = MagicMock()
@@ -194,25 +270,108 @@ async def test_handle_document_no_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_queues_upload_when_task_running() -> None:
-    """Uploads should be queued when user has a running task."""
-    file_receiver, session_service, task_service = _make_services()
-    running_task = MagicMock(spec=TaskRecord)
-    running_task.status = TaskStatus.RUNNING
-    task_service.list_recent = AsyncMock(return_value=[running_task])
+async def test_document_size_metadata_rejects_before_download() -> None:
+    document_handler, _photo_handler, _queue, _file_receiver, _session_service, _task_service = _register_upload_handlers(
+        upload_max_file_size_mb=1
+    )
+    message = _make_message()
+    bot = _attach_document(message, filename="large.py", file_size=1024 * 1024 + 1)
 
-    assert await _user_has_running_task(task_service, user_id=42) is True
+    await document_handler(message)
 
-    # Simulate queuing
-    _pending_uploads[42].append(("test.py", b"data"))
-    assert len(_pending_uploads[42]) == 1
+    bot.get_file.assert_not_awaited()
+    bot.download_file.assert_not_awaited()
+    message.answer.assert_awaited_once()
+    reply = message.answer.call_args[0][0]
+    assert "文件被拒绝" in reply
+    assert "1 MB" in reply
+
+
+@pytest.mark.asyncio
+async def test_photo_size_metadata_rejects_before_download() -> None:
+    _document_handler, photo_handler, _queue, _file_receiver, _session_service, _task_service = _register_upload_handlers(
+        upload_max_file_size_mb=1
+    )
+    message = _make_message()
+    bot = _attach_photo(message, largest_file_size=1024 * 1024 + 1)
+
+    await photo_handler(message)
+
+    bot.get_file.assert_not_awaited()
+    bot.download_file.assert_not_awaited()
+    message.answer.assert_awaited_once()
+    reply = message.answer.call_args[0][0]
+    assert "文件被拒绝" in reply
+    assert "1 MB" in reply
+
+
+@pytest.mark.asyncio
+async def test_running_task_queue_reply_mentions_restart_loss() -> None:
+    document_handler, _photo_handler, queue, _file_receiver, _session_service, task_service = _register_upload_handlers(
+        upload_max_file_size_mb=1
+    )
+    task_service.list_recent = AsyncMock(return_value=[_running_task()])
+    message = _make_message()
+    _attach_document(message, filename="queued.py", file_size=4, data=b"data")
+
+    await document_handler(message)
+
+    assert await queue.queued_count(user_id=42) == 1
+    message.answer.assert_awaited_once()
+    reply = message.answer.call_args[0][0]
+    assert "已加入队列" in reply
+    assert "bot" in reply
+    assert "重启" in reply
+    assert "丢失" in reply
+
+
+@pytest.mark.asyncio
+async def test_running_task_rejects_when_queue_count_limit_reached() -> None:
+    document_handler, _photo_handler, queue, _file_receiver, _session_service, task_service = _register_upload_handlers(
+        upload_max_file_size_mb=1,
+        upload_queue_max_files_per_user=1,
+    )
+    task_service.list_recent = AsyncMock(return_value=[_running_task()])
+
+    first = _make_message()
+    _attach_document(first, filename="first.py", file_size=5, data=b"first")
+    await document_handler(first)
+
+    second = _make_message()
+    _attach_document(second, filename="second.py", file_size=6, data=b"second")
+    await document_handler(second)
+
+    assert await queue.queued_count(user_id=42) == 1
+    second.answer.assert_awaited_once()
+    reply = second.answer.call_args[0][0]
+    assert "文件未加入队列" in reply
+    assert "队列已满" in reply
+
+
+@pytest.mark.asyncio
+async def test_running_task_rejects_downloaded_file_over_size_limit_before_queueing() -> None:
+    document_handler, _photo_handler, queue, _file_receiver, _session_service, task_service = _register_upload_handlers(
+        upload_max_file_size_mb=1
+    )
+    task_service.list_recent = AsyncMock(return_value=[_running_task()])
+    message = _make_message()
+    bot = _attach_document(message, filename="no-metadata.bin", file_size=None, data=b"x" * (1024 * 1024 + 1))
+
+    await document_handler(message)
+
+    bot.get_file.assert_awaited_once()
+    bot.download_file.assert_awaited_once()
+    assert await queue.queued_count(user_id=42) == 0
+    message.answer.assert_awaited_once()
+    reply = message.answer.call_args[0][0]
+    assert "文件被拒绝" in reply
+    assert "1 MB" in reply
+    assert "已加入队列" not in reply
 
 
 @pytest.mark.asyncio
 async def test_process_pending_uploads() -> None:
     """process_pending_uploads should process all queued files."""
-    from pathlib import Path
-
     from app.bot.handlers.file_upload import process_pending_uploads
 
     file_receiver, session_service, task_service = _make_services()
@@ -225,8 +384,9 @@ async def test_process_pending_uploads() -> None:
         return_value=FileUploadResult(filename="queued.py", size_bytes=100, path=Path("/tmp/work/.tg-uploads/42/queued.py"))
     )
 
-    # Queue a file
-    _pending_uploads[42].append(("queued.py", b"content"))
+    upload_queue = UploadQueueManager(max_files_per_user=2, max_bytes_per_user=100)
+    result = await upload_queue.enqueue(user_id=42, filename="queued.py", data=b"content")
+    assert result.accepted is True
 
     message = _make_message()
 
@@ -234,11 +394,12 @@ async def test_process_pending_uploads() -> None:
         message,
         file_receiver=file_receiver,
         session_service=session_service,
+        upload_queue=upload_queue,
         user_id=42,
     )
 
     # Queue should be cleared
-    assert 42 not in _pending_uploads
+    assert await upload_queue.queued_count(user_id=42) == 0
     file_receiver.receive_file.assert_awaited_once()
     message.answer.assert_awaited_once()
 

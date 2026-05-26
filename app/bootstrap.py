@@ -53,6 +53,7 @@ from app.services.task_service import TaskService
 from app.services.auto_approve_service import AutoApproveService
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
+from app.services.upload_queue import UploadQueueManager
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,10 @@ class AppContainer(
             upload_store=self.upload_store,
             allowed_extensions=set(settings.allowed_file_extensions),
             max_file_size_bytes=settings.upload_max_file_size_mb * 1024 * 1024,
+        )
+        self.upload_queue = UploadQueueManager(
+            max_files_per_user=settings.upload_queue_max_files_per_user,
+            max_bytes_per_user=settings.effective_upload_queue_max_bytes_per_user,
         )
         self.file_sender = FileSenderService(
             bot=self.bot,
@@ -282,6 +287,7 @@ class AppContainer(
             session_service=self.session_service,
             registry_service=self.session_registry,
             file_receiver=self.file_receiver,
+            upload_queue=self.upload_queue,
             result_exporter=self.result_exporter,
             diff_generator=self.diff_generator,
             external_discovery=self.external_discovery,

@@ -455,6 +455,8 @@ def test_container_wiring_passes_settings_to_task_store(tmp_path: Path) -> None:
 
     assert container.task_store._max_records == 500
     assert container.task_store._ttl.total_seconds() == 72 * 3600
+    assert container.upload_queue._max_files_per_user == settings.upload_queue_max_files_per_user
+    assert container.upload_queue._max_bytes_per_user == settings.effective_upload_queue_max_bytes_per_user
 
     # wire() should succeed and register RateLimitMiddleware on dispatcher
     container.wire()

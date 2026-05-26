@@ -37,6 +37,7 @@ from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
+from app.services.upload_queue import UploadQueueManager
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
@@ -54,6 +55,7 @@ def create_router(
     session_service: SessionService,
     registry_service: SessionRegistryService | None = None,
     file_receiver: FileReceiverService | None = None,
+    upload_queue: UploadQueueManager | None = None,
     result_exporter: ResultExporterService | None = None,
     diff_generator: DiffGeneratorService | None = None,
     external_discovery: ExternalSessionDiscoveryService | None = None,
@@ -168,12 +170,14 @@ def create_router(
             auto_approve_service=auto_approve_service,
         )
 
-    if file_receiver is not None:
+    if file_receiver is not None and upload_queue is not None:
         register_file_upload_handler(
             router,
             file_receiver=file_receiver,
             session_service=session_service,
             task_service=task_service,
+            upload_queue=upload_queue,
+            upload_max_file_size_mb=settings.upload_max_file_size_mb,
         )
 
     if result_exporter is not None:
