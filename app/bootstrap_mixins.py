@@ -21,6 +21,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _StageShortCircuit(Exception):
+    """Raised by a pipeline stage to terminate the rest of the stage list.
+
+    The orchestration loop catches this, logs at INFO level, closes unawaited
+    coroutines, and stops further stage execution. Not treated as an error.
+    """
+
+    def __init__(self, *, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class JsonlSyncMixin(AppContainerBase):
     """JSONL sync: debounced incremental parsing and event dispatch."""
 
@@ -116,10 +128,26 @@ class HookHandlingMixin(AppContainerBase):
         if ownership is None:
             return
 
-        # Stages 2+: each wrapped independently in error boundaries
-        for stage_name, stage_coro in self._build_stage_list(event, ownership):
+        # Stages 2+: each wrapped independently in error boundaries.
+        # A stage may raise _StageShortCircuit to terminate the pipeline early.
+        stages = self._build_stage_list(event, ownership)
+        executed_up_to = -1
+        for i, (stage_name, stage_coro) in enumerate(stages):
             try:
                 await stage_coro
+                executed_up_to = i
+            except _StageShortCircuit as sc:
+                logger.info(
+                    "hook pipeline short-circuited",
+                    extra={
+                        "stage_name": stage_name,
+                        "reason": sc.reason,
+                        "session_id": event.session_id,
+                        "event_type": event.event,
+                    },
+                )
+                executed_up_to = i
+                break
             except Exception:
                 logger.exception(
                     "hook pipeline stage failed",
@@ -130,6 +158,12 @@ class HookHandlingMixin(AppContainerBase):
                         "hook_cwd": getattr(event, "cwd", None),
                     },
                 )
+
+        # Close un-awaited coroutines from skipped stages
+        for j in range(executed_up_to + 1, len(stages)):
+            coro = stages[j][1]
+            if hasattr(coro, "close"):
+                coro.close()
 
     async def _resolve_ownership_stage(self, event: HookEvent) -> OwnershipResult | None:
         """Gate stage: workdir check, SessionEnd cleanup, and ownership resolution.
@@ -151,6 +185,10 @@ class HookHandlingMixin(AppContainerBase):
             # Clear auto-approve state on session end
             if event.event == "SessionEnd" and hasattr(self, "auto_approve_service"):
                 self.auto_approve_service.clear_session(event.session_id)
+
+            # Remove external binding on session end so /list doesn't show stale entries
+            if event.event == "SessionEnd" and hasattr(self, "external_binding_store"):
+                self.external_binding_store.remove_binding(event.session_id)
 
             # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior
             if not hasattr(self, "ownership_resolver"):
@@ -198,14 +236,8 @@ class HookHandlingMixin(AppContainerBase):
         stages: list[tuple[str, Awaitable[None]]] = []
 
         if ownership.ownership_state == "owned":
-            # Auto-approve check
-            stages.append(
-                (
-                    "auto_approve_check",
-                    self._run_auto_approve_check(event),
-                )
-            )
-            # Session binding
+            # Session binding MUST run before auto-approve check so that
+            # structured_session_store is updated even when short-circuited.
             stages.append(
                 (
                     "session_binding",
@@ -232,6 +264,14 @@ class HookHandlingMixin(AppContainerBase):
 
             stages.append(("jsonl_sync_scheduling", _schedule_jsonl_owned()))
 
+            # Auto-approve check — may short-circuit, skipping only auto_file_send
+            stages.append(
+                (
+                    "auto_approve_check",
+                    self._run_auto_approve_check(event),
+                )
+            )
+
             # Auto-file-send (sync — wrap in a trivial coroutine)
             async def _auto_file_send_owned() -> None:
                 self._maybe_auto_file_send(event, ownership.owner_user_id)
@@ -239,14 +279,7 @@ class HookHandlingMixin(AppContainerBase):
             stages.append(("auto_file_send", _auto_file_send_owned()))
 
         elif ownership.ownership_state == "bound":
-            # Auto-approve check
-            stages.append(
-                (
-                    "auto_approve_check",
-                    self._run_auto_approve_check(event),
-                )
-            )
-            # Event dispatch
+            # Event dispatch MUST run before auto-approve check
             stages.append(
                 (
                     "event_dispatch",
@@ -265,6 +298,14 @@ class HookHandlingMixin(AppContainerBase):
                 self._schedule_jsonl_sync(event.session_id, event.cwd)
 
             stages.append(("jsonl_sync_scheduling", _schedule_jsonl_bound()))
+
+            # Auto-approve check — may short-circuit, skipping push_notification
+            stages.append(
+                (
+                    "auto_approve_check",
+                    self._run_auto_approve_check(event),
+                )
+            )
 
             # Push notification
             async def _push_notification_bound() -> None:
@@ -304,10 +345,15 @@ class HookHandlingMixin(AppContainerBase):
         return stages
 
     async def _run_auto_approve_check(self, event: HookEvent) -> None:
-        """Check if the event should be auto-approved. If so, handle and raise to short-circuit."""
+        """Check if the event should be auto-approved.
+
+        If active, handles permission response and raises _StageShortCircuit
+        to terminate the pipeline — downstream stages must not send redundant prompts.
+        """
         if event.expects_response and event.tool != "AskUserQuestion":
             if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
                 await self._handle_auto_approved_permission(event)
+                raise _StageShortCircuit(reason="auto-approved")
 
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
         if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
@@ -401,7 +447,7 @@ class HookHandlingMixin(AppContainerBase):
                 user_id=user_id,
                 session_id=event.session_id,
                 tool_name=event.tool or "",
-                tool_input=None,
+                tool_input=event.tool_input,
                 tool_use_id=event.tool_use_id or "",
                 cwd=event.cwd,
                 title=_title,

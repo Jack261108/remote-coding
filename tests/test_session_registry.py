@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from app.adapters.storage.file_session_store import FileSessionStore
+from app.domain.models import utc_now
+from app.domain.session_models import SessionState
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
@@ -277,6 +281,96 @@ async def test_validate_or_reattach_returns_none_when_dead_and_no_recovery(tmp_p
 
     result = await registry.validate_or_reattach(user_id=1)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_validate_or_reattach_binds_live_state_for_same_user_and_workdir(tmp_path) -> None:
+    registry, session_service, cache, _ = _make_registry(
+        tmp_path,
+        alive_sessions={"tgcli_user_1_new456"},
+    )
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    ctx = await session_service.get(1)
+    ctx.terminal_id = "user_1_old123"
+    ctx.claude_session_id = "old-claude-session"
+    old_updated_at = utc_now() - timedelta(hours=1)
+    ctx.updated_at = old_updated_at
+    await session_service._store.save(ctx)
+
+    cache._repository.save(
+        SessionState(
+            session_id="state-new456",
+            user_id=1,
+            provider="claude_code",
+            workdir="/proj",
+            terminal_id="user_1_new456",
+            claude_session_id="new-claude-session",
+        )
+    )
+
+    result = await registry.validate_or_reattach(user_id=1)
+
+    assert result is not None
+    assert result.terminal_id == "user_1_new456"
+    assert result.claude_session_id == "new-claude-session"
+    assert result.updated_at > old_updated_at
+
+
+@pytest.mark.asyncio
+async def test_validate_or_reattach_chooses_most_recent_live_state(tmp_path) -> None:
+    registry, session_service, cache, _ = _make_registry(
+        tmp_path,
+        alive_sessions={"tgcli_user_1_older", "tgcli_user_1_newer"},
+    )
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    ctx = await session_service.get(1)
+    ctx.terminal_id = "user_1_dead"
+    ctx.claude_session_id = "dead-claude-session"
+    await session_service._store.save(ctx)
+
+    now = utc_now()
+    older = SessionState(
+        session_id="aaa-older",
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_id="user_1_older",
+        claude_session_id="older-claude-session",
+    )
+    older.created_at = now - timedelta(minutes=10)
+    older.last_activity = now - timedelta(minutes=10)
+    older.revision = 1
+    newer = SessionState(
+        session_id="zzz-newer",
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_id="user_1_newer",
+        claude_session_id="newer-claude-session",
+    )
+    newer.created_at = now - timedelta(minutes=5)
+    newer.last_activity = now
+    newer.revision = 2
+    cache._repository.save(older)
+    cache._repository.save(newer)
+
+    result = await registry.validate_or_reattach(user_id=1)
+
+    assert result is not None
+    assert result.terminal_id == "user_1_newer"
+    assert result.claude_session_id == "newer-claude-session"
 
 
 # ── get_session_info ──────────────────────────────────────────────────────────

@@ -148,6 +148,8 @@ class AppContainer(
         self.upload_queue = UploadQueueManager(
             max_files_per_user=settings.upload_queue_max_files_per_user,
             max_bytes_per_user=settings.effective_upload_queue_max_bytes_per_user,
+            ttl_sec=settings.upload_queue_ttl_sec,
+            cleanup_interval_sec=settings.upload_queue_cleanup_interval_sec,
         )
         self.file_sender = FileSenderService(
             bot=self.bot,
@@ -255,6 +257,7 @@ class AppContainer(
         self._start_agent_file_watchers()
         self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
         await self.session_registry.start_health_check()
+        await self.upload_queue.start_cleanup()
         await self.upload_cleanup.start()
         self._started = True
 
@@ -263,6 +266,7 @@ class AppContainer(
             await self.bot.session.close()
             return
         await self.upload_cleanup.stop()
+        await self.upload_queue.stop_cleanup()
         await self.session_registry.stop_health_check()
         await self._stop_periodic_recheck_task()
         await self._stop_jsonl_sync_tasks()

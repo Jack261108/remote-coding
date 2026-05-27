@@ -91,3 +91,78 @@ async def test_upload_queue_concurrent_enqueues_respect_file_limit() -> None:
 
     assert len(drained) == 1
     assert drained[0].filename in {"first.txt", "second.txt"}
+
+
+@pytest.mark.asyncio
+async def test_upload_queue_expires_old_items_before_drain() -> None:
+    now = 1000.0
+
+    def clock() -> float:
+        return now
+
+    manager = UploadQueueManager(max_files_per_user=2, max_bytes_per_user=10, ttl_sec=5.0, clock=clock)
+    await manager.enqueue(user_id=1, filename="old.txt", data=b"12345")
+
+    now = 1006.0
+
+    assert await manager.queued_count(user_id=1) == 0
+    assert await manager.drain(user_id=1) == []
+
+    result = await manager.enqueue(user_id=1, filename="new.txt", data=b"1234567890")
+    assert result.accepted is True
+
+
+@pytest.mark.asyncio
+async def test_upload_queue_drain_prunes_expired_items_without_count_first() -> None:
+    now = 1000.0
+
+    def clock() -> float:
+        return now
+
+    manager = UploadQueueManager(max_files_per_user=1, max_bytes_per_user=5, ttl_sec=5.0, clock=clock)
+    await manager.enqueue(user_id=1, filename="old.txt", data=b"12345")
+
+    now = 1006.0
+
+    assert await manager.drain(user_id=1) == []
+    assert 1 not in manager._queues
+    assert 1 not in manager._byte_totals
+
+
+@pytest.mark.asyncio
+async def test_upload_queue_background_cleanup_expires_without_user_operation() -> None:
+    now = 1000.0
+
+    def clock() -> float:
+        return now
+
+    manager = UploadQueueManager(max_files_per_user=1, max_bytes_per_user=5, ttl_sec=5.0, cleanup_interval_sec=0.01, clock=clock)
+    await manager.enqueue(user_id=1, filename="old.txt", data=b"12345")
+
+    now = 1006.0
+    await manager.start_cleanup()
+    try:
+        await asyncio.sleep(0.05)
+    finally:
+        await manager.stop_cleanup()
+
+    assert 1 not in manager._queues
+    assert 1 not in manager._byte_totals
+
+
+@pytest.mark.asyncio
+async def test_upload_queue_enqueue_prunes_expired_items_before_limits() -> None:
+    now = 1000.0
+
+    def clock() -> float:
+        return now
+
+    manager = UploadQueueManager(max_files_per_user=1, max_bytes_per_user=5, ttl_sec=5.0, clock=clock)
+    await manager.enqueue(user_id=1, filename="old.txt", data=b"12345")
+
+    now = 1006.0
+    result = await manager.enqueue(user_id=1, filename="new.txt", data=b"12345")
+
+    assert result.accepted is True
+    drained = await manager.drain(user_id=1)
+    assert [(item.filename, item.data, item.size_bytes) for item in drained] == [("new.txt", b"12345", 5)]

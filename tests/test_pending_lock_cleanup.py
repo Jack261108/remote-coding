@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.domain.hook_models import HookEvent
+from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
@@ -38,6 +39,7 @@ def _make_handler(
         bot=bot,
         hook_socket_server=hook_socket_server,
         allowed_user_ids=allowed_user_ids or {111},
+        permission_callback_registry=PermissionCallbackRegistry(ttl_sec=max(permission_ttl_sec, 1)),
         permission_ttl_sec=permission_ttl_sec,
     )
     return handler, bot, hook_socket_server
@@ -73,7 +75,7 @@ class TestResponseRemovesPendingAndExpiryTask:
 
         result = await handler.handle_response(tool_use_id="tuid-a", user_id=111, decision="allow")
 
-        assert result is True
+        assert result.accepted is True
         assert "tuid-a" not in handler._pending
         assert "tuid-a" not in handler._expiry_tasks
 

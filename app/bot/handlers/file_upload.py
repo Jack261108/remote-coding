@@ -31,6 +31,12 @@ def _max_upload_size_bytes(upload_max_file_size_mb: int) -> int:
     return upload_max_file_size_mb * 1024 * 1024
 
 
+def _format_ttl(ttl_sec: int) -> str:
+    if ttl_sec % 60 == 0:
+        return f"{ttl_sec // 60} 分钟"
+    return f"{ttl_sec} 秒"
+
+
 def _metadata_exceeds_limit(file_size: int | None, *, max_size_bytes: int) -> bool:
     return file_size is not None and file_size > max_size_bytes
 
@@ -160,6 +166,7 @@ def register_file_upload_handler(
     task_service: TaskService,
     upload_queue: UploadQueueManager,
     upload_max_file_size_mb: int,
+    upload_queue_ttl_sec: int = 3600,
 ) -> None:
     @router.message(F.document)
     async def handle_document(message: Message) -> None:
@@ -217,7 +224,8 @@ def register_file_upload_handler(
                 return
             await message.answer(
                 f"⏳ 任务运行中，文件 {filename} 已加入队列，将在任务完成后处理。\n"
-                "注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失。"
+                f"注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失；"
+                f"排队文件超过 {_format_ttl(upload_queue_ttl_sec)} 未处理会过期。"
             )
             return
 
@@ -285,7 +293,8 @@ def register_file_upload_handler(
                 return
             await message.answer(
                 f"⏳ 任务运行中，文件 {filename} 已加入队列，将在任务完成后处理。\n"
-                "注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失。"
+                f"注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失；"
+                f"排队文件超过 {_format_ttl(upload_queue_ttl_sec)} 未处理会过期。"
             )
             return
 

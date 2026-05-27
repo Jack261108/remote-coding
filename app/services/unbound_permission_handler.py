@@ -12,6 +12,12 @@ from app.domain.external_session_models import UnboundPermissionState
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
 
+
+def _escape_html(text: str) -> str:
+    """Escape HTML special characters for Telegram HTML parse_mode."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 if TYPE_CHECKING:
     from aiogram import Bot
 
@@ -76,7 +82,7 @@ class UnboundPermissionHandler:
 
         for user_id in self._allowed_user_ids:
             try:
-                await self._bot.send_message(chat_id=user_id, text=message_text, reply_markup=keyboard)
+                await self._bot.send_message(chat_id=user_id, text=message_text, reply_markup=keyboard, parse_mode="HTML")
                 notified_user_ids.append(user_id)
             except Exception:
                 logger.warning(
@@ -217,7 +223,7 @@ class UnboundPermissionHandler:
         )
 
     def _format_permission_message(self, event: HookEvent) -> str:
-        """Format a human-readable permission request message."""
+        """Format a human-readable permission request message with code block for commands."""
         tool_name = event.tool or "unknown tool"
         cwd = event.cwd
         session_id = event.session_id
@@ -231,25 +237,22 @@ class UnboundPermissionHandler:
             except Exception:
                 pass
 
-        lines = ["🔐 Permission request from unbound session"]
-        if title:
-            lines.append(f"Session: {title} ({short_id})")
-        else:
-            lines.append(f"Session: {short_id}")
-        lines.append(f"Directory: {cwd}")
-        lines.append(f"Tool: {tool_name}")
+        lines = [f"🔐 [{title or short_id}] 请求权限: {_escape_html(tool_name)}"]
 
         if event.tool_input:
-            # Include a brief description from tool_input
-            description = event.tool_input.get("description") or event.tool_input.get("command") or ""
+            command = event.tool_input.get("command")
+            file_path = event.tool_input.get("file_path") or event.tool_input.get("path")
+            description = event.tool_input.get("description")
+            if command:
+                cmd_display = command if len(command) <= 300 else command[:300] + "..."
+                lines.append(f"\n<code>{_escape_html(cmd_display)}</code>")
+            elif file_path:
+                lines.append(f"\n<code>{_escape_html(file_path)}</code>")
             if description:
-                # Truncate long descriptions
-                if len(description) > 200:
-                    description = description[:200] + "..."
-                lines.append(f"Details: {description}")
+                desc_display = description if len(description) <= 150 else description[:150] + "..."
+                lines.append(f"📝 {_escape_html(desc_display)}")
 
-        lines.append("")
-        lines.append("Use the buttons below to respond.")
+        lines.append(f"📂 {_escape_html(cwd)}")
 
         return "\n".join(lines)
 

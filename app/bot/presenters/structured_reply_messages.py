@@ -59,14 +59,33 @@ def _format_tool_input_detail(tool_name: str | None, tool_input: dict | None) ->
 
 
 def build_permission_prompt(*, tool_name: str | None, tool_input: dict | None = None) -> str:
-    lines = ["权限请求"]
+    lines = ["🔐 权限请求"]
     if tool_name:
         lines.append(f"工具: {tool_name}")
 
-    detail = _format_tool_input_detail(tool_name, tool_input)
-    if detail is not None:
-        label, value = detail
-        lines.append(f"{label}: {value}")
+    # Show command/file_path using backtick code blocks (the messenger's
+    # render_markdownish_to_telegram_html converts these to <code>/<pre>).
+    if tool_input:
+        command = tool_input.get("command")
+        file_path = tool_input.get("file_path") or tool_input.get("path")
+        description = tool_input.get("description")
+        if command:
+            cmd_display = command if len(command) <= 300 else command[:300] + "..."
+            if "\n" in cmd_display:
+                lines.append(f"\n```\n{cmd_display}\n```")
+            else:
+                lines.append(f"\n`{cmd_display}`")
+        elif file_path:
+            lines.append(f"\n`{file_path}`")
+        elif description:
+            desc_display = description if len(description) <= 200 else description[:200] + "..."
+            lines.append(f"📝 {desc_display}")
+        else:
+            # Fallback: use _format_tool_input_detail for other tool types
+            detail = _format_tool_input_detail(tool_name, tool_input)
+            if detail is not None:
+                label, value = detail
+                lines.append(f"{label}: `{value}`")
 
     lines.append("")
     lines.append("请点击下方按钮选择允许或拒绝。")

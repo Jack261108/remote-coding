@@ -5,7 +5,7 @@ import logging
 from contextlib import suppress
 
 from app.adapters.process.tmux_runner import TmuxRunner
-from app.domain.models import SessionContext, TerminalSessionInfo
+from app.domain.models import SessionContext, TerminalSessionInfo, utc_now
 from app.services.auto_approve_service import AutoApproveService
 from app.services.session_lookup_service import SessionLookupService
 from app.services.session_service import SessionService
@@ -214,7 +214,7 @@ class SessionRegistryService:
     async def validate_or_reattach(self, user_id: int) -> SessionContext | None:
         """Validate that the user's session binding is alive.
 
-        If the tmux session is dead, try to find a live session with the same terminal_id.
+        If the tmux session is dead, try to find another live session for the same user/workdir.
         Returns the (possibly updated) SessionContext, or None if no live session found.
         """
         current = await self._session_service.get(user_id)
@@ -228,30 +228,38 @@ class SessionRegistryService:
         if alive:
             return current
 
-        # Tmux session is dead. Try to find a live SessionState with the same terminal_id.
+        # Tmux session is dead. Try to find another live SessionState for this user/workdir.
         logger.info(
             "tmux session dead, attempting reattach",
             extra={"user_id": user_id, "terminal_id": terminal_id},
         )
 
-        # Search persisted SessionState records
-        all_states = self._repository.list_states()
-        for state in all_states:
-            if state.terminal_id == terminal_id:
-                state_tmux = self._tmux_runner._build_session_name(state.terminal_id)
-                if await self._tmux_runner._session_exists(state_tmux):
-                    # Found a live session with matching terminal_id
-                    logger.info(
-                        "reattach: found live session",
-                        extra={"user_id": user_id, "terminal_id": terminal_id, "session_id": state.session_id},
-                    )
-                    if current.claude_session_id != state.claude_session_id:
-                        await self._session_service.bind_claude_session(
-                            user_id=user_id,
-                            claude_session_id=state.claude_session_id or state.session_id,
-                            workdir=state.workdir,
-                        )
-                    return await self._session_service.get(user_id)
+        live_states = []
+        for state in self._repository.list_states():
+            if (
+                state.user_id != user_id
+                or state.provider != current.provider
+                or state.workdir != current.workdir
+                or not state.terminal_id
+                or state.terminal_id == terminal_id
+            ):
+                continue
+            state_tmux = self._tmux_runner._build_session_name(state.terminal_id)
+            if await self._tmux_runner._session_exists(state_tmux):
+                live_states.append(state)
+
+        if live_states:
+            state = max(live_states, key=lambda candidate: (candidate.last_activity, candidate.created_at, candidate.revision))
+            logger.info(
+                "reattach: found live session",
+                extra={"user_id": user_id, "terminal_id": state.terminal_id, "session_id": state.session_id},
+            )
+            current.terminal_id = state.terminal_id
+            current.claude_session_id = state.claude_session_id or state.session_id
+            current.workdir = state.workdir
+            current.updated_at = utc_now()
+            await self._session_service.save_session_context(current)
+            return await self._session_service.get(user_id)
 
         logger.info("reattach: no live session found", extra={"user_id": user_id, "terminal_id": terminal_id})
         return None

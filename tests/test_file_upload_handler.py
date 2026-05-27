@@ -323,6 +323,8 @@ async def test_running_task_queue_reply_mentions_restart_loss() -> None:
     assert "bot" in reply
     assert "重启" in reply
     assert "丢失" in reply
+    assert "60 分钟" in reply
+    assert "过期" in reply
 
 
 @pytest.mark.asyncio

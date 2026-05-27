@@ -149,6 +149,101 @@ async def test_task_cancel_call(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_stream_timeout_marks_running_task_final(tmp_path: Path) -> None:
+    adapter = StubAdapter(
+        events=[
+            CLIEvent(type=EventType.STARTED, task_id="x"),
+        ]
+    )
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    _ = [event async for event in result.events]
+
+    marked = await service.mark_stream_timeout(result.task.task_id, user_id=1, reason="watchdog")
+
+    assert marked is True
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.status == TaskStatus.TIMEOUT
+    assert status.failure_reason == "watchdog"
+    assert status.ended_at is not None
+
+
+@pytest.mark.asyncio
+async def test_late_events_do_not_override_stream_timeout(tmp_path: Path) -> None:
+    release = asyncio.Event()
+
+    class LateExitAdapter(StubAdapter):
+        def __init__(self) -> None:
+            super().__init__([])
+
+        async def run(self, task, *, terminal_key=None, interactive=False, claude_session_id=None):
+            yield CLIEvent(type=EventType.STARTED, task_id=task.task_id)
+            await release.wait()
+            yield CLIEvent(type=EventType.EXITED, task_id=task.task_id, exit_code=0)
+
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(LateExitAdapter()),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    events = result.events.__aiter__()
+    first = await anext(events)
+    assert first.type == EventType.STARTED
+
+    marked = await service.mark_stream_timeout(result.task.task_id, user_id=1, reason="watchdog")
+    release.set()
+    remaining = [event async for event in events]
+
+    assert marked is True
+    assert remaining == []
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.status == TaskStatus.TIMEOUT
+    assert status.failure_reason == "watchdog"
+
+
+@pytest.mark.asyncio
+async def test_mark_stream_timeout_and_cancel_calls_adapter_after_marking_final(tmp_path: Path) -> None:
+    adapter = StubAdapter(
+        events=[
+            CLIEvent(type=EventType.STARTED, task_id="x"),
+        ]
+    )
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    _ = [event async for event in result.events]
+
+    marked, canceled = await service.mark_stream_timeout_and_cancel(result.task.task_id, user_id=1, reason="watchdog")
+
+    assert marked is True
+    assert canceled is True
+    assert adapter.cancel_called is True
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.status == TaskStatus.TIMEOUT
+    assert status.failure_reason == "watchdog"
+
+
+@pytest.mark.asyncio
 async def test_output_limit_truncate(tmp_path: Path) -> None:
     adapter = StubAdapter(
         events=[

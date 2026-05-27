@@ -81,6 +81,8 @@ def _build_error_message(*, event_type: EventType, task_id: str, error_text: str
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _SPINNER_INTERVAL_SEC = 1.0
 _SPINNER_INITIAL_DELAY_SEC = 3.0
+_INTERACTIVE_PUMP_CANCEL_GRACE_SEC = 5.0
+_ABANDONED_INTERACTIVE_PUMP_TASKS: set[asyncio.Task] = set()
 
 
 class RunEventStreamer:
@@ -141,6 +143,58 @@ class RunEventStreamer:
             self._queued_upload_scheduler()
         except Exception:
             logger.exception("failed to schedule queued upload processing", extra={"user_id": self._user_id})
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except Exception:
+            pass
+
+    def _forget_abandoned_interactive_pump(self, task: asyncio.Task) -> None:
+        _ABANDONED_INTERACTIVE_PUMP_TASKS.discard(task)
+        if self._interactive_pump is task:
+            self._interactive_pump = None
+        self._consume_task_result(task)
+
+    async def _cancel_interactive_pump(self, *, timeout_sec: float | None = None) -> None:
+        task = self._interactive_pump
+        if task is None:
+            return
+        task.cancel()
+        if timeout_sec is None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            if task.done() and self._interactive_pump is task:
+                self._interactive_pump = None
+            return
+
+        done, _ = await asyncio.wait({task}, timeout=timeout_sec)
+        if task in done:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            if self._interactive_pump is task:
+                self._interactive_pump = None
+            return
+        if task not in _ABANDONED_INTERACTIVE_PUMP_TASKS:
+            _ABANDONED_INTERACTIVE_PUMP_TASKS.add(task)
+            task.add_done_callback(self._forget_abandoned_interactive_pump)
+        logger.error(
+            "interactive pump cancellation grace timeout",
+            extra={"task_id": self._start.task.task_id, "user_id": self._user_id, "timeout_sec": timeout_sec},
+        )
+
+    async def force_cleanup(self, *, schedule_uploads: bool = False, cancel_timeout_sec: float | None = None) -> None:
+        if schedule_uploads:
+            self._schedule_queued_uploads_once()
+        await self._stop_spinner()
+        await self._cancel_interactive_pump(timeout_sec=cancel_timeout_sec)
 
     async def _spin(self) -> None:
         short_id = self._start.task.task_id[:8]
@@ -267,6 +321,11 @@ class RunEventStreamer:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
                     continue
 
+                if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
+                    saw_terminal = True
+                if event.type == EventType.EXITED:
+                    saw_exit = True
+
                 if self._start.interactive:
                     async with self._emit_lock:
                         await self._dispatcher.emit_presenter_messages(log_missing=True)
@@ -274,11 +333,7 @@ class RunEventStreamer:
                 await self._stop_spinner()
                 duration, truncated = await _load_status_summary(self._task_service, self._start.task.task_id, self._user_id)
 
-                if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
-                    saw_terminal = True
-
                 if event.type == EventType.EXITED:
-                    saw_exit = True
                     success_msg = _build_success_message(
                         task_id=self._start.task.task_id,
                         exit_code=event.exit_code,
@@ -313,20 +368,17 @@ class RunEventStreamer:
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, error_msg):
                         await self._messenger.answer_safely(error_msg)
         finally:
-            await self._stop_spinner()
-            if saw_exit and self._start.interactive:
-                await asyncio.sleep(0.1)
-                # Freeze the presenter's last turn ID to prevent emitting
-                # new turns that arrive after task completion (e.g., idle greetings).
-                self._presenter.freeze_reply_cursor()
-                async with self._emit_lock:
-                    await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
-                await self._dispatcher.flush()
-            if self._interactive_pump is not None:
-                self._interactive_pump.cancel()
-                try:
-                    await self._interactive_pump
-                except asyncio.CancelledError:
-                    pass
             if saw_terminal:
                 self._schedule_queued_uploads_once()
+            try:
+                await self._stop_spinner()
+                if saw_exit and self._start.interactive:
+                    await asyncio.sleep(0.1)
+                    # Freeze the presenter's last turn ID to prevent emitting
+                    # new turns that arrive after task completion (e.g., idle greetings).
+                    self._presenter.freeze_reply_cursor()
+                    async with self._emit_lock:
+                        await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
+                    await self._dispatcher.flush()
+            finally:
+                await self._cancel_interactive_pump(timeout_sec=_INTERACTIVE_PUMP_CANCEL_GRACE_SEC)

@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.services.permission_callback_registry import PermissionCallbackRegistry
+
 if TYPE_CHECKING:
     from aiogram import Bot
 
@@ -13,6 +15,11 @@ if TYPE_CHECKING:
     from app.services.external_binding_store import ExternalBindingStore
 
 logger = logging.getLogger(__name__)
+
+
+def _escape_html(text: str) -> str:
+    """Escape HTML special characters for Telegram HTML parse_mode."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 class ExternalSessionPushNotifier:
@@ -24,10 +31,16 @@ class ExternalSessionPushNotifier:
         bot: Bot,
         binding_store: ExternalBindingStore,
         retry_count: int = 1,
+        permission_callback_registry: PermissionCallbackRegistry | None = None,
     ) -> None:
         self._bot = bot
         self._binding_store = binding_store
         self._retry_count = retry_count
+        # Use `is None` rather than `or` because PermissionCallbackRegistry defines
+        # __len__, so an empty (newly-constructed) registry is falsy.
+        self._permission_callback_registry = (
+            permission_callback_registry if permission_callback_registry is not None else PermissionCallbackRegistry(ttl_sec=600)
+        )
 
     async def notify_permission_request(
         self,
@@ -42,31 +55,48 @@ class ExternalSessionPushNotifier:
     ) -> bool:
         """Send permission request notification to bound user. Returns True if delivered."""
         short_id = session_id[:8]
-        if title:
-            text = f"🔐 [{title}] 请求权限: {tool_name}\n路径: {cwd}"
-        else:
-            text = f"🔐 [{short_id}] 请求权限: {tool_name}\n路径: {cwd}"
+        header = f"🔐 [{title or short_id}] 请求权限: {tool_name}"
 
-        # Telegram callback_data max 64 bytes; truncate tool_use_id if needed
-        def _build_cb(action: str) -> str:
-            cb = f"ext_perm:{tool_use_id}:{action}"
-            if len(cb.encode()) > 64:
-                max_id_len = 64 - len(f"ext_perm::{action}".encode())
-                cb = f"ext_perm:{tool_use_id[:max_id_len]}:{action}"
-            return cb
+        # Build structured message with tool_input details in code block
+        lines = [header]
+        if tool_input:
+            # Show command or file_path in a code block for readability
+            command = tool_input.get("command")
+            file_path = tool_input.get("file_path") or tool_input.get("path")
+            description = tool_input.get("description")
+            if command:
+                # Truncate very long commands
+                cmd_display = command if len(command) <= 300 else command[:300] + "..."
+                lines.append(f"\n<code>{_escape_html(cmd_display)}</code>")
+            elif file_path:
+                lines.append(f"\n<code>{_escape_html(file_path)}</code>")
+            if description:
+                desc_display = description if len(description) <= 150 else description[:150] + "..."
+                lines.append(f"📝 {_escape_html(desc_display)}")
+        lines.append(f"📂 {_escape_html(cwd)}")
+        text = "\n".join(lines)
+
+        # Register tool_use_id via registry to get a short token
+        token = self._permission_callback_registry.register(tool_use_id)
+        logger.info(
+            "push notifier registered token=%s for tool_use_id=%s registry_id=%s",
+            token,
+            tool_use_id[:20],
+            id(self._permission_callback_registry),
+        )
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=_build_cb("allow")),
-                    InlineKeyboardButton(text="❌ Deny", callback_data=_build_cb("deny")),
+                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{token}:allow"),
+                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{token}:deny"),
                 ],
                 [
-                    InlineKeyboardButton(text="🟢 Auto-approve All", callback_data=_build_cb("auto_approve")),
+                    InlineKeyboardButton(text="🟢 Auto-approve All", callback_data=f"ext_perm:{token}:auto_approve"),
                 ],
             ]
         )
-        return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=keyboard)
+        return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=keyboard, parse_mode="HTML")
 
     async def notify_phase_change(
         self,
@@ -158,11 +188,13 @@ class ExternalSessionPushNotifier:
         """Send an informational notification (no action buttons). Returns True if delivered."""
         return await self._send_with_retry(chat_id=user_id, text=text)
 
-    async def _send_with_retry(self, *, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
+    async def _send_with_retry(
+        self, *, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None, parse_mode: str | None = None
+    ) -> bool:
         """Send message with retry on failure."""
         for attempt in range(1 + self._retry_count):
             try:
-                await self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+                await self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
                 return True
             except Exception:
                 if attempt < self._retry_count:

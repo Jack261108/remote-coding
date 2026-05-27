@@ -51,3 +51,8 @@ class PermissionCallbackRegistry:
         expired = [token for token, entry in self._entries.items() if entry.expires_at <= now]
         for token in expired:
             self._entries.pop(token, None)
+
+    def __len__(self) -> int:
+        """Return the number of live (non-expired) entries."""
+        self._prune_expired()
+        return len(self._entries)

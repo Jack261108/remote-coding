@@ -114,6 +114,8 @@ class Settings(BaseSettings):
     upload_max_file_size_mb: int = Field(20, alias="UPLOAD_MAX_FILE_SIZE_MB")
     upload_queue_max_files_per_user: int = Field(5, alias="UPLOAD_QUEUE_MAX_FILES_PER_USER")
     upload_queue_max_bytes_per_user: int | None = Field(None, alias="UPLOAD_QUEUE_MAX_BYTES_PER_USER")
+    upload_queue_ttl_sec: int = Field(3600, alias="UPLOAD_QUEUE_TTL_SEC")
+    upload_queue_cleanup_interval_sec: int = Field(60, alias="UPLOAD_QUEUE_CLEANUP_INTERVAL_SEC")
     allowed_file_extensions: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_ALLOWED_EXTENSIONS),
         alias="ALLOWED_FILE_EXTENSIONS",
@@ -251,6 +253,8 @@ class Settings(BaseSettings):
         "claude_jsonl_sync_debounce_ms",
         "claude_periodic_recheck_ms",
         "upload_max_file_size_mb",
+        "upload_queue_ttl_sec",
+        "upload_queue_cleanup_interval_sec",
         "upload_expiry_hours",
         "upload_cleanup_interval_min",
         "auto_export_threshold_chars",

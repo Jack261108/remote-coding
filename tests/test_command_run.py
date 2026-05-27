@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,7 +9,9 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.enums import ParseMode
 
-from app.bot.handlers.command_run import _ACTIVE_STREAM_TASKS, run_prompt_and_stream
+from app.bot.handlers import command_run as command_run_module
+from app.bot.handlers import run_event_streamer as run_event_streamer_module
+from app.bot.handlers.command_run import _ABANDONED_STREAM_TASKS, _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import build_permission_prompt, build_tool_progress_message, build_user_question_prompt
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
@@ -211,6 +214,727 @@ async def test_run_prompt_and_stream_keeps_background_task_referenced_until_done
     assert task in _ACTIVE_STREAM_TASKS
     await task
     assert task not in _ACTIVE_STREAM_TASKS
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_watchdog_cancels_stuck_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+
+    class StuckTaskService(DummyTaskService):
+        def __init__(self) -> None:
+            super().__init__([], _status(task_status=TaskStatus.RUNNING))
+            self.cancel_called = False
+            self.timeout_marked = False
+
+        async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+            async def stream():
+                yield CLIEvent(type=EventType.STARTED, task_id="t-stuck")
+                await asyncio.Event().wait()
+
+            task = _status(task_status=TaskStatus.RUNNING)
+            task.task_id = "t-stuck"
+            task.timeout_sec = 0.01
+            return SimpleNamespace(task=task, events=stream(), interactive=False)
+
+        async def cancel(self, task_id: str, user_id: int) -> bool:
+            self.cancel_called = True
+            return True
+
+        async def mark_stream_timeout(self, task_id: str, user_id: int, *, reason: str) -> bool:
+            self.timeout_marked = True
+            self._status.status = TaskStatus.TIMEOUT
+            return True
+
+    message = DummyMessage()
+    task_service = StuckTaskService()
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.2)
+        assert task.done()
+        assert task not in _ACTIVE_STREAM_TASKS
+        assert task_service.cancel_called is True
+        assert task_service.timeout_marked is True
+        assert task_service._status.status == TaskStatus.TIMEOUT
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_watchdog_timeout_schedules_queued_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    upload_scheduled = False
+
+    class StuckTaskService(DummyTaskService):
+        def __init__(self) -> None:
+            super().__init__([], _status(task_status=TaskStatus.RUNNING))
+
+        async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+            async def stream():
+                yield CLIEvent(type=EventType.STARTED, task_id="t-timeout-upload")
+                await asyncio.Event().wait()
+
+            task = _status(task_status=TaskStatus.RUNNING)
+            task.task_id = "t-timeout-upload"
+            task.timeout_sec = 0.01
+            return SimpleNamespace(task=task, events=stream(), interactive=False)
+
+        async def cancel(self, task_id: str, user_id: int) -> bool:
+            return True
+
+        async def mark_stream_timeout(self, task_id: str, user_id: int, *, reason: str) -> bool:
+            self._status.status = TaskStatus.TIMEOUT
+            self._status.failure_reason = reason
+            return True
+
+    def queued_upload_scheduler(message: DummyMessage, user_id: int, task_id: str) -> None:
+        nonlocal upload_scheduled
+        upload_scheduled = True
+
+    message = DummyMessage()
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=StuckTaskService(),
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+        queued_upload_scheduler=queued_upload_scheduler,
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert upload_scheduled is True
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_watchdog_ignores_late_exit_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CANCEL_GRACE_SEC", 0.005, raising=False)
+
+    class LateExitTaskService(DummyTaskService):
+        def __init__(self) -> None:
+            super().__init__([], _status(task_status=TaskStatus.RUNNING))
+
+        async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+            async def stream():
+                yield CLIEvent(type=EventType.STARTED, task_id="t-late")
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await asyncio.sleep(0.02)
+                    yield CLIEvent(type=EventType.EXITED, task_id="t-late", exit_code=0)
+
+            task = _status(task_status=TaskStatus.RUNNING)
+            task.task_id = "t-late"
+            task.timeout_sec = 0.01
+            return SimpleNamespace(task=task, events=stream(), interactive=False)
+
+        async def cancel(self, task_id: str, user_id: int) -> bool:
+            return True
+
+        async def mark_stream_timeout(self, task_id: str, user_id: int, *, reason: str) -> bool:
+            self._status.status = TaskStatus.TIMEOUT
+            self._status.failure_reason = reason
+            return True
+
+    message = DummyMessage()
+    task_service = LateExitTaskService()
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert task_service._status.status == TaskStatus.TIMEOUT
+        lifecycle = message.sent_messages[0]
+        assert not any("✅ 完成 [t-late]" in edit for edit in lifecycle.edits)
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_marks_timeout_before_cancel_race(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    cancel_released = asyncio.Event()
+
+    class CancelRaceTaskService(DummyTaskService):
+        def __init__(self) -> None:
+            super().__init__([], _status(task_status=TaskStatus.RUNNING))
+
+        async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+            async def stream():
+                yield CLIEvent(type=EventType.STARTED, task_id="t-race")
+                await cancel_released.wait()
+                if self._status.status == TaskStatus.RUNNING:
+                    self._status.status = TaskStatus.SUCCEEDED
+                yield CLIEvent(type=EventType.EXITED, task_id="t-race", exit_code=0)
+
+            task = _status(task_status=TaskStatus.RUNNING)
+            task.task_id = "t-race"
+            task.timeout_sec = 0.01
+            return SimpleNamespace(task=task, events=stream(), interactive=False)
+
+        async def cancel(self, task_id: str, user_id: int) -> bool:
+            cancel_released.set()
+            await asyncio.sleep(0.02)
+            return True
+
+        async def mark_stream_timeout(self, task_id: str, user_id: int, *, reason: str) -> bool:
+            if self._status.status != TaskStatus.RUNNING:
+                return False
+            self._status.status = TaskStatus.TIMEOUT
+            self._status.failure_reason = reason
+            return True
+
+    message = DummyMessage()
+    task_service = CancelRaceTaskService()
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert task_service._status.status == TaskStatus.TIMEOUT
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_does_not_abandon_terminal_event_when_timeout_mark_loses_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    terminal_released = asyncio.Event()
+
+    class TerminalRaceTaskService(DummyTaskService):
+        def __init__(self) -> None:
+            super().__init__([], _status(task_status=TaskStatus.RUNNING))
+            self.cancel_called = False
+
+        async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+            async def stream():
+                yield CLIEvent(type=EventType.STARTED, task_id="t-terminal-race")
+                await terminal_released.wait()
+                self._status.status = TaskStatus.SUCCEEDED
+                self._status.exit_code = 0
+                yield CLIEvent(type=EventType.EXITED, task_id="t-terminal-race", exit_code=0)
+
+            task = _status(task_status=TaskStatus.RUNNING)
+            task.task_id = "t-terminal-race"
+            task.timeout_sec = 0.01
+            return SimpleNamespace(task=task, events=stream(), interactive=False)
+
+        async def cancel(self, task_id: str, user_id: int) -> bool:
+            self.cancel_called = True
+            return True
+
+        async def mark_stream_timeout(self, task_id: str, user_id: int, *, reason: str) -> bool:
+            terminal_released.set()
+            await asyncio.sleep(0.02)
+            if self._status.status != TaskStatus.RUNNING:
+                return False
+            self._status.status = TaskStatus.TIMEOUT
+            self._status.failure_reason = reason
+            return True
+
+    message = DummyMessage()
+    task_service = TerminalRaceTaskService()
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert task_service._status.status == TaskStatus.SUCCEEDED
+        assert task_service.cancel_called is False
+        assert not any("任务流处理超时" in answer for answer in message.answers)
+        lifecycle = message.sent_messages[0]
+        assert any("✅ 完成 [t-termin]" in edit for edit in lifecycle.edits)
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_watchdog_allows_interactive_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.03, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+
+    class ProgressTaskService(DummyTaskService):
+        async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+            async def stream():
+                yield CLIEvent(type=EventType.STARTED, task_id="t-progress")
+                for index in range(3):
+                    await asyncio.sleep(0.02)
+                    yield CLIEvent(type=EventType.STDOUT, task_id="t-progress", content=f"progress {index}\n")
+                yield CLIEvent(type=EventType.EXITED, task_id="t-progress", exit_code=0)
+
+            task = _status(task_status=TaskStatus.SUCCEEDED)
+            task.task_id = "t-progress"
+            task.timeout_sec = 0.01
+            return SimpleNamespace(task=task, events=stream(), interactive=True)
+
+    message = DummyMessage()
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=ProgressTaskService([], _status(task_status=TaskStatus.SUCCEEDED), interactive=True),
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    await task
+
+    lifecycle = message.sent_messages[0]
+    assert any("✅ 完成 [t-progre]" in edit for edit in lifecycle.edits)
+    assert not any("任务流处理超时" in answer for answer in message.answers)
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_watchdog_allows_structured_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.03, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+
+    class StructuredProgressTaskService(DummyTaskService):
+        def __init__(self) -> None:
+            super().__init__([], _status(task_status=TaskStatus.SUCCEEDED), interactive=True)
+            self._cursor = 0
+
+        async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+            async def stream():
+                yield CLIEvent(type=EventType.STARTED, task_id="t-structured")
+                await asyncio.sleep(0.06)
+                yield CLIEvent(type=EventType.EXITED, task_id="t-structured", exit_code=0)
+
+            task = _status(task_status=TaskStatus.SUCCEEDED)
+            task.task_id = "t-structured"
+            task.timeout_sec = 0.01
+            return SimpleNamespace(task=task, events=stream(), interactive=True)
+
+        async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
+            self._cursor += 1
+            return self._cursor
+
+    message = DummyMessage()
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=StructuredProgressTaskService(),
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    await task
+
+    lifecycle = message.sent_messages[0]
+    assert any("✅ 完成 [t-struct]" in edit for edit in lifecycle.edits)
+    assert not any("任务流处理超时" in answer for answer in message.answers)
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_watchdog_cancels_stuck_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CANCEL_GRACE_SEC", 0.01, raising=False)
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def stuck_after_terminal(self):
+        try:
+            async for event in self._start.events:
+                if event.type == EventType.EXITED:
+                    await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+    monkeypatch.setattr(command_run_module.RunEventStreamer, "stream_events", stuck_after_terminal)
+
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t-final"),
+            CLIEvent(type=EventType.EXITED, task_id="t-final", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+    )
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert task not in _ACTIVE_STREAM_TASKS
+        assert cleanup_started.is_set()
+    finally:
+        release_cleanup.set()
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_tracks_abandoned_stream_and_force_cleans_interactive_pump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CANCEL_GRACE_SEC", 0.01, raising=False)
+    pump_task: asyncio.Task | None = None
+    inner_stream_task: asyncio.Task | None = None
+    release_stream = asyncio.Event()
+
+    async def stuck_after_terminal(self):
+        nonlocal pump_task, inner_stream_task
+        inner_stream_task = asyncio.current_task()
+        pump_task = asyncio.create_task(asyncio.Event().wait())
+        self._interactive_pump = pump_task
+        try:
+            async for event in self._start.events:
+                if event.type == EventType.EXITED:
+                    await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release_stream.wait()
+
+    monkeypatch.setattr(command_run_module.RunEventStreamer, "stream_events", stuck_after_terminal)
+
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t-pump-cleanup"),
+            CLIEvent(type=EventType.EXITED, task_id="t-pump-cleanup", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+    )
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert task not in _ACTIVE_STREAM_TASKS
+        assert inner_stream_task is not None
+        assert inner_stream_task in _ABANDONED_STREAM_TASKS
+        assert pump_task is not None
+        assert pump_task.cancelled()
+    finally:
+        release_stream.set()
+        if inner_stream_task is not None and not inner_stream_task.done():
+            await inner_stream_task
+        if pump_task is not None and not pump_task.done():
+            pump_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pump_task
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_force_cleanup_does_not_block_on_uncancellable_interactive_pump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CANCEL_GRACE_SEC", 0.01, raising=False)
+    pump_task: asyncio.Task | None = None
+    release_pump = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    async def uncancellable_pump():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release_pump.wait()
+
+    async def stuck_after_terminal(self):
+        nonlocal pump_task
+        pump_task = asyncio.create_task(uncancellable_pump())
+        self._interactive_pump = pump_task
+        try:
+            async for event in self._start.events:
+                if event.type == EventType.EXITED:
+                    await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release_stream.wait()
+
+    monkeypatch.setattr(command_run_module.RunEventStreamer, "stream_events", stuck_after_terminal)
+
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t-uncancellable-pump"),
+            CLIEvent(type=EventType.EXITED, task_id="t-uncancellable-pump", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+    )
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert task not in _ACTIVE_STREAM_TASKS
+        assert pump_task is not None
+        assert not pump_task.done()
+    finally:
+        release_pump.set()
+        release_stream.set()
+        if pump_task is not None and not pump_task.done():
+            await pump_task
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_real_finally_tracks_uncancellable_interactive_pump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.02, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CANCEL_GRACE_SEC", 0.01, raising=False)
+    monkeypatch.setattr(run_event_streamer_module, "_INTERACTIVE_PUMP_CANCEL_GRACE_SEC", 0.005, raising=False)
+    pump_task: asyncio.Task | None = None
+    release_pump = asyncio.Event()
+
+    async def uncancellable_pump(self):
+        nonlocal pump_task
+        pump_task = asyncio.current_task()
+        while not release_pump.is_set():
+            try:
+                await release_pump.wait()
+            except asyncio.CancelledError:
+                continue
+
+    monkeypatch.setattr(command_run_module.RunEventStreamer, "pump_structured_reply", uncancellable_pump)
+
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t-real-pump"),
+            CLIEvent(type=EventType.EXITED, task_id="t-real-pump", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+    )
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert pump_task is not None
+        assert pump_task in run_event_streamer_module._ABANDONED_INTERACTIVE_PUMP_TASKS
+    finally:
+        release_pump.set()
+        if pump_task is not None and not pump_task.done():
+            await pump_task
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_schedules_queued_uploads_before_interactive_finalization_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
+    upload_scheduled = False
+
+    def queued_upload_scheduler(message: DummyMessage, user_id: int, task_id: str) -> None:
+        nonlocal upload_scheduled
+        upload_scheduled = True
+
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t-final-upload"),
+            CLIEvent(type=EventType.EXITED, task_id="t-final-upload", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+    )
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+        queued_upload_scheduler=queued_upload_scheduler,
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert task not in _ACTIVE_STREAM_TASKS
+        assert upload_scheduled is True
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_schedules_queued_uploads_when_terminal_flush_is_canceled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
+    monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
+    upload_scheduled = False
+
+    async def stuck_flush(self) -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(command_run_module.PresenterOutputDispatcher, "flush", stuck_flush)
+
+    def queued_upload_scheduler(message: DummyMessage, user_id: int, task_id: str) -> None:
+        nonlocal upload_scheduled
+        upload_scheduled = True
+
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t-flush"),
+            CLIEvent(type=EventType.EXITED, task_id="t-flush", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+    )
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+        queued_upload_scheduler=queued_upload_scheduler,
+    )
+
+    assert task is not None
+    try:
+        await asyncio.sleep(0.1)
+        assert task.done()
+        assert task not in _ACTIVE_STREAM_TASKS
+        assert upload_scheduled is True
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio
@@ -1052,8 +1776,12 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, permission_callback_registry=registry)
 
     expected_prompt = build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"})
-    assert message.answers.count(expected_prompt) == 1
-    permission_index = message.answers.index(expected_prompt)
+    # The messenger renders markdownish text to Telegram HTML before sending
+    from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
+
+    expected_rendered = render_markdownish_to_telegram_html(expected_prompt)
+    assert message.answers.count(expected_rendered) == 1
+    permission_index = message.answers.index(expected_rendered)
     reply_markup = message.reply_markups[permission_index]
     assert reply_markup is not None
     assert [button.text for button in reply_markup.inline_keyboard[0]] == ["允许", "拒绝"]

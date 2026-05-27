@@ -201,6 +201,7 @@ def create_router(
             task_service=task_service,
             upload_queue=upload_queue,
             upload_max_file_size_mb=settings.upload_max_file_size_mb,
+            upload_queue_ttl_sec=settings.upload_queue_ttl_sec,
         )
 
     if result_exporter is not None:

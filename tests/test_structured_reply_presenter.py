@@ -611,7 +611,10 @@ async def test_presenter_reports_waiting_for_approval_ask_user_question_without_
 def test_build_permission_prompt_includes_specific_bash_command() -> None:
     prompt = build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"})
 
-    assert prompt == "权限请求\n工具: Bash\n命令: pwd\n\n请点击下方按钮选择允许或拒绝。"
+    assert "🔐 权限请求" in prompt
+    assert "工具: Bash" in prompt
+    assert "`pwd`" in prompt
+    assert "请点击下方按钮选择允许或拒绝。" in prompt
 
 
 def test_build_permission_prompt_falls_back_to_compact_json_preview() -> None:

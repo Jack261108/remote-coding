@@ -70,6 +70,7 @@ class TaskService:
         self._cli_factory = cli_factory
         self._semaphore = semaphore
         self._context_builder = context_builder
+        self._task_lifecycle_locks: dict[str, asyncio.Lock] = {}
         self._structured_session_resolver = StructuredSessionResolver(
             session_service=session_service,
             task_store=task_store,
@@ -105,6 +106,16 @@ class TaskService:
             cli_factory=cli_factory,
             clear_user_questions=self._user_question_service.clear_user,
         )
+
+    def _task_lifecycle_lock(self, task_id: str) -> asyncio.Lock:
+        lock = self._task_lifecycle_locks.get(task_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._task_lifecycle_locks[task_id] = lock
+        return lock
+
+    def _cleanup_task_lifecycle_lock(self, task_id: str) -> None:
+        self._task_lifecycle_locks.pop(task_id, None)
 
     # ─── Forwarded interaction methods (from TaskInteractionFacade) ────
 
@@ -326,9 +337,23 @@ class TaskService:
                     interactive=interactive,
                     claude_session_id=session.claude_session_id,
                 ):
-                    await self._apply_event(record, event)
-                    await self._task_store.save(record)
-                    yield event
+                    should_yield = True
+                    lock = self._task_lifecycle_lock(record.task_id)
+                    async with lock:
+                        if record.is_final:
+                            logger.info(
+                                "task event ignored after final status",
+                                extra={"task_id": record.task_id, "user_id": record.user_id, "event_type": event.type.value},
+                            )
+                            should_yield = False
+                        else:
+                            await self._apply_event(record, event)
+                            await self._task_store.save(record)
+                        cleanup_lock = record.is_final
+                    if cleanup_lock:
+                        self._cleanup_task_lifecycle_lock(record.task_id)
+                    if should_yield:
+                        yield event
 
         return StartTaskResult(task=record, events=event_stream(), interactive=interactive)
 
@@ -345,6 +370,75 @@ class TaskService:
         if canceled:
             logger.info("task cancel requested", extra={"task_id": task_id, "user_id": user_id, "provider": task.provider})
         return canceled
+
+    async def mark_stream_timeout(self, task_id: str, user_id: int, *, reason: str) -> bool:
+        lock = self._task_lifecycle_lock(task_id)
+        async with lock:
+            task = await self._task_store.get(task_id)
+            if task is None or task.user_id != user_id:
+                cleanup_lock = True
+                marked = False
+            elif task.is_final:
+                cleanup_lock = True
+                marked = False
+            else:
+                await self._apply_event(task, CLIEvent(type=EventType.TIMEOUT, task_id=task_id, error=reason))
+                await self._task_store.save(task)
+                cleanup_lock = task.is_final
+                marked = True
+        if cleanup_lock:
+            self._cleanup_task_lifecycle_lock(task_id)
+        return marked
+
+    async def mark_stream_timeout_and_cancel(
+        self,
+        task_id: str,
+        user_id: int,
+        *,
+        reason: str,
+        cancel_timeout_sec: float | None = None,
+    ) -> tuple[bool, bool]:
+        provider: str | None = None
+        lock = self._task_lifecycle_lock(task_id)
+        async with lock:
+            task = await self._task_store.get(task_id)
+            if task is None or task.user_id != user_id:
+                cleanup_lock = True
+                marked = False
+            elif task.is_final:
+                cleanup_lock = True
+                marked = False
+            else:
+                provider = task.provider
+                await self._apply_event(task, CLIEvent(type=EventType.TIMEOUT, task_id=task_id, error=reason))
+                await self._task_store.save(task)
+                cleanup_lock = task.is_final
+                marked = True
+        if cleanup_lock:
+            self._cleanup_task_lifecycle_lock(task_id)
+        if not marked or provider is None:
+            return marked, False
+
+        adapter = self._cli_factory.get(provider)
+        try:
+            if cancel_timeout_sec is None:
+                canceled = await adapter.cancel(task_id)
+            else:
+                canceled = await asyncio.wait_for(adapter.cancel(task_id), timeout=cancel_timeout_sec)
+        except TimeoutError:
+            logger.error(
+                "task stream timeout adapter cancel timeout",
+                extra={"task_id": task_id, "user_id": user_id, "timeout_sec": cancel_timeout_sec},
+            )
+            return marked, False
+        except Exception:
+            logger.exception("task stream timeout adapter cancel failed", extra={"task_id": task_id, "user_id": user_id})
+            return marked, False
+        if canceled:
+            logger.info(
+                "task stream timeout adapter cancel requested", extra={"task_id": task_id, "user_id": user_id, "provider": provider}
+            )
+        return marked, canceled
 
     async def get_status(self, task_id: str, user_id: int) -> TaskRecord | None:
         task = await self._task_store.get(task_id)

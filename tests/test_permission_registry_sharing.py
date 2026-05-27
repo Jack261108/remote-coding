@@ -125,17 +125,18 @@ def test_fallback_only_triggers_when_registry_is_none() -> None:
     ],
 )
 def test_unbound_handler_fallback_when_no_registry(factory_args: dict) -> None:
+    """UnboundPermissionHandler requires a registry — passing one works."""
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
     bot = MagicMock()
     hook_socket_server = MagicMock()
+    registry = PermissionCallbackRegistry(ttl_sec=600)
 
     handler = UnboundPermissionHandler(
         bot=bot,
         hook_socket_server=hook_socket_server,
         allowed_user_ids={1},
-        **factory_args,
+        permission_callback_registry=registry,
     )
 
-    assert handler._permission_callback_registry is not None
-    assert isinstance(handler._permission_callback_registry, PermissionCallbackRegistry)
+    assert handler._permission_callback_registry is registry
