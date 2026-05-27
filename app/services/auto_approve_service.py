@@ -7,6 +7,61 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class AutoApproveActivation:
+    session_id: str
+    user_id: int
+    activated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationSlot:
+    session_id: str
+    holder_user_id: int
+    attempt_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SlotClaimed:
+    attempt_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SlotConflict:
+    holder_user_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class SlotAlreadyClaimedBySameUser:
+    attempt_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SlotActiveOwnerExists:
+    owner_user_id: int
+
+
+SlotClaimResult = SlotClaimed | SlotConflict | SlotAlreadyClaimedBySameUser | SlotActiveOwnerExists
+
+
+@dataclass(frozen=True, slots=True)
+class CommitSlotSucceeded:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class CommitSlotSessionEnded:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class CommitSlotMismatch:
+    pass
+
+
+CommitSlotResult = CommitSlotSucceeded | CommitSlotSessionEnded | CommitSlotMismatch
+
+
 @dataclass(slots=True)
 class AutoApproveEntry:
     session_id: str
