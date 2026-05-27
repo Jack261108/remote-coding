@@ -154,8 +154,8 @@ class TestConcurrentFirstResponderWins:
         )
 
         # Exactly one wins
-        assert results.count(True) == 1
-        assert results.count(False) == 2
+        assert sum(1 for result in results if result.accepted) == 1
+        assert sum(1 for result in results if not result.accepted) == 2
 
         # respond_to_permission called exactly once
         assert hook_socket.respond_to_permission.call_count == 1
@@ -167,10 +167,10 @@ class TestConcurrentFirstResponderWins:
         await handler.handle_unbound_permission(event)
 
         first = await handler.handle_response(tool_use_id="tuid-late", user_id=111, decision="allow")
-        assert first is True
+        assert first.accepted is True
 
         second = await handler.handle_response(tool_use_id="tuid-late", user_id=222, decision="deny")
-        assert second is False
+        assert second.accepted is False
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +360,8 @@ class TestAgentFileWatcherForget:
         assert task.cancelled()
 
     @pytest.mark.asyncio
-    async def test_generation_based_cleanup_in_finally(self):
-        """Watcher's finally block only cleans up lock if no newer watcher registered."""
+    async def test_finished_watcher_cleans_own_lock(self):
+        """Watcher's finally block cleans up its own completed task and lock."""
         from app.services.agent_file_watcher import AgentFileWatcher
 
         session_store = MagicMock()
@@ -378,39 +378,20 @@ class TestAgentFileWatcherForget:
         )
         watcher._active = True
 
-        # Start first watcher - it will exit because session_store.get returns None
         watcher.watch(session_id="sess-gen", workdir="/tmp")
-        gen1 = watcher._task_generation["sess-gen"]
-        assert gen1 == 1
+        task = watcher._tasks["sess-gen"]
+        await task
 
-        # Let it run and complete
-        await asyncio.sleep(0.05)
-
-        # After completing with its own generation, it should clean up lock
+        assert "sess-gen" not in watcher._tasks
         assert "sess-gen" not in watcher._session_locks
 
     @pytest.mark.asyncio
     async def test_newer_watcher_prevents_old_lock_cleanup(self):
-        """If a newer watcher is registered, old watcher's finally doesn't clean lock."""
+        """If a newer watcher is registered, old cleanup doesn't remove its lock."""
         from app.services.agent_file_watcher import AgentFileWatcher
-        from app.domain.session_models import SessionPhase
-
-        call_count = [0]
-
-        def make_state(session_id):
-            call_count[0] += 1
-            if call_count[0] <= 2:
-                # First calls: return a state so the watcher loops
-                state = MagicMock()
-                state.provider = "claude_code"
-                state.phase = SessionPhase.PROCESSING
-                state.tool_calls = {}
-                state.session_id = "sess-overlap"
-                return state
-            return None
 
         session_store = MagicMock()
-        session_store.get.side_effect = make_state
+        session_store.get.return_value = None
         claude_parser = MagicMock()
         on_update = AsyncMock()
 
@@ -420,26 +401,21 @@ class TestAgentFileWatcherForget:
             on_update=on_update,
             poll_interval_sec=0.01,
         )
-        watcher._active = True
 
-        # Start first watcher
-        watcher.watch(session_id="sess-overlap", workdir="/tmp")
-        await asyncio.sleep(0.02)
+        old_task = asyncio.create_task(asyncio.sleep(100))
+        new_task = asyncio.create_task(asyncio.sleep(100))
+        watcher._tasks["sess-overlap"] = new_task
+        watcher._session_locks["sess-overlap"] = asyncio.Lock()
 
-        # Bump generation by starting a new watcher (simulating forget + re-watch)
-        watcher._task_generation["sess-overlap"] = 5
+        try:
+            watcher._cleanup_finished_session(session_id="sess-overlap", task=old_task)
 
-        # Cancel the first watcher's task
-        task = watcher._tasks.get("sess-overlap")
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        await asyncio.sleep(0)
-
-        # Because generation was bumped, the finally block should NOT have cleaned up the lock
-        # (the lock may or may not exist based on timing, but generation should still be 5)
-        assert watcher._task_generation.get("sess-overlap") == 5
+            assert watcher._tasks["sess-overlap"] is new_task
+            assert "sess-overlap" in watcher._session_locks
+        finally:
+            for task in (old_task, new_task):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass

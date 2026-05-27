@@ -1,15 +1,17 @@
-"""Tests for upload queue drain after task completion (RunEventStreamer integration)."""
+"""Tests for upload queue drain after task completion."""
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from app.domain.file_models import FileUploadResult
-from app.services.upload_queue_manager import UploadQueueManager
+from app.bot.handlers.file_upload import process_pending_uploads, schedule_pending_upload_processing
+from app.domain.file_models import FileUploadResult, FileValidationError
+from app.services.upload_queue import UploadQueueManager
+from tests.fakes.telegram import DummyMessage
 
 
 @pytest.fixture
@@ -23,39 +25,10 @@ def file_receiver() -> AsyncMock:
 
 
 @pytest.fixture
-def session_service() -> AsyncMock:
+def session_service(tmp_path: Path) -> AsyncMock:
     svc = AsyncMock()
-    session = MagicMock()
-    session.workdir = "/tmp/work"
-    svc.get = AsyncMock(return_value=session)
+    svc.get = AsyncMock(return_value=SimpleNamespace(workdir=str(tmp_path)))
     return svc
-
-
-@pytest.fixture
-def messenger() -> AsyncMock:
-    m = AsyncMock()
-    m.send_message_safely = AsyncMock()
-    return m
-
-
-def _make_streamer(
-    *,
-    upload_queue: UploadQueueManager,
-    file_receiver: AsyncMock,
-    session_service: AsyncMock,
-    messenger: AsyncMock,
-    user_id: int = 42,
-):
-    """Create a minimal RunEventStreamer for testing drain logic."""
-    from app.bot.handlers.run_event_streamer import RunEventStreamer
-
-    streamer = object.__new__(RunEventStreamer)
-    streamer._upload_queue = upload_queue
-    streamer._file_receiver = file_receiver
-    streamer._session_service = session_service
-    streamer._messenger = messenger
-    streamer._user_id = user_id
-    return streamer
 
 
 @pytest.mark.asyncio
@@ -63,11 +36,10 @@ async def test_drain_processes_all_queued_files(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
-    messenger: AsyncMock,
 ) -> None:
     """After task completion, drain processes all queued files in FIFO order."""
-    upload_queue.enqueue(42, "first.py", b"aaa", 3)
-    upload_queue.enqueue(42, "second.py", b"bbb", 3)
+    await upload_queue.enqueue(user_id=42, filename="first.py", data=b"aaa")
+    await upload_queue.enqueue(user_id=42, filename="second.py", data=b"bbb")
 
     file_receiver.receive_file = AsyncMock(
         side_effect=[
@@ -75,23 +47,24 @@ async def test_drain_processes_all_queued_files(
             FileUploadResult(filename="second.py", size_bytes=3, path=Path("/tmp/work/.tg-uploads/42/second.py")),
         ]
     )
+    message = DummyMessage(user_id=42)
 
-    streamer = _make_streamer(
-        upload_queue=upload_queue,
+    await process_pending_uploads(
+        message,
         file_receiver=file_receiver,
         session_service=session_service,
-        messenger=messenger,
+        upload_queue=upload_queue,
+        user_id=42,
     )
 
-    await streamer._process_queued_uploads(42)
-
     assert file_receiver.receive_file.await_count == 2
-    # Check FIFO order
     calls = file_receiver.receive_file.await_args_list
     assert calls[0].kwargs["filename"] == "first.py"
     assert calls[1].kwargs["filename"] == "second.py"
-    # Confirmation messages sent
-    assert messenger.send_message_safely.await_count == 2
+    assert message.answers == [
+        "✅ 文件已接收: first.py (3 B)",
+        "✅ 文件已接收: second.py (3 B)",
+    ]
 
 
 @pytest.mark.asyncio
@@ -99,34 +72,32 @@ async def test_failed_file_does_not_block_subsequent(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
-    messenger: AsyncMock,
 ) -> None:
     """A failed file in the queue should not prevent subsequent files from processing."""
-    upload_queue.enqueue(42, "fail.py", b"bad", 3)
-    upload_queue.enqueue(42, "good.py", b"ok", 2)
+    await upload_queue.enqueue(user_id=42, filename="fail.py", data=b"bad")
+    await upload_queue.enqueue(user_id=42, filename="good.py", data=b"ok")
 
     file_receiver.receive_file = AsyncMock(
         side_effect=[
-            Exception("disk full"),
+            FileValidationError(filename="fail.py", reason="invalid content"),
             FileUploadResult(filename="good.py", size_bytes=2, path=Path("/tmp/work/.tg-uploads/42/good.py")),
         ]
     )
+    message = DummyMessage(user_id=42)
 
-    streamer = _make_streamer(
-        upload_queue=upload_queue,
+    await process_pending_uploads(
+        message,
         file_receiver=file_receiver,
         session_service=session_service,
-        messenger=messenger,
+        upload_queue=upload_queue,
+        user_id=42,
     )
 
-    await streamer._process_queued_uploads(42)
-
-    # Both files were attempted
     assert file_receiver.receive_file.await_count == 2
-    # Messages: one error for fail.py, one success for good.py
-    calls = messenger.send_message_safely.await_args_list
-    assert any("fail.py" in str(c) for c in calls)
-    assert any("good.py" in str(c) for c in calls)
+    assert message.answers == [
+        "❌ 文件被拒绝: fail.py\n原因: invalid content",
+        "✅ 文件已接收: good.py (2 B)",
+    ]
 
 
 @pytest.mark.asyncio
@@ -134,20 +105,20 @@ async def test_drain_no_op_when_queue_empty(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
-    messenger: AsyncMock,
 ) -> None:
     """Drain does nothing when there are no queued files."""
-    streamer = _make_streamer(
-        upload_queue=upload_queue,
+    message = DummyMessage(user_id=42)
+
+    await process_pending_uploads(
+        message,
         file_receiver=file_receiver,
         session_service=session_service,
-        messenger=messenger,
+        upload_queue=upload_queue,
+        user_id=42,
     )
 
-    await streamer._process_queued_uploads(42)
-
     file_receiver.receive_file.assert_not_awaited()
-    messenger.send_message_safely.assert_not_awaited()
+    assert message.answers == []
 
 
 @pytest.mark.asyncio
@@ -155,26 +126,23 @@ async def test_schedule_creates_background_task(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
-    messenger: AsyncMock,
 ) -> None:
-    """_schedule_queued_upload_processing creates an asyncio task that drains the queue."""
-    upload_queue.enqueue(42, "scheduled.py", b"data", 4)
+    """schedule_pending_upload_processing creates an asyncio task that drains the queue."""
+    await upload_queue.enqueue(user_id=42, filename="scheduled.py", data=b"data")
 
     file_receiver.receive_file = AsyncMock(
         return_value=FileUploadResult(filename="scheduled.py", size_bytes=4, path=Path("/tmp/work/.tg-uploads/42/scheduled.py"))
     )
+    message = DummyMessage(user_id=42)
 
-    streamer = _make_streamer(
-        upload_queue=upload_queue,
+    task = schedule_pending_upload_processing(
+        message,
         file_receiver=file_receiver,
         session_service=session_service,
-        messenger=messenger,
+        upload_queue=upload_queue,
+        user_id=42,
     )
-
-    streamer._schedule_queued_upload_processing()
-
-    # Let the scheduled task run
-    await asyncio.sleep(0.05)
+    await task
 
     file_receiver.receive_file.assert_awaited_once()
-    messenger.send_message_safely.assert_awaited_once()
+    assert message.answers == ["✅ 文件已接收: scheduled.py (4 B)"]

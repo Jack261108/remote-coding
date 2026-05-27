@@ -36,7 +36,7 @@ def _make_hook_event(
     cwd: str = "/home/user/project",
     event: str = "PreToolUse",
     status: str = "running_tool",
-    pid: int | None = 1234,
+    pid: int | None = None,
     tool: str | None = None,
     tool_use_id: str | None = None,
     tool_input: dict | None = None,
