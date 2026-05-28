@@ -197,6 +197,9 @@ async def test_presenter_reports_pending_permission_once() -> None:
             tool_use_id="tool-1",
             permission_key="tool-1:Bash",
             tool_name="Bash",
+            session_id="claude-session-1",
+            tool_input={"command": "pwd"},
+            user_id=1,
         )
     ]
     assert second == []
@@ -220,6 +223,9 @@ async def test_presenter_reemits_pending_permission_until_delivery_acknowledged(
         tool_use_id="tool-1",
         permission_key="tool-1:Bash",
         tool_name="Bash",
+        session_id="claude-session-1",
+        tool_input={"command": "pwd"},
+        user_id=1,
     )
 
     await presenter.prime()
@@ -228,6 +234,41 @@ async def test_presenter_reemits_pending_permission_until_delivery_acknowledged(
 
     assert first == [expected]
     assert second == [expected]
+
+
+@pytest.mark.asyncio
+async def test_presenter_pending_permission_includes_session_metadata_without_completed_turn() -> None:
+    pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    session = _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending)
+    session.workdir = "/tmp/project"
+    session.title = "Project Session"
+    session.user_id = 99
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                session,
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        PermissionRequestOutput(
+            text=build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"}),
+            tool_use_id="tool-1",
+            permission_key="tool-1:Bash",
+            tool_name="Bash",
+            session_id="claude-session-1",
+            tool_input={"command": "pwd"},
+            cwd="/tmp/project",
+            session_title="Project Session",
+            user_id=99,
+        )
+    ]
 
 
 @pytest.mark.asyncio

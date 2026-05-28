@@ -13,6 +13,7 @@ from app.services.task_service import TaskService
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
     from app.services.auto_approve_service import AutoApproveService
+    from app.services.permission_gateway import CallbackResponse, PermissionGateway
     from app.services.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,21 @@ def build_permission_keyboard(*, tool_use_id: str, permission_callback_registry:
     )
 
 
+async def _apply_callback_response(callback: CallbackQuery, response: CallbackResponse) -> None:
+    if callback.message is not None:
+        if response.edit_message_text:
+            try:
+                await callback.message.edit_text(response.edit_message_text)
+            except Exception:
+                logger.exception("failed to edit permission callback message")
+        if response.clear_keyboard:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                logger.exception("failed to clear permission inline keyboard")
+    await callback.answer(response.alert_text, show_alert=response.show_alert)
+
+
 def register_permission_handlers(
     router,
     *,
@@ -69,10 +85,15 @@ def register_permission_handlers(
     hook_socket_server: HookSocketServer | None = None,
     structured_session_store: SessionStore | None = None,
     permission_callback_registry: PermissionCallbackRegistry | None = None,
+    permission_gateway: PermissionGateway | None = None,
 ):
     @router.message(Command("approve"))
     async def command_approve(message: Message) -> None:
         user_id = message.from_user.id if message.from_user else 0
+        if permission_gateway is not None:
+            await message.answer(await permission_gateway.handle_approve_command(user_id=user_id))
+            return
+
         ok, text = await task_service.respond_to_pending_permission(user_id=user_id, decision="allow")
         if ok:
             await message.answer(text)
@@ -82,6 +103,10 @@ def register_permission_handlers(
     @router.message(Command("deny"))
     async def command_deny(message: Message, command: CommandObject) -> None:
         user_id = message.from_user.id if message.from_user else 0
+        reason = (command.args or "").strip() or None
+        if permission_gateway is not None:
+            await message.answer(await permission_gateway.handle_deny_command(user_id=user_id, reason=reason))
+            return
 
         if auto_approve_service is not None:
             deactivated_count = await auto_approve_service.deactivate_all_for_user(user_id)
@@ -89,7 +114,6 @@ def register_permission_handlers(
                 await message.answer("已关闭自动批准，后续权限请求将正常提示")
                 return
 
-        reason = (command.args or "").strip() or None
         ok, text = await task_service.respond_to_pending_permission(user_id=user_id, decision="deny", reason=reason)
         if ok:
             await message.answer(text)
@@ -99,6 +123,11 @@ def register_permission_handlers(
     @router.callback_query(F.data.startswith(f"{_PERMISSION_CALLBACK_PREFIX}:"))
     async def callback_permission(callback: CallbackQuery) -> None:
         user_id = callback.from_user.id if callback.from_user else 0
+        if permission_gateway is not None:
+            response = await permission_gateway.handle_callback(data=callback.data or "", user_id=user_id)
+            await _apply_callback_response(callback, response)
+            return
+
         parsed = parse_permission_callback_data(callback.data)
         if parsed is None:
             await callback.answer("无效的权限操作", show_alert=True)

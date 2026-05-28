@@ -31,17 +31,17 @@ class ParserRegistry:
 
     async def consume(self, token: str, user_id: int, action: PermissionAction) -> object:
         self.consumes.append((token, user_id, action))
-        return ConsumeConsumed(_snapshot(action=action))
+        return ConsumeConsumed(_snapshot(token=token, action=action))
 
     async def mark_resolved(self, token: str) -> bool:
         self.resolved.append(token)
         return True
 
 
-def _snapshot(*, action: PermissionAction) -> PermissionCallbackRecordSnapshot:
+def _snapshot(*, token: str, action: PermissionAction) -> PermissionCallbackRecordSnapshot:
     now = datetime(2026, 5, 28, tzinfo=timezone.utc)
     return PermissionCallbackRecordSnapshot(
-        token=TOKEN,
+        token=token,
         tool_use_id=TOOL_USE_ID,
         session_id=SESSION_ID,
         origin=SessionOrigin.OWNED,
@@ -74,36 +74,36 @@ def _gateway(registry: ParserRegistry) -> PermissionGateway:
 
 async def _dispatch(snapshot: object, action: PermissionAction) -> object:
     assert isinstance(snapshot, PermissionCallbackRecordSnapshot)
-    assert snapshot.token == TOKEN
     assert snapshot.decision is action
     return BackendDispatchSucceeded()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "data",
+    ("data", "expected_token"),
     [
-        f"perm:{TOKEN}:allow",
-        f"perm:allow:{TOKEN}",
-        f"ext_perm:{TOKEN}:allow",
+        (f"perm:{TOKEN}:allow", TOKEN),
+        (f"perm:allow:{TOKEN}", TOKEN),
+        (f"ext_perm:{TOKEN}:allow", TOKEN),
+        ("perm:short:allow", "short"),
     ],
 )
-async def test_all_callback_shapes_route_through_same_dispatch_table(data: str) -> None:
+async def test_all_callback_shapes_route_through_same_dispatch_table(data: str, expected_token: str) -> None:
     registry = ParserRegistry()
     gateway = _gateway(registry)
 
     response = await gateway.handle_callback(data=data, user_id=USER_ID)
 
     assert response.alert_text == "已批准"
-    assert registry.consumes == [(TOKEN, USER_ID, PermissionAction.ALLOW)]
-    assert registry.resolved == [TOKEN]
+    assert registry.consumes == [(expected_token, USER_ID, PermissionAction.ALLOW)]
+    assert registry.resolved == [expected_token]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "data",
     [
-        "perm:not-a-token:allow",
+        "perm:bad.token:allow",
         f"perm:{TOKEN}:approve",
         "perm:allow",
         "ext_perm:token-only",

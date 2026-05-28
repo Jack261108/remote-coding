@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_NEW_CALLBACK_RE = re.compile(r"^perm:([A-Za-z0-9_-]{8}):(allow|deny|auto_approve)$")
+_NEW_CALLBACK_RE = re.compile(r"^perm:([A-Za-z0-9_-]{1,64}):(allow|deny|auto_approve)$")
 _LEGACY_PERMISSION_RE = re.compile(r"^perm:(allow|deny|auto_approve):([^:]+)$")
 _LEGACY_EXTERNAL_RE = re.compile(r"^ext_perm:([^:]+):(allow|deny|auto_approve)$")
 

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from app.services.auto_approve_service import AutoApproveService
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_callback_registry import PermissionCallbackRegistry
+    from app.services.permission_gateway import CallbackResponse, PermissionGateway
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 logger = logging.getLogger(__name__)
@@ -20,14 +21,30 @@ _STALE_EXTERNAL_PERMISSION_CALLBACK_TEXT = (
 )
 
 
+async def _apply_callback_response(callback: CallbackQuery, response: CallbackResponse) -> None:
+    if callback.message is not None:
+        if response.edit_message_text:
+            try:
+                await callback.message.edit_text(response.edit_message_text)
+            except Exception:
+                logger.exception("failed to edit external permission callback message")
+        if response.clear_keyboard:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                logger.exception("failed to clear external permission inline keyboard")
+    await callback.answer(response.alert_text, show_alert=response.show_alert)
+
+
 def register_external_permission_handler(
     router: Router,
     *,
     hook_socket_server: HookSocketServer,
     unbound_permission_handler: UnboundPermissionHandler,
-    permission_callback_registry: PermissionCallbackRegistry,
+    permission_callback_registry: PermissionCallbackRegistry | None = None,
     external_uq_state: ExternalUserQuestionState | None = None,
     auto_approve_service: AutoApproveService | None = None,
+    permission_gateway: PermissionGateway | None = None,
 ) -> None:
     @router.callback_query(F.data.startswith("ext_perm:"))
     async def handle_external_permission_callback(callback: CallbackQuery) -> None:
@@ -40,6 +57,17 @@ def register_external_permission_handler(
         _, token, decision = parts
         if decision not in ("allow", "deny", "auto_approve"):
             await callback.answer("Invalid decision", show_alert=True)
+            return
+
+        if permission_gateway is not None:
+            user_id = callback.from_user.id if callback.from_user else 0
+            response = await permission_gateway.handle_callback(data=f"perm:{token}:{decision}", user_id=user_id)
+            await _apply_callback_response(callback, response)
+            return
+
+        if permission_callback_registry is None:
+            logger.error("permission_callback_registry is not configured")
+            await callback.answer("Permission service is not configured", show_alert=True)
             return
 
         # Resolve short token to full tool_use_id
@@ -217,8 +245,8 @@ def register_external_permission_handler(
         # Confirm to user
         await callback.answer(f"✅ Selected: {selected_label}")
 
-        # Edit original message to reflect selection
-        if callback.message:
+        # Edit original message to reflect selection when the Telegram message object supports it.
+        if callback.message and hasattr(callback.message, "edit_text"):
             original_text = callback.message.text or ""
             await callback.message.edit_text(f"{original_text}\n\n✅ Selected: {selected_label} (by you)")
 

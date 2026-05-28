@@ -35,6 +35,9 @@ class StructuredReplySnapshotLoader:
             return _StructuredSnapshot(session_id=None, turn_id=None, reply="", session_available=False)
 
         phase = session.phase.value
+        session_user_id = session.user_id if getattr(session, "user_id", None) is not None else self._user_id
+        session_cwd = getattr(session, "workdir", None)
+        session_title = getattr(session, "title", None)
         tool_states = tuple(self._collect_tool_states(session))
         pending = getattr(session, "pending_permission", None)
         pending_permission_key = None
@@ -62,6 +65,9 @@ class StructuredReplySnapshotLoader:
                 pending_permission_tool_use_id=pending_permission_tool_use_id,
                 pending_permission_tool_name=pending_permission_tool_name,
                 pending_permission_tool_input=pending_permission_tool_input,
+                cwd=session_cwd,
+                session_title=session_title,
+                user_id=session_user_id,
                 tool_states=tool_states,
             )
 
@@ -92,6 +98,9 @@ class StructuredReplySnapshotLoader:
                 pending_permission_tool_use_id=pending_permission_tool_use_id,
                 pending_permission_tool_name=pending_permission_tool_name,
                 pending_permission_tool_input=pending_permission_tool_input,
+                cwd=session_cwd,
+                session_title=session_title,
+                user_id=session_user_id,
                 tool_states=tool_states,
                 turn_ended_at=turn.ended_at,
             )
@@ -115,6 +124,9 @@ class StructuredReplySnapshotLoader:
             pending_permission_tool_use_id=pending_permission_tool_use_id,
             pending_permission_tool_name=pending_permission_tool_name,
             pending_permission_tool_input=pending_permission_tool_input,
+            cwd=session_cwd,
+            session_title=session_title,
+            user_id=session_user_id,
             tool_states=tool_states,
         )
 

@@ -253,6 +253,11 @@ class StructuredReplyPresenter:
                     tool_use_id=snapshot.pending_permission_tool_use_id,
                     permission_key=snapshot.pending_permission_key,
                     tool_name=snapshot.pending_permission_tool_name,
+                    session_id=snapshot.session_id,
+                    tool_input=snapshot.pending_permission_tool_input,
+                    cwd=snapshot.cwd,
+                    session_title=snapshot.session_title,
+                    user_id=snapshot.user_id,
                 )
             )
         elif snapshot.phase != SessionPhase.WAITING_FOR_APPROVAL.value:

@@ -21,6 +21,7 @@ import pytest
 from app.bootstrap_mixins import HookHandlingMixin, _StageShortCircuit
 from app.domain.hook_models import HookEvent
 from app.services.auto_approve_service import AutoApproveService
+from app.services.permission_callback_registry import AutoApproveOutcome
 
 
 def _make_event(*, tool: str = "Edit", expects_response: bool = True) -> HookEvent:
@@ -78,6 +79,9 @@ class _Container(HookHandlingMixin):
         self.hook_socket_server = SimpleNamespace(
             respond_to_permission=AsyncMock(return_value=True),
         )
+        self.permission_gateway = SimpleNamespace(
+            maybe_auto_approve=AsyncMock(return_value=AutoApproveOutcome.NOT_APPROVED),
+        )
         self.bot = MagicMock()
         self.bot.send_message = AsyncMock()
 
@@ -101,8 +105,18 @@ class _Container(HookHandlingMixin):
 
 async def _make_container(*, auto_approve_active: bool) -> _Container:
     container = _Container()
-    if auto_approve_active:
-        await container.auto_approve_service.activate("sess-123", user_id=42)
+
+    async def maybe_auto_approve(**kwargs):  # noqa: ANN202
+        if not auto_approve_active:
+            return AutoApproveOutcome.NOT_APPROVED
+        await container.hook_socket_server.respond_to_permission(
+            tool_use_id=kwargs["tool_use_id"],
+            decision="allow",
+            reason="auto-approved",
+        )
+        return AutoApproveOutcome.APPROVED
+
+    container.permission_gateway.maybe_auto_approve.side_effect = maybe_auto_approve
     return container
 
 

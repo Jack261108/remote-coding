@@ -7,6 +7,7 @@ import pytest
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
 from app.bot.handlers.command_permission import register_permission_handlers
+from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.handlers.command_user_question import register_user_question_handlers
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
@@ -21,6 +22,8 @@ from app.domain.session_models import (
     ToolCallRecord,
     ToolStatus,
 )
+from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
+from app.services.external_user_question_state import ExternalUserQuestionState, PendingExternalUserQuestion
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 from app.services.permission_callback_registry import PermissionCallbackRegistry
@@ -428,6 +431,91 @@ async def test_external_permission_auto_approve_reports_session_ended_without_ac
     assert not auto_approve_service.is_active("ended-external-session", user_id=1)
     assert callback.answers == [(fallback, False)]
     assert message.edits == [f"Permission request\n\n{fallback}"]
+
+
+@pytest.mark.asyncio
+async def test_external_permission_callback_delegates_reformatted_payload_to_gateway() -> None:
+    class FakeGateway:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        async def handle_callback(self, *, data: str, user_id: int):  # noqa: ANN202
+            self.calls.append((data, user_id))
+            return SimpleNamespace(alert_text="已批准", show_alert=False, edit_message_text="", clear_keyboard=True)
+
+    gateway = FakeGateway()
+    router = DummyRouter()
+    register_external_permission_handler(
+        router,
+        hook_socket_server=SimpleNamespace(respond_to_permission=AsyncMock(return_value=True)),
+        unbound_permission_handler=SimpleNamespace(),
+        permission_callback_registry=PermissionCallbackRegistry(ttl_sec=60),
+        permission_gateway=gateway,
+    )
+
+    message = DummyMessage("Permission request")
+    callback = DummyCallbackQuery("ext_perm:tok12345:allow", user_id=321, message=message)
+
+    await router.callback_handlers[0](callback)
+
+    assert gateway.calls == [("perm:tok12345:allow", 321)]
+    assert callback.answers == [("已批准", False)]
+    assert message.edited_reply_markups == [None]
+
+
+@pytest.mark.asyncio
+async def test_external_user_question_callback_still_uses_existing_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_inject(pane_id: str, *, option_index: int, submit_after: bool) -> tuple[bool, str]:
+        assert pane_id == "%1"
+        assert option_index == 0
+        assert submit_after is True
+        return True, ""
+
+    monkeypatch.setattr("app.adapters.process.pty_injector.inject_option_selection", fake_inject)
+
+    hook_socket_server = SimpleNamespace(respond_to_permission=AsyncMock(return_value=True))
+    external_uq_state = ExternalUserQuestionState()
+    external_uq_state.store(
+        PendingExternalUserQuestion(
+            tool_use_id="tool-question",
+            session_id="external-session",
+            user_id=1,
+            pid=123,
+            pane_id="%1",
+            prompts=(
+                UserQuestionPrompt(
+                    tool_use_id="tool-question",
+                    question_index=0,
+                    total_questions=1,
+                    question="Pick one",
+                    options=(UserQuestionOption(label="A"),),
+                ),
+            ),
+        )
+    )
+
+    router = DummyRouter()
+    register_external_permission_handler(
+        router,
+        hook_socket_server=hook_socket_server,
+        unbound_permission_handler=SimpleNamespace(),
+        permission_callback_registry=PermissionCallbackRegistry(ttl_sec=60),
+        permission_gateway=SimpleNamespace(handle_callback=AsyncMock()),
+        external_uq_state=external_uq_state,
+    )
+
+    message = DummyMessage("Question")
+    callback = DummyCallbackQuery("ext_uq:tool-question:0", user_id=1, message=message)
+
+    await router.callback_handlers[1](callback)
+
+    hook_socket_server.respond_to_permission.assert_awaited_once_with(
+        tool_use_id="tool-question",
+        decision="allow",
+        reason="AskUserQuestion answered via Telegram by user 1",
+    )
+    assert callback.answers == [("✅ Selected: A", False)]
+    assert external_uq_state.get("tool-question") is None
 
 
 @pytest.mark.asyncio

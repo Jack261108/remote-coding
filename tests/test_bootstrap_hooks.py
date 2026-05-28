@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,6 +13,8 @@ from app.domain.models import TaskRecord, TaskStatus
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.interrupt_watcher import InterruptWatcher
+from app.services.permission_callback_registry import PermissionCallbackRegistry
+from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
 async def wait_for_jsonl_sync_idle(container: AppContainer, session_id: str) -> None:
@@ -1303,3 +1306,83 @@ async def test_start_restores_agent_file_watcher_for_existing_subagent_container
         assert ("claude-session-1", str(tmp_path)) in seen_agent_watch
     finally:
         await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_unbound_permission_handler_requires_gateway_before_notify(tmp_path) -> None:
+    handler = UnboundPermissionHandler(
+        bot=type("Bot", (), {"send_message": AsyncMock()})(),
+        hook_socket_server=type("HookSocket", (), {"respond_to_permission": AsyncMock(return_value=True)})(),
+        allowed_user_ids={1},
+        permission_callback_registry=PermissionCallbackRegistry(ttl_sec=60),
+    )
+
+    event = HookEvent(
+        session_id="session-before-gateway",
+        cwd=str(tmp_path),
+        event="PermissionRequest",
+        status="waiting_for_approval",
+        tool="Bash",
+        tool_input={"command": "pwd"},
+        tool_use_id="tool-before-gateway",
+    )
+
+    with pytest.raises(RuntimeError, match="gateway"):
+        await handler.handle_unbound_permission(event)
+
+
+@pytest.mark.asyncio
+async def test_session_end_runs_unified_permission_cleanup_in_order(tmp_path) -> None:
+    seen: list[str] = []
+
+    class _AAS:
+        async def deactivate_all_for_session(self, session_id: str) -> int:
+            seen.append(f"aas_deactivate:{session_id}")
+            return 1
+
+        async def release_all_slots_for_session(self, session_id: str) -> int:
+            seen.append(f"aas_release:{session_id}")
+            return 1
+
+    class _Registry:
+        async def invalidate_session(self, session_id: str) -> int:
+            seen.append(f"registry:{session_id}")
+            return 1
+
+    class _Unbound:
+        async def invalidate_session(self, session_id: str) -> int:
+            seen.append(f"unbound:{session_id}")
+            return 1
+
+    class _BindingStore:
+        def remove_binding(self, session_id: str) -> None:
+            seen.append(f"binding:{session_id}")
+
+    class _Container(AppContainer):
+        def __init__(self) -> None:
+            self.settings = type("Settings", (), {"allowed_workdirs": [str(tmp_path)]})()
+            self.auto_approve_service = _AAS()
+            self.permission_callback_registry = _Registry()
+            self.unbound_permission_handler = _Unbound()
+            self.external_binding_store = _BindingStore()
+
+        async def _bind_hook_session(self, event: HookEvent) -> None:
+            seen.append(f"bind:{event.session_id}")
+
+        async def _dispatch_session_event(self, event: SessionEvent) -> None:
+            seen.append(f"dispatch:{event.session_id}")
+
+        def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
+            seen.append(f"sync:{session_id}")
+
+    container = _Container()
+
+    await container._resolve_ownership_stage(HookEvent(session_id="ended-session", cwd=str(tmp_path), event="SessionEnd", status="ended"))
+
+    assert seen[:5] == [
+        "aas_deactivate:ended-session",
+        "aas_release:ended-session",
+        "registry:ended-session",
+        "unbound:ended-session",
+        "binding:ended-session",
+    ]
