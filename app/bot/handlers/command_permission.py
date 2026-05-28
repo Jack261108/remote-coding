@@ -83,11 +83,9 @@ def register_permission_handlers(
     async def command_deny(message: Message, command: CommandObject) -> None:
         user_id = message.from_user.id if message.from_user else 0
 
-        # Check if auto-approve is active for user's current session
         if auto_approve_service is not None:
-            state = await task_service.get_structured_session(user_id, log_missing=False)
-            if state is not None and auto_approve_service.get_active_session_for_user(user_id, state.session_id):
-                auto_approve_service.deactivate(state.session_id)
+            deactivated_count = await auto_approve_service.deactivate_all_for_user(user_id)
+            if deactivated_count > 0:
                 await message.answer("已关闭自动批准，后续权限请求将正常提示")
                 return
 
@@ -171,8 +169,11 @@ def register_permission_handlers(
 
         # Activate auto-approve if we resolved the session_id
         if session_id and auto_approve_service is not None:
-            auto_approve_service.activate(session_id, user_id=user_id)
-            confirmation = "🟢 已开启自动批准，本次会话后续权限请求将自动通过\n发送 /deny 可关闭"
+            activated = await auto_approve_service.activate_if_session_alive(user_id=user_id, session_id=session_id)
+            if activated:
+                confirmation = "🟢 已开启自动批准，本次会话后续权限请求将自动通过\n发送 /deny 可关闭"
+            else:
+                confirmation = f"{text}\n自动批准未开启：会话已结束"
             if callback.message is not None:
                 await callback.message.answer(confirmation)
             await callback.answer(confirmation)

@@ -318,7 +318,7 @@ class SessionRegistryService:
             )
             # Clear auto-approve state for the stale session
             if self._auto_approve_service is not None and ctx.claude_session_id:
-                self._auto_approve_service.clear_session(ctx.claude_session_id)
+                await self._auto_approve_service.clear_session(ctx.claude_session_id)
             ctx.claude_session_id = None
             if not ctx.is_owner:
                 # Non-owner: fully detach

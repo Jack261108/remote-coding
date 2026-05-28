@@ -76,18 +76,28 @@ def register_external_permission_handler(
                     return
 
             # Activate auto-approve for the session
+            activation_failed = False
             if session_id and auto_approve_service is not None:
-                auto_approve_service.activate(session_id, user_id=user_id)
+                activation_failed = not await auto_approve_service.activate_if_session_alive(user_id=user_id, session_id=session_id)
 
-            await callback.answer("🟢 Auto-approve activated")
+            if activation_failed:
+                confirmation = "Permission approved, but session ended; auto-approve was not activated."
+                edit_suffix = confirmation
+                log_message = "external permission approved but auto-approve not activated"
+            else:
+                confirmation = "🟢 Auto-approve activated"
+                edit_suffix = "🟢 已开启自动批准，本次会话后续权限请求将自动通过\n发送 /deny 可关闭"
+                log_message = "external permission auto-approve activated"
+
+            await callback.answer(confirmation)
 
             # Edit original message to reflect decision
             if callback.message:
                 original_text = callback.message.text or ""
-                await callback.message.edit_text(f"{original_text}\n\n🟢 已开启自动批准，本次会话后续权限请求将自动通过\n发送 /deny 可关闭")
+                await callback.message.edit_text(f"{original_text}\n\n{edit_suffix}")
 
             logger.info(
-                "external permission auto-approve activated",
+                log_message,
                 extra={
                     "tool_use_id": tool_use_id,
                     "session_id": session_id,

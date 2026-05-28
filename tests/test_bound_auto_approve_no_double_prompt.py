@@ -66,7 +66,7 @@ def _make_ownership(state: str = "bound", user_id: int = 42):
 class _Container(HookHandlingMixin):
     """Minimal container satisfying HookHandlingMixin's hasattr() checks."""
 
-    def __init__(self, *, auto_approve_active: bool) -> None:
+    def __init__(self) -> None:
         self.push_notifier = MagicMock()
         self.push_notifier.notify_permission_request = AsyncMock(return_value=True)
         self.push_notifier.notify_user_question = AsyncMock(return_value=True)
@@ -74,8 +74,6 @@ class _Container(HookHandlingMixin):
         self.push_notifier.notify_session_end = AsyncMock(return_value=True)
 
         self.auto_approve_service = AutoApproveService()
-        if auto_approve_active:
-            self.auto_approve_service.activate("sess-123", user_id=42)
 
         self.hook_socket_server = SimpleNamespace(
             respond_to_permission=AsyncMock(return_value=True),
@@ -101,11 +99,18 @@ class _Container(HookHandlingMixin):
         pass
 
 
+async def _make_container(*, auto_approve_active: bool) -> _Container:
+    container = _Container()
+    if auto_approve_active:
+        await container.auto_approve_service.activate("sess-123", user_id=42)
+    return container
+
+
 @pytest.mark.asyncio
 async def test_auto_approve_check_raises_short_circuit() -> None:
     """_run_auto_approve_check must raise _StageShortCircuit when auto-approve
     is active, terminating the pipeline before push_notification runs."""
-    container = _Container(auto_approve_active=True)
+    container = await _make_container(auto_approve_active=True)
     event = _make_event(tool="Edit")
 
     with pytest.raises(_StageShortCircuit, match="auto-approved"):
@@ -115,7 +120,7 @@ async def test_auto_approve_check_raises_short_circuit() -> None:
 @pytest.mark.asyncio
 async def test_auto_approve_check_does_not_short_circuit_when_inactive() -> None:
     """When auto-approve is NOT active, the stage must NOT raise."""
-    container = _Container(auto_approve_active=False)
+    container = await _make_container(auto_approve_active=False)
     event = _make_event(tool="Edit")
 
     # Should return normally (no exception)
@@ -125,7 +130,7 @@ async def test_auto_approve_check_does_not_short_circuit_when_inactive() -> None
 @pytest.mark.asyncio
 async def test_auto_approve_check_does_not_short_circuit_for_ask_user_question() -> None:
     """AskUserQuestion is never auto-approved; the stage must not raise."""
-    container = _Container(auto_approve_active=True)
+    container = await _make_container(auto_approve_active=True)
     event = _make_event(tool="AskUserQuestion")
 
     await container._run_auto_approve_check(event)
@@ -135,7 +140,7 @@ async def test_auto_approve_check_does_not_short_circuit_for_ask_user_question()
 async def test_pipeline_bound_auto_approve_skips_push_notification() -> None:
     """Full pipeline integration: with auto-approve active on a bound session,
     the push_notification stage must NOT execute."""
-    container = _Container(auto_approve_active=True)
+    container = await _make_container(auto_approve_active=True)
     event = _make_event(tool="Edit")
     ownership = _make_ownership(state="bound", user_id=42)
 
@@ -178,7 +183,7 @@ async def test_pipeline_bound_auto_approve_skips_push_notification() -> None:
 async def test_pipeline_bound_no_auto_approve_sends_push_notification() -> None:
     """Without auto-approve, the push_notification stage runs normally and
     sends the permission-button prompt."""
-    container = _Container(auto_approve_active=False)
+    container = await _make_container(auto_approve_active=False)
     event = _make_event(tool="Edit")
     ownership = _make_ownership(state="bound", user_id=42)
 
@@ -207,7 +212,7 @@ async def test_pipeline_bound_no_auto_approve_sends_push_notification() -> None:
 async def test_pipeline_owned_auto_approve_short_circuits() -> None:
     """Owned sessions short-circuit on auto-approve, but session_binding,
     event_dispatch, and jsonl_sync still run before the short-circuit."""
-    container = _Container(auto_approve_active=True)
+    container = await _make_container(auto_approve_active=True)
     event = _make_event(tool="Edit")
     ownership = _make_ownership(state="owned", user_id=42)
 

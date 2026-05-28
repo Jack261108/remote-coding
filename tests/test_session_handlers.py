@@ -206,6 +206,42 @@ async def test_permission_handlers_approve_current_pending_request(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_permission_handlers_deny_disables_all_auto_approve_state(tmp_path) -> None:
+    from app.services.auto_approve_service import AutoApproveService, SlotClaimed
+
+    class FakeTaskService:
+        def __init__(self) -> None:
+            self.denials: list[tuple[int, str, str | None]] = []
+
+        async def get_structured_session(self, user_id: int, *, log_missing: bool = True):  # noqa: ANN202
+            return SimpleNamespace(session_id="current-session")
+
+        async def respond_to_pending_permission(self, *, user_id: int, decision: str, reason: str | None = None, **kwargs):  # noqa: ANN202, ARG002
+            self.denials.append((user_id, decision, reason))
+            return False, "no pending permission"
+
+    service = FakeTaskService()
+    auto_approve_service = AutoApproveService()
+    await auto_approve_service.activate("other-session", user_id=1)
+    slot = await auto_approve_service.try_claim_slot(session_id="slot-session", user_id=1)
+    assert isinstance(slot, SlotClaimed)
+
+    router = DummyRouter()
+    register_permission_handlers(router, task_service=service, auto_approve_service=auto_approve_service)
+    deny_handler = router.handlers[1]
+    message = DummyMessage("/deny", user_id=1)
+    command = SimpleNamespace(args=None)
+
+    await deny_handler(message, command)
+
+    assert message.answers == ["已关闭自动批准，后续权限请求将正常提示"]
+    assert service.denials == []
+    assert not auto_approve_service.is_active("other-session", user_id=1)
+    assert all(slot.holder_user_id != 1 for slot in auto_approve_service._slots.values())
+    assert auto_approve_service.deny_epoch(1) == 1
+
+
+@pytest.mark.asyncio
 async def test_permission_handlers_report_stale_pending_request(tmp_path) -> None:
     tmux_runner = TmuxRunner(data_dir=str(tmp_path))
     factory = StubFactory(StubAdapter(events=[]))
@@ -294,6 +330,104 @@ async def test_permission_callback_handler_approves_pending_request(tmp_path) ->
     assert message.answers == ["已批准权限请求: Bash"]
     assert message.edited_reply_markups == [None]
     assert callback.answers == [("已批准权限请求: Bash", False)]
+
+
+@pytest.mark.asyncio
+async def test_permission_callback_auto_approve_reports_session_ended_without_activation() -> None:
+    from app.services.auto_approve_service import AutoApproveService
+
+    class FakeTaskService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, str, str]] = []
+
+        async def respond_to_pending_permission(self, *, user_id: int, decision: str, expected_tool_use_id: str, **kwargs):  # noqa: ANN202, ARG002
+            self.calls.append((user_id, decision, expected_tool_use_id))
+            return True, "已批准权限请求: Bash"
+
+        async def get_structured_session(self, user_id: int, *, log_missing: bool = True):  # noqa: ANN202, ARG002
+            return None
+
+    class FakeSessionStore:
+        def find_by_pending_tool_use_id(self, tool_use_id: str):  # noqa: ANN202
+            return SimpleNamespace(session_id="ended-session")
+
+        def get(self, session_id: str):  # noqa: ANN202
+            return SimpleNamespace(user_id=1)
+
+    service = FakeTaskService()
+    auto_approve_service = AutoApproveService()
+    await auto_approve_service.deactivate_all_for_session("ended-session")
+
+    router = DummyRouter()
+    registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345", clock=lambda: 100.0)
+    token = registry.register("tool-1")
+    register_permission_handlers(
+        router,
+        task_service=service,
+        auto_approve_service=auto_approve_service,
+        structured_session_store=FakeSessionStore(),
+        permission_callback_registry=registry,
+    )
+    callback_handler = router.callback_handlers[0]
+    message = DummyMessage("权限请求")
+    callback = DummyCallbackQuery(f"perm:auto_approve:{token}", message=message)
+
+    await callback_handler(callback)
+
+    fallback = "已批准权限请求: Bash\n自动批准未开启：会话已结束"
+    assert service.calls == [(1, "allow", "tool-1")]
+    assert not auto_approve_service.is_active("ended-session", user_id=1)
+    assert message.answers == [fallback]
+    assert message.edited_reply_markups == [None]
+    assert callback.answers == [(fallback, False)]
+
+
+@pytest.mark.asyncio
+async def test_external_permission_auto_approve_reports_session_ended_without_activation() -> None:
+    from app.bot.handlers.external_permission import register_external_permission_handler
+    from app.services.auto_approve_service import AutoApproveService
+    from tests.fakes.telegram import DummyAnswerMessage
+
+    class FakeHookSocketServer:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str | None]] = []
+
+        async def get_session_id_for_tool_use_id(self, tool_use_id: str) -> str:
+            return "ended-external-session"
+
+        async def respond_to_permission(self, *, tool_use_id: str, decision: str, reason: str | None = None) -> bool:
+            self.calls.append((tool_use_id, decision, reason))
+            return True
+
+    class FakeUnboundPermissionHandler:
+        def is_unbound_permission(self, tool_use_id: str) -> bool:  # noqa: ARG002
+            return False
+
+    hook_socket_server = FakeHookSocketServer()
+    auto_approve_service = AutoApproveService()
+    await auto_approve_service.deactivate_all_for_session("ended-external-session")
+
+    router = DummyRouter()
+    registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345", clock=lambda: 100.0)
+    token = registry.register("tool-1")
+    register_external_permission_handler(
+        router,
+        hook_socket_server=hook_socket_server,
+        unbound_permission_handler=FakeUnboundPermissionHandler(),
+        permission_callback_registry=registry,
+        auto_approve_service=auto_approve_service,
+    )
+    callback_handler = router.callback_handlers[0]
+    message = DummyAnswerMessage("Permission request")
+    callback = DummyCallbackQuery(f"ext_perm:{token}:auto_approve", message=message)
+
+    await callback_handler(callback)
+
+    fallback = "Permission approved, but session ended; auto-approve was not activated."
+    assert hook_socket_server.calls == [("tool-1", "allow", "auto-approve activated by user 1")]
+    assert not auto_approve_service.is_active("ended-external-session", user_id=1)
+    assert callback.answers == [(fallback, False)]
+    assert message.edits == [f"Permission request\n\n{fallback}"]
 
 
 @pytest.mark.asyncio

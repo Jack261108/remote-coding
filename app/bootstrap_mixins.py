@@ -184,7 +184,7 @@ class HookHandlingMixin(AppContainerBase):
 
             # Clear auto-approve state on session end
             if event.event == "SessionEnd" and hasattr(self, "auto_approve_service"):
-                self.auto_approve_service.clear_session(event.session_id)
+                await self.auto_approve_service.clear_session(event.session_id)
 
             # Remove external binding on session end so /list doesn't show stale entries
             if event.event == "SessionEnd" and hasattr(self, "external_binding_store"):
@@ -484,13 +484,13 @@ class HookHandlingMixin(AppContainerBase):
         )
 
         # Send silent notification to the user who activated auto-approve
-        entry = self.auto_approve_service._sessions.get(event.session_id)
-        if entry is not None:
+        active_user_id = self.auto_approve_service.get_active_user_for_session(event.session_id)
+        if active_user_id is not None:
             tool_name = event.tool or "Unknown"
             input_summary = self._format_auto_approve_input_summary(event)
             message = f"🟢 Auto-approved: {tool_name} {input_summary}".strip()
             try:
-                await self.bot.send_message(chat_id=entry.user_id, text=message)
+                await self.bot.send_message(chat_id=active_user_id, text=message)
             except Exception:
                 logger.warning(
                     "Failed to send auto-approve notification",
