@@ -6,7 +6,6 @@ from datetime import datetime
 from app.bot.presenters.structured_reply_messages import (
     build_compacting_progress_message,
     build_file_tool_aggregate_status_message,  # noqa: F401
-    build_permission_prompt,
     build_subagent_aggregate_status_message,  # noqa: F401
     build_task_list_status_message,  # noqa: F401
     build_tool_progress_message,  # noqa: F401
@@ -246,13 +245,15 @@ class StructuredReplyPresenter:
         ):
             messages.append(
                 PermissionRequestOutput(
-                    text=build_permission_prompt(
-                        tool_name=snapshot.pending_permission_tool_name,
-                        tool_input=snapshot.pending_permission_tool_input,
-                    ),
+                    text="",
                     tool_use_id=snapshot.pending_permission_tool_use_id,
                     permission_key=snapshot.pending_permission_key,
                     tool_name=snapshot.pending_permission_tool_name,
+                    session_id=snapshot.session_id,
+                    tool_input=snapshot.pending_permission_tool_input,
+                    cwd=snapshot.cwd,
+                    session_title=snapshot.session_title,
+                    user_id=snapshot.user_id,
                 )
             )
         elif snapshot.phase != SessionPhase.WAITING_FOR_APPROVAL.value:

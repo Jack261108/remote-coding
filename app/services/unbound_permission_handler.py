@@ -6,23 +6,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
+from app.bot.presenters.permission_message_builder import PermissionPromptInput
+from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.external_session_models import UnboundPermissionState
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
-
-
-def _escape_html(text: str) -> str:
-    """Escape HTML special characters for Telegram HTML parse_mode."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
+from app.services.permission_callback_registry import SessionOrigin
+from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 
 if TYPE_CHECKING:
     from aiogram import Bot
 
     from app.adapters.claude.hook_socket_server import HookSocketServer
-    from app.services.permission_callback_registry import PermissionCallbackRegistry
+    from app.services.permission_gateway import PermissionGateway
 
 logger = logging.getLogger(__name__)
 
@@ -46,28 +42,28 @@ class UnboundPermissionHandler:
         bot: Bot,
         hook_socket_server: HookSocketServer,
         allowed_user_ids: set[int],
-        permission_callback_registry: PermissionCallbackRegistry,
         permission_ttl_sec: int = 600,
         title_resolver: Callable[[str, str], str | None] | None = None,
     ) -> None:
         self._bot = bot
         self._hook_socket_server = hook_socket_server
         self._allowed_user_ids = allowed_user_ids
-        self._permission_callback_registry = permission_callback_registry
         self._permission_ttl_sec = permission_ttl_sec
         self._title_resolver = title_resolver
+        self._permission_gateway: PermissionGateway | None = None
         self._pending: dict[str, UnboundPermissionState] = {}
         self._expiry_tasks: dict[str, asyncio.Task[None]] = {}
         self._state_lock = asyncio.Lock()
 
-    async def handle_unbound_permission(self, event: HookEvent) -> None:
-        """Broadcast permission request to all allowed users.
+    def set_permission_gateway(self, gateway: PermissionGateway) -> None:
+        self._permission_gateway = gateway
 
-        Steps:
-        1. Send message to each user in allowed_user_ids with session_id, cwd, tool info
-        2. Track the pending state
-        3. Schedule TTL expiry task
-        """
+    async def handle_unbound_permission(self, event: HookEvent) -> None:
+        """Broadcast permission request to all allowed users."""
+        gateway = self._permission_gateway
+        if gateway is None:
+            raise RuntimeError("permission gateway is not configured")
+
         tool_use_id = event.tool_use_id or ""
         if not tool_use_id:
             logger.warning(
@@ -76,34 +72,49 @@ class UnboundPermissionHandler:
             )
             return
 
-        notified_user_ids: list[int] = []
-        message_text = self._format_permission_message(event)
-        keyboard = self._build_permission_keyboard(tool_use_id)
-
-        for user_id in self._allowed_user_ids:
-            try:
-                await self._bot.send_message(chat_id=user_id, text=message_text, reply_markup=keyboard, parse_mode="HTML")
-                notified_user_ids.append(user_id)
-            except Exception:
-                logger.warning(
-                    "failed to send unbound permission notification",
-                    extra={"user_id": user_id, "tool_use_id": tool_use_id},
-                )
-
-        async with self._state_lock:
-            state = UnboundPermissionState(
-                session_id=event.session_id,
-                tool_use_id=tool_use_id,
-                notified_user_ids=notified_user_ids,
-                responded=False,
-                responded_by=None,
-                created_at=utc_now(),
+        result = await gateway.register_for_button(
+            tool_use_id=tool_use_id,
+            session_id=event.session_id,
+            origin=SessionOrigin.EXTERNAL_UNBOUND,
+            candidate_user_id=None,
+        )
+        if isinstance(result, RegisterForButtonConflict):
+            logger.warning(
+                "unbound permission registration conflict",
+                extra={"tool_use_id": tool_use_id, "session_id": event.session_id},
             )
-            self._pending[tool_use_id] = state
+            await self._broadcast(
+                text=result.advisory_text,
+                reply_markup=result.keyboard,
+                parse_mode=None,
+            )
+            return
+        if not isinstance(result, RegisterForButtonOk):
+            raise RuntimeError("unexpected permission gateway registration result")
 
-            # Schedule expiry
+        state = UnboundPermissionState(
+            session_id=event.session_id,
+            tool_use_id=tool_use_id,
+            notified_user_ids=[],
+            responded=False,
+            responded_by=None,
+            created_at=utc_now(),
+        )
+        async with self._state_lock:
+            self._pending[tool_use_id] = state
             self._cancel_expiry_task(tool_use_id)
             self._expiry_tasks[tool_use_id] = asyncio.create_task(self._expire_permission(tool_use_id))
+
+        prompt = PermissionPromptInput(
+            tool_name=event.tool or "unknown tool",
+            tool_input=event.tool_input,
+            cwd=event.cwd,
+            session_id=event.session_id,
+            session_title=self._resolve_title(event.session_id, event.cwd),
+        )
+        text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
+        notified_user_ids = await self._broadcast(text=text, reply_markup=result.keyboard, parse_mode="HTML")
+        state.notified_user_ids.extend(notified_user_ids)
 
         logger.info(
             "unbound permission broadcast sent",
@@ -120,29 +131,26 @@ class UnboundPermissionHandler:
         Uses a short critical section to pop pending and cancel expiry,
         then forwards the decision outside the lock.
         """
-        forwarded = False
         async with self._state_lock:
             state = self._pending.pop(tool_use_id, None)
             if state is None or state.responded:
-                # Put it back if it was there but already responded
                 if state is not None and state.responded:
                     self._pending[tool_use_id] = state
                 return UnboundPermissionResponseResult(accepted=False, forwarded=False)
 
             state.responded = True
             state.responded_by = user_id
-
-            # Cancel expiry task since we have a response
             self._cancel_expiry_task(tool_use_id)
 
-        # Forward decision outside lock
+        forwarded = False
         try:
-            await self._hook_socket_server.respond_to_permission(
-                tool_use_id=tool_use_id,
-                decision=decision,
-                reason=f"responded by user {user_id}",
+            forwarded = bool(
+                await self._hook_socket_server.respond_to_permission(
+                    tool_use_id=tool_use_id,
+                    decision=decision,
+                    reason=f"responded by user {user_id}",
+                )
             )
-            forwarded = True
         except Exception:
             logger.warning(
                 "failed to forward unbound permission decision",
@@ -167,6 +175,14 @@ class UnboundPermissionHandler:
         )
         return UnboundPermissionResponseResult(accepted=True, forwarded=forwarded)
 
+    async def invalidate_session(self, session_id: str) -> int:
+        async with self._state_lock:
+            tool_use_ids = [tool_use_id for tool_use_id, state in self._pending.items() if state.session_id == session_id]
+            for tool_use_id in tool_use_ids:
+                self._pending.pop(tool_use_id, None)
+                self._cancel_expiry_task(tool_use_id)
+            return len(tool_use_ids)
+
     async def _expire_permission(self, tool_use_id: str) -> None:
         """Auto-deny on TTL expiry if no response received."""
         try:
@@ -182,7 +198,6 @@ class UnboundPermissionHandler:
                 return
             session_id = state.session_id
 
-        # Auto-deny outside lock
         await self._hook_socket_server.respond_to_permission(
             tool_use_id=tool_use_id,
             decision="deny",
@@ -203,58 +218,26 @@ class UnboundPermissionHandler:
         state = self._pending.get(tool_use_id)
         return state.session_id if state is not None else None
 
-    def _build_permission_keyboard(self, tool_use_id: str) -> InlineKeyboardMarkup:
-        """Build inline keyboard with approve, deny, and auto-approve buttons.
-
-        Uses the permission callback registry to generate short tokens.
-        """
-        token = self._permission_callback_registry.register(tool_use_id)
-
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{token}:allow"),
-                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{token}:deny"),
-                ],
-                [
-                    InlineKeyboardButton(text="🟢 Auto-approve All", callback_data=f"ext_perm:{token}:auto_approve"),
-                ],
-            ]
-        )
-
-    def _format_permission_message(self, event: HookEvent) -> str:
-        """Format a human-readable permission request message with code block for commands."""
-        tool_name = event.tool or "unknown tool"
-        cwd = event.cwd
-        session_id = event.session_id
-        short_id = session_id[:8]
-
-        # Resolve session title
-        title: str | None = None
-        if self._title_resolver is not None:
+    async def _broadcast(self, *, text: str, reply_markup: object, parse_mode: str | None) -> list[int]:
+        notified_user_ids: list[int] = []
+        for user_id in self._allowed_user_ids:
             try:
-                title = self._title_resolver(session_id, cwd)
+                await self._bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+                notified_user_ids.append(user_id)
             except Exception:
-                pass
+                logger.warning(
+                    "failed to send unbound permission notification",
+                    extra={"user_id": user_id},
+                )
+        return notified_user_ids
 
-        lines = [f"🔐 [{title or short_id}] 请求权限: {_escape_html(tool_name)}"]
-
-        if event.tool_input:
-            command = event.tool_input.get("command")
-            file_path = event.tool_input.get("file_path") or event.tool_input.get("path")
-            description = event.tool_input.get("description")
-            if command:
-                cmd_display = command if len(command) <= 300 else command[:300] + "..."
-                lines.append(f"\n<code>{_escape_html(cmd_display)}</code>")
-            elif file_path:
-                lines.append(f"\n<code>{_escape_html(file_path)}</code>")
-            if description:
-                desc_display = description if len(description) <= 150 else description[:150] + "..."
-                lines.append(f"📝 {_escape_html(desc_display)}")
-
-        lines.append(f"📂 {_escape_html(cwd)}")
-
-        return "\n".join(lines)
+    def _resolve_title(self, session_id: str, cwd: str) -> str | None:
+        if self._title_resolver is None:
+            return None
+        try:
+            return self._title_resolver(session_id, cwd)
+        except Exception:
+            return None
 
     def _cancel_expiry_task(self, tool_use_id: str) -> None:
         """Cancel an existing expiry task for the given tool_use_id."""

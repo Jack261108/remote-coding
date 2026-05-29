@@ -9,12 +9,14 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from app.bot.presenters.permission_message_builder import PermissionMessageBuilder
+from app.services.permission_gateway import RegisterForButtonOk
 from app.domain.hook_models import HookEvent
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 # --- Strategies ---
@@ -53,8 +55,13 @@ allowed_user_sets = st.frozensets(user_ids, min_size=1, max_size=5)
 tool_names = st.sampled_from(["Read", "Write", "Bash", "Edit", "ListDir", "Grep"])
 
 
-def _registry(token: str = "tokTest123") -> PermissionCallbackRegistry:
-    return PermissionCallbackRegistry(ttl_sec=300, token_factory=lambda: token)
+class FakePermissionGateway:
+    def __init__(self) -> None:
+        self.message_builder = PermissionMessageBuilder()
+        self.keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Allow", callback_data="perm:tokTest123:allow")]])
+
+    async def register_for_button(self, **kwargs):  # noqa: ANN003, ANN202
+        return RegisterForButtonOk(keyboard=self.keyboard)
 
 
 def permission_events(
@@ -106,8 +113,8 @@ class TestUnboundPermissionBroadcast:
             bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids=set(allowed_users),
-            permission_callback_registry=_registry(),
         )
+        handler.set_permission_gateway(FakePermissionGateway())
 
         asyncio.run(handler.handle_unbound_permission(event))
 
@@ -150,8 +157,8 @@ class TestFirstResponderWins:
             bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={responders[0]},
-            permission_callback_registry=_registry(),
         )
+        handler.set_permission_gateway(FakePermissionGateway())
 
         asyncio.run(handler.handle_unbound_permission(event))
 
@@ -202,8 +209,8 @@ class TestPermissionApprovalNoAutoBind:
             bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={approver},
-            permission_callback_registry=_registry(),
         )
+        handler.set_permission_gateway(FakePermissionGateway())
 
         # Handle permission and approve
         asyncio.run(handler.handle_unbound_permission(event))
@@ -239,7 +246,6 @@ class TestTTLExpiryAutoDenies:
             hook_socket_server=hook_socket_server,
             allowed_user_ids={12345},
             permission_ttl_sec=0,  # Expire immediately
-            permission_callback_registry=_registry(),
         )
 
         event = HookEvent(
@@ -250,6 +256,7 @@ class TestTTLExpiryAutoDenies:
             tool="Bash",
             tool_use_id="tuid001",
         )
+        handler.set_permission_gateway(FakePermissionGateway())
 
         await handler.handle_unbound_permission(event)
 
@@ -276,7 +283,6 @@ class TestTTLExpiryAutoDenies:
             hook_socket_server=hook_socket_server,
             allowed_user_ids={12345},
             permission_ttl_sec=0,
-            permission_callback_registry=_registry(),
         )
 
         event = HookEvent(
@@ -287,6 +293,7 @@ class TestTTLExpiryAutoDenies:
             tool="Write",
             tool_use_id="tuid002",
         )
+        handler.set_permission_gateway(FakePermissionGateway())
 
         await handler.handle_unbound_permission(event)
         await asyncio.sleep(0.05)
@@ -315,7 +322,6 @@ class TestResponseRemovesPendingAndExpiry:
             hook_socket_server=hook_socket_server,
             allowed_user_ids={42},
             permission_ttl_sec=60,
-            permission_callback_registry=_registry(),
         )
 
         event = HookEvent(
@@ -326,6 +332,7 @@ class TestResponseRemovesPendingAndExpiry:
             tool="Bash",
             tool_use_id="tuid-cleanup01",
         )
+        handler.set_permission_gateway(FakePermissionGateway())
 
         await handler.handle_unbound_permission(event)
         assert "tuid-cleanup01" in handler._pending
@@ -356,7 +363,6 @@ class TestExpiryRemovesPendingAndExpiry:
             hook_socket_server=hook_socket_server,
             allowed_user_ids={42},
             permission_ttl_sec=0,
-            permission_callback_registry=_registry(),
         )
 
         event = HookEvent(
@@ -367,6 +373,7 @@ class TestExpiryRemovesPendingAndExpiry:
             tool="Bash",
             tool_use_id="tuid-expiry01",
         )
+        handler.set_permission_gateway(FakePermissionGateway())
 
         await handler.handle_unbound_permission(event)
         assert "tuid-expiry01" in handler._pending
@@ -393,7 +400,6 @@ class TestConcurrentUnboundResponses:
             hook_socket_server=hook_socket_server,
             allowed_user_ids={100, 200, 300},
             permission_ttl_sec=60,
-            permission_callback_registry=_registry(),
         )
 
         event = HookEvent(
@@ -404,6 +410,7 @@ class TestConcurrentUnboundResponses:
             tool="Bash",
             tool_use_id="tuid-concurrent01",
         )
+        handler.set_permission_gateway(FakePermissionGateway())
 
         await handler.handle_unbound_permission(event)
 

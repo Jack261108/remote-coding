@@ -19,6 +19,7 @@ from app.adapters.storage.memory import MemoryTaskStore
 from app.adapters.storage.upload_store import UploadStoreAdapter
 from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
+from app.bot.presenters.permission_message_builder import PermissionMessageBuilder
 from app.bot.router import create_router
 from app.config.settings import Settings
 from app.bootstrap_base import AppContainerBase
@@ -52,6 +53,7 @@ from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 from app.services.auto_approve_service import AutoApproveService
 from app.services.permission_callback_registry import PermissionCallbackRegistry
+from app.services.permission_gateway import PermissionGateway
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
 from app.services.upload_queue import UploadQueueManager
@@ -110,6 +112,8 @@ class AppContainer(
         self.permission_callback_registry = PermissionCallbackRegistry(
             ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
         )
+        self.auto_approve_service = AutoApproveService()
+        self.permission_message_builder = PermissionMessageBuilder()
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
         self.session_context_store = FileSessionContextStore(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
@@ -177,7 +181,6 @@ class AppContainer(
             hook_socket_server=self.hook_socket_server,
             context_builder=self.context_builder,
         )
-        self.auto_approve_service = AutoApproveService()
         self.session_registry = SessionRegistryService(
             session_service=self.session_service,
             lookup=self.structured_session_store._lookup,
@@ -205,17 +208,29 @@ class AppContainer(
             projects_dir=Path("~/.claude/projects").expanduser(),
             sync_callback=self.sync_claude_session,
         )
-        self.push_notifier = ExternalSessionPushNotifier(
-            bot=self.bot,
-            binding_store=self.external_binding_store,
-            retry_count=settings.push_notification_retry_count,
-        )
         self.unbound_permission_handler = UnboundPermissionHandler(
             bot=self.bot,
             hook_socket_server=self.hook_socket_server,
             allowed_user_ids=settings.allowed_user_id_set,
-            permission_callback_registry=self.permission_callback_registry,
+            permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
+        )
+        self.permission_gateway = PermissionGateway(
+            registry=self.permission_callback_registry,
+            auto_approve_service=self.auto_approve_service,
+            task_service=self.task_service,
+            hook_socket_server=self.hook_socket_server,
+            unbound_responder=self.unbound_permission_handler,
+            settings=settings,
+            bot=self.bot,
+            message_builder=self.permission_message_builder,
+        )
+        self.unbound_permission_handler.set_permission_gateway(self.permission_gateway)
+        self.push_notifier = ExternalSessionPushNotifier(
+            bot=self.bot,
+            binding_store=self.external_binding_store,
+            permission_gateway=self.permission_gateway,
+            retry_count=settings.push_notification_retry_count,
         )
 
         # External user question state for PTY injection
@@ -308,8 +323,7 @@ class AppContainer(
             hook_socket_server=self.hook_socket_server,
             unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
-            auto_approve_service=self.auto_approve_service,
-            permission_callback_registry=self.permission_callback_registry,
+            permission_gateway=self.permission_gateway,
             session_scanner=SessionScanner(),
             claude_paths=self.claude_paths,
         )

@@ -5,7 +5,10 @@ from typing import TYPE_CHECKING
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.services.permission_callback_registry import PermissionCallbackRegistry
+from app.bot.presenters.permission_message_builder import PermissionPromptInput
+from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
+from app.services.permission_callback_registry import SessionOrigin
+from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -13,13 +16,9 @@ if TYPE_CHECKING:
     from app.domain.session_models import SessionPhase
     from app.domain.user_question_models import UserQuestionPrompt
     from app.services.external_binding_store import ExternalBindingStore
+    from app.services.permission_gateway import PermissionGateway
 
 logger = logging.getLogger(__name__)
-
-
-def _escape_html(text: str) -> str:
-    """Escape HTML special characters for Telegram HTML parse_mode."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 class ExternalSessionPushNotifier:
@@ -31,16 +30,12 @@ class ExternalSessionPushNotifier:
         bot: Bot,
         binding_store: ExternalBindingStore,
         retry_count: int = 1,
-        permission_callback_registry: PermissionCallbackRegistry | None = None,
+        permission_gateway: PermissionGateway | None = None,
     ) -> None:
         self._bot = bot
         self._binding_store = binding_store
         self._retry_count = retry_count
-        # Use `is None` rather than `or` because PermissionCallbackRegistry defines
-        # __len__, so an empty (newly-constructed) registry is falsy.
-        self._permission_callback_registry = (
-            permission_callback_registry if permission_callback_registry is not None else PermissionCallbackRegistry(ttl_sec=600)
-        )
+        self._permission_gateway = permission_gateway
 
     async def notify_permission_request(
         self,
@@ -54,49 +49,34 @@ class ExternalSessionPushNotifier:
         title: str | None = None,
     ) -> bool:
         """Send permission request notification to bound user. Returns True if delivered."""
-        short_id = session_id[:8]
-        header = f"🔐 [{title or short_id}] 请求权限: {tool_name}"
+        gateway = self._permission_gateway
+        if gateway is None:
+            raise RuntimeError("permission gateway is not configured")
 
-        # Build structured message with tool_input details in code block
-        lines = [header]
-        if tool_input:
-            # Show command or file_path in a code block for readability
-            command = tool_input.get("command")
-            file_path = tool_input.get("file_path") or tool_input.get("path")
-            description = tool_input.get("description")
-            if command:
-                # Truncate very long commands
-                cmd_display = command if len(command) <= 300 else command[:300] + "..."
-                lines.append(f"\n<code>{_escape_html(cmd_display)}</code>")
-            elif file_path:
-                lines.append(f"\n<code>{_escape_html(file_path)}</code>")
-            if description:
-                desc_display = description if len(description) <= 150 else description[:150] + "..."
-                lines.append(f"📝 {_escape_html(desc_display)}")
-        lines.append(f"📂 {_escape_html(cwd)}")
-        text = "\n".join(lines)
-
-        # Register tool_use_id via registry to get a short token
-        token = self._permission_callback_registry.register(tool_use_id)
-        logger.info(
-            "push notifier registered token=%s for tool_use_id=%s registry_id=%s",
-            token,
-            tool_use_id[:20],
-            id(self._permission_callback_registry),
+        result = await gateway.register_for_button(
+            tool_use_id=tool_use_id,
+            session_id=session_id,
+            origin=SessionOrigin.EXTERNAL_BOUND,
+            candidate_user_id=user_id,
         )
+        if isinstance(result, RegisterForButtonConflict):
+            logger.warning(
+                "bound permission registration conflict",
+                extra={"tool_use_id": tool_use_id, "session_id": session_id, "user_id": user_id},
+            )
+            return await self._send_with_retry(chat_id=user_id, text=result.advisory_text, reply_markup=result.keyboard)
+        if not isinstance(result, RegisterForButtonOk):
+            raise RuntimeError("unexpected permission gateway registration result")
 
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=f"ext_perm:{token}:allow"),
-                    InlineKeyboardButton(text="❌ Deny", callback_data=f"ext_perm:{token}:deny"),
-                ],
-                [
-                    InlineKeyboardButton(text="🟢 Auto-approve All", callback_data=f"ext_perm:{token}:auto_approve"),
-                ],
-            ]
+        prompt = PermissionPromptInput(
+            tool_name=tool_name or "unknown tool",
+            tool_input=tool_input,
+            cwd=cwd,
+            session_id=session_id,
+            session_title=title,
         )
-        return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=keyboard, parse_mode="HTML")
+        text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
+        return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=result.keyboard, parse_mode="HTML")
 
     async def notify_phase_change(
         self,

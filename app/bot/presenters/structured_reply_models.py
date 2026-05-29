@@ -36,6 +36,9 @@ class _StructuredSnapshot:
     pending_permission_tool_use_id: str | None = None
     pending_permission_tool_name: str | None = None
     pending_permission_tool_input: dict | None = None
+    cwd: str | None = None
+    session_title: str | None = None
+    user_id: int | None = None
     tool_states: tuple[_ToolStateSnapshot, ...] = ()
     turn_ended_at: datetime | None = None
 
@@ -52,6 +55,11 @@ class PermissionRequestOutput:
     tool_use_id: str | None
     permission_key: str
     tool_name: str | None = None
+    session_id: str | None = None
+    tool_input: dict | None = None
+    cwd: str | None = None
+    session_title: str | None = None
+    user_id: int | None = None
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,6 @@ from app.bot.presenters.structured_reply_presenter import (
     ToolStatusOutput,
     UserQuestionOutput,
     build_file_tool_aggregate_status_message,
-    build_permission_prompt,
     build_subagent_aggregate_status_message,
     build_task_list_status_message,
     build_tool_progress_message,
@@ -193,10 +192,13 @@ async def test_presenter_reports_pending_permission_once() -> None:
 
     assert first == [
         PermissionRequestOutput(
-            text=build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"}),
+            text="",
             tool_use_id="tool-1",
             permission_key="tool-1:Bash",
             tool_name="Bash",
+            session_id="claude-session-1",
+            tool_input={"command": "pwd"},
+            user_id=1,
         )
     ]
     assert second == []
@@ -216,10 +218,13 @@ async def test_presenter_reemits_pending_permission_until_delivery_acknowledged(
         user_id=1,
     )
     expected = PermissionRequestOutput(
-        text=build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"}),
+        text="",
         tool_use_id="tool-1",
         permission_key="tool-1:Bash",
         tool_name="Bash",
+        session_id="claude-session-1",
+        tool_input={"command": "pwd"},
+        user_id=1,
     )
 
     await presenter.prime()
@@ -228,6 +233,41 @@ async def test_presenter_reemits_pending_permission_until_delivery_acknowledged(
 
     assert first == [expected]
     assert second == [expected]
+
+
+@pytest.mark.asyncio
+async def test_presenter_pending_permission_includes_session_metadata_without_completed_turn() -> None:
+    pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
+    session = _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending)
+    session.workdir = "/tmp/project"
+    session.title = "Project Session"
+    session.user_id = 99
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                session,
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        PermissionRequestOutput(
+            text="",
+            tool_use_id="tool-1",
+            permission_key="tool-1:Bash",
+            tool_name="Bash",
+            session_id="claude-session-1",
+            tool_input={"command": "pwd"},
+            cwd="/tmp/project",
+            session_title="Project Session",
+            user_id=99,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -606,24 +646,6 @@ async def test_presenter_reports_waiting_for_approval_ask_user_question_without_
 
     assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
     assert second == []
-
-
-def test_build_permission_prompt_includes_specific_bash_command() -> None:
-    prompt = build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"})
-
-    assert "🔐 权限请求" in prompt
-    assert "工具: Bash" in prompt
-    assert "`pwd`" in prompt
-    assert "请点击下方按钮选择允许或拒绝。" in prompt
-
-
-def test_build_permission_prompt_falls_back_to_compact_json_preview() -> None:
-    prompt = build_permission_prompt(tool_name="Edit", tool_input={"old_string": "a" * 400, "new_string": "b"})
-
-    assert "权限请求" in prompt
-    assert "工具: Edit" in prompt
-    assert "参数:" in prompt
-    assert "..." in prompt
 
 
 def test_build_tool_progress_message_includes_specific_bash_command() -> None:

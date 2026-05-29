@@ -4,7 +4,6 @@ import asyncio
 import logging
 from collections.abc import Awaitable
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +13,7 @@ from app.domain.models import SessionContext, TaskStatus
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.domain.user_question_models import extract_user_question_prompts
 from app.bootstrap_base import AppContainerBase
+from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 
 if TYPE_CHECKING:
     from app.domain.external_session_models import OwnershipResult
@@ -182,9 +182,15 @@ class HookHandlingMixin(AppContainerBase):
                 )
                 return None
 
-            # Clear auto-approve state on session end
-            if event.event == "SessionEnd" and hasattr(self, "auto_approve_service"):
-                self.auto_approve_service.clear_session(event.session_id)
+            # Clear unified permission state on session end before removing bindings.
+            if event.event == "SessionEnd":
+                if hasattr(self, "auto_approve_service"):
+                    await self.auto_approve_service.deactivate_all_for_session(event.session_id)
+                    await self.auto_approve_service.release_all_slots_for_session(event.session_id)
+                if hasattr(self, "permission_callback_registry"):
+                    await self.permission_callback_registry.invalidate_session(event.session_id)
+                if hasattr(self, "unbound_permission_handler"):
+                    await self.unbound_permission_handler.invalidate_session(event.session_id)
 
             # Remove external binding on session end so /list doesn't show stale entries
             if event.event == "SessionEnd" and hasattr(self, "external_binding_store"):
@@ -268,7 +274,11 @@ class HookHandlingMixin(AppContainerBase):
             stages.append(
                 (
                     "auto_approve_check",
-                    self._run_auto_approve_check(event),
+                    self._run_auto_approve_check(
+                        event,
+                        origin=SessionOrigin.OWNED,
+                        candidate_user_id=ownership.owner_user_id,
+                    ),
                 )
             )
 
@@ -303,7 +313,11 @@ class HookHandlingMixin(AppContainerBase):
             stages.append(
                 (
                     "auto_approve_check",
-                    self._run_auto_approve_check(event),
+                    self._run_auto_approve_check(
+                        event,
+                        origin=SessionOrigin.EXTERNAL_BOUND,
+                        candidate_user_id=ownership.owner_user_id,
+                    ),
                 )
             )
 
@@ -335,25 +349,50 @@ class HookHandlingMixin(AppContainerBase):
                     if event.tool == "AskUserQuestion":
                         await self._auto_allow_ask_user_question(event)
                     else:
-                        if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
-                            await self._handle_auto_approved_permission(event)
-                        else:
-                            await self.unbound_permission_handler.handle_unbound_permission(event)
+                        candidate_user_id = None
+                        if hasattr(self, "auto_approve_service"):
+                            candidate_user_id = self.auto_approve_service.get_active_user_for_session(event.session_id)
+                        outcome = await self._run_auto_approve_check(
+                            event,
+                            origin=SessionOrigin.EXTERNAL_UNBOUND,
+                            candidate_user_id=candidate_user_id,
+                        )
+                        if outcome in {AutoApproveOutcome.APPROVED, AutoApproveOutcome.APPROVAL_UNKNOWN}:
+                            return
+                        await self.unbound_permission_handler.handle_unbound_permission(event)
 
             stages.append(("permission_handling", _permission_handling()))
 
         return stages
 
-    async def _run_auto_approve_check(self, event: HookEvent) -> None:
-        """Check if the event should be auto-approved.
+    async def _run_auto_approve_check(
+        self,
+        event: HookEvent,
+        *,
+        origin: SessionOrigin = SessionOrigin.EXTERNAL_BOUND,
+        candidate_user_id: int | None = None,
+    ) -> AutoApproveOutcome:
+        """Check if the event should be auto-approved through PermissionGateway.
 
-        If active, handles permission response and raises _StageShortCircuit
-        to terminate the pipeline — downstream stages must not send redundant prompts.
+        Successful or unknown auto-approval short-circuits downstream prompt stages.
+        Failed auto-approval falls back to normal interactive notification.
         """
-        if event.expects_response and event.tool != "AskUserQuestion":
-            if hasattr(self, "auto_approve_service") and self.auto_approve_service.is_active(event.session_id):
-                await self._handle_auto_approved_permission(event)
-                raise _StageShortCircuit(reason="auto-approved")
+        if not event.expects_response or event.tool == "AskUserQuestion":
+            return AutoApproveOutcome.NOT_APPROVED
+        if not event.tool_use_id or not hasattr(self, "permission_gateway"):
+            return AutoApproveOutcome.NOT_APPROVED
+
+        outcome = await self.permission_gateway.maybe_auto_approve(
+            session_id=event.session_id,
+            origin=origin,
+            candidate_user_id=candidate_user_id,
+            tool_use_id=event.tool_use_id,
+            tool_name=event.tool or "unknown tool",
+            tool_input=event.tool_input,
+        )
+        if outcome in {AutoApproveOutcome.APPROVED, AutoApproveOutcome.APPROVAL_UNKNOWN}:
+            raise _StageShortCircuit(reason="auto-approved")
+        return outcome
 
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
         if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
@@ -469,56 +508,6 @@ class HookHandlingMixin(AppContainerBase):
             decision="allow",
             reason="AskUserQuestion auto-allowed",
         )
-
-    async def _handle_auto_approved_permission(self, event: HookEvent) -> None:
-        """Auto-approve a permission request and send silent notification."""
-        tool_use_id = event.tool_use_id or ""
-        if not tool_use_id:
-            return
-
-        # Respond with allow immediately
-        await self.hook_socket_server.respond_to_permission(
-            tool_use_id=tool_use_id,
-            decision="allow",
-            reason="auto-approved",
-        )
-
-        # Send silent notification to the user who activated auto-approve
-        entry = self.auto_approve_service._sessions.get(event.session_id)
-        if entry is not None:
-            tool_name = event.tool or "Unknown"
-            input_summary = self._format_auto_approve_input_summary(event)
-            message = f"🟢 Auto-approved: {tool_name} {input_summary}".strip()
-            try:
-                await self.bot.send_message(chat_id=entry.user_id, text=message)
-            except Exception:
-                logger.warning(
-                    "Failed to send auto-approve notification",
-                    extra={"session_id": event.session_id, "tool_use_id": tool_use_id},
-                )
-
-        # Audit log
-        logger.info(
-            "permission auto-approved",
-            extra={
-                "session_id": event.session_id,
-                "tool": event.tool,
-                "tool_use_id": tool_use_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-
-    def _format_auto_approve_input_summary(self, event: HookEvent) -> str:
-        """Format a brief summary of tool_input for auto-approve notifications."""
-        if not event.tool_input:
-            return ""
-        # Common patterns for tool inputs
-        for key in ("file_path", "path", "command", "url", "query", "description"):
-            value = event.tool_input.get(key)
-            if value and isinstance(value, str):
-                truncated = value[:80] + ("..." if len(value) > 80 else "")
-                return truncated
-        return ""
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
         logger.warning(

@@ -7,16 +7,20 @@ using temp directories for persistence.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from app.bot.presenters.permission_message_builder import PermissionMessageBuilder
 from app.domain.hook_models import HookEvent
+from app.services.auto_approve_service import AutoApproveService
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
-from app.services.permission_callback_registry import PermissionCallbackRegistry
+from app.services.permission_callback_registry import CallbackRecordStatus, PermissionCallbackRegistry, SessionOrigin
+from app.services.permission_gateway import PermissionGateway
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
@@ -50,6 +54,40 @@ def _make_hook_event(
         tool=tool,
         tool_use_id=tool_use_id,
         tool_input=tool_input,
+    )
+
+
+class _TaskService:
+    async def respond_to_pending_permission(self, **kwargs: object) -> tuple[bool, str]:
+        del kwargs
+        return True, "ok"
+
+
+class _UnboundResponder:
+    def __init__(self, handler: UnboundPermissionHandler) -> None:
+        self._handler = handler
+
+    async def handle_response(self, *, tool_use_id: str, user_id: int, decision: str):
+        return await self._handler.handle_response(tool_use_id=tool_use_id, user_id=user_id, decision=decision)
+
+
+def _make_permission_gateway(
+    *,
+    registry: PermissionCallbackRegistry,
+    hook_socket_server: object,
+    unbound_handler: UnboundPermissionHandler | None = None,
+    allowed_user_ids: set[int] | None = None,
+    bot: object | None = None,
+) -> PermissionGateway:
+    return PermissionGateway(
+        registry=registry,
+        auto_approve_service=AutoApproveService(),
+        task_service=_TaskService(),
+        hook_socket_server=hook_socket_server,
+        unbound_responder=_UnboundResponder(unbound_handler) if unbound_handler is not None else SimpleNamespace(),
+        settings=SimpleNamespace(allow_all_users=False, allowed_user_id_set=allowed_user_ids or set()),
+        bot=bot or SimpleNamespace(send_message=AsyncMock()),
+        message_builder=PermissionMessageBuilder(),
     )
 
 
@@ -134,9 +172,17 @@ class TestPermissionRequestForwarding:
 
         # Create push notifier with mocked bot
         mock_bot = AsyncMock()
+        registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345")
+        gateway = _make_permission_gateway(
+            registry=registry,
+            hook_socket_server=AsyncMock(),
+            allowed_user_ids={user_id},
+            bot=mock_bot,
+        )
         push_notifier = ExternalSessionPushNotifier(
             bot=mock_bot,
             binding_store=binding_store,
+            permission_gateway=gateway,
         )
 
         # Simulate a PermissionRequest event for the bound session
@@ -149,12 +195,17 @@ class TestPermissionRequestForwarding:
             cwd=cwd,
         )
 
-        # Verify push notification was sent
+        # Verify push notification was sent with a gateway-registered button
         assert delivered is True
         mock_bot.send_message.assert_called_once()
         call_kwargs = mock_bot.send_message.call_args.kwargs
         assert call_kwargs["chat_id"] == user_id
         assert session_id[:8] in call_kwargs["text"]
+        callback_data = [button.callback_data for row in call_kwargs["reply_markup"].inline_keyboard for button in row]
+        assert callback_data == ["perm:tok12345:allow", "perm:tok12345:deny", "perm:tok12345:auto_approve"]
+        record = registry._records["tok12345"]
+        assert record.origin is SessionOrigin.EXTERNAL_BOUND
+        assert record.authorized_user_ids == frozenset({user_id})
 
 
 class TestUnboundPermissionBroadcast:
@@ -168,13 +219,21 @@ class TestUnboundPermissionBroadcast:
 
         allowed_users = {100, 200, 300}
 
+        registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345")
         handler = UnboundPermissionHandler(
             bot=mock_bot,
             hook_socket_server=mock_hook_socket,
             allowed_user_ids=allowed_users,
             permission_ttl_sec=60,
-            permission_callback_registry=PermissionCallbackRegistry(ttl_sec=60),
         )
+        gateway = _make_permission_gateway(
+            registry=registry,
+            hook_socket_server=mock_hook_socket,
+            unbound_handler=handler,
+            allowed_user_ids=allowed_users,
+            bot=mock_bot,
+        )
+        handler.set_permission_gateway(gateway)
 
         session_id = "sess-unbound01"
         tool_use_id = "tooluse-xyz789"
@@ -198,20 +257,21 @@ class TestUnboundPermissionBroadcast:
         notified_chat_ids = {call.kwargs["chat_id"] for call in mock_bot.send_message.call_args_list}
         assert notified_chat_ids == allowed_users
 
-        # Step 2: First user responds with "approve"
-        first_response = await handler.handle_response(tool_use_id=tool_use_id, user_id=200, decision="approve")
-        assert first_response.accepted is True
+        # Step 2: First user responds with "approve" through the gateway callback path
+        first_response = await gateway.handle_callback(data="perm:tok12345:allow", user_id=200)
+        assert first_response.alert_text == "已批准"
 
         # Verify decision forwarded to hook socket
         mock_hook_socket.respond_to_permission.assert_called_once_with(
             tool_use_id=tool_use_id,
-            decision="approve",
+            decision="allow",
             reason="responded by user 200",
         )
+        assert registry._records["tok12345"].status is CallbackRecordStatus.RESOLVED
 
         # Step 3: Second user tries to respond (too late)
-        second_response = await handler.handle_response(tool_use_id=tool_use_id, user_id=100, decision="deny")
-        assert second_response.accepted is False
+        second_response = await gateway.handle_callback(data="perm:tok12345:deny", user_id=100)
+        assert second_response.alert_text == "已响应过"
 
         # Verify only one decision forwarded
         mock_hook_socket.respond_to_permission.assert_called_once()
@@ -268,12 +328,12 @@ class TestServerRestartBindingsRestored:
 
 
 class TestUnboundPermissionKeyboardToken:
-    """Unbound permission keyboard uses external short token from registry."""
+    """Unbound permission keyboard uses gateway tokens."""
 
     @pytest.mark.asyncio
-    async def test_unbound_permission_keyboard_uses_external_short_token(self) -> None:
-        """Keyboard callback_data uses ext_perm:{token}:{decision} format, all <= 64 bytes,
-        and registry resolves token back to full tool_use_id."""
+    async def test_unbound_permission_keyboard_uses_gateway_short_token(self) -> None:
+        """Keyboard callback_data uses perm:{token}:{decision} format, all <= 64 bytes,
+        and the registry record points back to the full tool_use_id."""
         mock_bot = AsyncMock()
         mock_hook_socket = AsyncMock()
 
@@ -287,8 +347,15 @@ class TestUnboundPermissionKeyboardToken:
             hook_socket_server=mock_hook_socket,
             allowed_user_ids={42},
             permission_ttl_sec=60,
-            permission_callback_registry=registry,
         )
+        gateway = _make_permission_gateway(
+            registry=registry,
+            hook_socket_server=mock_hook_socket,
+            unbound_handler=handler,
+            allowed_user_ids={42},
+            bot=mock_bot,
+        )
+        handler.set_permission_gateway(gateway)
 
         # Use a long tool_use_id that would exceed 64 bytes with old format
         long_tool_use_id = "tooluse-" + "a" * 80
@@ -316,14 +383,17 @@ class TestUnboundPermissionKeyboardToken:
                 callback_data.append(button.callback_data)
 
         assert callback_data == [
-            "ext_perm:tok12345:allow",
-            "ext_perm:tok12345:deny",
-            "ext_perm:tok12345:auto_approve",
+            "perm:tok12345:allow",
+            "perm:tok12345:deny",
+            "perm:tok12345:auto_approve",
         ]
 
         # All callback_data must be <= 64 bytes
         for cd in callback_data:
             assert len(cd.encode("utf-8")) <= 64
 
-        # Registry must resolve token back to full tool_use_id
-        assert registry.resolve("tok12345") == long_tool_use_id
+        # Registry record must point back to the full tool_use_id
+        record = registry._records["tok12345"]
+        assert record.tool_use_id == long_tool_use_id
+        assert record.origin is SessionOrigin.EXTERNAL_UNBOUND
+        assert record.authorized_user_ids == frozenset({42})
