@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -36,6 +37,7 @@ from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.context_builder import ContextBuilderService
 from app.services.diff_generator import DiffGeneratorService
+from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
@@ -233,6 +235,14 @@ class AppContainer(
             retry_count=settings.push_notification_retry_count,
         )
 
+        self.external_binding_cleanup_service = ExternalBindingCleanupService(
+            binding_store=self.external_binding_store,
+            auto_approve_service=self.auto_approve_service,
+            hook_socket_server=self.hook_socket_server,
+            ttl=timedelta(hours=settings.external_binding_idle_ttl_hours),
+            interval_sec=settings.session_health_check_interval_sec,
+        )
+
         # External user question state for PTY injection
         from app.services.external_user_question_state import ExternalUserQuestionState
 
@@ -272,6 +282,7 @@ class AppContainer(
         self._start_agent_file_watchers()
         self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
         await self.session_registry.start_health_check()
+        await self.external_binding_cleanup_service.start()
         await self.upload_queue.start_cleanup()
         await self.upload_cleanup.start()
         self._started = True
@@ -282,6 +293,7 @@ class AppContainer(
             return
         await self.upload_cleanup.stop()
         await self.upload_queue.stop_cleanup()
+        await self.external_binding_cleanup_service.stop()
         await self.session_registry.stop_health_check()
         await self._stop_periodic_recheck_task()
         await self._stop_jsonl_sync_tasks()

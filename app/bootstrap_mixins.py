@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.config.settings import is_workdir_allowed
+from app.domain.external_session_models import SessionOrigin as ExternalSessionOrigin
 from app.domain.hook_models import HookEvent
-from app.domain.models import SessionContext, TaskStatus
+from app.domain.models import SessionContext, TaskStatus, utc_now
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.domain.user_question_models import extract_user_question_prompts
 from app.bootstrap_base import AppContainerBase
@@ -220,6 +221,20 @@ class HookHandlingMixin(AppContainerBase):
                     "owner_user_id": ownership.owner_user_id,
                 },
             )
+
+            # Refresh activity timestamp on bound external hook events so that
+            # the periodic stale-binding cleanup keeps active sessions alive.
+            # Skipped for SessionEnd (which removes the binding above) and for
+            # tmux-owned or unbound events.
+            if (
+                ownership.origin == ExternalSessionOrigin.EXTERNAL
+                and ownership.ownership_state == "bound"
+                and event.event != "SessionEnd"
+                and hasattr(self, "external_binding_store")
+                and self.external_binding_store.get_binding(event.session_id) is not None
+            ):
+                self.external_binding_store.touch_activity(event.session_id, utc_now())
+
             return ownership
         except Exception:
             logger.exception(

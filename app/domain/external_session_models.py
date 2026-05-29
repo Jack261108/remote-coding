@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -37,6 +37,14 @@ class ExternalBinding:
     cwd: str
     bound_at: datetime
     jsonl_path: str | None
+    last_activity_at_init: InitVar[datetime | None] = None
+    last_activity_at: datetime = field(init=False)
+
+    def __post_init__(self, last_activity_at_init: datetime | None) -> None:
+        # Default activity timestamp to bind time so existing callers that don't
+        # pass `last_activity_at` get a sensible non-None value. The stored
+        # attribute is always a `datetime`, never None.
+        self.last_activity_at = last_activity_at_init if last_activity_at_init is not None else self.bound_at
 
 
 @dataclass

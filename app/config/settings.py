@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     task_output_char_limit: int = Field(120_000, alias="TASK_OUTPUT_CHAR_LIMIT")
 
     session_health_check_interval_sec: float = Field(30.0, alias="SESSION_HEALTH_CHECK_INTERVAL_SEC")
+    external_binding_idle_ttl_hours: int = Field(24, alias="EXTERNAL_BINDING_IDLE_TTL_HOURS", ge=1)
 
     # File upload settings
     upload_max_file_size_mb: int = Field(20, alias="UPLOAD_MAX_FILE_SIZE_MB")
