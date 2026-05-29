@@ -4,7 +4,6 @@ import asyncio
 import logging
 from collections.abc import Awaitable
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -509,56 +508,6 @@ class HookHandlingMixin(AppContainerBase):
             decision="allow",
             reason="AskUserQuestion auto-allowed",
         )
-
-    async def _handle_auto_approved_permission(self, event: HookEvent) -> None:
-        """Auto-approve a permission request and send silent notification."""
-        tool_use_id = event.tool_use_id or ""
-        if not tool_use_id:
-            return
-
-        # Respond with allow immediately
-        await self.hook_socket_server.respond_to_permission(
-            tool_use_id=tool_use_id,
-            decision="allow",
-            reason="auto-approved",
-        )
-
-        # Send silent notification to the user who activated auto-approve
-        active_user_id = self.auto_approve_service.get_active_user_for_session(event.session_id)
-        if active_user_id is not None:
-            tool_name = event.tool or "Unknown"
-            input_summary = self._format_auto_approve_input_summary(event)
-            message = f"🟢 Auto-approved: {tool_name} {input_summary}".strip()
-            try:
-                await self.bot.send_message(chat_id=active_user_id, text=message)
-            except Exception:
-                logger.warning(
-                    "Failed to send auto-approve notification",
-                    extra={"session_id": event.session_id, "tool_use_id": tool_use_id},
-                )
-
-        # Audit log
-        logger.info(
-            "permission auto-approved",
-            extra={
-                "session_id": event.session_id,
-                "tool": event.tool,
-                "tool_use_id": tool_use_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-
-    def _format_auto_approve_input_summary(self, event: HookEvent) -> str:
-        """Format a brief summary of tool_input for auto-approve notifications."""
-        if not event.tool_input:
-            return ""
-        # Common patterns for tool inputs
-        for key in ("file_path", "path", "command", "url", "query", "description"):
-            value = event.tool_input.get(key)
-            if value and isinstance(value, str):
-                truncated = value[:80] + ("..." if len(value) > 80 else "")
-                return truncated
-        return ""
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
         logger.warning(

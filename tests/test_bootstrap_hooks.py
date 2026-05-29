@@ -13,7 +13,6 @@ from app.domain.models import TaskRecord, TaskStatus
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.interrupt_watcher import InterruptWatcher
-from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
@@ -1314,7 +1313,6 @@ async def test_unbound_permission_handler_requires_gateway_before_notify(tmp_pat
         bot=type("Bot", (), {"send_message": AsyncMock()})(),
         hook_socket_server=type("HookSocket", (), {"respond_to_permission": AsyncMock(return_value=True)})(),
         allowed_user_ids={1},
-        permission_callback_registry=PermissionCallbackRegistry(ttl_sec=60),
     )
 
     event = HookEvent(

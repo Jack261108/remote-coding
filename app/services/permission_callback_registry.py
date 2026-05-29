@@ -172,12 +172,6 @@ class InFlightConflictError(Exception):
     pass
 
 
-@dataclass(frozen=True, slots=True)
-class _PermissionCallbackEntry:
-    tool_use_id: str
-    expires_at: float
-
-
 class PermissionCallbackRegistry:
     def __init__(
         self,
@@ -197,7 +191,6 @@ class PermissionCallbackRegistry:
         self._ttl_deadlines: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._compound_index: dict[tuple[str, str], str] = {}
-        self._legacy_entries: dict[str, _PermissionCallbackEntry] = {}
 
     async def register_token(
         self,
@@ -352,27 +345,6 @@ class PermissionCallbackRegistry:
             snapshots.sort(key=lambda snapshot: snapshot.created_at, reverse=sort_desc_by_created_at)
             return snapshots
 
-    # DEPRECATED: callers will be migrated in Phase 6 (tasks 8.2-8.6)
-    def register(self, tool_use_id: str) -> str:
-        self._prune_legacy()
-        for _ in range(16):
-            token = self._token_factory()
-            if token not in self._legacy_entries:
-                self._legacy_entries[token] = _PermissionCallbackEntry(
-                    tool_use_id=tool_use_id,
-                    expires_at=self._clock() + self._ttl_sec,
-                )
-                return token
-        raise RuntimeError("failed to generate unique permission callback token")
-
-    # DEPRECATED: callers will be migrated in Phase 6 (tasks 8.2-8.6)
-    def resolve(self, token: str) -> str | None:
-        self._prune_legacy()
-        entry = self._legacy_entries.get(token)
-        if entry is None:
-            return None
-        return entry.tool_use_id
-
     def _is_authorized(self, record: PermissionCallbackRecord, user_id: int) -> bool:
         if record.authorization_mode is AuthorizationMode.ALL_USERS:
             return True
@@ -418,16 +390,5 @@ class PermissionCallbackRegistry:
                 if token in stale_token_set:
                     self._compound_index.pop(compound_key, None)
 
-    def _prune_legacy(self) -> None:
-        now = self._clock()
-        expired = [token for token, entry in self._legacy_entries.items() if entry.expires_at <= now]
-        for token in expired:
-            self._legacy_entries.pop(token, None)
-
     def _now_datetime(self) -> datetime:
         return self._wall_clock()
-
-    def __len__(self) -> int:
-        """Return the number of live legacy shim entries."""
-        self._prune_legacy()
-        return len(self._legacy_entries)

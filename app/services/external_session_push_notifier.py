@@ -7,7 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.presenters.permission_message_builder import PermissionPromptInput
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
-from app.services.permission_callback_registry import PermissionCallbackRegistry, SessionOrigin
+from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 
 if TYPE_CHECKING:
@@ -31,17 +31,11 @@ class ExternalSessionPushNotifier:
         binding_store: ExternalBindingStore,
         retry_count: int = 1,
         permission_gateway: PermissionGateway | None = None,
-        permission_callback_registry: PermissionCallbackRegistry | None = None,
     ) -> None:
         self._bot = bot
         self._binding_store = binding_store
         self._retry_count = retry_count
         self._permission_gateway = permission_gateway
-        # Kept until Phase 7 so legacy construction tests can still verify
-        # injected empty registries are not replaced accidentally.
-        self._permission_callback_registry = (
-            permission_callback_registry if permission_callback_registry is not None else PermissionCallbackRegistry(ttl_sec=600)
-        )
 
     async def notify_permission_request(
         self,

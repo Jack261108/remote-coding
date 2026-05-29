@@ -8,16 +8,19 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiogram.enums import ParseMode
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.handlers import command_run as command_run_module
 from app.bot.handlers import run_event_streamer as run_event_streamer_module
 from app.bot.handlers.command_run import _ABANDONED_STREAM_TASKS, _ACTIVE_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
-from app.bot.presenters.structured_reply_presenter import build_permission_prompt, build_tool_progress_message, build_user_question_prompt
+from app.bot.presenters.permission_message_builder import PermissionMessageBuilder, PermissionPromptInput
+from app.bot.presenters.structured_reply_presenter import build_tool_progress_message, build_user_question_prompt
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
-from app.services.permission_callback_registry import PermissionCallbackRegistry
+from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
+from app.services.permission_gateway import RegisterForButtonOk
 from tests.fakes.structured import make_structured_session as _structured_session
 from tests.fakes.telegram import DummyMessage
 
@@ -129,7 +132,7 @@ async def _run_and_wait(
     message: DummyMessage,
     task_service: DummyTaskService,
     wait_sec: float = 0.05,
-    permission_callback_registry: PermissionCallbackRegistry | None = None,
+    permission_gateway: object | None = None,
 ) -> None:
     task = await run_prompt_and_stream(
         message=message,
@@ -139,11 +142,52 @@ async def _run_and_wait(
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
-        permission_callback_registry=permission_callback_registry,
+        permission_gateway=permission_gateway,
     )
     await asyncio.sleep(wait_sec)
     if task is not None:
         await task
+
+
+class FakePermissionGateway:
+    def __init__(self) -> None:
+        self.message_builder = PermissionMessageBuilder()
+        self.registrations: list[tuple[str, str, SessionOrigin, int | None]] = []
+        self.auto_approve_calls: list[tuple[str, SessionOrigin, int | None, str]] = []
+        self.keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Approve", callback_data="perm:tok12345:allow"),
+                    InlineKeyboardButton(text="❌ Deny", callback_data="perm:tok12345:deny"),
+                ],
+                [InlineKeyboardButton(text="🟢 Auto-approve", callback_data="perm:tok12345:auto_approve")],
+            ]
+        )
+
+    async def maybe_auto_approve(
+        self,
+        *,
+        session_id: str,
+        origin: SessionOrigin,
+        candidate_user_id: int | None,
+        tool_use_id: str,
+        tool_name: str,
+        tool_input: object,
+    ) -> AutoApproveOutcome:
+        del tool_input
+        self.auto_approve_calls.append((session_id, origin, candidate_user_id, tool_use_id))
+        return AutoApproveOutcome.NOT_APPROVED
+
+    async def register_for_button(
+        self,
+        *,
+        tool_use_id: str,
+        session_id: str,
+        origin: SessionOrigin,
+        candidate_user_id: int | None,
+    ) -> RegisterForButtonOk:
+        self.registrations.append((tool_use_id, session_id, origin, candidate_user_id))
+        return RegisterForButtonOk(keyboard=self.keyboard)
 
 
 @pytest.mark.asyncio
@@ -1749,7 +1793,7 @@ async def test_run_prompt_and_stream_interactive_uses_task_bound_session_after_c
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_reports_pending_permission_once() -> None:
     message = DummyMessage()
-    registry = PermissionCallbackRegistry(ttl_sec=600)
+    permission_gateway = FakePermissionGateway()
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已完成回复\n", is_complete=True)]
     task_service = DummyTaskService(
@@ -1773,35 +1817,32 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, permission_callback_registry=registry)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, permission_gateway=permission_gateway)
 
-    expected_prompt = build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"})
-    # The messenger renders markdownish text to Telegram HTML before sending
-    from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
-
+    expected_prompt = permission_gateway.message_builder.build_permission_prompt(
+        PermissionPromptInput(
+            tool_name="Bash",
+            tool_input={"command": "pwd"},
+            cwd="",
+            session_id="claude-session-1",
+            session_title=None,
+        )
+    )
     expected_rendered = render_markdownish_to_telegram_html(expected_prompt)
     assert message.answers.count(expected_rendered) == 1
     permission_index = message.answers.index(expected_rendered)
     reply_markup = message.reply_markups[permission_index]
-    assert reply_markup is not None
-    assert [button.text for button in reply_markup.inline_keyboard[0]] == ["允许", "拒绝"]
-    allow_data = reply_markup.inline_keyboard[0][0].callback_data
-    deny_data = reply_markup.inline_keyboard[0][1].callback_data
-    assert allow_data.startswith("perm:allow:")
-    assert deny_data.startswith("perm:deny:")
-    # Resolve the token back to the original tool_use_id
-    from app.bot.handlers.command_permission import parse_permission_callback_data
-
-    _, allow_token = parse_permission_callback_data(allow_data)
-    _, deny_token = parse_permission_callback_data(deny_data)
-    assert allow_token == deny_token
-    assert registry.resolve(allow_token) == "tool-1"
+    assert reply_markup is permission_gateway.keyboard
+    assert [button.text for button in reply_markup.inline_keyboard[0]] == ["✅ Approve", "❌ Deny"]
+    assert permission_gateway.auto_approve_calls == [("claude-session-1", SessionOrigin.OWNED, 1, "tool-1")]
+    assert permission_gateway.registrations == [("tool-1", "claude-session-1", SessionOrigin.OWNED, 1)]
     assert task_service._structured_permission_key == "tool-1:Bash"
 
 
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_does_not_ack_permission_when_prompt_send_fails() -> None:
-    message = DummyMessage(fail_on_texts={"权限请求"})
+    message = DummyMessage(fail_on_texts={"请求权限"})
+    permission_gateway = FakePermissionGateway()
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已完成回复\n", is_complete=True)]
     task_service = DummyTaskService(
@@ -1825,9 +1866,18 @@ async def test_run_prompt_and_stream_does_not_ack_permission_when_prompt_send_fa
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, permission_gateway=permission_gateway)
 
-    assert build_permission_prompt(tool_name="Bash", tool_input={"command": "pwd"}) not in message.answers
+    expected_prompt = permission_gateway.message_builder.build_permission_prompt(
+        PermissionPromptInput(
+            tool_name="Bash",
+            tool_input={"command": "pwd"},
+            cwd="",
+            session_id="claude-session-1",
+            session_title=None,
+        )
+    )
+    assert render_markdownish_to_telegram_html(expected_prompt) not in message.answers
     assert task_service._structured_permission_key is None
 
 

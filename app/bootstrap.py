@@ -323,8 +323,6 @@ class AppContainer(
             hook_socket_server=self.hook_socket_server,
             unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
-            auto_approve_service=self.auto_approve_service,
-            permission_callback_registry=self.permission_callback_registry,
             permission_gateway=self.permission_gateway,
             session_scanner=SessionScanner(),
             claude_paths=self.claude_paths,

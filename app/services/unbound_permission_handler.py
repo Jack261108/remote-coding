@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from aiogram import Bot
 
     from app.adapters.claude.hook_socket_server import HookSocketServer
-    from app.services.permission_callback_registry import PermissionCallbackRegistry
     from app.services.permission_gateway import PermissionGateway
 
 logger = logging.getLogger(__name__)
@@ -43,11 +42,9 @@ class UnboundPermissionHandler:
         bot: Bot,
         hook_socket_server: HookSocketServer,
         allowed_user_ids: set[int],
-        permission_callback_registry: PermissionCallbackRegistry | None = None,
         permission_ttl_sec: int = 600,
         title_resolver: Callable[[str, str], str | None] | None = None,
     ) -> None:
-        self._permission_callback_registry = permission_callback_registry
         self._bot = bot
         self._hook_socket_server = hook_socket_server
         self._allowed_user_ids = allowed_user_ids

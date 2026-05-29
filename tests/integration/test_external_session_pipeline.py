@@ -225,7 +225,6 @@ class TestUnboundPermissionBroadcast:
             hook_socket_server=mock_hook_socket,
             allowed_user_ids=allowed_users,
             permission_ttl_sec=60,
-            permission_callback_registry=registry,
         )
         gateway = _make_permission_gateway(
             registry=registry,
@@ -348,7 +347,6 @@ class TestUnboundPermissionKeyboardToken:
             hook_socket_server=mock_hook_socket,
             allowed_user_ids={42},
             permission_ttl_sec=60,
-            permission_callback_registry=registry,
         )
         gateway = _make_permission_gateway(
             registry=registry,

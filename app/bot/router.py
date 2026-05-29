@@ -41,9 +41,7 @@ from app.services.upload_queue import UploadQueueManager
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
-    from app.services.auto_approve_service import AutoApproveService
     from app.services.external_user_question_state import ExternalUserQuestionState
-    from app.services.permission_callback_registry import PermissionCallbackRegistry
     from app.services.permission_gateway import PermissionGateway
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
@@ -66,8 +64,6 @@ def create_router(
     hook_socket_server: HookSocketServer | None = None,
     unbound_permission_handler: UnboundPermissionHandler | None = None,
     external_uq_state: ExternalUserQuestionState | None = None,
-    auto_approve_service: AutoApproveService | None = None,
-    permission_callback_registry: PermissionCallbackRegistry | None = None,
     permission_gateway: PermissionGateway | None = None,
     session_scanner: SessionScanner | None = None,
     claude_paths: ClaudePaths | None = None,
@@ -133,21 +129,15 @@ def create_router(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         queued_upload_scheduler=queued_upload_scheduler,
-        permission_callback_registry=permission_callback_registry,
         permission_gateway=permission_gateway,
     )
     register_claude_handler(router, task_service=task_service)
     register_cancel_handler(router, task_service=task_service)
     register_status_handler(router, task_service=task_service)
     register_session_handler(router, task_service=task_service, session_service=session_service)
-    if permission_callback_registry is not None or permission_gateway is not None:
+    if permission_gateway is not None:
         register_permission_handlers(
             router,
-            task_service=task_service,
-            auto_approve_service=auto_approve_service,
-            hook_socket_server=hook_socket_server,
-            structured_session_store=structured_session_store,
-            permission_callback_registry=permission_callback_registry,
             permission_gateway=permission_gateway,
         )
     register_user_question_handlers(router, task_service=task_service)
@@ -187,18 +177,12 @@ def create_router(
             session_store=structured_session_store,
         )
 
-    if (
-        hook_socket_server is not None
-        and unbound_permission_handler is not None
-        and (permission_callback_registry is not None or permission_gateway is not None)
-    ):
+    if hook_socket_server is not None and unbound_permission_handler is not None and permission_gateway is not None:
         register_external_permission_handler(
             router,
             hook_socket_server=hook_socket_server,
             unbound_permission_handler=unbound_permission_handler,
-            permission_callback_registry=permission_callback_registry,
             external_uq_state=external_uq_state,
-            auto_approve_service=auto_approve_service,
             permission_gateway=permission_gateway,
         )
 
@@ -263,7 +247,6 @@ def create_router(
             diff_generator=diff_generator,
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
-            permission_callback_registry=permission_callback_registry,
             permission_gateway=permission_gateway,
         )
         logger.info(
