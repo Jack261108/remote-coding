@@ -41,5 +41,8 @@ ENV/
 .idea/
 .kiro/
 
+# Local backups (spec/file snapshots)
+.claude/backups/
+
 # Logs
 *.log
