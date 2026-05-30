@@ -233,7 +233,7 @@ class HookHandlingMixin(AppContainerBase):
                 and hasattr(self, "external_binding_store")
                 and self.external_binding_store.get_binding(event.session_id) is not None
             ):
-                self.external_binding_store.touch_activity(event.session_id, utc_now())
+                self.external_binding_store.touch_activity(event.session_id, utc_now(), pid=event.pid)
 
             return ownership
         except Exception:

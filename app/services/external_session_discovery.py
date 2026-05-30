@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable
 
 from app.domain.external_session_models import UnboundExternalSession
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
+from app.services.process_liveness import process_is_alive
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +84,7 @@ class ExternalSessionDiscoveryService:
     @staticmethod
     def _is_pid_alive(pid: int) -> bool:
         """Check if a process is still running."""
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-        except OSError:
-            return False
+        return process_is_alive(pid)
 
     def get(self, session_id: str) -> UnboundExternalSession | None:
         """Get a specific unbound session by ID."""

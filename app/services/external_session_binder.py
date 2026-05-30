@@ -81,13 +81,21 @@ class ExternalSessionBinder:
             projects_dir=self._projects_dir,
         )
 
-        # 4. Create binding in store
+        # 4. Create binding in store. Capture pid defensively so any failure
+        # degrades to pid=None rather than blocking the bind (Req 3.3); the
+        # pid will be recovered on the next hook event per Req 4.
+        try:
+            captured_pid = unbound.pid
+        except Exception:  # pragma: no cover - defensive per Req 3.3
+            captured_pid = None
+
         binding = ExternalBinding(
             session_id=session_id,
             user_id=user_id,
             cwd=unbound.cwd,
             bound_at=utc_now(),
             jsonl_path=str(jsonl_path),
+            pid=captured_pid,
         )
         self._binding_store.save_binding(binding)
 

@@ -30,6 +30,7 @@ from hypothesis import strategies as st
 from app.domain.external_session_models import ExternalBinding
 from app.domain.models import utc_now
 from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
+from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
 
 
@@ -96,10 +97,16 @@ async def test_property_a_cleanup_decision_matches_spec(
 
         hook_server = _make_hook_server(has_pending=has_pending)
         auto_approve = _make_auto_approve_service()
-        service = ExternalBindingCleanupService(
+        reaper = ExternalBindingReaper(
             binding_store=store,
             auto_approve_service=auto_approve,
             hook_socket_server=hook_server,
+        )
+        service = ExternalBindingCleanupService(
+            binding_store=store,
+            hook_socket_server=hook_server,
+            reaper=reaper,
+            liveness_enabled=False,
             ttl=timedelta(hours=ttl_hours),
             interval_sec=30.0,
         )

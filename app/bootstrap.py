@@ -38,6 +38,7 @@ from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.context_builder import ContextBuilderService
 from app.services.diff_generator import DiffGeneratorService
 from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
+from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
@@ -235,10 +236,17 @@ class AppContainer(
             retry_count=settings.push_notification_retry_count,
         )
 
-        self.external_binding_cleanup_service = ExternalBindingCleanupService(
+        self.external_binding_reaper = ExternalBindingReaper(
             binding_store=self.external_binding_store,
             auto_approve_service=self.auto_approve_service,
             hook_socket_server=self.hook_socket_server,
+        )
+
+        self.external_binding_cleanup_service = ExternalBindingCleanupService(
+            binding_store=self.external_binding_store,
+            hook_socket_server=self.hook_socket_server,
+            reaper=self.external_binding_reaper,
+            liveness_enabled=settings.external_binding_pid_liveness_enabled,
             ttl=timedelta(hours=settings.external_binding_idle_ttl_hours),
             interval_sec=settings.session_health_check_interval_sec,
         )
@@ -338,5 +346,7 @@ class AppContainer(
             permission_gateway=self.permission_gateway,
             session_scanner=SessionScanner(),
             claude_paths=self.claude_paths,
+            liveness_enabled=self.settings.external_binding_pid_liveness_enabled,
+            external_binding_reaper=self.external_binding_reaper,
         )
         self.dispatcher.include_router(router)

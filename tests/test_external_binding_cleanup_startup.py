@@ -31,6 +31,7 @@ import pytest
 from app.domain.external_session_models import ExternalBinding
 from app.domain.models import utc_now
 from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
+from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
 
 TTL = timedelta(hours=24)
@@ -106,10 +107,16 @@ async def test_t14_startup_with_stale_binding_in_json_is_cleaned_after_start(
 
     hook_server = _make_hook_server(has_pending=False)
     auto_approve = _make_auto_approve_service()
-    service = ExternalBindingCleanupService(
+    reaper = ExternalBindingReaper(
         binding_store=store,
         auto_approve_service=auto_approve,
         hook_socket_server=hook_server,
+    )
+    service = ExternalBindingCleanupService(
+        binding_store=store,
+        hook_socket_server=hook_server,
+        reaper=reaper,
+        liveness_enabled=False,
         ttl=TTL,
         interval_sec=LONG_INTERVAL_SEC,
     )
@@ -156,10 +163,16 @@ async def test_t15_startup_with_fresh_binding_in_json_is_preserved(tmp_path: Pat
 
     hook_server = _make_hook_server(has_pending=False)
     auto_approve = _make_auto_approve_service()
-    service = ExternalBindingCleanupService(
+    reaper = ExternalBindingReaper(
         binding_store=store,
         auto_approve_service=auto_approve,
         hook_socket_server=hook_server,
+    )
+    service = ExternalBindingCleanupService(
+        binding_store=store,
+        hook_socket_server=hook_server,
+        reaper=reaper,
+        liveness_enabled=False,
         ttl=TTL,
         interval_sec=LONG_INTERVAL_SEC,
     )
@@ -200,7 +213,7 @@ def test_t16_cleanup_service_constructor_has_no_tmux_or_session_registry_depende
     assert not overlap, f"ExternalBindingCleanupService must not depend on tmux/registry, " f"but constructor accepts: {overlap}"
 
     # Sanity: the dependencies it DOES need are present.
-    expected = {"binding_store", "auto_approve_service", "hook_socket_server", "ttl", "interval_sec"}
+    expected = {"binding_store", "hook_socket_server", "reaper", "liveness_enabled", "ttl", "interval_sec"}
     missing = expected - params
     assert not missing, f"constructor missing expected params: {missing}"
 
@@ -237,10 +250,16 @@ async def test_t16_cleanup_runs_standalone_cleans_stale_preserves_fresh(tmp_path
 
     hook_server = _make_hook_server(has_pending=False)
     auto_approve = _make_auto_approve_service()
-    service = ExternalBindingCleanupService(
+    reaper = ExternalBindingReaper(
         binding_store=store,
         auto_approve_service=auto_approve,
         hook_socket_server=hook_server,
+    )
+    service = ExternalBindingCleanupService(
+        binding_store=store,
+        hook_socket_server=hook_server,
+        reaper=reaper,
+        liveness_enabled=False,
         ttl=TTL,
         interval_sec=LONG_INTERVAL_SEC,
     )
@@ -275,10 +294,16 @@ async def test_t17_external_cleanup_works_without_any_tmux_infrastructure(tmp_pa
     # Empty store — no bindings to consider. This must not raise.
     hook_server = _make_hook_server(has_pending=False)
     auto_approve = _make_auto_approve_service()
-    service = ExternalBindingCleanupService(
+    reaper = ExternalBindingReaper(
         binding_store=store,
         auto_approve_service=auto_approve,
         hook_socket_server=hook_server,
+    )
+    service = ExternalBindingCleanupService(
+        binding_store=store,
+        hook_socket_server=hook_server,
+        reaper=reaper,
+        liveness_enabled=False,
         ttl=TTL,
         interval_sec=LONG_INTERVAL_SEC,
     )

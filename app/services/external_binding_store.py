@@ -73,6 +73,7 @@ class ExternalBindingStore:
         last_activity_at: datetime,
         *,
         persist_min_interval_sec: int = 60,
+        pid: int | None = None,
     ) -> None:
         """Update the in-memory ``last_activity_at`` for ``session_id``.
 
@@ -81,6 +82,14 @@ class ExternalBindingStore:
         was just (re-)saved), the call persists right away; otherwise it
         persists only when at least ``persist_min_interval_sec`` seconds have
         elapsed since the previous touch-driven persist for the same session.
+
+        When ``pid`` is supplied and is a positive integer, the binding's stored
+        ``pid`` is updated in memory immediately. A ``pid`` of ``None`` or any
+        non-positive value leaves the existing stored ``pid`` unchanged (so an
+        event that does not carry a usable pid never clobbers a previously
+        recorded pid). Persistence of the ``pid`` change rides the same
+        ``persist_min_interval_sec`` throttle as ``last_activity_at`` — there is
+        no separate immediate-persist path for pid.
 
         No-op if ``session_id`` is not present in the store.
         """
@@ -91,6 +100,11 @@ class ExternalBindingStore:
         # Always update in memory immediately so subsequent reads (e.g. the
         # cleanup service's re-read) observe the fresh activity timestamp.
         binding.last_activity_at = last_activity_at
+
+        # Update the stored pid only when the caller supplied a usable value;
+        # ``None`` or ``<= 0`` leaves any previously recorded pid intact.
+        if pid is not None and pid > 0:
+            binding.pid = pid
 
         now = time.monotonic()
         last_persist = self._last_persist_at.get(session_id)
@@ -117,6 +131,7 @@ class ExternalBindingStore:
                     cwd=entry["cwd"],
                     bound_at=bound_at,
                     jsonl_path=entry.get("jsonl_path"),
+                    pid=entry.get("pid"),
                     last_activity_at_init=last_activity_at,
                 )
             return bindings
@@ -134,6 +149,7 @@ class ExternalBindingStore:
                 "bound_at": binding.bound_at.isoformat(),
                 "last_activity_at": binding.last_activity_at.isoformat(),
                 "jsonl_path": binding.jsonl_path,
+                "pid": binding.pid,
             }
         # Atomic write: write to temp file then rename to avoid corruption
         try:

@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from app.domain.models import utc_now
-from app.services.auto_approve_service import AutoApproveService
+from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
+from app.services.process_liveness import process_is_alive
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
@@ -16,32 +18,70 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class ExternalBindingCleanupService:
-    """Periodically remove external bindings whose idle age exceeds the TTL.
+@dataclass(frozen=True)
+class CleanupDecision:
+    action: Literal["keep", "remove"]
+    reason: str | None  # "pid_dead" | "idle_ttl_expired" | None
 
-    Bindings with a pending permission for the corresponding session are
-    protected from removal even if their idle TTL is exceeded — pending
-    permissions are a strong signal that the session is still meaningfully
-    "alive" from the user's perspective.
+
+def decide_cleanup(
+    *,
+    liveness_enabled: bool,
+    pid_known: bool,
+    pid_alive: bool,  # only consulted when pid_known
+    idle_expired: bool,  # idle_age > ttl
+    has_pending_permission: bool,
+) -> CleanupDecision:
+    # Rows 1-3: liveness governs when enabled AND pid known.
+    if liveness_enabled and pid_known:
+        if pid_alive:
+            return CleanupDecision("keep", None)  # row 1
+        return CleanupDecision("remove", "pid_dead")  # rows 2, 3
+    # Rows 4-9: idle-TTL fallback (pid unknown OR liveness disabled).
+    if idle_expired and not has_pending_permission:
+        return CleanupDecision("remove", "idle_ttl_expired")  # rows 4, 7
+    return CleanupDecision("keep", None)  # rows 5, 6, 8, 9
+
+
+class ExternalBindingCleanupService:
+    """Periodically remove external bindings whose owning process is dead or
+    whose idle age exceeds the TTL.
+
+    The cleanup decision is governed by the normative Decision Matrix in
+    ``requirements.md``:
+
+    - When pid liveness is enabled AND the binding's pid is known
+      (``pid is not None and pid > 0``), liveness governs the decision: a
+      live pid retains the binding regardless of idle age, and a dead pid
+      removes the binding regardless of idle age and pending-permission
+      state (Decision Matrix rows 1-3).
+    - Otherwise (pid unknown OR liveness disabled), the binding falls back
+      to the existing idle-TTL path with race-safe re-reads and the
+      pending-permission protection signal (rows 4-9).
 
     Architectural note: this service intentionally does NOT depend on
     ``PermissionCallbackRegistry``. Idle TTL is a heuristic, not proof of
     death, so we deliberately avoid invalidating callback registry entries
-    here (per spec T12c).
+    here (per spec T12c). The dead-process path delegates the canonical
+    removal-and-cleanup sequence to the shared ``ExternalBindingReaper``,
+    which is also used by ``/list`` so the order lives in exactly one
+    place.
     """
 
     def __init__(
         self,
         *,
         binding_store: ExternalBindingStore,
-        auto_approve_service: AutoApproveService,
         hook_socket_server: HookSocketServer,
+        reaper: ExternalBindingReaper,
+        liveness_enabled: bool,
         ttl: timedelta,
         interval_sec: float,
     ) -> None:
         self._binding_store = binding_store
-        self._auto_approve_service = auto_approve_service
         self._hook_socket_server = hook_socket_server
+        self._reaper = reaper
+        self._liveness_enabled = liveness_enabled
         self._ttl = ttl
         self._interval_sec = interval_sec
         self._task: asyncio.Task[None] | None = None
@@ -84,14 +124,36 @@ class ExternalBindingCleanupService:
                 logger.exception("external binding cleanup iteration failed")
 
     async def _cleanup(self) -> None:
-        """Remove every binding whose idle age exceeds the TTL and which has
-        no pending permission, with race-safe re-reads around the await.
+        """Apply the Decision Matrix to every binding with race-safe re-reads.
+
+        For each binding: when liveness is enabled AND the pid is known the
+        liveness probe governs (rows 1-3); otherwise the existing idle-TTL
+        path runs verbatim with its race-safe re-reads and pending-permission
+        protection signal (rows 4-9). The actual removal-and-cleanup sequence
+        is delegated to the shared reaper so its canonical order lives in
+        exactly one place.
         """
         now = utc_now()
         snapshot = self._binding_store.list_all()
 
         for binding in snapshot:
             session_id = binding.session_id
+            pid_known = binding.pid is not None and binding.pid > 0
+
+            # Rows 1-3: liveness governs when enabled AND pid known. A live
+            # pid retains the binding regardless of idle age (Req 5.1, 5.2);
+            # a dead pid removes it regardless of idle age and pending
+            # permission (Req 6.1-6.3). The reaper performs its own re-read
+            # guard before removal (Req 6.6), so no explicit re-read here.
+            if self._liveness_enabled and pid_known:
+                # Type guard for mypy: pid_known proved binding.pid is int.
+                assert binding.pid is not None
+                if process_is_alive(binding.pid):
+                    continue
+                await self._reaper.remove_with_cleanup(session_id, reason="pid_dead")
+                continue
+
+            # Rows 4-9: idle-TTL fallback (pid unknown OR liveness disabled).
 
             # Step i: snapshot pre-filter (no await) — cheap reject for fresh
             # bindings before doing any further work.
@@ -126,23 +188,7 @@ class ExternalBindingCleanupService:
             if idle_age <= self._ttl:
                 continue
 
-            # Step vi: remove the binding and clean up associated session
-            # state. Order matters: drop the binding first so any concurrent
-            # observer sees it gone, then clear auto-approve and cancel any
-            # straggling pending permissions.
-            self._binding_store.remove_binding(session_id)
-            await self._auto_approve_service.clear_session(session_id)
-            await self._hook_socket_server.cancel_pending_permissions(session_id=session_id)
-
-            logger.info(
-                "stale external binding removed",
-                extra={
-                    "session_id": session_id,
-                    "user_id": current.user_id,
-                    "cwd": current.cwd,
-                    "bound_at": current.bound_at.isoformat(),
-                    "last_activity_at": current.last_activity_at.isoformat(),
-                    "idle_hours": idle_age.total_seconds() / 3600,
-                    "reason": "idle_ttl_expired",
-                },
-            )
+            # Step vi: delegate the canonical removal sequence to the reaper.
+            # The reaper drops the binding, clears auto-approve state, cancels
+            # pending permissions, and emits the INFO log itself.
+            await self._reaper.remove_with_cleanup(session_id, reason="idle_ttl_expired")

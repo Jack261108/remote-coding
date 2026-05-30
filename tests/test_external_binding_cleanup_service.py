@@ -39,9 +39,10 @@ import pytest
 from app.domain.external_session_models import ExternalBinding
 from app.domain.models import utc_now
 from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
+from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
 
-CLEANUP_LOGGER_NAME = "app.services.external_binding_cleanup_service"
+CLEANUP_LOGGER_NAME = "app.services.external_binding_reaper"
 TTL = timedelta(hours=24)
 
 
@@ -76,8 +77,13 @@ def make_service(
 
     service = ExternalBindingCleanupService(
         binding_store=store,
-        auto_approve_service=auto_approve,
         hook_socket_server=hook_server,
+        reaper=ExternalBindingReaper(
+            binding_store=store,
+            auto_approve_service=auto_approve,
+            hook_socket_server=hook_server,
+        ),
+        liveness_enabled=False,
         ttl=TTL,
         interval_sec=30.0,
     )
@@ -230,8 +236,9 @@ def test_constructor_does_not_accept_permission_callback_registry() -> None:
     assert params == {
         "self",
         "binding_store",
-        "auto_approve_service",
         "hook_socket_server",
+        "reaper",
+        "liveness_enabled",
         "ttl",
         "interval_sec",
     }

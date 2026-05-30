@@ -41,6 +41,7 @@ from app.services.upload_queue import UploadQueueManager
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.external_binding_reaper import ExternalBindingReaper
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_gateway import PermissionGateway
     from app.services.unbound_permission_handler import UnboundPermissionHandler
@@ -67,6 +68,8 @@ def create_router(
     permission_gateway: PermissionGateway | None = None,
     session_scanner: SessionScanner | None = None,
     claude_paths: ClaudePaths | None = None,
+    liveness_enabled: bool = False,
+    external_binding_reaper: ExternalBindingReaper | None = None,
 ) -> Router:
     router = Router()
 
@@ -159,6 +162,8 @@ def create_router(
             registry_service=registry_service,
             external_discovery=external_discovery,
             external_binder=external_binder,
+            liveness_enabled=liveness_enabled,
+            reaper=external_binding_reaper,
         )
         register_attach_handler(router, registry_service=registry_service)
 

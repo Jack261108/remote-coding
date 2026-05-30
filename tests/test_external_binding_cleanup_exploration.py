@@ -31,6 +31,7 @@ from app.services.external_binding_store import ExternalBindingStore
 # success signal for this exploration test (it confirms the bug exists because
 # no cleanup component is present in the codebase).
 from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
+from app.services.external_binding_reaper import ExternalBindingReaper
 
 TTL = timedelta(hours=24)
 
@@ -54,10 +55,16 @@ def _make_cleanup_service(
     hook_server: AsyncMock,
     auto_approve: AsyncMock,
 ) -> ExternalBindingCleanupService:
-    return ExternalBindingCleanupService(
+    reaper = ExternalBindingReaper(
         binding_store=store,
         auto_approve_service=auto_approve,
         hook_socket_server=hook_server,
+    )
+    return ExternalBindingCleanupService(
+        binding_store=store,
+        hook_socket_server=hook_server,
+        reaper=reaper,
+        liveness_enabled=False,
         ttl=TTL,
         interval_sec=30.0,
     )

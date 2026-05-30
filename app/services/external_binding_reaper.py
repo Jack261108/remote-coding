@@ -1,0 +1,92 @@
+"""Shared removal-and-cleanup collaborator for external bindings.
+
+This module owns the canonical sequence used to remove an
+``ExternalBinding`` and unwind its associated session state. The exact
+ordering — drop the binding from the store first, then clear the
+auto-approve state, then cancel any straggling pending permissions, then
+emit one INFO log — is invoked by BOTH the periodic cleanup loop in
+``ExternalBindingCleanupService`` AND the proactive `/list` render (per
+Requirements 6.4 and 9.2). Centralizing it here guarantees the order lives
+in exactly one place and is identical regardless of which path observes a
+removable binding first.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from app.domain.models import utc_now
+from app.services.auto_approve_service import AutoApproveService
+from app.services.external_binding_store import ExternalBindingStore
+
+if TYPE_CHECKING:
+    from app.adapters.claude.hook_socket_server import HookSocketServer
+
+logger = logging.getLogger(__name__)
+
+
+class ExternalBindingReaper:
+    """Performs the single canonical removal-and-cleanup sequence used by
+    both the cleanup loop and the `/list` handler (Requirements 6.4, 9.2).
+    """
+
+    def __init__(
+        self,
+        *,
+        binding_store: ExternalBindingStore,
+        auto_approve_service: AutoApproveService,
+        hook_socket_server: HookSocketServer,
+    ) -> None:
+        self._binding_store = binding_store
+        self._auto_approve_service = auto_approve_service
+        self._hook_socket_server = hook_socket_server
+
+    async def remove_with_cleanup(self, session_id: str, *, reason: str) -> bool:
+        """Atomically remove a binding and unwind its associated state.
+
+        Steps (canonical order — do not reorder):
+          1. Re-read the binding via ``get_binding``; if it is already gone
+             (e.g. a concurrent ``SessionEnd`` handler removed it) return
+             ``False`` without performing any further work (Req 6.6).
+          2. Drop the binding from the store first so any concurrent observer
+             (e.g. a `/list` render or a racing ``SessionEnd``) immediately
+             sees it gone.
+          3. Clear the auto-approve state for the session.
+          4. Cancel any straggling pending permissions for the session.
+          5. Emit one INFO log including the reason and a fixed set of
+             context fields. ``pid`` is always present in the log payload —
+             rendered as an explicit ``None`` (JSON ``null``) when unknown,
+             so consumers can distinguish "no pid recorded" from "field
+             missing" (Req 8.3).
+
+        The ``reason`` string is supplied by the caller (typically
+        ``"pid_dead"`` or ``"idle_ttl_expired"``) and is logged verbatim;
+        this method does not validate it.
+
+        Returns ``True`` iff a binding was removed; ``False`` when the
+        re-read guard saw the binding already gone.
+        """
+        current = self._binding_store.get_binding(session_id)
+        if current is None:
+            return False
+
+        self._binding_store.remove_binding(session_id)
+        await self._auto_approve_service.clear_session(session_id)
+        await self._hook_socket_server.cancel_pending_permissions(session_id=session_id)
+
+        idle_hours = (utc_now() - current.last_activity_at).total_seconds() / 3600
+        logger.info(
+            "external binding removed",
+            extra={
+                "session_id": session_id,
+                "user_id": current.user_id,
+                "cwd": current.cwd,
+                "bound_at": current.bound_at.isoformat(),
+                "last_activity_at": current.last_activity_at.isoformat(),
+                "idle_hours": idle_hours,
+                "pid": current.pid,
+                "reason": reason,
+            },
+        )
+        return True
