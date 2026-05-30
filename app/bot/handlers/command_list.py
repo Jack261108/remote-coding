@@ -63,15 +63,12 @@ def register_list_handler(
             if liveness_enabled and reaper is not None:
                 visible = []
                 dead_ids: list[str] = []
-                for b in bound_sessions:
-                    pid = b.pid
-                    if pid is not None and pid > 0:
-                        if not process_is_alive(pid):
-                            dead_ids.append(b.session_id)
-                        else:
-                            visible.append(b)
-                    else:
-                        visible.append(b)
+                for binding in bound_sessions:
+                    pid = binding.pid
+                    if pid is not None and pid > 0 and not process_is_alive(pid):
+                        dead_ids.append(binding.session_id)
+                        continue
+                    visible.append(binding)
                 bound_sessions = visible
                 for session_id in dead_ids:
                     try:

@@ -138,17 +138,15 @@ class ExternalBindingCleanupService:
 
         for binding in snapshot:
             session_id = binding.session_id
-            pid_known = binding.pid is not None and binding.pid > 0
+            pid = binding.pid
 
             # Rows 1-3: liveness governs when enabled AND pid known. A live
             # pid retains the binding regardless of idle age (Req 5.1, 5.2);
             # a dead pid removes it regardless of idle age and pending
             # permission (Req 6.1-6.3). The reaper performs its own re-read
             # guard before removal (Req 6.6), so no explicit re-read here.
-            if self._liveness_enabled and pid_known:
-                # Type guard for mypy: pid_known proved binding.pid is int.
-                assert binding.pid is not None
-                if process_is_alive(binding.pid):
+            if self._liveness_enabled and pid is not None and pid > 0:
+                if process_is_alive(pid):
                     continue
                 await self._reaper.remove_with_cleanup(session_id, reason="pid_dead")
                 continue

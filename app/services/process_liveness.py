@@ -23,9 +23,9 @@ def process_is_alive(pid: int) -> bool:
     - ``pid <= 0``           -> ``False`` (no ``os.kill`` call; not a single-process target)
     - ``os.kill`` returns    -> ``True``
     - ``ProcessLookupError`` -> ``False`` (no such process)
-    - ``PermissionError``    -> ``True``  (process exists, owned by another user)
-    - any other ``OSError``  -> ``True``  (ambiguous; treat as alive to avoid
-      wrongly removing a live session)
+    - any other ``OSError``  -> ``True``  (including ``PermissionError``;
+      ambiguous outcomes are treated as alive to avoid wrongly removing a live
+      session)
     """
     if pid <= 0:
         return False
@@ -33,8 +33,6 @@ def process_is_alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        return True
     except OSError:
         return True
     return True
