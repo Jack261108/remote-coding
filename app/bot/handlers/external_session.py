@@ -75,11 +75,7 @@ def register_external_session_handler(
         # parts[0] = "/external"
         if len(parts) < 2:
             await message.answer(
-                "用法:\n"
-                "/external list\n"
-                "/external bind <session_id>\n"
-                "/external unbind <session_id>\n"
-                "/external status <session_id>"
+                "用法:\n/external list\n/external bind <session_id>\n/external unbind <session_id>\n/external status <session_id>"
             )
             return
 

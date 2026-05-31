@@ -128,7 +128,7 @@ class ResultExporterService:
         final_size = zip_path.stat().st_size
         if final_size > max_size_bytes:
             zip_path.unlink(missing_ok=True)
-            raise ZipSizeLimitError(f"ZIP archive exceeds {self._settings.zip_max_size_mb} MB limit. " "Consider using a narrower scope.")
+            raise ZipSizeLimitError(f"ZIP archive exceeds {self._settings.zip_max_size_mb} MB limit. Consider using a narrower scope.")
 
         return ExportResult(
             file_path=zip_path,

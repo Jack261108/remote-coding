@@ -109,9 +109,9 @@ def test_pid_change_within_throttle_stays_in_memory_then_persists(tmp_path: Path
     third_activity = utc_now() + timedelta(seconds=2)
     store.touch_activity("session-throttle", third_activity, persist_min_interval_sec=0)
     assert persist_calls["count"] == 2, "throttle-eligible touch SHALL persist again"
-    assert (
-        _read_bindings_json(tmp_path)["session-throttle"]["pid"] == 222
-    ), "the in-memory pid change is persisted on the next eligible touch"
+    assert _read_bindings_json(tmp_path)["session-throttle"]["pid"] == 222, (
+        "the in-memory pid change is persisted on the next eligible touch"
+    )
 
     # A fresh store reading the same file observes the persisted pid.
     reloaded = ExternalBindingStore(data_dir=tmp_path).get_binding("session-throttle")

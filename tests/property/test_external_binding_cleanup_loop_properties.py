@@ -129,8 +129,7 @@ def test_property_4_cleanup_loop_honors_liveness_governance(
             # regardless of idle age or pending permission.
             reaper.remove_with_cleanup.assert_not_awaited()
             assert store.get_binding(session_id) is not None, (
-                "an alive Pid_Known binding must be retained regardless of idle "
-                f"age (idle_hours={idle_hours}) or pending ({has_pending})"
+                f"an alive Pid_Known binding must be retained regardless of idle age (idle_hours={idle_hours}) or pending ({has_pending})"
             )
         else:
             # Rows 2-3: REMOVE — reaper called exactly once with reason='pid_dead',

@@ -228,18 +228,18 @@ def test_prime_with_baseline_current_snapshot_preserves_persisted_cursor_when_sn
     # 3) The fresh turn must be emitted exactly once on the second poll (Requirement 2.3).
     structured_emits_second_poll = [out for out in second_poll if isinstance(out, StructuredReplyOutput)]
     assert len(structured_emits_second_poll) == 1, (
-        f"expected exactly one StructuredReplyOutput on the second poll, " f"got {structured_emits_second_poll!r}"
+        f"expected exactly one StructuredReplyOutput on the second poll, got {structured_emits_second_poll!r}"
     )
-    assert (
-        structured_emits_second_poll[0].turn_id == _FRESH_TURN_ID
-    ), f"second poll did not emit the fresh turn: {structured_emits_second_poll[0]!r}"
+    assert structured_emits_second_poll[0].turn_id == _FRESH_TURN_ID, (
+        f"second poll did not emit the fresh turn: {structured_emits_second_poll[0]!r}"
+    )
 
     # 4) Across both polls combined, the previously acknowledged turn must never be emitted.
     stale_emits_total = [
         out for out in (*first_poll, *second_poll) if isinstance(out, StructuredReplyOutput) and out.turn_id == persisted_turn_id
     ]
     assert stale_emits_total == [], (
-        f"the previously acknowledged turn {persisted_turn_id!r} was re-emitted across " f"the two polls: {stale_emits_total!r}"
+        f"the previously acknowledged turn {persisted_turn_id!r} was re-emitted across the two polls: {stale_emits_total!r}"
     )
 
 
@@ -465,7 +465,7 @@ def test_prime_preserves_last_structured_turn_id_for_non_bug_inputs(
     else:
         # Non-baseline branch: persisted cursor is restored verbatim.
         assert presenter._last_structured_turn_id == persisted_turn_id, (
-            f"baseline=False: expected _last_structured_turn_id == " f"{persisted_turn_id!r}, got {presenter._last_structured_turn_id!r}"
+            f"baseline=False: expected _last_structured_turn_id == {persisted_turn_id!r}, got {presenter._last_structured_turn_id!r}"
         )
 
 
@@ -510,7 +510,7 @@ def test_prime_preserves_persisted_permission_key_and_snapshot_observables(
 
     # Permission key cursor preservation (Req 3.5).
     assert presenter._last_pending_permission_key == persisted_permission_key, (
-        f"expected _last_pending_permission_key == {persisted_permission_key!r}, " f"got {presenter._last_pending_permission_key!r}"
+        f"expected _last_pending_permission_key == {persisted_permission_key!r}, got {presenter._last_pending_permission_key!r}"
     )
     # Session/phase observables reflect the loaded snapshot (Req 3.5).
     assert presenter._structured_session_available is True

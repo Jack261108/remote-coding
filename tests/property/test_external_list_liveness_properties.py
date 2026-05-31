@@ -196,7 +196,7 @@ def test_property_8_list_liveness_visibility_partition(
             # Rendered set is exactly the alive + unknown bindings; the dead ones
             # are excluded (Req 9.1, 9.3, 9.4).
             assert rendered == {sid[:16] for sid in visible_expected}, (
-                f"liveness on: expected rendered={visible_expected!r}, " f"got prefixes={rendered!r} (dead_expected={dead_expected!r})"
+                f"liveness on: expected rendered={visible_expected!r}, got prefixes={rendered!r} (dead_expected={dead_expected!r})"
             )
 
             # Each Pid_Known-and-dead binding is reaped exactly once with

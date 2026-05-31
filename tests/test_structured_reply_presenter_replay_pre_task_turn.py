@@ -285,7 +285,7 @@ def test_collect_reply_skips_pre_task_turn_after_bot_restart(
     # 1) Sanity: post-restart prime leaves the in-memory cursor empty
     #    because both ``snapshot.turn_id`` and the persisted cursor are
     #    ``None``. This pins the precondition for the bug-condition shape.
-    assert cursor_after_prime is None, f"expected _last_structured_turn_id == None after post-restart prime, " f"got {cursor_after_prime!r}"
+    assert cursor_after_prime is None, f"expected _last_structured_turn_id == None after post-restart prime, got {cursor_after_prime!r}"
 
     # 2) The first pump cycle MUST NOT replay the pre-task turn A
     #    (Requirement 2.1). On the UNFIXED code this assertion FAILS with
@@ -302,17 +302,17 @@ def test_collect_reply_skips_pre_task_turn_after_bot_restart(
     #    second poll (Requirement 2.2).
     structured_emits_second_poll = [out for out in second_poll if isinstance(out, StructuredReplyOutput)]
     assert len(structured_emits_second_poll) == 1, (
-        f"expected exactly one StructuredReplyOutput on the second poll, " f"got {structured_emits_second_poll!r}"
+        f"expected exactly one StructuredReplyOutput on the second poll, got {structured_emits_second_poll!r}"
     )
     assert structured_emits_second_poll[0].turn_id == _FRESH_TURN_B_ID, (
-        f"second poll did not emit the fresh post-task turn: " f"{structured_emits_second_poll[0]!r}"
+        f"second poll did not emit the fresh post-task turn: {structured_emits_second_poll[0]!r}"
     )
 
     # 4) Across both polls combined, the pre-task turn must never be
     #    emitted (Requirement 2.3 -- direct check that the bug condition is
     #    fully suppressed end-to-end).
     pre_task_emits_total = [out for out in (*first_poll, *second_poll) if isinstance(out, StructuredReplyOutput) and out.turn_id == turn_id]
-    assert pre_task_emits_total == [], f"the pre-task turn {turn_id!r} was re-emitted across the two " f"polls: {pre_task_emits_total!r}"
+    assert pre_task_emits_total == [], f"the pre-task turn {turn_id!r} was re-emitted across the two polls: {pre_task_emits_total!r}"
 
 
 # ============================================================================
@@ -516,15 +516,13 @@ def test_preserve_no_task_context_emits_for_any_ended_at(delta_seconds: int, tur
     ended_at = _FIXED_TASK_STARTED_AT + timedelta(seconds=delta_seconds)
     cursor_after_prime, first_poll, second_poll = asyncio.run(_run_no_task_context_scenario(turn_id=turn_id, ended_at=ended_at))
 
-    assert cursor_after_prime is None, (
-        f"prime with empty snapshot should leave _last_structured_turn_id=None, " f"got {cursor_after_prime!r}"
-    )
+    assert cursor_after_prime is None, f"prime with empty snapshot should leave _last_structured_turn_id=None, got {cursor_after_prime!r}"
     structured_first = [o for o in first_poll if isinstance(o, StructuredReplyOutput)]
     assert len(structured_first) == 1, f"first poll must emit exactly one StructuredReplyOutput, got {structured_first!r}"
     assert structured_first[0].turn_id == turn_id
     structured_second = [o for o in second_poll if isinstance(o, StructuredReplyOutput)]
     assert structured_second == [], (
-        f"second poll must suppress the duplicate turn via the existing " f"duplicate-turn guard, got {structured_second!r}"
+        f"second poll must suppress the duplicate turn via the existing duplicate-turn guard, got {structured_second!r}"
     )
 
 
@@ -569,7 +567,7 @@ def test_preserve_snapshot_without_turn_ended_at_emits_when_task_started_at_set(
     first_poll = asyncio.run(presenter.poll(task_id="task-1"))
 
     structured = [o for o in first_poll if isinstance(o, StructuredReplyOutput)]
-    assert len(structured) == 1, f"turn with ended_at=None must be emitted (new guard short-circuits), " f"got {structured!r}"
+    assert len(structured) == 1, f"turn with ended_at=None must be emitted (new guard short-circuits), got {structured!r}"
     assert structured[0].turn_id == turn_id
 
 
@@ -608,7 +606,7 @@ def test_preserve_post_task_turn_emits_once_when_task_started_at_set(delta_post:
     first_poll = asyncio.run(presenter.poll(task_id="task-1"))
 
     structured = [o for o in first_poll if isinstance(o, StructuredReplyOutput)]
-    assert len(structured) == 1, f"post-task turn (delta_post={delta_post!r}) must emit exactly once, " f"got {structured!r}"
+    assert len(structured) == 1, f"post-task turn (delta_post={delta_post!r}) must emit exactly once, got {structured!r}"
     assert structured[0].turn_id == turn_id
 
 
@@ -641,7 +639,7 @@ def test_preserve_boundary_equality_emits_turn_when_ended_at_equals_task_started
     first_poll = asyncio.run(presenter.poll(task_id="task-1"))
 
     structured = [o for o in first_poll if isinstance(o, StructuredReplyOutput)]
-    assert len(structured) == 1, f"boundary turn (ended_at == task_started_at) must emit exactly once, " f"got {structured!r}"
+    assert len(structured) == 1, f"boundary turn (ended_at == task_started_at) must emit exactly once, got {structured!r}"
     assert structured[0].turn_id == turn_id
 
 
@@ -697,11 +695,11 @@ def test_preserve_previous_bugfix_when_baseline_and_snapshot_turn_id_is_none(
     first_poll = asyncio.run(presenter.poll(task_id="task-1"))
 
     assert cursor_after_prime == persisted_turn_id, (
-        f"previous bugfix must restore _last_structured_turn_id to " f"{persisted_turn_id!r}, got {cursor_after_prime!r}"
+        f"previous bugfix must restore _last_structured_turn_id to {persisted_turn_id!r}, got {cursor_after_prime!r}"
     )
     structured = [o for o in first_poll if isinstance(o, StructuredReplyOutput)]
     assert structured == [], (
-        f"existing duplicate-turn guard must suppress the previously-acknowledged " f"turn {persisted_turn_id!r}, got {structured!r}"
+        f"existing duplicate-turn guard must suppress the previously-acknowledged turn {persisted_turn_id!r}, got {structured!r}"
     )
 
 
@@ -754,7 +752,7 @@ def test_preserve_cold_start_post_task_turn_emits_once(delta_post: timedelta, tu
             asyncio.run(presenter.acknowledge_delivery(output))
     second_poll = asyncio.run(presenter.poll(task_id="task-1"))
 
-    assert cursor_after_prime is None, f"cold-start prime should leave _last_structured_turn_id=None, " f"got {cursor_after_prime!r}"
+    assert cursor_after_prime is None, f"cold-start prime should leave _last_structured_turn_id=None, got {cursor_after_prime!r}"
     structured_first = [o for o in first_poll if isinstance(o, StructuredReplyOutput)]
     assert len(structured_first) == 1, f"cold-start post-task turn must emit exactly once, got {structured_first!r}"
     assert structured_first[0].turn_id == turn_id

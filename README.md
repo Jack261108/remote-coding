@@ -87,6 +87,51 @@ pytest -q
 
 当前用例覆盖：provider 映射、任务状态机、输出分片与节流。
 
+## 开发 / 本地钩子（pre-commit）
+
+本仓库通过 pre-commit 框架的多阶段钩子，将**本地检查与 GitHub Actions CI 完全对齐**，让会导致 CI 失败的问题在 `git push` 到达远程之前就在本地被拦截。
+
+钩子做的事：
+
+- **pre-commit 阶段（执行 `git commit` 时）**：运行 ruff，即 `ruff check --fix app tests`（lint，自动修复）与 `ruff format app tests`（格式化）。这些检查很快，保证提交流畅。
+- **pre-push 阶段（执行 `git push` 时）**：运行 `mypy --follow-imports=skip`（针对与 CI 相同的 7 个文件）与 `pytest -q`（完整测试套件）。这些检查较慢，放在推送前一次性拦截。
+
+### 一次性安装
+
+`pre-commit` CLI 来自 dev 附加依赖，执行 `pip install -e ".[dev]"` 即可获得，**无需各自手动全局安装**。
+
+安装钩子（推荐，依赖配置中的 `default_install_hook_types`）：
+
+```bash
+pre-commit install
+```
+
+等价的显式写法（不依赖默认声明，手动指定两类钩子）：
+
+```bash
+pre-commit install --hook-type pre-commit --hook-type pre-push
+```
+
+上述命令亦可写作模块调用形式（模块名为下划线 `pre_commit`），以确保使用的是项目虚拟环境中的 `pre-commit`，避免误用 PATH 上的全局 `pre-commit`：
+
+```bash
+python -m pre_commit install
+```
+
+### 环境前置条件
+
+执行 `git commit` / `git push` 时，shell 中的 `python` 必须解析到**已执行过 `pip install -e ".[dev]"` 的项目虚拟环境**。钩子通过 `python -m <tool>` 调用 ruff / mypy / pytest，只有在该环境下，本地使用的工具版本才与 CI 同源，从而维持「本地通过则 CI 通过」的一致性保证。
+
+### 绕过钩子（`--no-verify`）
+
+紧急情况下可跳过本地 pre-push 检查：
+
+```bash
+git push --no-verify
+```
+
+注意：`--no-verify` 只会跳过**本地** pre-push 钩子，**远端 CI 仍会执行完整的检查集**（ruff lint、ruff format 校验、mypy、pytest）。因此该选项只是绕过本地的提前反馈，并不能跳过 CI。
+
 ## Linux systemd 部署
 
 1. 将项目部署到 `/opt/tg-cli-gateway`

@@ -156,7 +156,7 @@ def test_property_7_hook_event_pid_refresh_always_touches_activity(
 
         # last_activity_at is ALWAYS refreshed to ``now`` regardless of event pid.
         assert binding.last_activity_at == now, (
-            f"last_activity_at ({binding.last_activity_at!r}) must equal now ({now!r}) " f"regardless of event_pid ({event_pid!r})"
+            f"last_activity_at ({binding.last_activity_at!r}) must equal now ({now!r}) regardless of event_pid ({event_pid!r})"
         )
 
         # pid is updated IFF event_pid is a positive integer; else unchanged.

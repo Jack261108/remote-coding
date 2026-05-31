@@ -116,13 +116,11 @@ async def test_property_a_cleanup_decision_matches_spec(
         is_stale_and_unprotected = age_hours > ttl_hours and not has_pending
         if is_stale_and_unprotected:
             assert store.get_binding(session_id) is None, (
-                f"stale + unprotected binding should be removed "
-                f"(age_hours={age_hours}, ttl_hours={ttl_hours}, has_pending={has_pending})"
+                f"stale + unprotected binding should be removed (age_hours={age_hours}, ttl_hours={ttl_hours}, has_pending={has_pending})"
             )
         else:
             assert store.get_binding(session_id) is not None, (
-                f"fresh or protected binding should be retained "
-                f"(age_hours={age_hours}, ttl_hours={ttl_hours}, has_pending={has_pending})"
+                f"fresh or protected binding should be retained (age_hours={age_hours}, ttl_hours={ttl_hours}, has_pending={has_pending})"
             )
 
 
@@ -169,7 +167,7 @@ def test_property_b_touch_reflects_last_call(timestamps: list[datetime]) -> None
         binding = store.get_binding(session_id)
         assert binding is not None
         assert binding.last_activity_at == timestamps[-1], (
-            f"in-memory last_activity_at ({binding.last_activity_at!r}) " f"should equal last touch timestamp ({timestamps[-1]!r})"
+            f"in-memory last_activity_at ({binding.last_activity_at!r}) should equal last touch timestamp ({timestamps[-1]!r})"
         )
 
         # Persisted: with throttle disabled, every call hit disk too.
@@ -178,7 +176,7 @@ def test_property_b_touch_reflects_last_call(timestamps: list[datetime]) -> None
         reloaded = store2.get_binding(session_id)
         assert reloaded is not None
         assert reloaded.last_activity_at == timestamps[-1], (
-            f"persisted last_activity_at ({reloaded.last_activity_at!r}) " f"should equal last touch timestamp ({timestamps[-1]!r})"
+            f"persisted last_activity_at ({reloaded.last_activity_at!r}) should equal last touch timestamp ({timestamps[-1]!r})"
         )
 
 
@@ -277,8 +275,8 @@ def test_property_c_json_load_round_trip_mixed_timezone_shapes(
         # Loaded UTC values represent the same absolute moment as the original.
         # Allow microsecond-scale tolerance for float round-trip safety.
         assert abs(loaded.bound_at.timestamp() - expected_bound_ts) < 1e-6, (
-            f"bound_at instant changed under load: " f"{loaded.bound_at.timestamp()} vs expected {expected_bound_ts}"
+            f"bound_at instant changed under load: {loaded.bound_at.timestamp()} vs expected {expected_bound_ts}"
         )
         assert abs(loaded.last_activity_at.timestamp() - expected_activity_ts) < 1e-6, (
-            f"last_activity_at instant changed under load: " f"{loaded.last_activity_at.timestamp()} vs expected {expected_activity_ts}"
+            f"last_activity_at instant changed under load: {loaded.last_activity_at.timestamp()} vs expected {expected_activity_ts}"
         )

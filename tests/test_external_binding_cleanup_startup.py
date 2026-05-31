@@ -210,7 +210,7 @@ def test_t16_cleanup_service_constructor_has_no_tmux_or_session_registry_depende
         "registry",
     }
     overlap = params & forbidden
-    assert not overlap, f"ExternalBindingCleanupService must not depend on tmux/registry, " f"but constructor accepts: {overlap}"
+    assert not overlap, f"ExternalBindingCleanupService must not depend on tmux/registry, but constructor accepts: {overlap}"
 
     # Sanity: the dependencies it DOES need are present.
     expected = {"binding_store", "hook_socket_server", "reaper", "liveness_enabled", "ttl", "interval_sec"}
