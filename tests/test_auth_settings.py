@@ -380,8 +380,9 @@ async def test_global_cleanup_respects_interval_and_batch() -> None:
     for uid in range(1, 5):
         middleware._buckets[uid][-1] -= 200.0
 
-    # Reset _last_cleanup_ts so the next request triggers global cleanup.
-    middleware._last_cleanup_ts = 0.0
+    # Reset _last_cleanup_ts relative to the current loop time so cleanup triggers
+    # even on fresh CI event loops whose monotonic time is still below the interval.
+    middleware._last_cleanup_ts = asyncio.get_running_loop().time() - middleware._cleanup_interval_sec
 
     # Trigger a request from a fresh user to force global cleanup.
     # cleanup_batch_size=2, so at most 2 stale buckets are removed.
