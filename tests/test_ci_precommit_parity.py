@@ -26,10 +26,13 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import tomllib
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CI_PATH = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _PRECOMMIT_PATH = _REPO_ROOT / ".pre-commit-config.yaml"
+_PYPROJECT_PATH = _REPO_ROOT / "pyproject.toml"
+_UV_LOCK_PATH = _REPO_ROOT / "uv.lock"
 
 # The canonical mypy file set, mirrored from the requirements glossary (Mypy_Check)
 # and CI. Both CI and the hooks MUST cover exactly these 7 files.
@@ -83,11 +86,10 @@ def _mypy_files(text: str) -> set[str]:
 
 
 def _hook_blocks(precommit_text: str) -> dict[str, dict[str, str]]:
-    """Parse ``.pre-commit-config.yaml`` into a mapping of hook id -> {entry, stages}.
+    """Parse ``.pre-commit-config.yaml`` into a mapping of hook id -> key values.
 
     Uses simple text splitting (no YAML library). Each hook starts at a ``- id:``
-    marker; within a block we capture the (possibly folded) ``entry`` and the
-    ``stages`` list as raw strings.
+    marker; within a block we capture the fields that matter for CI parity.
     """
     blocks: dict[str, dict[str, str]] = {}
     # Split on the "- id:" marker. The first chunk is the file preamble.
@@ -98,11 +100,58 @@ def _hook_blocks(precommit_text: str) -> dict[str, dict[str, str]]:
         entry_match = re.search(r"entry:\s*(.*?)\n\s*language:", chunk, re.DOTALL)
         entry = _normalize(entry_match.group(1)) if entry_match else ""
 
-        stages_match = re.search(r"stages:\s*\[([^\]]*)\]", chunk)
-        stages = stages_match.group(1).replace(" ", "") if stages_match else ""
+        fields = {"entry": entry}
+        for key in ("language", "pass_filenames", "always_run", "require_serial"):
+            match = re.search(rf"(?m)^\s*{key}:\s*([^\n]+)", chunk)
+            if match:
+                fields[key] = match.group(1).strip()
 
-        blocks[hook_id] = {"entry": entry, "stages": stages}
+        stages_match = re.search(r"stages:\s*\[([^\]]*)\]", chunk)
+        fields["stages"] = stages_match.group(1).replace(" ", "") if stages_match else ""
+
+        blocks[hook_id] = fields
     return blocks
+
+
+def _normalize_package_name(name: str) -> str:
+    return name.lower().replace("_", "-")
+
+
+def _requirement_name_and_specifier(requirement: str) -> tuple[str, str]:
+    match = re.fullmatch(r"([A-Za-z0-9_.-]+)(.*)", requirement)
+    assert match is not None, f"unsupported dev dependency requirement: {requirement!r}"
+    return _normalize_package_name(match.group(1)), match.group(2)
+
+
+def _pyproject_dev_requirements(text: str) -> dict[str, str]:
+    data = tomllib.loads(text)
+    dev_dependencies = data["project"]["optional-dependencies"]["dev"]
+    return dict(_requirement_name_and_specifier(requirement) for requirement in dev_dependencies)
+
+
+def _lock_package(text: str) -> dict:
+    data = tomllib.loads(text)
+    packages = [package for package in data["package"] if package["name"] == "tg-cli-gateway"]
+    assert len(packages) == 1, "uv.lock must include exactly one editable tg-cli-gateway package"
+    return packages[0]
+
+
+def _lock_dev_requirements(text: str) -> dict[str, str]:
+    package = _lock_package(text)
+    optional_dependency_names = {_normalize_package_name(dependency["name"]) for dependency in package["optional-dependencies"]["dev"]}
+    metadata_requirements = {
+        _normalize_package_name(requirement["name"]): requirement.get("specifier", "")
+        for requirement in package["metadata"]["requires-dist"]
+        if requirement.get("marker") == "extra == 'dev'"
+    }
+
+    assert optional_dependency_names == set(metadata_requirements), "uv.lock dev extra names must match its dev requires-dist metadata"
+    return metadata_requirements
+
+
+def test_dev_extra_is_synchronized_between_pyproject_and_uv_lock() -> None:
+    """The locked dev extra must match pyproject.toml so local installs are repeatable."""
+    assert _lock_dev_requirements(_read(_UV_LOCK_PATH)) == _pyproject_dev_requirements(_read(_PYPROJECT_PATH))
 
 
 def test_ci_defines_expected_check_commands() -> None:
@@ -119,16 +168,27 @@ def test_ci_defines_expected_check_commands() -> None:
 def test_precommit_defines_corresponding_hooks_in_correct_stages() -> None:
     """The hooks define the corresponding checks and place them in the stages that
     matter for parity: ruff in pre-commit; mypy + pytest in pre-push."""
-    blocks = _hook_blocks(_read(_PRECOMMIT_PATH))
+    precommit_text = _read(_PRECOMMIT_PATH)
+    assert "default_install_hook_types: [pre-commit, pre-push]" in _normalize(precommit_text)
+
+    blocks = _hook_blocks(precommit_text)
 
     # All four logical checks exist as local hooks.
     assert {"ruff-check", "ruff-format", "mypy", "pytest"} <= set(blocks)
 
+    # CI parity hooks must ignore Git's filename filtering and run on every invocation.
+    for hook_id in ("ruff-check", "ruff-format", "mypy", "pytest"):
+        assert blocks[hook_id]["language"] == "system"
+        assert blocks[hook_id]["pass_filenames"] == "false"
+        assert blocks[hook_id]["always_run"] == "true"
+
     # pre-commit stage: fast ruff checks (Requirement 2.1).
     assert "ruff check --fix app tests" in blocks["ruff-check"]["entry"]
     assert blocks["ruff-check"]["stages"] == "pre-commit"
+    assert blocks["ruff-check"]["require_serial"] == "true"
     assert "ruff format app tests" in blocks["ruff-format"]["entry"]
     assert blocks["ruff-format"]["stages"] == "pre-commit"
+    assert blocks["ruff-format"]["require_serial"] == "true"
 
     # pre-push stage: slow checks (Requirement 3.1).
     assert "mypy --follow-imports=skip" in blocks["mypy"]["entry"]
