@@ -459,6 +459,7 @@ class HookHandlingMixin(AppContainerBase):
                             pid=event.pid,
                             prompts=prompts,
                             pane_id=pane_id,
+                            tmux_bin=self.settings.tmux_bin,
                         )
                         self.external_uq_state.store(pending)
                         await self.push_notifier.notify_user_question(

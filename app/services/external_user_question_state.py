@@ -27,6 +27,7 @@ class PendingExternalUserQuestion:
     pid: int | None
     prompts: tuple[UserQuestionPrompt, ...]
     pane_id: str | None
+    tmux_bin: str = "tmux"
     created_at: datetime = field(default_factory=utc_now)
 
 

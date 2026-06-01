@@ -103,6 +103,7 @@ def register_external_permission_handler(
             pending.pane_id,
             option_index=option_index,
             submit_after=is_final,
+            tmux_bin=pending.tmux_bin,
         )
         if not ok:
             logger.warning(

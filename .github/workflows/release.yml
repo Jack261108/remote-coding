@@ -43,7 +43,7 @@ jobs:
           VERSION_NO_V: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION_NO_V#v}"
-          ARCHIVE_NAME="tg-cli-gateway-${VERSION}.tar.gz"
+          export ARCHIVE_NAME="tg-cli-gateway-${VERSION}.tar.gz"
           git archive --prefix="tg-cli-gateway-${VERSION}/" -o "${ARCHIVE_NAME}" HEAD
           SHA256=$(python <<'PY'
           import os
@@ -100,8 +100,9 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          ARCHIVE_NAME: ${{ steps.tarball.outputs.archive_name }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --generate-notes \
             --verify-tag \
-            "${{ steps.tarball.outputs.archive_name }}"
+            "${ARCHIVE_NAME}"

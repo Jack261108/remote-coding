@@ -252,7 +252,7 @@ async def test_external_permission_callback_delegates_reformatted_payload_to_gat
 
 @pytest.mark.asyncio
 async def test_external_user_question_callback_still_uses_existing_handler(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_inject(pane_id: str, *, option_index: int, submit_after: bool) -> tuple[bool, str]:
+    async def fake_inject(pane_id: str, *, option_index: int, submit_after: bool, tmux_bin: str = "tmux") -> tuple[bool, str]:
         assert pane_id == "%1"
         assert option_index == 0
         assert submit_after is True

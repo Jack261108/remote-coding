@@ -45,10 +45,14 @@ def get_version() -> str:
     even if a different version of the package happens to be installed in the
     environment. When no ``pyproject.toml`` is found (installed package context),
     fall back to the installed package metadata.
+
+    Catches all exceptions from pyproject reading (file not found, missing key,
+    malformed TOML, permission denied) so that a single corrupted file never
+    prevents the CLI from starting — the metadata fallback is always available.
     """
     try:
         return _read_pyproject_version()
-    except RuntimeError:
+    except Exception:  # noqa: BLE001 — broad catch is intentional: fallback to metadata
         return metadata.version(PROG)
 
 
