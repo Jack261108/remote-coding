@@ -7,6 +7,7 @@ Feature: homebrew-packaging, Property 7: 固定依赖版本满足 pyproject 约�
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import hypothesis.strategies as st
@@ -15,11 +16,13 @@ from hypothesis import given, settings
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
+_ROOT = Path(__file__).resolve().parents[2]
+_FORMULA_PATH = _ROOT / "packaging" / "tg-cli-gateway.rb"
+
 
 def _read_constraints() -> dict[str, SpecifierSet]:
     """Read dependency constraints from pyproject.toml."""
-    root = Path(__file__).resolve().parents[2]
-    with (root / "pyproject.toml").open("rb") as fh:
+    with (_ROOT / "pyproject.toml").open("rb") as fh:
         data = tomllib.load(fh)
     constraints: dict[str, SpecifierSet] = {}
     for dep in data["project"]["dependencies"]:
@@ -32,18 +35,34 @@ def _read_constraints() -> dict[str, SpecifierSet]:
 
 _CONSTRAINTS = _read_constraints()
 
-# Pinned versions in the Homebrew formula (packaging/tg-cli-gateway.rb).
-# These are the versions actually shipped to users via brew install.
-_PINNED_VERSIONS: dict[str, str] = {
-    "aiogram": "3.28.2",
-    "pydantic-settings": "2.14.1",
-    "aiohttp-socks": "0.11.0",
-}
+# Only these packages from pyproject.toml are also pinned as Homebrew resources.
+_CONSTRAINED_PACKAGES = set(_CONSTRAINTS)
+
+# Regex to extract version from a Homebrew resource URL filename.
+# Matches: <name>-<version>[-<tags>].<ext>
+_RESOURCE_VERSION_RE = re.compile(r"/([a-zA-Z0-9_.]+)-(\d+\.\d+\.\d+(?:\.\d+)?)(?:-[a-z0-9_.]+)*\.(?:whl|tar\.gz)")
 
 
-@settings(max_examples=100)
-@given(dummy=st.none())
-def test_pinned_versions_satisfy_constraints(dummy: None) -> None:
+def _read_pinned_versions_from_formula() -> dict[str, str]:
+    """Parse resource versions from the Homebrew formula template.
+
+    Reads ``packaging/tg-cli-gateway.rb`` and extracts the pinned version for
+    each resource that also appears in ``pyproject.toml`` dependencies.
+    """
+    text = _FORMULA_PATH.read_text(encoding="utf-8")
+    pinned: dict[str, str] = {}
+    for match in _RESOURCE_VERSION_RE.finditer(text):
+        pkg_name = match.group(1).replace("_", "-")
+        version = match.group(2)
+        if pkg_name in _CONSTRAINED_PACKAGES:
+            pinned[pkg_name] = version
+    return pinned
+
+
+_PINNED_VERSIONS = _read_pinned_versions_from_formula()
+
+
+def test_pinned_versions_satisfy_constraints() -> None:
     """The versions pinned in the Homebrew formula satisfy pyproject.toml constraints."""
     for name, pinned_ver in _PINNED_VERSIONS.items():
         if name not in _CONSTRAINTS:

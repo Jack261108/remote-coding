@@ -9,6 +9,7 @@ class TgCliGateway < Formula
   license "MIT"
 
   depends_on "python@3.11"
+  depends_on "rust" => :build
 
   # === RESOURCES ===
   # URLs and sha256 fetched from PyPI JSON API (https://pypi.org/pypi/<name>/<ver>/json).

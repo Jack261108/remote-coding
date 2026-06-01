@@ -22,7 +22,7 @@ _unknown_flag_st = (
     .map(
         lambda s: f"--{s}" if not s.startswith("-") else s,
     )
-    .filter(lambda s: s not in {"--version", "--help", "--env-file", "-h"})
+    .filter(lambda s: s not in {"--", "--version", "--help", "--env-file", "-h"})
 )
 _env_file_path_st = st.text(min_size=1, max_size=100, alphabet="abcdefghijklmnopqrstuvwxyz0123456789/._").filter(
     lambda s: not s.startswith("-"),

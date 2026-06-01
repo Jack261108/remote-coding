@@ -6,7 +6,7 @@ import logging
 import sys
 from dataclasses import dataclass
 from importlib import metadata
-from importlib.metadata import PackageNotFoundError
+
 from pathlib import Path
 
 import tomllib
@@ -39,14 +39,17 @@ def get_version() -> str:
     """Return the application version.
 
     The single source of truth is `pyproject.toml`'s `[project].version`.
-    Prefer the installed package metadata (which is generated from
-    `pyproject.toml`), and fall back to reading `pyproject.toml` directly in
-    dev/editable contexts where the package metadata may be unavailable.
+
+    When running from a source checkout (a ``pyproject.toml`` is found nearby),
+    read it directly so that the version always matches the current checkout,
+    even if a different version of the package happens to be installed in the
+    environment. When no ``pyproject.toml`` is found (installed package context),
+    fall back to the installed package metadata.
     """
     try:
-        return metadata.version(PROG)
-    except PackageNotFoundError:
         return _read_pyproject_version()
+    except RuntimeError:
+        return metadata.version(PROG)
 
 
 def _read_pyproject_version() -> str:

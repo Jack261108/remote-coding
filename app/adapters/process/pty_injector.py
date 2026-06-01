@@ -13,21 +13,21 @@ import shutil
 
 logger = logging.getLogger(__name__)
 
-_TMUX_BIN = "tmux"
+_DEFAULT_TMUX_BIN = "tmux"
 
 
-async def find_tmux_pane_for_pid(pid: int) -> str | None:
+async def find_tmux_pane_for_pid(pid: int, tmux_bin: str = _DEFAULT_TMUX_BIN) -> str | None:
     """Walk the process tree from *pid* upward, looking for a tmux pane whose
     shell PID matches an ancestor. Returns the pane ID (e.g. ``%3``) or None.
     """
-    tmux_bin = shutil.which(_TMUX_BIN)
-    if tmux_bin is None:
+    resolved = shutil.which(tmux_bin)
+    if resolved is None:
         return None
 
     # Get all tmux panes and their shell PIDs
     try:
         proc = await asyncio.create_subprocess_exec(
-            tmux_bin,
+            resolved,
             "list-panes",
             "-a",
             "-F",
@@ -70,16 +70,16 @@ async def find_tmux_pane_for_pid(pid: int) -> str | None:
     return None
 
 
-async def inject_keys_via_tmux(pane_id: str, *keys: str) -> tuple[bool, str]:
+async def inject_keys_via_tmux(pane_id: str, *keys: str, tmux_bin: str = _DEFAULT_TMUX_BIN) -> tuple[bool, str]:
     """Send keystrokes to a tmux pane via ``tmux send-keys``."""
-    tmux_bin = shutil.which(_TMUX_BIN)
-    if tmux_bin is None:
+    resolved = shutil.which(tmux_bin)
+    if resolved is None:
         return False, "tmux not found"
     if not keys:
         return True, ""
     try:
         proc = await asyncio.create_subprocess_exec(
-            tmux_bin,
+            resolved,
             "send-keys",
             "-t",
             pane_id,
@@ -102,6 +102,7 @@ async def inject_option_selection(
     option_index: int,
     submit_after: bool = False,
     enter_delay_sec: float = 0.15,
+    tmux_bin: str = _DEFAULT_TMUX_BIN,
 ) -> tuple[bool, str]:
     """Select an option in the Claude TUI by moving cursor down and pressing Enter.
 
@@ -111,20 +112,20 @@ async def inject_option_selection(
     # Move cursor to the target option
     if option_index > 0:
         for _ in range(option_index):
-            ok, err = await inject_keys_via_tmux(pane_id, "Down")
+            ok, err = await inject_keys_via_tmux(pane_id, "Down", tmux_bin=tmux_bin)
             if not ok:
                 return False, err
             await asyncio.sleep(0.05)
 
     # Select the option
-    ok, err = await inject_keys_via_tmux(pane_id, "C-m")
+    ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=tmux_bin)
     if not ok:
         return False, err
 
     # Submit if this is the final question
     if submit_after:
         await asyncio.sleep(enter_delay_sec)
-        ok, err = await inject_keys_via_tmux(pane_id, "C-m")
+        ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=tmux_bin)
         if not ok:
             return False, err
 
@@ -138,6 +139,7 @@ async def inject_text_answer(
     option_count: int,
     submit_after: bool = False,
     enter_delay_sec: float = 0.15,
+    tmux_bin: str = _DEFAULT_TMUX_BIN,
 ) -> tuple[bool, str]:
     """Navigate past options to the text input field, type text, and submit.
 
@@ -146,31 +148,31 @@ async def inject_text_answer(
     """
     # Move to "Other" option (after all regular options)
     for _ in range(option_count):
-        ok, err = await inject_keys_via_tmux(pane_id, "Down")
+        ok, err = await inject_keys_via_tmux(pane_id, "Down", tmux_bin=tmux_bin)
         if not ok:
             return False, err
         await asyncio.sleep(0.05)
 
     # Select "Other"
-    ok, err = await inject_keys_via_tmux(pane_id, "C-m")
+    ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=tmux_bin)
     if not ok:
         return False, err
     await asyncio.sleep(enter_delay_sec)
 
     # Type the text (use tmux send-keys with literal text)
     # Escape special characters for tmux
-    ok, err = await inject_keys_via_tmux(pane_id, text)
+    ok, err = await inject_keys_via_tmux(pane_id, text, tmux_bin=tmux_bin)
     if not ok:
         return False, err
 
     # Submit
-    ok, err = await inject_keys_via_tmux(pane_id, "C-m")
+    ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=tmux_bin)
     if not ok:
         return False, err
 
     if submit_after:
         await asyncio.sleep(enter_delay_sec)
-        ok, err = await inject_keys_via_tmux(pane_id, "C-m")
+        ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=tmux_bin)
         if not ok:
             return False, err
 

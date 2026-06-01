@@ -446,7 +446,7 @@ class HookHandlingMixin(AppContainerBase):
                     # Try to find tmux pane for interactive injection
                     from app.adapters.process.pty_injector import find_tmux_pane_for_pid
 
-                    pane_id = await find_tmux_pane_for_pid(event.pid)
+                    pane_id = await find_tmux_pane_for_pid(event.pid, self.settings.tmux_bin)
                     if pane_id is not None:
                         # Store pending state and show interactive buttons
                         # Do NOT auto-allow — hold the permission until user clicks

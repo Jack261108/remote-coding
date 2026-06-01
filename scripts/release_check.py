@@ -81,9 +81,9 @@ def sha256_of(path: str) -> str:
 #
 # Anchoring to this exact shape lets ``update_formula`` rewrite the version and
 # checksum deterministically, and lets the parse-back helpers read them for
-# round-trip assertions (Property 8). Pinning the ``sha256`` to the line that
-# directly follows the release URL avoids touching the per-``resource``
-# ``sha256`` values elsewhere in the formula.
+# round-trip assertions (Property 8). Pinning the ``sha256`` to the block that
+# follows the release URL (allowing intervening comment lines) avoids touching
+# the per-``resource`` ``sha256`` values elsewhere in the formula.
 
 _RELEASE_DOWNLOAD_PREFIX = "https://github.com/Jack261108/remote-coding/releases/download"
 
@@ -94,7 +94,7 @@ _MAIN_URL_SHA_RE = re.compile(
     r"(?P<url>" + re.escape(_RELEASE_DOWNLOAD_PREFIX) + r"/"
     r'v(?P<tag_ver>[^/"]+?)/tg-cli-gateway-(?P<file_ver>[^/"]+?)\.tar\.gz)'
     r'(?P<url_suffix>")'
-    r'(?P<between>\s*sha256\s+")'
+    r'(?P<between>(?:[^\n]*\n)*?\s*sha256\s+")'
     r"(?P<digest>[0-9a-fA-F]+)"
     r'(?P<sha_suffix>")'
 )

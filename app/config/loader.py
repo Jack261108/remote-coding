@@ -107,8 +107,7 @@ def load_settings(env_file: str | None) -> Settings:
     traceback.
     """
     is_readable = _path_is_readable(env_file) if env_file is not None else False
-    default_env_exists = Path(DEFAULT_ENV_FILE).is_file()
-    action = classify_env_file(env_file, is_readable, default_env_exists=default_env_exists)
+    action = classify_env_file(env_file, is_readable, default_env_exists=Path(DEFAULT_ENV_FILE).is_file())
 
     if action is EnvFileAction.ERROR_UNREADABLE:
         raise StartupError(_unreadable_env_file_message(env_file))
@@ -134,23 +133,38 @@ def _path_is_readable(path: str) -> bool:
 
 
 def _startup_error_from_validation(exc: ValidationError) -> StartupError:
-    """Build a friendly :class:`StartupError` from a pydantic validation error."""
-    missing = _required_aliases_in_error(exc)
+    """Build a friendly :class:`StartupError` from a pydantic validation error.
+
+    Distinguishes truly *missing* required fields (``type == 'missing'``) from
+    value errors on those same fields so the user sees "缺少必填配置项" only when
+    the variable is absent, and "配置校验失败" when it is present but malformed.
+    """
+    missing = _required_aliases_in_error(exc, only_missing=True)
     if missing:
         return StartupError(_format_missing_message(missing))
     return StartupError(_format_other_validation_message(exc))
 
 
-def _required_aliases_in_error(exc: ValidationError) -> list[str]:
+def _required_aliases_in_error(
+    exc: ValidationError,
+    *,
+    only_missing: bool = False,
+) -> list[str]:
     """Return required-field aliases implicated by *exc*, in declaration order.
 
     A validation error location may surface as either the alias
     (e.g. ``TG_BOT_TOKEN``) or the underlying field name (e.g. ``tg_bot_token``)
     depending on the error type, so both forms are mapped back to the alias.
+
+    When *only_missing* is ``True``, only errors whose ``type`` is ``'missing'``
+    are included — value errors on required fields are excluded so they surface
+    as "配置校验失败" instead of "缺少必填配置项".
     """
     field_to_alias = {field: alias for alias, field in REQUIRED_FIELDS.items()}
     seen: set[str] = set()
     for err in exc.errors():
+        if only_missing and err.get("type") != "missing":
+            continue
         loc = err.get("loc") or ()
         if not loc:
             continue

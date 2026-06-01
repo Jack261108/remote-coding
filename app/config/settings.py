@@ -60,7 +60,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    tg_bot_token: str = Field(..., alias="TG_BOT_TOKEN")
+    tg_bot_token: str = Field(..., alias="TG_BOT_TOKEN", min_length=1)
     tg_allowed_user_ids: Annotated[list[int], NoDecode] = Field(..., alias="TG_ALLOWED_USER_IDS")
     tg_proxy_url: str | None = Field(None, alias="TG_PROXY_URL")
     tg_request_timeout_sec: int = Field(30, alias="TG_REQUEST_TIMEOUT_SEC")
