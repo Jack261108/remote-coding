@@ -17,7 +17,93 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install packaging
+
+      - name: Version gate
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+        run: |
+          python <<'PY'
+          import os, sys
+          from scripts.release_check import read_pyproject_version, versions_match
+          tag = os.environ["GIT_TAG"]
+          pyproject_ver = read_pyproject_version()
+          if not versions_match(tag, pyproject_ver):
+              print(f"ERROR: tag {tag} does not match pyproject.toml version {pyproject_ver}", file=sys.stderr)
+              sys.exit(1)
+          PY
+        shell: bash
+
+      - name: Build source tarball
+        id: tarball
+        env:
+          ARCHIVE_NAME: tg-cli-gateway-${{ github.ref_name }}.tar.gz
+          VERSION_NO_V: ${{ github.ref_name }}
+        run: |
+          git archive --prefix="tg-cli-gateway-${VERSION_NO_V#v}/" -o "${ARCHIVE_NAME}" HEAD
+          SHA256=$(python <<'PY'
+          import os
+          from scripts.release_check import sha256_of
+          print(sha256_of(os.environ["ARCHIVE_NAME"]))
+          PY
+          )
+          echo "archive_name=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION_NO_V#v}" >> "$GITHUB_OUTPUT"
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            "${{ steps.tarball.outputs.archive_name }}"
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          FORMULA_VERSION: ${{ steps.tarball.outputs.version }}
+          FORMULA_SHA256: ${{ steps.tarball.outputs.sha256 }}
+          FORMULA_PATH: tap-repo/Formula/tg-cli-gateway.rb
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN secret is not configured. Formula update cannot proceed."
+            echo "::error::Set HOMEBREW_TAP_TOKEN in repository secrets (a PAT with contents:write on the tap repo)."
+            exit 1
+          fi
+
+          # Clone the tap repository
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/Jack261108/homebrew-tg-cli-gateway.git" tap-repo
+
+          # Update formula using release_check.py
+          python <<'PY'
+          import os, sys
+          sys.path.insert(0, '.')
+          from scripts.release_check import update_formula
+          formula_path = os.environ["FORMULA_PATH"]
+          version = os.environ["FORMULA_VERSION"]
+          sha256 = os.environ["FORMULA_SHA256"]
+          with open(formula_path, encoding='utf-8') as f:
+              text = f.read()
+          updated = update_formula(text, version, sha256)
+          with open(formula_path, 'w', encoding='utf-8') as f:
+              f.write(updated)
+          PY
+
+          # Commit and push
+          cd tap-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Formula/tg-cli-gateway.rb"
+          git commit -m "Update tg-cli-gateway to v${FORMULA_VERSION}"
+          git push || {
+            echo "::error::Failed to push formula update to tap repository"
+            exit 1
+          }
