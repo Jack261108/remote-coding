@@ -827,8 +827,8 @@ EOF
 Run:
 
 ```bash
-mkdir -p /Users/jack/project/remote-coding/.claude/backups
-cp /Users/jack/project/remote-coding/deploy/env/.env.example /Users/jack/project/remote-coding/.claude/backups/.env.example
+mkdir -p /home/user/project/.claude/backups
+cp /home/user/project/deploy/env/.env.example /home/user/project/.claude/backups/.env.example
 ```
 
 Expected: backup exists at `.claude/backups/.env.example`.

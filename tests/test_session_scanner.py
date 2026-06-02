@@ -50,7 +50,7 @@ def _make_session_file(
 
 class TestEncodeWorkdir:
     def test_replaces_slashes(self, scanner: SessionScanner) -> None:
-        assert scanner.encode_workdir("/Users/jack/project") == "-Users-jack-project"
+        assert scanner.encode_workdir("/home/user/project") == "-home-user-project"
 
     def test_root_path(self, scanner: SessionScanner) -> None:
         assert scanner.encode_workdir("/") == "-"
@@ -65,10 +65,10 @@ class TestScan:
         assert result == []
 
     def test_discovers_session_files(self, scanner: SessionScanner, claude_paths: ClaudePaths) -> None:
-        encoded = scanner.encode_workdir("/Users/jack/project")
+        encoded = scanner.encode_workdir("/home/user/project")
         _make_session_file(claude_paths.projects_dir, encoded, "abc-123", "hi there")
 
-        result = scanner.scan("/Users/jack/project", claude_paths)
+        result = scanner.scan("/home/user/project", claude_paths)
         assert len(result) == 1
         assert result[0].session_id == "abc-123"
         assert result[0].summary == "hi there"

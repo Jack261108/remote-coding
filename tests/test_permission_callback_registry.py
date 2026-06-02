@@ -207,7 +207,7 @@ def test_phase1_permission_prompt_input_is_available() -> None:
     prompt_input = PermissionPromptInput(
         tool_name="Edit",
         tool_input={"file_path": "/x.py"},
-        cwd="/Users/jack/project/remote-coding",
+        cwd="/home/user/project",
         session_id="sess-123",
         session_title="Example session",
     )

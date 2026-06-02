@@ -15,7 +15,7 @@
 当前仓库已有与本功能无关的未提交文件。执行实现前应在干净隔离环境中工作，推荐用 `superpowers:using-git-worktrees` 创建工作区；如果不使用 worktree，至少先运行：
 
 ```bash
-git -C /Users/jack/project/remote-coding status --short
+git -C /home/user/project status --short
 ```
 
 只允许本计划列出的 `app/...` 和 `tests/...` 文件进入功能提交。不要 stage 现有的附件回传设计/计划文件。
@@ -23,7 +23,7 @@ git -C /Users/jack/project/remote-coding status --short
 运行 Python 相关命令前检查 pyenv 项目虚拟环境：
 
 ```bash
-cd /Users/jack/project/remote-coding && pyenv version
+cd /home/user/project && pyenv version
 ```
 
 Expected: 输出包含 `remote-coding`，因为项目根目录 `.python-version` 内容为 `remote-coding`。
@@ -276,7 +276,7 @@ Update `test_presenter_emits_resume_progress_after_permission` final assertion t
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest tests/test_structured_reply_presenter.py -q
+cd /home/user/project && python -m pytest tests/test_structured_reply_presenter.py -q
 ```
 
 Expected: FAIL with import errors for `ToolStatusOutput` / `build_tool_status_message`, or assertion failures because tool progress still emits `ProgressUpdateOutput`.
@@ -391,7 +391,7 @@ Replace `_collect_progress_updates()` with:
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest tests/test_structured_reply_presenter.py -q
+cd /home/user/project && python -m pytest tests/test_structured_reply_presenter.py -q
 ```
 
 Expected: PASS.
@@ -401,8 +401,8 @@ Expected: PASS.
 Run:
 
 ```bash
-git -C /Users/jack/project/remote-coding add app/bot/presenters/structured_reply_presenter.py tests/test_structured_reply_presenter.py
-git -C /Users/jack/project/remote-coding commit -m "feat: emit structured tool status updates"
+git -C /home/user/project add app/bot/presenters/structured_reply_presenter.py tests/test_structured_reply_presenter.py
+git -C /home/user/project commit -m "feat: emit structured tool status updates"
 ```
 
 ---
@@ -551,7 +551,7 @@ async def test_tool_message_manager_does_not_raise_when_send_fails() -> None:
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest tests/test_tool_message_manager.py -q
+cd /home/user/project && python -m pytest tests/test_tool_message_manager.py -q
 ```
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'app.bot.presenters.tool_message_manager'`.
@@ -652,7 +652,7 @@ class ToolMessageManager:
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest tests/test_tool_message_manager.py -q
+cd /home/user/project && python -m pytest tests/test_tool_message_manager.py -q
 ```
 
 Expected: PASS.
@@ -662,8 +662,8 @@ Expected: PASS.
 Run:
 
 ```bash
-git -C /Users/jack/project/remote-coding add app/bot/presenters/tool_message_manager.py tests/test_tool_message_manager.py
-git -C /Users/jack/project/remote-coding commit -m "feat: manage telegram tool messages"
+git -C /home/user/project add app/bot/presenters/tool_message_manager.py tests/test_tool_message_manager.py
+git -C /home/user/project commit -m "feat: manage telegram tool messages"
 ```
 
 ---
@@ -825,7 +825,7 @@ async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest tests/test_command_run.py::test_run_prompt_and_stream_updates_tool_message_to_success -q
+cd /home/user/project && python -m pytest tests/test_command_run.py::test_run_prompt_and_stream_updates_tool_message_to_success -q
 ```
 
 Expected: FAIL because `ToolStatusOutput` is not handled in `command_run.py` yet, so no editable tool message is created.
@@ -900,7 +900,7 @@ The branch order inside `emit_presenter_messages()` should be:
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest tests/test_command_run.py::test_run_prompt_and_stream_updates_tool_message_to_success -q
+cd /home/user/project && python -m pytest tests/test_command_run.py::test_run_prompt_and_stream_updates_tool_message_to_success -q
 ```
 
 Expected: PASS.
@@ -910,7 +910,7 @@ Expected: PASS.
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest tests/test_command_run.py -q
+cd /home/user/project && python -m pytest tests/test_command_run.py -q
 ```
 
 Expected: PASS.
@@ -920,8 +920,8 @@ Expected: PASS.
 Run:
 
 ```bash
-git -C /Users/jack/project/remote-coding add app/bot/handlers/command_run.py tests/test_command_run.py
-git -C /Users/jack/project/remote-coding commit -m "feat: route tool statuses to telegram messages"
+git -C /home/user/project add app/bot/handlers/command_run.py tests/test_command_run.py
+git -C /home/user/project commit -m "feat: route tool statuses to telegram messages"
 ```
 
 ---
@@ -941,7 +941,7 @@ git -C /Users/jack/project/remote-coding commit -m "feat: route tool statuses to
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest tests/test_structured_reply_presenter.py tests/test_tool_message_manager.py tests/test_command_run.py -q
+cd /home/user/project && python -m pytest tests/test_structured_reply_presenter.py tests/test_tool_message_manager.py tests/test_command_run.py -q
 ```
 
 Expected: PASS for all selected tests.
@@ -951,7 +951,7 @@ Expected: PASS for all selected tests.
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m ruff check app tests
+cd /home/user/project && python -m ruff check app tests
 ```
 
 Expected: PASS with no new lint errors.
@@ -961,7 +961,7 @@ Expected: PASS with no new lint errors.
 Run:
 
 ```bash
-cd /Users/jack/project/remote-coding && python -m pytest -q
+cd /home/user/project && python -m pytest -q
 ```
 
 Expected: PASS.
@@ -971,7 +971,7 @@ Expected: PASS.
 Run:
 
 ```bash
-git -C /Users/jack/project/remote-coding status --short
+git -C /home/user/project status --short
 ```
 
 Expected: only unrelated pre-existing files remain unstaged, or the working tree is clean if implementation happened in a fresh worktree. The feature commits should include only:

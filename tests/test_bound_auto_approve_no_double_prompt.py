@@ -30,7 +30,7 @@ def _make_event(*, tool: str = "Edit", expects_response: bool = True) -> HookEve
     if expects_response:
         return HookEvent(
             session_id="sess-123",
-            cwd="/Users/jack/project/remote-coding",
+            cwd="/home/user/project",
             event="PermissionRequest",
             status="waiting_for_approval",
             tool=tool,
@@ -40,7 +40,7 @@ def _make_event(*, tool: str = "Edit", expects_response: bool = True) -> HookEve
         )
     return HookEvent(
         session_id="sess-123",
-        cwd="/Users/jack/project/remote-coding",
+        cwd="/home/user/project",
         event="PostToolUse",
         status="processing",
         tool=tool,
