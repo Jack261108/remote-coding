@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     STARTED = "STARTED"
     STDOUT = "STDOUT"
     STDERR = "STDERR"
@@ -19,7 +19,7 @@ class EventType(str, Enum):
     CANCELED = "CANCELED"
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
@@ -120,7 +120,7 @@ class SessionContext:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict) -> "SessionContext":
+    def from_dict(cls, payload: dict) -> SessionContext:
         return cls(
             user_id=int(payload["user_id"]),
             session_id=str(payload["session_id"]),

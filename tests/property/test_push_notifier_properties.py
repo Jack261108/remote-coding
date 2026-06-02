@@ -12,7 +12,6 @@ import pytest
 from app.domain.session_models import SessionPhase
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 
-
 # --- Property 15: Phase transitions trigger push notifications ---
 
 

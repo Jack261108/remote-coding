@@ -12,7 +12,6 @@ from hypothesis import given, settings
 
 from scripts.release_check import normalize_tag, versions_match
 
-
 _semver_st = st.from_regex(r"[0-9]+\.[0-9]+\.[0-9]+", fullmatch=True)
 _tag_st = st.one_of(
     _semver_st.map(lambda v: f"v{v}"),

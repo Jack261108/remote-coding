@@ -6,19 +6,18 @@ Feature: external-session-takeover
 from __future__ import annotations
 
 import tempfile
-import pytest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from hypothesis import given, settings, HealthCheck, assume
+import pytest
+from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from app.domain.external_session_models import ExternalBinding, SessionOrigin
 from app.domain.models import SessionContext
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.session_ownership_resolver import SessionOwnershipResolver
-
 
 # --- Strategies ---
 
@@ -66,7 +65,7 @@ def _make_binding(session_id: str, user_id: int, cwd: str = "/tmp") -> ExternalB
         session_id=session_id,
         user_id=user_id,
         cwd=cwd,
-        bound_at=datetime.now(timezone.utc),
+        bound_at=datetime.now(UTC),
         jsonl_path=None,
     )
 
@@ -194,7 +193,7 @@ class TestOwnershipResolverPriorityChain:
             )
         )
         # Other sessions without terminal_id that should NOT interfere
-        for sid, uid in zip(other_session_ids, other_user_ids):
+        for sid, uid in zip(other_session_ids, other_user_ids, strict=False):
             assume(sid != target_session_id)
             contexts.append(_make_context(user_id=uid, claude_session_id=sid, terminal_id=None))
 

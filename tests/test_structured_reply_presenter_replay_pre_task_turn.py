@@ -56,7 +56,7 @@ Validates: Requirements 1.1, 1.2, 1.3, 2.1, 2.2, 2.3
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import hypothesis
 import hypothesis.strategies as st
@@ -69,12 +69,11 @@ from app.bot.presenters.structured_reply_presenter import (
 from app.domain.session_models import ConversationTurn, SessionPhase
 from tests.fakes.structured import make_structured_session as _session
 
-
 # Fixed wall-clock anchor for the current task's ``started_at``. Mirrors the
 # production trace timestamp from ``bugfix.md`` (the second message
 # emitted at ``2026-05-19T16:58:25Z`` was the genuine reply; the task's
 # ``started_at`` is the immediately preceding second).
-_FIXED_TASK_STARTED_AT = datetime(2026, 5, 19, 16, 58, 24, tzinfo=timezone.utc)
+_FIXED_TASK_STARTED_AT = datetime(2026, 5, 19, 16, 58, 24, tzinfo=UTC)
 # Fresh post-task turn id and ended_at. Two seconds AFTER the task started
 # guarantees ``B.ended_at >= task_started_at`` so the new pre-task guard does
 # NOT suppress ``B`` once it lands.

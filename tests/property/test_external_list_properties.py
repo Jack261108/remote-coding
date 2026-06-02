@@ -5,18 +5,17 @@ Feature: external-session-takeover, Property 16: List correctness per user
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import tempfile
+from datetime import UTC, datetime
+from pathlib import Path
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from app.domain.external_session_models import ExternalBinding
-from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.external_binding_store import ExternalBindingStore
 from app.domain.hook_models import HookEvent
-
-import tempfile
-from pathlib import Path
+from app.services.external_binding_store import ExternalBindingStore
+from app.services.external_session_discovery import ExternalSessionDiscoveryService
 
 # --- Strategies ---
 
@@ -168,7 +167,7 @@ class TestListCorrectnessPerUser:
             store = ExternalBindingStore(data_dir=Path(tmp))
 
             # Save all bindings
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             for uid, sessions in bindings_by_user.items():
                 for sid, cwd in sessions:
                     binding = ExternalBinding(
@@ -206,7 +205,7 @@ class TestListCorrectnessPerUser:
             store = ExternalBindingStore(data_dir=Path(tmp))
 
             # Save all bindings
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             for uid, sessions in bindings_by_user.items():
                 for sid, cwd in sessions:
                     binding = ExternalBinding(

@@ -22,7 +22,6 @@ from app.domain.hook_models import HookEvent
 from app.services.permission_gateway import RegisterForButtonOk
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

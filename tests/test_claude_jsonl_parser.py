@@ -145,7 +145,7 @@ def test_claude_jsonl_parser_ignores_truncated_tail_until_line_is_complete(tmp_p
     assert snapshot.last_offset < session_file.stat().st_size
 
     with session_file.open("ab") as fh:
-        fh.write('{"id":"a2","content":[{"type":"text","text":"第二行"}]}}\n'.encode("utf-8"))
+        fh.write('{"id":"a2","content":[{"type":"text","text":"第二行"}]}}\n'.encode())
 
     snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
 

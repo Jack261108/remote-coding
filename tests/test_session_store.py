@@ -1,7 +1,6 @@
-from datetime import timedelta
-
 import asyncio
 import json
+from datetime import timedelta
 
 import pytest
 

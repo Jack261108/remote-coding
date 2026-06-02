@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from app.domain.session_models import CLAUDE_SESSION_PREFIX, _UUID_SESSION_RE, is_claude_session_id
+from app.domain.session_models import _UUID_SESSION_RE, CLAUDE_SESSION_PREFIX, is_claude_session_id
 
 
 def test_claude_session_prefix_value() -> None:

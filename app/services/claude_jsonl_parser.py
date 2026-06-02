@@ -309,7 +309,7 @@ class ClaudeJSONLParser:
             return
 
         assistant_texts: list[str] = []
-        for index, block in enumerate(content):
+        for _index, block in enumerate(content):
             if not isinstance(block, dict):
                 continue
             block_type = str(block.get("type", ""))

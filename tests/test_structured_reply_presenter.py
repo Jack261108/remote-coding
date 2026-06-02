@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.adapters.storage.file_session_store import FileSessionStore
 from app.bot.presenters.structured_reply_presenter import (
     FileToolAggregateStatusOutput,
     PermissionRequestOutput,
@@ -25,7 +26,6 @@ from app.bot.presenters.structured_reply_presenter import (
     preview_stream_text,
     strip_bridge_markers,
 )
-from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.session_models import (
     ConversationTurn,
     ParserCheckpoint,

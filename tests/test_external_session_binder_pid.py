@@ -16,7 +16,7 @@ This test forces access to ``unbound.pid`` to raise and asserts that:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.services.external_binding_store import ExternalBindingStore
@@ -34,8 +34,8 @@ class _RaisingPidUnbound:
     def __init__(self, *, session_id: str, cwd: str) -> None:
         self.session_id = session_id
         self.cwd = cwd
-        self.first_seen = datetime.now(timezone.utc)
-        self.last_seen = datetime.now(timezone.utc)
+        self.first_seen = datetime.now(UTC)
+        self.last_seen = datetime.now(UTC)
         self.event_count = 1
         self.title = None
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,7 +11,6 @@ from app.bot.handlers.command_export import parse_export_args
 from app.domain.file_models import ExportResult
 from app.domain.models import TaskRecord, TaskStatus  # noqa: F401
 from app.services.result_exporter import ZipSizeLimitError
-
 
 # --- parse_export_args tests ---
 
@@ -56,7 +55,7 @@ def _make_record(
     started_at: datetime | None = None,
     ended_at: datetime | None = None,
 ) -> TaskRecord:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return TaskRecord(
         task_id=task_id,
         session_id="sess-1",

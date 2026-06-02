@@ -9,11 +9,11 @@ import pytest
 from aiogram import Router
 from aiogram.types import CallbackQuery, Message, User
 
+from app.bot.handlers.session_actions import _resolve_session_id, register_session_action_handlers
 from app.domain.hook_models import HookEvent
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.bot.handlers.session_actions import register_session_action_handlers, _resolve_session_id
 
 
 @pytest.fixture

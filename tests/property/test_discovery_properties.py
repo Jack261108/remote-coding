@@ -5,7 +5,7 @@ Feature: external-session-takeover
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -204,7 +204,7 @@ class TestStaleSessionPruning:
             svc.record_event(ev)
 
         # Now manipulate last_seen to create a mix of stale and fresh sessions
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expected_stale: set[str] = set()
         expected_fresh: set[str] = set()
 

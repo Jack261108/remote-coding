@@ -16,7 +16,6 @@ from hypothesis import given, settings
 
 from app.config.loader import load_settings
 
-
 _token_st = st.text(min_size=1, max_size=50, alphabet="abcdefghijklmnopqrstuvwxyz0123456789")
 _ids_st = st.integers(min_value=1, max_value=999999).map(str)
 

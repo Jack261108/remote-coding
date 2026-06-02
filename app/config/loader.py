@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -30,7 +30,7 @@ class StartupError(Exception):
     """
 
 
-class EnvFileAction(str, Enum):
+class EnvFileAction(StrEnum):
     """Classification of how an Env_File path should be handled.
 
     - ``ERROR_UNREADABLE``: an explicit path was given but cannot be read;

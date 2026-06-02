@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class ClaudePaths:
         *,
         env: Mapping[str, str] | None = None,
         home: Path | None = None,
-    ) -> "ClaudePaths":
+    ) -> ClaudePaths:
         env_map = env or os.environ
         home_dir = home or Path.home()
 

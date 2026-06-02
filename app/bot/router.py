@@ -15,16 +15,16 @@ from app.bot.handlers.command_cmds import register_cmds_handler
 from app.bot.handlers.command_exit import register_exit_handler
 from app.bot.handlers.command_export import register_export_handler
 from app.bot.handlers.command_list import register_list_handler
-from app.bot.handlers.command_resume import register_resume_handler
-from app.bot.handlers.external_session import register_external_session_handler
-from app.bot.handlers.session_actions import register_session_action_handlers
-from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.handlers.command_permission import register_permission_handlers
-from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
+from app.bot.handlers.command_resume import register_resume_handler
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
+from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
+from app.bot.handlers.external_permission import register_external_permission_handler
+from app.bot.handlers.external_session import register_external_session_handler
 from app.bot.handlers.file_upload import register_file_upload_handler, schedule_pending_upload_processing
+from app.bot.handlers.session_actions import register_session_action_handlers
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
 from app.services.diff_generator import DiffGeneratorService

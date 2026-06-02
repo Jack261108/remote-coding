@@ -3,14 +3,14 @@ from __future__ import annotations
 import pytest
 from aiogram import Router
 
-from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
+from app.adapters.storage.file_session_store import FileSessionStore
+from app.bot.handlers.command_list import register_list_handler
+from app.services.session_lookup_service import SessionLookupService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
-from app.services.session_lookup_service import SessionLookupService
 from app.services.session_state_cache import SessionStateCache
 from app.services.session_state_repository import SessionStateRepository
-from app.bot.handlers.command_list import register_list_handler
 
 
 class FakeTmuxRunner:

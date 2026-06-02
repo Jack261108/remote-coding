@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -98,18 +98,18 @@ class TestCollectPendingFiles:
         new_file.write_text("new")
 
         # Use a timestamp before old_file — should get both
-        all_files = adapter.collect_pending_files(1, workdir, datetime.fromtimestamp(0, tz=timezone.utc))
+        all_files = adapter.collect_pending_files(1, workdir, datetime.fromtimestamp(0, tz=UTC))
         assert len(all_files) == 2
 
         # With since after old_file — should get only new
-        since = datetime.fromtimestamp(time.time() - 60, tz=timezone.utc)
+        since = datetime.fromtimestamp(time.time() - 60, tz=UTC)
         recent = adapter.collect_pending_files(1, workdir, since)
         assert len(recent) == 1
         assert recent[0].name == "new.txt"
 
     def test_returns_empty_for_nonexistent_dir(self, adapter: UploadStoreAdapter, tmp_path: Path) -> None:
         workdir = str(tmp_path / "workdir")
-        result = adapter.collect_pending_files(999, workdir, datetime.fromtimestamp(0, tz=timezone.utc))
+        result = adapter.collect_pending_files(999, workdir, datetime.fromtimestamp(0, tz=UTC))
         assert result == []
 
 

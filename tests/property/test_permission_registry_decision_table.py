@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from hypothesis import given, settings
@@ -34,7 +34,7 @@ TOKEN = "tok00001"
 
 
 def _dt(seconds: float) -> datetime:
-    return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    return datetime.fromtimestamp(seconds, tz=UTC)
 
 
 def _auth_mode_and_users(auth_case: str) -> tuple[AuthorizationMode, frozenset[int]]:

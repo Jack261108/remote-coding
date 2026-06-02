@@ -5,7 +5,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -522,7 +522,7 @@ class TaskService:
         for task in tasks:
             if task.is_final and task.ended_at is not None:
                 return task.ended_at
-        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return datetime(1970, 1, 1, tzinfo=UTC)
 
     def _is_workdir_allowed(self, workdir: str) -> bool:
         return is_workdir_allowed(workdir, self._settings.allowed_workdirs)

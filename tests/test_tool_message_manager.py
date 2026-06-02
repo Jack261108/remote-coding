@@ -26,7 +26,7 @@ class DummyTelegramMessage:
         self.fail_next_edit = False
         self.not_modified_next_edit = False
 
-    async def edit_text(self, text: str, parse_mode=None) -> "DummyTelegramMessage":
+    async def edit_text(self, text: str, parse_mode=None) -> DummyTelegramMessage:
         if self.not_modified_next_edit:
             self.not_modified_next_edit = False
             raise RuntimeError("message is not modified")

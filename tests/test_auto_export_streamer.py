@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -70,13 +70,13 @@ class DummyMessage:
         self._answers: list[str] = []
         self._documents: list[object] = []
 
-    async def answer(self, text: str, **kwargs) -> "DummyMessage":
+    async def answer(self, text: str, **kwargs) -> DummyMessage:
         self._answers.append(text)
         new_msg = DummyMessage()
         new_msg.message_id = len(self._answers)
         return new_msg
 
-    async def answer_document(self, document, **kwargs) -> "DummyMessage":
+    async def answer_document(self, document, **kwargs) -> DummyMessage:
         self._documents.append(document)
         new_msg = DummyMessage()
         new_msg.message_id = 999
@@ -97,7 +97,7 @@ def _make_record(output_chars: int) -> TaskRecord:
         timeout_sec=60,
         status=TaskStatus.SUCCEEDED,
         output_chars=output_chars,
-        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2025, 1, 1, tzinfo=UTC),
     )
 
 

@@ -4,12 +4,10 @@ import argparse
 import asyncio
 import logging
 import sys
+import tomllib
 from dataclasses import dataclass
 from importlib import metadata
-
 from pathlib import Path
-
-import tomllib
 
 from aiogram.exceptions import TelegramNetworkError
 

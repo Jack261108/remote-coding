@@ -12,7 +12,6 @@ from hypothesis import given, settings
 
 from app.config.loader import EnvFileAction, classify_env_file
 
-
 _env_file_st = st.one_of(st.none(), st.text(min_size=1, max_size=100))
 _is_readable_st = st.booleans()
 _default_env_exists_st = st.booleans()

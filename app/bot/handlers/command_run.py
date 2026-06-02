@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 from contextlib import suppress
+from typing import TYPE_CHECKING
 
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
@@ -14,8 +14,10 @@ from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import (
-    StructuredReplyPresenter,
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
+)
+from app.bot.presenters.structured_reply_presenter import (
+    StructuredReplyPresenter,
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.models import EventType

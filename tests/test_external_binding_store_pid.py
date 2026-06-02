@@ -31,7 +31,6 @@ from app.domain.external_session_models import ExternalBinding
 from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
 
-
 # --- Helpers ----------------------------------------------------------------
 
 

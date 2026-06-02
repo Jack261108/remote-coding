@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from contextlib import suppress
 import json
 import os
 import socket
 import subprocess
 import threading
 import uuid
+from contextlib import suppress
 
 from app.adapters.claude.hook_installer import ClaudeCodeVersion, HookInstaller
 from app.adapters.claude.paths import ClaudePaths

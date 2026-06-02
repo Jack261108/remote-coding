@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -46,7 +46,7 @@ class ParserRegistry:
 
 
 def _snapshot(*, token: str, action: PermissionAction) -> PermissionCallbackRecordSnapshot:
-    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 28, tzinfo=UTC)
     return PermissionCallbackRecordSnapshot(
         token=token,
         tool_use_id=TOOL_USE_ID,

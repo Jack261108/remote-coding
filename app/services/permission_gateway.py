@@ -5,7 +5,7 @@ import inspect
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -528,7 +528,7 @@ class PermissionGateway:
         candidate_user_id: int,
         tool_use_id: str,
     ) -> PermissionCallbackRecordSnapshot:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         authorization_mode, authorized_user_ids = self._resolve_authorization(
             origin=origin,
             candidate_user_id=candidate_user_id,

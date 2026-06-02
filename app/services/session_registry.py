@@ -306,7 +306,7 @@ class SessionRegistryService:
         tmux_names = [self._tmux_runner._build_session_name(ctx.terminal_id) for ctx in contexts_with_terminals]
         alive_results = await asyncio.gather(*(self._tmux_runner._session_exists(name) for name in tmux_names))
 
-        stale = [ctx for ctx, alive in zip(contexts_with_terminals, alive_results) if not alive]
+        stale = [ctx for ctx, alive in zip(contexts_with_terminals, alive_results, strict=False) if not alive]
 
         if not stale:
             return

@@ -7,13 +7,13 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app.bootstrap_base import AppContainerBase
 from app.config.settings import is_workdir_allowed
 from app.domain.external_session_models import SessionOrigin as ExternalSessionOrigin
 from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus, utc_now
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.domain.user_question_models import extract_user_question_prompts
-from app.bootstrap_base import AppContainerBase
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 
 if TYPE_CHECKING:

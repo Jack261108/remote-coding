@@ -17,7 +17,6 @@ from scripts.release_check import (
     update_formula,
 )
 
-
 # A minimal formula template with the expected URL + sha256 shape.
 _FORMULA_TEMPLATE = """\
 class TgCliGateway < Formula

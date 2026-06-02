@@ -3,7 +3,6 @@ from __future__ import annotations
 import html
 import re
 
-
 _FENCED_CODE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+\-]*)[ \t]*\n?(.*?)```", re.DOTALL)
 _LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")

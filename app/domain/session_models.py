@@ -3,11 +3,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from app.domain.models import utc_now
-
 
 CLAUDE_SESSION_PREFIX = "claude-session-"
 _UUID_SESSION_RE = re.compile(
@@ -26,7 +25,7 @@ def is_claude_session_id(session_id: str | None) -> bool:
     return text.startswith(CLAUDE_SESSION_PREFIX) or bool(_UUID_SESSION_RE.match(text))
 
 
-class SessionPhase(str, Enum):
+class SessionPhase(StrEnum):
     IDLE = "idle"
     PROCESSING = "processing"
     WAITING_FOR_INPUT = "waiting_for_input"
@@ -35,7 +34,7 @@ class SessionPhase(str, Enum):
     ENDED = "ended"
 
 
-class SessionEventType(str, Enum):
+class SessionEventType(StrEnum):
     SESSION_STARTED = "session_started"
     RAW_CHUNK_APPENDED = "raw_chunk_appended"
     PARSER_UPDATED = "parser_updated"
@@ -52,7 +51,7 @@ class SessionEventType(str, Enum):
     PERMISSION_RESPONSE_FAILED = "permission_response_failed"
 
 
-class ToolStatus(str, Enum):
+class ToolStatus(StrEnum):
     RUNNING = "running"
     SUCCESS = "success"
     ERROR = "error"
@@ -92,7 +91,7 @@ class ParserCheckpoint:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "ParserCheckpoint":
+    def from_dict(cls, data: dict[str, Any] | None) -> ParserCheckpoint:
         if not data:
             return cls()
         updated_at = data.get("updated_at")
@@ -134,7 +133,7 @@ class ConversationTurn:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ConversationTurn":
+    def from_dict(cls, data: dict[str, Any]) -> ConversationTurn:
         ended_at = data.get("ended_at")
         return cls(
             turn_id=str(data["turn_id"]),
@@ -171,7 +170,7 @@ class SubagentToolCall:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SubagentToolCall":
+    def from_dict(cls, data: dict[str, Any]) -> SubagentToolCall:
         completed_at = data.get("completed_at")
         return cls(
             tool_use_id=str(data["tool_use_id"]),
@@ -215,7 +214,7 @@ class ToolCallRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ToolCallRecord":
+    def from_dict(cls, data: dict[str, Any]) -> ToolCallRecord:
         completed_at = data.get("completed_at")
         return cls(
             tool_use_id=str(data["tool_use_id"]),
@@ -246,7 +245,7 @@ class SubagentTaskState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SubagentTaskState":
+    def from_dict(cls, data: dict[str, Any]) -> SubagentTaskState:
         return cls(
             task_tool_id=str(data["task_tool_id"]),
             description=str(data["description"]) if data.get("description") is not None else None,
@@ -299,7 +298,7 @@ class SubagentState:
         return {"active_tasks": {key: value.to_dict() for key, value in self.active_tasks.items()}}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "SubagentState":
+    def from_dict(cls, data: dict[str, Any] | None) -> SubagentState:
         if not data:
             return cls()
         active_tasks = data.get("active_tasks", {})
@@ -324,7 +323,7 @@ class PendingPermission:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "PendingPermission | None":
+    def from_dict(cls, data: dict[str, Any] | None) -> PendingPermission | None:
         if not data:
             return None
         received_at = data.get("received_at")
@@ -420,7 +419,7 @@ class SessionState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SessionState":
+    def from_dict(cls, data: dict[str, Any]) -> SessionState:
         session_id = str(data["session_id"])
         return cls(
             session_id=session_id,

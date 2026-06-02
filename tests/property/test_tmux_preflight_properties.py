@@ -14,7 +14,6 @@ from hypothesis import given, settings
 
 from app.infra.tmux_preflight import tmux_preflight
 
-
 _resolver_st = st.sampled_from(
     [
         lambda _bin: "/usr/bin/tmux",  # found

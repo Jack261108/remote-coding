@@ -4,7 +4,7 @@ import json
 import logging
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.domain.external_session_models import ExternalBinding
@@ -22,8 +22,8 @@ def _normalize_to_utc(value: datetime) -> datetime:
     naive/aware comparison errors.
     """
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 class ExternalBindingStore:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -19,7 +19,7 @@ BASE_SECONDS = 2_000.0
 
 
 def _dt(seconds: float) -> datetime:
-    return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    return datetime.fromtimestamp(seconds, tz=UTC)
 
 
 def _make_record(

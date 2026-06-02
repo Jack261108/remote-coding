@@ -7,10 +7,10 @@ import pytest
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
 from app.bot.handlers.command_permission import register_permission_handlers
-from app.bot.handlers.external_permission import register_external_permission_handler
-from app.bot.handlers.command_user_question import register_user_question_handlers
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
+from app.bot.handlers.command_user_question import register_user_question_handlers
+from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.router import create_router
 from app.domain.models import TaskRecord, TaskStatus
 from app.domain.session_models import (

@@ -7,7 +7,6 @@ from typing import Annotated, Any
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-
 DEFAULT_ALLOWED_EXTENSIONS: list[str] = [
     ".txt",
     ".md",

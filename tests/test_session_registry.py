@@ -4,13 +4,13 @@ from datetime import timedelta
 
 import pytest
 
+from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import utc_now
 from app.domain.session_models import SessionState
-from app.adapters.storage.file_session_context_store import FileSessionContextStore
+from app.services.session_lookup_service import SessionLookupService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
-from app.services.session_lookup_service import SessionLookupService
 from app.services.session_state_cache import SessionStateCache
 from app.services.session_state_repository import SessionStateRepository
 

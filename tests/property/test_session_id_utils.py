@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 import uuid
 
-from hypothesis import given, settings, assume
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from app.domain.session_models import _UUID_SESSION_RE, is_claude_session_id

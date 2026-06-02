@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -80,7 +80,7 @@ class TestAugmentPrompt:
 
 class TestBuildContext:
     def test_no_files_returns_original_prompt(self, service: ContextBuilderService, adapter: UploadStoreAdapter, workdir: str) -> None:
-        since = datetime.fromtimestamp(0, tz=timezone.utc)
+        since = datetime.fromtimestamp(0, tz=UTC)
         ctx = service.build_context(user_id=1, workdir=workdir, provider="claude_code", prompt="Do stuff", since=since)
         assert ctx.file_paths == []
         assert ctx.augmented_prompt == "Do stuff"
@@ -90,7 +90,7 @@ class TestBuildContext:
         # Upload a file
         asyncio.run(adapter.save_file(1, workdir, "test.py", b"content"))
 
-        since = datetime.fromtimestamp(0, tz=timezone.utc)
+        since = datetime.fromtimestamp(0, tz=UTC)
         ctx = service.build_context(user_id=1, workdir=workdir, provider="claude_code", prompt="Fix it", since=since)
         assert len(ctx.file_paths) == 1
         assert ctx.file_paths[0].name == "test.py"
@@ -101,7 +101,7 @@ class TestBuildContext:
     def test_with_files_codex(self, service: ContextBuilderService, adapter: UploadStoreAdapter, workdir: str) -> None:
         asyncio.run(adapter.save_file(1, workdir, "data.json", b"{}"))
 
-        since = datetime.fromtimestamp(0, tz=timezone.utc)
+        since = datetime.fromtimestamp(0, tz=UTC)
         ctx = service.build_context(user_id=1, workdir=workdir, provider="codex", prompt="Analyze", since=since)
         assert len(ctx.file_paths) == 1
         assert ctx.cli_args == []
@@ -117,7 +117,7 @@ class TestBuildContext:
         os.utime(old_file, (old_mtime, old_mtime))
 
         # Since is after old file
-        since = datetime.fromtimestamp(time.time() - 60, tz=timezone.utc)
+        since = datetime.fromtimestamp(time.time() - 60, tz=UTC)
         ctx = service.build_context(user_id=1, workdir=workdir, provider="claude_code", prompt="Go", since=since)
         assert ctx.file_paths == []
         assert ctx.augmented_prompt == "Go"

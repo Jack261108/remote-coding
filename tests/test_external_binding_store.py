@@ -29,7 +29,7 @@ Covers test plan items T1-T5c and T13b from the bugfix test plan
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -37,7 +37,6 @@ import pytest
 from app.domain.external_session_models import ExternalBinding
 from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
-
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -54,7 +53,7 @@ def _read_bindings_json(data_dir: Path) -> dict[str, dict]:
 
 
 def test_t1_load_json_missing_last_activity_at_falls_back_to_bound_at(tmp_path: Path) -> None:
-    bound_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    bound_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     _write_bindings_json(
         tmp_path,
         {
@@ -138,7 +137,7 @@ def test_t3_explicit_last_activity_at_is_preserved() -> None:
 
 def test_t4_naive_bound_at_in_json_normalized_to_aware_utc(tmp_path: Path) -> None:
     naive_bound = datetime(2026, 5, 1, 9, 0, 0)  # no tzinfo
-    last_activity = datetime(2026, 5, 1, 10, 0, 0, tzinfo=timezone.utc)
+    last_activity = datetime(2026, 5, 1, 10, 0, 0, tzinfo=UTC)
     _write_bindings_json(
         tmp_path,
         {
@@ -159,14 +158,14 @@ def test_t4_naive_bound_at_in_json_normalized_to_aware_utc(tmp_path: Path) -> No
     assert loaded.bound_at.tzinfo is not None
     assert loaded.bound_at.utcoffset() == timedelta(0)
     # Naive should be treated as UTC, so the absolute instant matches.
-    assert loaded.bound_at == naive_bound.replace(tzinfo=timezone.utc)
+    assert loaded.bound_at == naive_bound.replace(tzinfo=UTC)
 
 
 # --- T4b: naive last_activity_at in JSON normalized to tz-aware UTC ---------
 
 
 def test_t4b_naive_last_activity_at_in_json_normalized_to_aware_utc(tmp_path: Path) -> None:
-    bound_at = datetime(2026, 5, 1, 8, 0, 0, tzinfo=timezone.utc)
+    bound_at = datetime(2026, 5, 1, 8, 0, 0, tzinfo=UTC)
     naive_activity = datetime(2026, 5, 1, 11, 0, 0)  # no tzinfo
     _write_bindings_json(
         tmp_path,
@@ -187,7 +186,7 @@ def test_t4b_naive_last_activity_at_in_json_normalized_to_aware_utc(tmp_path: Pa
 
     assert loaded.last_activity_at.tzinfo is not None
     assert loaded.last_activity_at.utcoffset() == timedelta(0)
-    assert loaded.last_activity_at == naive_activity.replace(tzinfo=timezone.utc)
+    assert loaded.last_activity_at == naive_activity.replace(tzinfo=UTC)
 
 
 # --- T4c: aware non-UTC datetime in JSON converted to UTC -------------------
@@ -251,7 +250,7 @@ def test_t4d_missing_last_activity_at_with_naive_bound_at(tmp_path: Path) -> Non
     assert loaded.last_activity_at.utcoffset() == timedelta(0)
     # And last_activity_at falls back to the normalized bound_at.
     assert loaded.last_activity_at == loaded.bound_at
-    assert loaded.bound_at == naive_bound.replace(tzinfo=timezone.utc)
+    assert loaded.bound_at == naive_bound.replace(tzinfo=UTC)
 
 
 # --- T5: touch_activity updates in-memory immediately -----------------------

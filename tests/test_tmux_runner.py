@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.adapters.process.tmux_runner import _TmuxTaskMeta, TmuxRunner
+from app.adapters.process.tmux_runner import TmuxRunner, _TmuxTaskMeta
 from app.domain.models import CLIEvent, EventType, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
 
@@ -463,7 +463,7 @@ def test_read_new_text_recovers_after_log_truncation(tmp_path: Path) -> None:
     text, position = runner._read_new_text(log_file, position=100)
 
     assert text == "new-output"
-    assert position == len("new-output".encode("utf-8"))
+    assert position == len(b"new-output")
 
 
 @pytest.mark.asyncio
@@ -601,7 +601,7 @@ async def test_interactive_timeout_keeps_session_alive(tmp_path: Path, caplog: p
 
     assert events[-1].type == EventType.TIMEOUT
     assert any(record.message == "tmux task timeout" for record in caplog.records)
-    assert any(record.message == "tmux task finished" and getattr(record, "result") == "timeout" for record in caplog.records)
+    assert any(record.message == "tmux task finished" and record.result == "timeout" for record in caplog.records)
     state = runner._session_store.get(session_name)
     assert state is not None
     assert state.phase == SessionPhase.PROCESSING

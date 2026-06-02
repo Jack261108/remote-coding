@@ -7,7 +7,6 @@ from aiogram.exceptions import TelegramBadRequest
 
 from app.bot.presenters.telegram_formatting import split_markdownish_for_telegram
 
-
 SendText = Callable[[str], Awaitable[bool | None]]
 
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
+
+import pytest
 
 from app.domain.external_session_models import ExternalBinding, SessionOrigin
 from app.domain.models import SessionContext
@@ -78,7 +79,7 @@ async def test_resolve_external_bound(
             session_id="sess-ext",
             user_id=99,
             cwd="/tmp/work",
-            bound_at=datetime.now(timezone.utc),
+            bound_at=datetime.now(UTC),
             jsonl_path=None,
         )
     )
@@ -117,7 +118,7 @@ async def test_tmux_priority_over_binding(
             session_id="sess-both",
             user_id=20,
             cwd="/tmp",
-            bound_at=datetime.now(timezone.utc),
+            bound_at=datetime.now(UTC),
             jsonl_path=None,
         )
     )

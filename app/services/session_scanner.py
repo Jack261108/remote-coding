@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.adapters.claude.paths import ClaudePaths
@@ -54,7 +54,7 @@ class SessionScanner:
             session_id = path.stem
             try:
                 mtime = path.stat().st_mtime
-                modified_at = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                modified_at = datetime.fromtimestamp(mtime, tz=UTC)
             except OSError:
                 logger.debug("Cannot stat %s, skipping", path)
                 continue

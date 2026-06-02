@@ -14,9 +14,6 @@ from app.bot.presenters.structured_reply_messages import (
     build_user_question_prompt,  # noqa: F401
 )
 from app.bot.presenters.structured_reply_models import (
-    _StructuredSnapshot,
-    _SubagentToolStateSnapshot,  # noqa: F401
-    _ToolStateSnapshot,
     FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
@@ -27,6 +24,9 @@ from app.bot.presenters.structured_reply_models import (
     TaskListStatusOutput,
     ToolStatusOutput,
     UserQuestionOutput,
+    _StructuredSnapshot,
+    _SubagentToolStateSnapshot,  # noqa: F401
+    _ToolStateSnapshot,
 )
 from app.bot.presenters.structured_reply_snapshot_loader import StructuredReplySnapshotLoader
 from app.bot.presenters.structured_reply_text import (  # noqa: F401

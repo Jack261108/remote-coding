@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.bot.presenters.permission_message_builder import PermissionPromptInput
 from app.bot.handlers.command_user_question import build_user_question_keyboard
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.chunk_sender import ChunkSender
+from app.bot.presenters.permission_message_builder import PermissionPromptInput
 from app.bot.presenters.structured_reply_presenter import (
     FileToolAggregateStatusOutput,
     PermissionRequestOutput,

@@ -25,13 +25,13 @@ import pytest
 
 from app.domain.external_session_models import ExternalBinding
 from app.domain.models import utc_now
-from app.services.external_binding_store import ExternalBindingStore
 
 # This import is expected to raise ImportError on UNFIXED code, which is the
 # success signal for this exploration test (it confirms the bug exists because
 # no cleanup component is present in the codebase).
 from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
 from app.services.external_binding_reaper import ExternalBindingReaper
+from app.services.external_binding_store import ExternalBindingStore
 
 TTL = timedelta(hours=24)
 

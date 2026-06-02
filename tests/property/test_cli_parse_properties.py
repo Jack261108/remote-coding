@@ -12,7 +12,6 @@ from hypothesis import given, settings
 
 from app.main import CliOptions, parse_cli
 
-
 # --- Strategies ---
 
 _version_flag_st = st.sampled_from(["--version"])

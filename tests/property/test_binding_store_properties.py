@@ -8,7 +8,7 @@ Feature: external-session-takeover, Property 8: Binding persistence round-trip
 from __future__ import annotations
 
 import tempfile
-from datetime import timezone
+from datetime import UTC
 from pathlib import Path
 
 import hypothesis.strategies as st
@@ -17,7 +17,6 @@ from hypothesis.strategies import characters, datetimes, integers, just, none, o
 
 from app.domain.external_session_models import ExternalBinding
 from app.services.external_binding_store import ExternalBindingStore
-
 
 # --- Strategies ---
 
@@ -31,7 +30,7 @@ user_id_st = integers(min_value=1, max_value=10**9)
 
 cwd_st = text(min_size=1, max_size=200)
 
-bound_at_st = datetimes(timezones=just(timezone.utc))
+bound_at_st = datetimes(timezones=just(UTC))
 
 jsonl_path_st = one_of(none(), text(min_size=1, max_size=200))
 

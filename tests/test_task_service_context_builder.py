@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -280,7 +280,7 @@ async def test_since_uses_last_task_ended_at(tmp_path: Path) -> None:
     _ = [event async for event in result1.events]
 
     first_call_since = context_builder.build_context.call_args.kwargs["since"]
-    assert first_call_since == datetime(1970, 1, 1, tzinfo=timezone.utc)
+    assert first_call_since == datetime(1970, 1, 1, tzinfo=UTC)
 
     # Second task - since should be the ended_at of the first task
     context_builder.build_context.reset_mock()
@@ -289,4 +289,4 @@ async def test_since_uses_last_task_ended_at(tmp_path: Path) -> None:
 
     second_call_since = context_builder.build_context.call_args.kwargs["since"]
     # The first task should have ended, so since should be after epoch
-    assert second_call_since > datetime(1970, 1, 1, tzinfo=timezone.utc)
+    assert second_call_since > datetime(1970, 1, 1, tzinfo=UTC)

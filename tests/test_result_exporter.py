@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -38,9 +38,9 @@ def _make_task_record(
     record.prompt = prompt
     record.workdir = workdir
     record.status = status
-    record.created_at = datetime(2025, 1, 15, 10, 30, 0, tzinfo=timezone.utc)
-    record.started_at = started_at or datetime(2025, 1, 15, 10, 30, 0, tzinfo=timezone.utc)
-    record.ended_at = ended_at or datetime(2025, 1, 15, 10, 35, 0, tzinfo=timezone.utc)
+    record.created_at = datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC)
+    record.started_at = started_at or datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC)
+    record.ended_at = ended_at or datetime(2025, 1, 15, 10, 35, 0, tzinfo=UTC)
     record.duration_sec = 300.0
     return record
 
@@ -61,7 +61,7 @@ class TestFormatMarkdownHeader:
             task_id="abc-123",
             provider="claude_code",
             duration_sec=45.2,
-            timestamp=datetime(2025, 1, 15, 10, 30, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC),
         )
         assert "abc-123" in result
 
@@ -70,7 +70,7 @@ class TestFormatMarkdownHeader:
             task_id="t1",
             provider="gemini",
             duration_sec=10.0,
-            timestamp=datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
         )
         assert "gemini" in result
 
@@ -79,7 +79,7 @@ class TestFormatMarkdownHeader:
             task_id="t1",
             provider="claude_code",
             duration_sec=123.4,
-            timestamp=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )
         assert "123.4s" in result
 
@@ -88,7 +88,7 @@ class TestFormatMarkdownHeader:
             task_id="t1",
             provider="claude_code",
             duration_sec=None,
-            timestamp=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )
         assert "N/A" in result
 
@@ -97,7 +97,7 @@ class TestFormatMarkdownHeader:
             task_id="t1",
             provider="claude_code",
             duration_sec=5.0,
-            timestamp=datetime(2025, 3, 20, 14, 30, 45, tzinfo=timezone.utc),
+            timestamp=datetime(2025, 3, 20, 14, 30, 45, tzinfo=UTC),
         )
         assert "2025-03-20 14:30:45 UTC" in result
 
@@ -124,8 +124,8 @@ class TestCollectModifiedFiles:
         now = time.time()
         os.utime(f, (now, now))
 
-        started_at = datetime.fromtimestamp(now - 10, tz=timezone.utc)
-        ended_at = datetime.fromtimestamp(now + 10, tz=timezone.utc)
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
 
         result = service.collect_modified_files(
             workdir=str(tmp_path),
@@ -142,8 +142,8 @@ class TestCollectModifiedFiles:
         os.utime(f, (old_time, old_time))
 
         now = time.time()
-        started_at = datetime.fromtimestamp(now - 10, tz=timezone.utc)
-        ended_at = datetime.fromtimestamp(now + 10, tz=timezone.utc)
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
 
         result = service.collect_modified_files(
             workdir=str(tmp_path),
@@ -160,8 +160,8 @@ class TestCollectModifiedFiles:
         now = time.time()
         os.utime(f, (now, now))
 
-        started_at = datetime.fromtimestamp(now - 10, tz=timezone.utc)
-        ended_at = datetime.fromtimestamp(now + 10, tz=timezone.utc)
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
 
         result = service.collect_modified_files(
             workdir=str(tmp_path),
@@ -177,8 +177,8 @@ class TestCollectModifiedFiles:
         now = time.time()
         os.utime(f, (now, now))
 
-        started_at = datetime.fromtimestamp(now - 10, tz=timezone.utc)
-        ended_at = datetime.fromtimestamp(now + 10, tz=timezone.utc)
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
 
         result = service.collect_modified_files(
             workdir=str(tmp_path),
@@ -191,8 +191,8 @@ class TestCollectModifiedFiles:
     def test_nonexistent_workdir_returns_empty(self, service: ResultExporterService) -> None:
         result = service.collect_modified_files(
             workdir="/nonexistent/path",
-            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            ended_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
+            started_at=datetime(2025, 1, 1, tzinfo=UTC),
+            ended_at=datetime(2025, 1, 2, tzinfo=UTC),
             gitignore_patterns=[],
         )
         assert result == []
@@ -206,8 +206,8 @@ class TestCollectModifiedFiles:
             os.utime(f, (now, now))
             files.append(f)
 
-        started_at = datetime.fromtimestamp(now - 10, tz=timezone.utc)
-        ended_at = datetime.fromtimestamp(now + 10, tz=timezone.utc)
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
 
         result = service.collect_modified_files(
             workdir=str(tmp_path),
@@ -242,8 +242,8 @@ class TestExportZip:
         os.utime(f, (now, now))
 
         record = _make_task_record(task_id="z1")
-        started_at = datetime.fromtimestamp(now - 10, tz=timezone.utc)
-        ended_at = datetime.fromtimestamp(now + 10, tz=timezone.utc)
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
 
         result = asyncio.run(service.export_zip(record, workdir=str(tmp_path), started_at=started_at, ended_at=ended_at))
         assert result.file_path.exists()
@@ -259,8 +259,8 @@ class TestExportZip:
         os.utime(f, (now, now))
 
         record = _make_task_record(task_id="z2")
-        started_at = datetime.fromtimestamp(now - 10, tz=timezone.utc)
-        ended_at = datetime.fromtimestamp(now + 10, tz=timezone.utc)
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
 
         result = asyncio.run(service.export_zip(record, workdir=str(tmp_path), started_at=started_at, ended_at=ended_at))
 
@@ -290,8 +290,8 @@ class TestExportZip:
         os.utime(included, (now, now))
 
         record = _make_task_record(task_id="z3")
-        started_at = datetime.fromtimestamp(now - 10, tz=timezone.utc)
-        ended_at = datetime.fromtimestamp(now + 10, tz=timezone.utc)
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
 
         result = asyncio.run(service.export_zip(record, workdir=str(tmp_path), started_at=started_at, ended_at=ended_at))
 

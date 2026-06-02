@@ -110,7 +110,7 @@ async def test_periodic_loop_calls_cleanup_after_interval(mock_upload_store: Mag
         # Wait for task to complete (it will be cancelled after sleep raises)
         try:
             await asyncio.wait_for(service._task, timeout=1.0)  # type: ignore[arg-type]
-        except (asyncio.CancelledError, asyncio.TimeoutError):
+        except (TimeoutError, asyncio.CancelledError):
             pass
 
         # Initial cleanup + at least one periodic cleanup

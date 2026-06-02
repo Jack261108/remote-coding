@@ -6,7 +6,7 @@ import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 logger = logging.getLogger(__name__)
@@ -186,7 +186,7 @@ class PermissionCallbackRegistry:
         self._ttl_sec = ttl_sec
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(6))
         self._clock = clock or time.monotonic
-        self._wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
+        self._wall_clock = wall_clock or (lambda: datetime.now(UTC))
         self._records: dict[str, PermissionCallbackRecord] = {}
         self._ttl_deadlines: dict[str, float] = {}
         self._lock = asyncio.Lock()

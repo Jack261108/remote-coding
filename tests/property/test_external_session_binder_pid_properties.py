@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from hypothesis import given, settings
@@ -26,7 +26,7 @@ from app.services.external_session_binder import ExternalSessionBinder
 
 # A fixed, tz-aware UTC timestamp keeps UnboundExternalSession construction
 # deterministic across runs.
-_FIXED_TS = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+_FIXED_TS = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
 
 class _DiscoveryDouble:

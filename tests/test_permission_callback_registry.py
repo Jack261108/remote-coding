@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import get_args
 
 import pytest
@@ -16,8 +16,8 @@ from app.services.auto_approve_service import (
     CommitSlotSucceeded,
     SlotActiveOwnerExists,
     SlotAlreadyClaimedBySameUser,
-    SlotClaimResult,
     SlotClaimed,
+    SlotClaimResult,
     SlotConflict,
 )
 from app.services.permission_callback_registry import (
@@ -78,8 +78,8 @@ def test_phase1_permission_callback_enums_use_explicit_string_values() -> None:
 
 
 def test_phase1_permission_callback_snapshot_copies_mutable_record() -> None:
-    created_at = datetime(2026, 5, 27, 10, 0, tzinfo=timezone.utc)
-    expires_at = datetime(2026, 5, 27, 10, 5, tzinfo=timezone.utc)
+    created_at = datetime(2026, 5, 27, 10, 0, tzinfo=UTC)
+    expires_at = datetime(2026, 5, 27, 10, 5, tzinfo=UTC)
     record = PermissionCallbackRecord(
         token="tok12345",
         tool_use_id="toolu_abc",
@@ -116,8 +116,8 @@ def test_phase1_permission_callback_result_variants_are_available() -> None:
         origin=SessionOrigin.OWNED,
         authorization_mode=AuthorizationMode.OWNER,
         authorized_user_ids=frozenset({42}),
-        created_at=datetime(2026, 5, 27, 10, 0, tzinfo=timezone.utc),
-        expires_at=datetime(2026, 5, 27, 10, 5, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 27, 10, 0, tzinfo=UTC),
+        expires_at=datetime(2026, 5, 27, 10, 5, tzinfo=UTC),
         status=CallbackRecordStatus.PENDING,
         decision=None,
         responded_by_user_id=None,
@@ -177,7 +177,7 @@ def test_phase1_permission_gateway_models_are_available() -> None:
 
 
 def test_phase1_auto_approve_slot_models_are_available() -> None:
-    activated_at = datetime(2026, 5, 27, 10, 0, tzinfo=timezone.utc)
+    activated_at = datetime(2026, 5, 27, 10, 0, tzinfo=UTC)
     activation = AutoApproveActivation("sess-123", 42, activated_at)
     slot = ActivationSlot("sess-123", 42, "attempt-1")
 

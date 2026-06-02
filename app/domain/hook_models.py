@@ -135,11 +135,11 @@ class HookEvent:
     def expects_response(self) -> bool:
         return self.event == "PermissionRequest" and self.status == "waiting_for_approval"
 
-    def with_tool_use_id(self, tool_use_id: str) -> "HookEvent":
+    def with_tool_use_id(self, tool_use_id: str) -> HookEvent:
         return replace(self, tool_use_id=tool_use_id)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "HookEvent":
+    def from_dict(cls, data: dict[str, Any]) -> HookEvent:
         if not isinstance(data, dict):
             raise ValueError("hook payload 必须为对象")
         return cls(

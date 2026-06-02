@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
 
-class SessionOrigin(str, Enum):
+class SessionOrigin(StrEnum):
     TMUX = "tmux"
     EXTERNAL = "external"
 

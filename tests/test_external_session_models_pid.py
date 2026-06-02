@@ -11,12 +11,12 @@ continues to hold in both cases.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.domain.external_session_models import ExternalBinding
 
 # A fixed, tz-aware bind time so assertions are deterministic.
-_BOUND_AT = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+_BOUND_AT = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def test_pid_defaults_to_none_when_not_provided() -> None:

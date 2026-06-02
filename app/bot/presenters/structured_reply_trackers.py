@@ -4,7 +4,6 @@ import re
 
 from app.bot.presenters.structured_reply_messages import _format_tool_input_detail, _is_user_question_tool, build_user_question_prompt
 from app.bot.presenters.structured_reply_models import (
-    _ToolStateSnapshot,
     FileToolAggregateStatusOutput,
     SubagentAggregateStatusOutput,
     SubagentToolStatusOutput,
@@ -12,6 +11,7 @@ from app.bot.presenters.structured_reply_models import (
     TaskListStatusOutput,
     ToolStatusOutput,
     UserQuestionOutput,
+    _ToolStateSnapshot,
 )
 from app.domain.session_models import ToolStatus
 from app.domain.user_question_models import UserQuestionPrompt

@@ -12,7 +12,6 @@ from hypothesis import given, settings
 
 from app.config.loader import REQUIRED_FIELDS, missing_required_fields
 
-
 _required_aliases = list(REQUIRED_FIELDS.keys())
 
 _value_st = st.one_of(

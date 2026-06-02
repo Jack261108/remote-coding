@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -32,7 +32,6 @@ from app.domain.models import utc_now
 from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
 from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
-
 
 # --- Shared helpers ---------------------------------------------------------
 
@@ -130,7 +129,7 @@ async def test_property_a_cleanup_decision_matches_spec(
 _aware_utc_datetime_st = st.datetimes(
     min_value=datetime(2020, 1, 1),
     max_value=datetime(2030, 12, 31),
-    timezones=st.just(timezone.utc),
+    timezones=st.just(UTC),
 )
 
 
@@ -218,7 +217,7 @@ def test_property_c_json_load_round_trip_mixed_timezone_shapes(
 
         if shape == "missing":
             # Aware UTC `bound_at` written, `last_activity_at` field omitted.
-            bound_at_aware = base_dt.replace(tzinfo=timezone.utc)
+            bound_at_aware = base_dt.replace(tzinfo=UTC)
             payload_entry: dict = {
                 "user_id": 42,
                 "cwd": "/home/user/c",
@@ -237,8 +236,8 @@ def test_property_c_json_load_round_trip_mixed_timezone_shapes(
                 "last_activity_at": last_activity_naive.isoformat(),
                 "jsonl_path": None,
             }
-            expected_bound_ts = base_dt.replace(tzinfo=timezone.utc).timestamp()
-            expected_activity_ts = last_activity_naive.replace(tzinfo=timezone.utc).timestamp()
+            expected_bound_ts = base_dt.replace(tzinfo=UTC).timestamp()
+            expected_activity_ts = last_activity_naive.replace(tzinfo=UTC).timestamp()
         else:  # "aware_non_utc"
             # Aware datetimes in a non-UTC fixed-offset timezone.
             bound_at_tz = base_dt.replace(tzinfo=tz)

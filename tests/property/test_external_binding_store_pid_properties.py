@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from hypothesis import given, settings
@@ -27,7 +27,7 @@ from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
 
 # A fixed, tz-aware UTC bind time keeps construction deterministic across runs.
-_FIXED_BOUND_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+_FIXED_BOUND_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
 
 # --- Property 5: pid serialization round-trip -------------------------------

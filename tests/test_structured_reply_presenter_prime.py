@@ -50,7 +50,6 @@ from app.bot.presenters.structured_reply_presenter import (
 from app.domain.session_models import ConversationTurn, SessionPhase
 from tests.fakes.structured import make_structured_session as _session
 
-
 # A turn id that can never collide with the hypothesis-generated
 # ``persisted_turn_id`` (which always starts with the literal prefix ``turn-``).
 _FRESH_TURN_ID = "FRESH-TURN-B"
@@ -264,7 +263,6 @@ from app.domain.user_question_models import (  # noqa: E402
     UserQuestionOption,
     UserQuestionPrompt,
 )
-
 
 _OPTIONAL_TURN_ID_STRATEGY = st.one_of(st.none(), _TURN_ID_STRATEGY)
 

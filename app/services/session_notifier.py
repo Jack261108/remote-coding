@@ -62,7 +62,7 @@ class SessionNotifier:
                     condition.wait_for(lambda: self.get_cursor(session_id) > since_cursor),
                     timeout=timeout_sec,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return False
         return True
 

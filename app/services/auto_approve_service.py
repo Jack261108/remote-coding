@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +266,7 @@ class AutoApproveService:
         self._activations[(user_id, session_id)] = AutoApproveActivation(
             session_id=session_id,
             user_id=user_id,
-            activated_at=datetime.now(timezone.utc),
+            activated_at=datetime.now(UTC),
         )
         self._active_owners[session_id] = user_id
         logger.info("Auto-approve activated for session %s by user %d", session_id, user_id)

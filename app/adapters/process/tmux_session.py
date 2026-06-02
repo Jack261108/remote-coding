@@ -6,7 +6,6 @@ from pathlib import Path
 
 from app.domain.user_question_models import USER_QUESTION_TUI_FALLBACK_ERROR
 
-
 _TMUX_TERMINAL_DEFAULTS: dict[str, str] = {
     "TERM": "xterm-256color",
     "COLORTERM": "truecolor",

@@ -14,9 +14,9 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from app.bot.presenters.permission_message_builder import PermissionMessageBuilder
-from app.services.permission_gateway import RegisterForButtonOk
 from app.domain.hook_models import HookEvent
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.permission_gateway import RegisterForButtonOk
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 # --- Strategies ---

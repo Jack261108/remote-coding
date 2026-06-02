@@ -63,7 +63,7 @@ _PROBE_PATH = "app.bot.handlers.command_list.process_is_alive"
 _CALLBACK_PREFIX = "sess:select:"
 
 
-def _rendered_session_id_prefixes(message: "_DummyMessage") -> set[str]:
+def _rendered_session_id_prefixes(message: _DummyMessage) -> set[str]:
     """Extract the bound-session callback prefixes from the rendered keyboard.
 
     Each bound binding renders an inline button with

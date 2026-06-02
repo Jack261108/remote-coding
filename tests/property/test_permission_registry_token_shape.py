@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from hypothesis import given, settings
@@ -47,12 +47,12 @@ def test_register_token_returns_eight_url_safe_characters(tool_use_id: str, sess
 @settings(max_examples=100, deadline=None)
 @given(token=st.from_regex(TOKEN_RE, fullmatch=True), action=st.sampled_from(list(PermissionAction)))
 def test_permission_callback_data_fits_telegram_limit(token: str, action: PermissionAction) -> None:
-    assert len(f"perm:{token}:{action}".encode("utf-8")) <= 64
+    assert len(f"perm:{token}:{action}".encode()) <= 64
 
 
 def test_default_register_token_uses_current_wall_clock_timestamps() -> None:
     async def run_scenario() -> None:
-        before = datetime.now(timezone.utc) - timedelta(minutes=1)
+        before = datetime.now(UTC) - timedelta(minutes=1)
         registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok00001")
         token = await registry.register_token(
             tool_use_id="tool-1",
@@ -61,7 +61,7 @@ def test_default_register_token_uses_current_wall_clock_timestamps() -> None:
             authorization_mode=AuthorizationMode.ALL_USERS,
             authorized_user_ids=frozenset(),
         )
-        after = datetime.now(timezone.utc) + timedelta(minutes=1)
+        after = datetime.now(UTC) + timedelta(minutes=1)
         record = registry._records[token]
 
         assert before <= record.created_at <= after
