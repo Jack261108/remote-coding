@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 
 from app.domain.hook_models import validate_session_id
 from app.domain.session_models import (
@@ -12,17 +13,31 @@ from app.services.session_state_repository import SessionStateRepository
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_MAX_SIZE = 512
+
 
 class SessionStateCache:
-    """In-memory cache for SessionState objects with load-on-miss from repository.
+    """In-memory LRU cache for SessionState objects with load-on-miss from repository.
 
     Single responsibility: store and retrieve SessionState objects in memory,
     delegating to SessionStateRepository for persistence on miss.
+    Entries are evicted in least-recently-used order when the cache exceeds maxsize.
     """
 
-    def __init__(self, repository: SessionStateRepository) -> None:
+    def __init__(self, repository: SessionStateRepository, maxsize: int = _DEFAULT_MAX_SIZE) -> None:
         self._repository = repository
-        self._states: dict[str, SessionState] = {}
+        self._maxsize = maxsize
+        self._states: OrderedDict[str, SessionState] = OrderedDict()
+
+    def _touch(self, session_id: str) -> None:
+        """Move session_id to the end (most recently used)."""
+        self._states.move_to_end(session_id)
+
+    def _evict_if_needed(self) -> None:
+        """Evict least recently used entries until the cache is within maxsize."""
+        while len(self._states) > self._maxsize:
+            evicted_id, _ = self._states.popitem(last=False)
+            logger.debug("Evicted session %s from cache (LRU)", evicted_id)
 
     def get(self, session_id: str) -> SessionState | None:
         """Retrieve a cached SessionState by session_id.
@@ -33,11 +48,13 @@ class SessionStateCache:
         session_id = validate_session_id(session_id)
         state = self._states.get(session_id)
         if state is not None:
+            self._touch(session_id)
             return state
         loaded = self._repository.load(session_id)
         if loaded is None:
             return None
         self._states[session_id] = loaded
+        self._evict_if_needed()
         return loaded
 
     def get_or_create(
@@ -61,6 +78,7 @@ class SessionStateCache:
 
         state = self._states.get(session_id)
         if state is not None:
+            self._touch(session_id)
             if user_id is not None:
                 state.user_id = user_id
             state.provider = provider
@@ -103,11 +121,14 @@ class SessionStateCache:
 
         state.history_loaded = _has_loaded_history(state)
         self._states[session_id] = state
+        self._evict_if_needed()
         return state
 
     def put(self, state: SessionState) -> None:
         """Store a SessionState in the cache, overwriting any existing entry."""
         self._states[state.session_id] = state
+        self._touch(state.session_id)
+        self._evict_if_needed()
 
     def values(self) -> list[SessionState]:
         """Return all currently cached session states (snapshot)."""
@@ -133,6 +154,7 @@ class SessionStateCache:
 
         cached = self._states.get(state.session_id)
         if cached is not None:
+            self._touch(state.session_id)
             if not cached.turns and loaded_turns:
                 cached.turns = loaded_turns
             if not cached.tool_calls and state.tool_calls:
@@ -155,6 +177,7 @@ class SessionStateCache:
             state.turns = loaded_turns
         state.history_loaded = _has_loaded_history(state)
         self._states[state.session_id] = state
+        self._evict_if_needed()
         return state
 
 

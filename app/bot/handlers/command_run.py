@@ -351,9 +351,21 @@ async def run_prompt_and_stream(
         )
 
         async def _notify_error() -> None:
-            await messenger.answer_safely(f"任务处理异常: {exc}")
+            try:
+                await messenger.answer_safely(f"任务处理异常: {exc}")
+            except Exception:
+                logger.exception(
+                    "failed to notify user about task error",
+                    extra={"task_id": start.task.task_id, "user_id": user_id},
+                )
 
-        asyncio.get_running_loop().create_task(_notify_error())
+        try:
+            asyncio.get_running_loop().create_task(_notify_error())
+        except RuntimeError:
+            logger.warning(
+                "could not schedule error notification, event loop may be shutting down",
+                extra={"task_id": start.task.task_id, "user_id": user_id},
+            )
 
     task.add_done_callback(_on_done)
     return task

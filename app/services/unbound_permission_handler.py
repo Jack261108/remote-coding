@@ -128,16 +128,16 @@ class UnboundPermissionHandler:
     async def handle_response(self, *, tool_use_id: str, user_id: int, decision: str) -> UnboundPermissionResponseResult:
         """Process a response from a user.
 
-        Uses a short critical section to pop pending and cancel expiry,
-        then forwards the decision outside the lock.
+        Marks the state as responded inside the lock to prevent concurrent
+        responses, then forwards the decision outside the lock.  On forwarding
+        failure the responded flag is rolled back and the expiry task is
+        re-created so the permission will eventually auto-deny rather than
+        leaving Claude stuck forever.
         """
         async with self._state_lock:
-            state = self._pending.pop(tool_use_id, None)
+            state = self._pending.get(tool_use_id)
             if state is None or state.responded:
-                if state is not None and state.responded:
-                    self._pending[tool_use_id] = state
                 return UnboundPermissionResponseResult(accepted=False, forwarded=False)
-
             state.responded = True
             state.responded_by = user_id
             self._cancel_expiry_task(tool_use_id)
@@ -157,7 +157,18 @@ class UnboundPermissionHandler:
                 extra={"tool_use_id": tool_use_id, "user_id": user_id, "decision": decision},
             )
 
-        if not forwarded:
+        if forwarded:
+            async with self._state_lock:
+                self._pending.pop(tool_use_id, None)
+        else:
+            async with self._state_lock:
+                current = self._pending.get(tool_use_id)
+                if current is state:
+                    state.responded = False
+                    state.responded_by = None
+                    self._expiry_tasks[tool_use_id] = asyncio.create_task(
+                        self._expire_permission(tool_use_id),
+                    )
             logger.warning(
                 "unbound permission decision not forwarded",
                 extra={"tool_use_id": tool_use_id, "user_id": user_id, "decision": decision},
@@ -173,7 +184,7 @@ class UnboundPermissionHandler:
                 "forwarded": forwarded,
             },
         )
-        return UnboundPermissionResponseResult(accepted=True, forwarded=forwarded)
+        return UnboundPermissionResponseResult(accepted=forwarded, forwarded=forwarded)
 
     async def invalidate_session(self, session_id: str) -> int:
         async with self._state_lock:

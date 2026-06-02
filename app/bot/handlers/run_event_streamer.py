@@ -280,7 +280,14 @@ class RunEventStreamer:
             finally:
                 # Clean up temp file
                 export_result.file_path.unlink(missing_ok=True)
-                export_result.file_path.parent.rmdir()
+                try:
+                    export_result.file_path.parent.rmdir()
+                except OSError:
+                    logger.debug(
+                        "temp export directory cleanup failed (non-fatal)",
+                        extra={"dir": str(export_result.file_path.parent)},
+                        exc_info=True,
+                    )
         except Exception:
             logger.warning(
                 "auto-export failed",

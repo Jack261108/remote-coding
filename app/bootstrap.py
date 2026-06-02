@@ -284,16 +284,20 @@ class AppContainer(
             logger.warning("Failed to register bot commands: %s", exc)
         if self.settings.claude_install_hooks:
             self.hook_installer.install()
-        await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
-        await self._restore_session_bindings()
-        self._start_interrupt_watchers()
-        self._start_agent_file_watchers()
-        self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
-        await self.session_registry.start_health_check()
-        await self.external_binding_cleanup_service.start()
-        await self.upload_queue.start_cleanup()
-        await self.upload_cleanup.start()
         self._started = True
+        try:
+            await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
+            await self._restore_session_bindings()
+            self._start_interrupt_watchers()
+            self._start_agent_file_watchers()
+            self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
+            await self.session_registry.start_health_check()
+            await self.external_binding_cleanup_service.start()
+            await self.upload_queue.start_cleanup()
+            await self.upload_cleanup.start()
+        except Exception:
+            await self.stop()
+            raise
 
     async def stop(self) -> None:
         if not self._started:
@@ -308,6 +312,7 @@ class AppContainer(
         await self.agent_file_watcher.stop_all()
         await self.interrupt_watcher.stop_all()
         await self.hook_socket_server.stop()
+        await self._stop_background_tasks()
         await self.bot.session.close()
         self._started = False
 

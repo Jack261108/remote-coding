@@ -100,29 +100,39 @@ class ResultExporterService:
         max_size_bytes = self._settings.zip_max_size_mb * 1024 * 1024
         total_size = md_result.file_path.stat().st_size
 
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            # Add markdown output
-            zf.write(md_result.file_path, arcname=md_result.filename)
+        try:
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # Add markdown output
+                zf.write(md_result.file_path, arcname=md_result.filename)
 
-            # Add modified files
-            workdir_path = Path(workdir)
-            for file_path in modified_files:
-                try:
-                    file_size = file_path.stat().st_size
-                    total_size += file_size
-                    if total_size > max_size_bytes:
-                        logger.warning(
-                            "ZIP size limit exceeded (%d MB), stopping file collection",
-                            self._settings.zip_max_size_mb,
-                        )
-                        raise _ZipSizeLimitExceeded()
-                    # Use relative path from workdir as archive name
-                    arcname = str(file_path.relative_to(workdir_path))
-                    zf.write(file_path, arcname=arcname)
-                except _ZipSizeLimitExceeded:
-                    raise
-                except Exception:
-                    logger.warning("Failed to add file to ZIP: %s", file_path, exc_info=True)
+                # Add modified files
+                workdir_path = Path(workdir)
+                for file_path in modified_files:
+                    try:
+                        file_size = file_path.stat().st_size
+                        total_size += file_size
+                        if total_size > max_size_bytes:
+                            logger.warning(
+                                "ZIP size limit exceeded (%d MB), stopping file collection",
+                                self._settings.zip_max_size_mb,
+                            )
+                            raise _ZipSizeLimitExceeded()
+                        # Use relative path from workdir as archive name
+                        arcname = str(file_path.relative_to(workdir_path))
+                        zf.write(file_path, arcname=arcname)
+                    except _ZipSizeLimitExceeded:
+                        raise
+                    except Exception:
+                        logger.warning("Failed to add file to ZIP: %s", file_path, exc_info=True)
+        finally:
+            # Clean up intermediate markdown temp file and directory
+            try:
+                md_tmp_dir = md_result.file_path.parent
+                md_result.file_path.unlink(missing_ok=True)
+                if md_tmp_dir != Path("/") and not any(md_tmp_dir.iterdir()):
+                    md_tmp_dir.rmdir()
+            except Exception:
+                logger.debug("cleanup of intermediate markdown temp file failed", exc_info=True)
 
         # Check final ZIP size
         final_size = zip_path.stat().st_size

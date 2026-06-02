@@ -247,7 +247,7 @@ class TaskService:
         selected_provider = provider or self._settings.default_provider
         selected_provider = self._cli_factory.normalize_provider(selected_provider)
 
-        selected_timeout = timeout_sec or self._settings.default_timeout_sec
+        selected_timeout = timeout_sec if timeout_sec is not None else self._settings.default_timeout_sec
 
         selected_workdir = str(Path(workdir or self._settings.default_workdir).resolve())
         if not self._is_workdir_allowed(selected_workdir):

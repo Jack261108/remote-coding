@@ -430,6 +430,15 @@ class HookHandlingMixin(AppContainerBase):
         if exc is not None:
             logger.warning("background task failed", exc_info=exc)
 
+    async def _stop_background_tasks(self) -> None:
+        tasks = list(self._background_tasks)
+        self._background_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""
         if not hasattr(self, "push_notifier"):
