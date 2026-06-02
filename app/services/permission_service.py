@@ -78,7 +78,7 @@ class PermissionService:
     ) -> tuple[SessionState | None, str | None]:
         state = None
         if expected_tool_use_id is not None:
-            state = self._structured_session_store.find_by_pending_tool_use_id(expected_tool_use_id)
+            state = self._structured_session_store.find_by_pending_tool_use_id(expected_tool_use_id)  # type: ignore[union-attr]
             if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
                 return None, "这个权限按钮已经过期，请等待最新的权限请求"
         if state is None:
@@ -113,14 +113,14 @@ class PermissionService:
             return False, "当前没有待处理的权限请求"
 
         tool_use_id = pending.tool_use_id
-        sent = await self._hook_socket_server.respond_to_permission(tool_use_id=tool_use_id, decision=decision, reason=reason)
+        sent = await self._hook_socket_server.respond_to_permission(tool_use_id=tool_use_id, decision=decision, reason=reason)  # type: ignore[union-attr]
         if not sent:
             return False, "待处理权限请求已失效，请等待 Claude 重新发起"
         tool_name = pending.tool_name
         event_type = SessionEventType.PERMISSION_APPROVED if decision == "allow" else SessionEventType.PERMISSION_DENIED
-        updated = self._structured_session_store.process(
+        updated = self._structured_session_store.process(  # type: ignore[union-attr]
             SessionEvent(
-                session_id=state.session_id,
+                session_id=state.session_id,  # type: ignore[union-attr]
                 type=event_type,
                 payload={"tool_use_id": tool_use_id},
             )

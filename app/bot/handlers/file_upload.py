@@ -182,7 +182,7 @@ def register_file_upload_handler(
             await _answer_oversized(
                 message,
                 filename=filename,
-                size_bytes=file_size,
+                size_bytes=file_size,  # type: ignore[arg-type]
                 upload_max_file_size_mb=upload_max_file_size_mb,
             )
             return
@@ -252,7 +252,7 @@ def register_file_upload_handler(
             await _answer_oversized(
                 message,
                 filename=filename,
-                size_bytes=file_size,
+                size_bytes=file_size,  # type: ignore[arg-type]
                 upload_max_file_size_mb=upload_max_file_size_mb,
             )
             return

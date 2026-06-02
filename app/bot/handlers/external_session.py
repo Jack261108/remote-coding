@@ -140,8 +140,8 @@ async def _handle_bind(
         return
 
     resolved, error = _resolve_session_id(session_id, discovery, binder)
-    if error:
-        await message.answer(f"❌ {error}")
+    if error or not resolved:
+        await message.answer(f"❌ {error or 'Session not found'}")
         return
 
     result = await binder.bind(user_id=user_id, session_id=resolved)
@@ -165,8 +165,8 @@ async def _handle_unbind(
         return
 
     resolved, error = _resolve_session_id(session_id, discovery, binder)
-    if error:
-        await message.answer(f"❌ {error}")
+    if error or not resolved:
+        await message.answer(f"❌ {error or 'Session not found'}")
         return
 
     result = await binder.unbind(user_id=user_id, session_id=resolved)
@@ -190,8 +190,8 @@ async def _handle_status(
         return
 
     resolved, error = _resolve_session_id(session_id, discovery, binder)
-    if error:
-        await message.answer(f"❌ {error}")
+    if error or not resolved:
+        await message.answer(f"❌ {error or 'Session not found'}")
         return
 
     # Verify user owns this binding

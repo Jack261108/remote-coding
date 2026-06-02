@@ -82,7 +82,7 @@ class AppContainer(
             session_kwargs["proxy"] = settings.tg_proxy_url
 
         try:
-            session = AiohttpSession(**session_kwargs)
+            session = AiohttpSession(**session_kwargs)  # type: ignore[arg-type]
         except RuntimeError as exc:
             if settings.tg_proxy_url and "aiohttp-socks" in str(exc):
                 raise RuntimeError(

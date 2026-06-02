@@ -18,12 +18,12 @@ async def _apply_callback_response(callback: CallbackQuery, response: CallbackRe
     if callback.message is not None:
         if response.edit_message_text:
             try:
-                await callback.message.edit_text(response.edit_message_text)
+                await callback.message.edit_text(response.edit_message_text)  # type: ignore[union-attr]
             except Exception:
                 logger.exception("failed to edit permission callback message")
         if response.clear_keyboard:
             try:
-                await callback.message.edit_reply_markup(reply_markup=None)
+                await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
             except Exception:
                 logger.exception("failed to clear permission inline keyboard")
     await callback.answer(response.alert_text, show_alert=response.show_alert)

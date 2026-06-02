@@ -34,18 +34,6 @@ _PRECOMMIT_PATH = _REPO_ROOT / ".pre-commit-config.yaml"
 _PYPROJECT_PATH = _REPO_ROOT / "pyproject.toml"
 _UV_LOCK_PATH = _REPO_ROOT / "uv.lock"
 
-# The canonical mypy file set, mirrored from the requirements glossary (Mypy_Check)
-# and CI. Both CI and the hooks MUST cover exactly these 7 files.
-_EXPECTED_MYPY_FILES = {
-    "app/adapters/process/subprocess_runner.py",
-    "app/bot/middleware/auth.py",
-    "app/bot/middleware/rate_limit.py",
-    "app/bot/handlers/command_permission.py",
-    "app/bot/handlers/command_user_question.py",
-    "app/bootstrap.py",
-    "app/services/task_service.py",
-}
-
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -74,15 +62,6 @@ def _canonicalize_ruff(normalized: str) -> str:
     stripped = re.sub(r"\s--fix\b", "", normalized)
     stripped = re.sub(r"\s--check\b", "", stripped)
     return re.sub(r"\s+", " ", stripped).strip()
-
-
-def _mypy_files(text: str) -> set[str]:
-    """Extract the set of ``app/.../*.py`` paths referenced by the file.
-
-    In both ci.yml and .pre-commit-config.yaml the only ``app/*.py`` paths present
-    are the mypy target files, so a global scan yields exactly the mypy file set.
-    """
-    return set(re.findall(r"app/[\w./-]+\.py", text))
 
 
 def _hook_blocks(precommit_text: str) -> dict[str, dict[str, str]]:
@@ -156,12 +135,12 @@ def test_dev_extra_is_synchronized_between_pyproject_and_uv_lock() -> None:
 
 def test_ci_defines_expected_check_commands() -> None:
     """CI (ci.yml) runs the four expected checks: ruff lint, ruff format check,
-    mypy (read-only), and pytest."""
+    mypy (full app/), and pytest."""
     ci = _normalize(_read(_CI_PATH))
 
     assert "python -m ruff check app tests" in ci
     assert "python -m ruff format --check app tests" in ci
-    assert "python -m mypy --follow-imports=skip" in ci
+    assert "python -m mypy app/" in ci
     assert "python -m pytest -q" in ci
 
 
@@ -191,24 +170,19 @@ def test_precommit_defines_corresponding_hooks_in_correct_stages() -> None:
     assert blocks["ruff-format"]["require_serial"] == "true"
 
     # pre-push stage: slow checks (Requirement 3.1).
-    assert "mypy --follow-imports=skip" in blocks["mypy"]["entry"]
+    assert "mypy app/" in blocks["mypy"]["entry"]
     assert blocks["mypy"]["stages"] == "pre-push"
     assert "pytest -q" in blocks["pytest"]["entry"]
     assert blocks["pytest"]["stages"] == "pre-push"
 
 
-def test_mypy_file_set_matches_between_ci_and_precommit() -> None:
-    """The most valuable parity assertion: the mypy 7-file set must be identical on
-    both sides. This catches a file being added/removed on only one side.
-    """
-    ci_files = _mypy_files(_read(_CI_PATH))
-    hook_files = _mypy_files(_read(_PRECOMMIT_PATH))
+def test_mypy_target_matches_between_ci_and_precommit() -> None:
+    """Both CI and pre-commit must target the same mypy scope (full app/)."""
+    ci = _normalize(_read(_CI_PATH))
+    hook = _normalize(_read(_PRECOMMIT_PATH))
 
-    # Both sides must cover exactly the canonical 7 files...
-    assert ci_files == _EXPECTED_MYPY_FILES
-    assert hook_files == _EXPECTED_MYPY_FILES
-    # ...and therefore must agree with each other.
-    assert ci_files == hook_files
+    assert "python -m mypy app/" in ci
+    assert "python -m mypy app/" in hook
 
 
 def test_ruff_tool_and_scope_alignment() -> None:

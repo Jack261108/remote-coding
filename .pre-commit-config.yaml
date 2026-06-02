@@ -24,16 +24,8 @@ repos:
 
       # ---- pre-push 阶段：慢速检查（Requirement 3） ----
       - id: mypy
-        name: mypy --follow-imports=skip (7 files)
-        entry: >-
-          python -m mypy --follow-imports=skip
-          app/adapters/process/subprocess_runner.py
-          app/bot/middleware/auth.py
-          app/bot/middleware/rate_limit.py
-          app/bot/handlers/command_permission.py
-          app/bot/handlers/command_user_question.py
-          app/bootstrap.py
-          app/services/task_service.py
+        name: mypy app/ (full codebase)
+        entry: python -m mypy app/
         language: system
         pass_filenames: false
         always_run: true

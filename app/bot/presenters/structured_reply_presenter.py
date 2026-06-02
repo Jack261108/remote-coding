@@ -420,7 +420,7 @@ class StructuredReplyPresenter:
                 if prompts:
                     return prompts
             return ()
-        prompts = tool_question_prompts.get(snapshot.pending_permission_tool_use_id)
+        prompts = tool_question_prompts.get(snapshot.pending_permission_tool_use_id)  # type: ignore[assignment]
         if prompts is not None:
             return prompts
         return extract_user_question_prompts(

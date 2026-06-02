@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import signal
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from app.domain.models import CLIEvent, EventType
@@ -31,7 +31,7 @@ class SubprocessRunner:
         terminal_key: str | None = None,
         interactive: bool = False,
         claude_session_id: str | None = None,
-    ) -> AsyncIterator[CLIEvent]:
+    ) -> AsyncGenerator[CLIEvent, None]:
         if not argv:
             yield CLIEvent(type=EventType.FAILED, task_id=task_id, error="命令参数为空")
             return

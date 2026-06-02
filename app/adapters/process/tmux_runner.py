@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -150,7 +150,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         terminal_key: str | None = None,
         interactive: bool = False,
         claude_session_id: str | None = None,
-    ):
+    ) -> AsyncGenerator[CLIEvent, None]:
         if not argv:
             yield CLIEvent(type=EventType.FAILED, task_id=task_id, error="命令参数为空")
             return

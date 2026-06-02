@@ -328,10 +328,10 @@ class ClaudeJSONLParser:
                     status=state.tool_calls.get(
                         tool_use_id, ToolCallRecord(tool_use_id=tool_use_id, name=str(block.get("name") or "Tool"))
                     ).status,
-                    result=state.tool_calls.get(tool_use_id).result if tool_use_id in state.tool_calls else None,
-                    structured_result=state.tool_calls.get(tool_use_id).structured_result if tool_use_id in state.tool_calls else None,
-                    started_at=state.tool_calls.get(tool_use_id).started_at if tool_use_id in state.tool_calls else timestamp,
-                    completed_at=state.tool_calls.get(tool_use_id).completed_at if tool_use_id in state.tool_calls else None,
+                    result=state.tool_calls.get(tool_use_id).result if tool_use_id in state.tool_calls else None,  # type: ignore[union-attr]
+                    structured_result=state.tool_calls.get(tool_use_id).structured_result if tool_use_id in state.tool_calls else None,  # type: ignore[union-attr]
+                    started_at=state.tool_calls.get(tool_use_id).started_at if tool_use_id in state.tool_calls else timestamp,  # type: ignore[union-attr]
+                    completed_at=state.tool_calls.get(tool_use_id).completed_at if tool_use_id in state.tool_calls else None,  # type: ignore[union-attr]
                 )
                 state.last_reply_role = "tool"
                 state.last_tool_name = str(block.get("name") or "Tool")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 from app.adapters.cli.base import BaseCLIAdapter
 from app.adapters.process.subprocess_runner import SubprocessRunner
@@ -21,7 +21,7 @@ class CodexCLIAdapter(BaseCLIAdapter):
         terminal_key: str | None = None,
         interactive: bool = False,
         claude_session_id: str | None = None,
-    ) -> AsyncIterator[CLIEvent]:
+    ) -> AsyncGenerator[CLIEvent, None]:
         argv = [self._cli_bin, "exec", task.prompt]
         async for event in self._runner.run(
             task_id=task.task_id,

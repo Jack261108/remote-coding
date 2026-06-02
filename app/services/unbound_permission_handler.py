@@ -222,7 +222,7 @@ class UnboundPermissionHandler:
         notified_user_ids: list[int] = []
         for user_id in self._allowed_user_ids:
             try:
-                await self._bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+                await self._bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)  # type: ignore[arg-type]
                 notified_user_ids.append(user_id)
             except Exception:
                 logger.warning(

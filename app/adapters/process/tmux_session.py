@@ -97,7 +97,7 @@ class TmuxSessionMixin:
         current_cmd = await self._session_current_command(session_name)
         if "claude" in current_cmd:
             return True, ""
-        command = self._build_interactive_claude_command(workdir=workdir)
+        command = self._build_interactive_claude_command(workdir=workdir)  # type: ignore[attr-defined]
         respawned, respawn_err = await self._respawn_and_send_command(session_name=session_name, command=command, workdir=workdir)
         if not respawned:
             return False, respawn_err
@@ -109,7 +109,7 @@ class TmuxSessionMixin:
         ready, err = await self._ensure_persistent_session(session_name, workdir=workdir, env=env)
         if not ready:
             return False, err
-        command = self._build_interactive_claude_resume_command(workdir=workdir, session_id=session_id)
+        command = self._build_interactive_claude_resume_command(workdir=workdir, session_id=session_id)  # type: ignore[attr-defined]
         respawned, respawn_err = await self._respawn_and_send_command(session_name=session_name, command=command, workdir=workdir)
         if not respawned:
             return False, respawn_err

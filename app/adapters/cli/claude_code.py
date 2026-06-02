@@ -1,40 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Protocol
+from collections.abc import AsyncGenerator
 
 from app.adapters.cli.base import BaseCLIAdapter
+from app.adapters.process.subprocess_runner import SubprocessRunner
+from app.adapters.process.tmux_runner import TmuxRunner
 from app.domain.models import CLIEvent, ExecutionTask
 
-
-class RunnerProtocol(Protocol):
-    async def run(
-        self,
-        *,
-        task_id: str,
-        argv: list[str],
-        workdir: str,
-        timeout_sec: int,
-        env: dict[str, str] | None = None,
-        terminal_key: str | None = None,
-        interactive: bool = False,
-        claude_session_id: str | None = None,
-    ) -> AsyncIterator[CLIEvent]: ...
-
-    async def ensure_claude_interactive_session(
-        self,
-        *,
-        terminal_key: str,
-        workdir: str,
-    ) -> tuple[bool, str]: ...
-
-    async def cancel(self, task_id: str) -> bool: ...
+Runner = SubprocessRunner | TmuxRunner
 
 
 class ClaudeCodeAdapter(BaseCLIAdapter):
     provider = "claude_code"
 
-    def __init__(self, cli_bin: str, runner: RunnerProtocol) -> None:
+    def __init__(self, cli_bin: str, runner: Runner) -> None:
         self._cli_bin = cli_bin
         self._runner = runner
 
@@ -45,7 +24,7 @@ class ClaudeCodeAdapter(BaseCLIAdapter):
         terminal_key: str | None = None,
         interactive: bool = False,
         claude_session_id: str | None = None,
-    ) -> AsyncIterator[CLIEvent]:
+    ) -> AsyncGenerator[CLIEvent, None]:
         if interactive:
             argv = [task.prompt]
         else:
@@ -65,7 +44,9 @@ class ClaudeCodeAdapter(BaseCLIAdapter):
             yield event
 
     async def ensure_interactive_session(self, *, terminal_key: str, workdir: str) -> tuple[bool, str]:
-        return await self._runner.ensure_claude_interactive_session(terminal_key=terminal_key, workdir=workdir)
+        if isinstance(self._runner, TmuxRunner):
+            return await self._runner.ensure_claude_interactive_session(terminal_key=terminal_key, workdir=workdir)
+        return False, "tmux 模式未启用"
 
     async def cancel(self, task_id: str) -> bool:
         return await self._runner.cancel(task_id)

@@ -19,12 +19,12 @@ async def _apply_callback_response(callback: CallbackQuery, response: CallbackRe
     if callback.message is not None:
         if response.edit_message_text:
             try:
-                await callback.message.edit_text(response.edit_message_text)
+                await callback.message.edit_text(response.edit_message_text)  # type: ignore[union-attr]
             except Exception:
                 logger.exception("failed to edit external permission callback message")
         if response.clear_keyboard:
             try:
-                await callback.message.edit_reply_markup(reply_markup=None)
+                await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
             except Exception:
                 logger.exception("failed to clear external permission inline keyboard")
     await callback.answer(response.alert_text, show_alert=response.show_alert)
@@ -129,7 +129,7 @@ def register_external_permission_handler(
 
         # Edit original message to reflect selection when the Telegram message object supports it.
         if callback.message and hasattr(callback.message, "edit_text"):
-            original_text = callback.message.text or ""
+            original_text = callback.message.text or ""  # type: ignore[union-attr]
             await callback.message.edit_text(f"{original_text}\n\n✅ Selected: {selected_label} (by you)")
 
         logger.info(

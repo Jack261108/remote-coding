@@ -114,9 +114,9 @@ def load_settings(env_file: str | None) -> Settings:
 
     try:
         if action is EnvFileAction.LOAD and env_file is not None:
-            return Settings(_env_file=env_file)
+            return Settings(_env_file=env_file)  # type: ignore[call-arg]
         # FALLBACK, or LOAD of the default `.env`: rely on model_config default.
-        return Settings()
+        return Settings()  # type: ignore[call-arg]
     except ValidationError as exc:
         raise _startup_error_from_validation(exc) from exc
 

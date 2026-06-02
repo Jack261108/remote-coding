@@ -126,7 +126,7 @@ def register_cmds_handler(
                 return ChunkSender(chunk_size=4000, flush_interval_sec=1.0)
 
             await run_prompt_and_stream(
-                message=callback.message,
+                message=callback.message,  # type: ignore[arg-type]
                 task_service=task_service,
                 sender_factory=sender_factory,
                 user_id=user_id,

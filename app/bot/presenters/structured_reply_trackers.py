@@ -64,7 +64,7 @@ def _task_list_status_output(tools: tuple[_ToolStateSnapshot, ...]) -> TaskListS
             continue
         if tool_name == "taskupdate":
             task_input = tool.tool_input or {}
-            task_id = _task_list_text_value(task_input, "taskId") or _task_list_text_value(task_input, "task_id")
+            task_id = _task_list_text_value(task_input, "taskId") or _task_list_text_value(task_input, "task_id")  # type: ignore[assignment]
             if not task_id:
                 continue
             existing = items.get(task_id)

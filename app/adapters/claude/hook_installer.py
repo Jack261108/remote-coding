@@ -67,12 +67,12 @@ class HookInstaller:
         return ClaudeCodeVersion(*(int(part) for part in match.groups()))
 
     def supported_hook_events(self, version: ClaudeCodeVersion | None) -> list[tuple[str, list[dict[str, object]]]]:
-        hook_entry = [{"type": "command", "command": self._command()}]
-        hook_entry_with_timeout = [{"type": "command", "command": self._command(), "timeout": 86400}]
-        with_matcher = [{"matcher": "*", "hooks": hook_entry}]
-        with_matcher_and_timeout = [{"matcher": "*", "hooks": hook_entry_with_timeout}]
-        without_matcher = [{"hooks": hook_entry}]
-        pre_compact = [
+        hook_entry: list[dict[str, object]] = [{"type": "command", "command": self._command()}]
+        hook_entry_with_timeout: list[dict[str, object]] = [{"type": "command", "command": self._command(), "timeout": 86400}]
+        with_matcher: list[dict[str, object]] = [{"matcher": "*", "hooks": hook_entry}]
+        with_matcher_and_timeout: list[dict[str, object]] = [{"matcher": "*", "hooks": hook_entry_with_timeout}]
+        without_matcher: list[dict[str, object]] = [{"hooks": hook_entry}]
+        pre_compact: list[dict[str, object]] = [
             {"matcher": "auto", "hooks": hook_entry},
             {"matcher": "manual", "hooks": hook_entry},
         ]

@@ -57,8 +57,8 @@ def register_session_action_handlers(
 
         session_id_prefix = parts[2]
         resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
-        if error:
-            await callback.answer(error)
+        if error or not resolved:
+            await callback.answer(error or "Session not found")
             return
 
         # Determine binding state for this user
@@ -101,8 +101,8 @@ def register_session_action_handlers(
 
         session_id_prefix = parts[2]
         resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
-        if error:
-            await callback.answer(error)
+        if error or not resolved:
+            await callback.answer(error or "Session not found")
             return
 
         result = await binder.bind(user_id=user_id, session_id=resolved)
@@ -125,8 +125,8 @@ def register_session_action_handlers(
 
         session_id_prefix = parts[2]
         resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
-        if error:
-            await callback.answer(error)
+        if error or not resolved:
+            await callback.answer(error or "Session not found")
             return
 
         result = await binder.unbind(user_id=user_id, session_id=resolved)

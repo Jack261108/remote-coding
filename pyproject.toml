@@ -73,3 +73,4 @@ python_version = "3.11"
 show_error_codes = true
 pretty = true
 warn_unused_ignores = true
+ignore_missing_imports = true

@@ -30,16 +30,7 @@ jobs:
         run: python -m ruff format --check app tests
 
       - name: Type check
-        run: >-
-          python -m mypy
-          --follow-imports=skip
-          app/adapters/process/subprocess_runner.py
-          app/bot/middleware/auth.py
-          app/bot/middleware/rate_limit.py
-          app/bot/handlers/command_permission.py
-          app/bot/handlers/command_user_question.py
-          app/bootstrap.py
-          app/services/task_service.py
+        run: python -m mypy app/
 
   test:
     runs-on: ubuntu-latest

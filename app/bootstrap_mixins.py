@@ -53,7 +53,7 @@ class JsonlSyncMixin(AppContainerBase):
                     "clear_detected": snapshot.clear_detected,
                 },
             )
-            await self._dispatch_session_event(
+            await self._dispatch_session_event(  # type: ignore[attr-defined]
                 SessionEvent(
                     session_id=session_id,
                     type=SessionEventType.FILE_SYNCED,
@@ -74,8 +74,8 @@ class JsonlSyncMixin(AppContainerBase):
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         self._jsonl_sync_requests[session_id] = cwd
-        self._start_interrupt_watchers_by_session_id(session_id, cwd)
-        self._start_agent_file_watchers_by_session_id(session_id, cwd)
+        self._start_interrupt_watchers_by_session_id(session_id, cwd)  # type: ignore[attr-defined]
+        self._start_agent_file_watchers_by_session_id(session_id, cwd)  # type: ignore[attr-defined]
         existing = self._jsonl_sync_tasks.get(session_id)
         if existing is None or existing.done():
             self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
@@ -200,14 +200,14 @@ class HookHandlingMixin(AppContainerBase):
             # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior
             if not hasattr(self, "ownership_resolver"):
                 await self._bind_hook_session(event)
-                await self._dispatch_session_event(
+                await self._dispatch_session_event(  # type: ignore[attr-defined]
                     SessionEvent(
                         session_id=event.session_id,
                         type=SessionEventType.HOOK_RECEIVED,
                         payload=event.to_dict(),
                     )
                 )
-                self._schedule_jsonl_sync(event.session_id, event.cwd)
+                self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
                 return None
 
             # Resolve ownership
@@ -269,7 +269,7 @@ class HookHandlingMixin(AppContainerBase):
             stages.append(
                 (
                     "event_dispatch",
-                    self._dispatch_session_event(
+                    self._dispatch_session_event(  # type: ignore[attr-defined]
                         SessionEvent(
                             session_id=event.session_id,
                             type=SessionEventType.HOOK_RECEIVED,
@@ -281,13 +281,13 @@ class HookHandlingMixin(AppContainerBase):
 
             # JSONL sync scheduling (sync, not async — wrap in a trivial coroutine)
             async def _schedule_jsonl_owned() -> None:
-                self._schedule_jsonl_sync(event.session_id, event.cwd)
+                self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
 
             stages.append(("jsonl_sync_scheduling", _schedule_jsonl_owned()))
 
             # Auto-approve check — may short-circuit, skipping only auto_file_send
             stages.append(
-                (
+                (  # type: ignore[arg-type]
                     "auto_approve_check",
                     self._run_auto_approve_check(
                         event,
@@ -308,7 +308,7 @@ class HookHandlingMixin(AppContainerBase):
             stages.append(
                 (
                     "event_dispatch",
-                    self._dispatch_session_event(
+                    self._dispatch_session_event(  # type: ignore[attr-defined]
                         SessionEvent(
                             session_id=event.session_id,
                             type=SessionEventType.HOOK_RECEIVED,
@@ -320,13 +320,13 @@ class HookHandlingMixin(AppContainerBase):
 
             # JSONL sync scheduling
             async def _schedule_jsonl_bound() -> None:
-                self._schedule_jsonl_sync(event.session_id, event.cwd)
+                self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
 
             stages.append(("jsonl_sync_scheduling", _schedule_jsonl_bound()))
 
             # Auto-approve check — may short-circuit, skipping push_notification
             stages.append(
-                (
+                (  # type: ignore[arg-type]
                     "auto_approve_check",
                     self._run_auto_approve_check(
                         event,
@@ -530,7 +530,7 @@ class HookHandlingMixin(AppContainerBase):
             "permission response failed",
             extra={"session_id": session_id, "tool_use_id": tool_use_id},
         )
-        await self._dispatch_session_event(
+        await self._dispatch_session_event(  # type: ignore[attr-defined]
             SessionEvent(
                 session_id=session_id,
                 type=SessionEventType.PERMISSION_RESPONSE_FAILED,
@@ -541,7 +541,7 @@ class HookHandlingMixin(AppContainerBase):
     async def _bind_hook_session(self, event: HookEvent) -> None:
         if not event.session_id:
             return
-        matched = await self._match_session_context(event)
+        matched = await self._match_session_context(event)  # type: ignore[attr-defined]
         logger.info(
             "hook session match result",
             extra={
@@ -839,7 +839,7 @@ class PeriodicRecheckMixin(AppContainerBase):
                     "workdir": session.workdir,
                 },
             )
-            await self.sync_claude_session(session.claude_session_id, session.workdir)
+            await self.sync_claude_session(session.claude_session_id, session.workdir)  # type: ignore[attr-defined]
 
     async def _stop_periodic_recheck_task(self) -> None:
         task = self._periodic_recheck_task
@@ -874,7 +874,7 @@ class SessionRestoreMixin(AppContainerBase):
                 continue
             session_file = self.claude_jsonl_parser.session_file_path(session_id=claude_session_id, cwd=session.workdir)
             if session_file.exists():
-                await self.sync_claude_session(claude_session_id, session.workdir)
+                await self.sync_claude_session(claude_session_id, session.workdir)  # type: ignore[attr-defined]
                 self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
                 self.agent_file_watcher.watch(session_id=state.session_id, workdir=state.workdir)
                 continue

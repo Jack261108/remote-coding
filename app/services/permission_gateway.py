@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -104,14 +104,14 @@ class PermissionGateway:
     def __init__(
         self,
         *,
-        registry: object,
-        auto_approve_service: object,
-        task_service: object,
-        hook_socket_server: object,
+        registry: Any,
+        auto_approve_service: Any,
+        task_service: Any,
+        hook_socket_server: Any,
         unbound_responder: UnboundResponderProtocol,
-        settings: object,
-        bot: object,
-        message_builder: object,
+        settings: Any,
+        bot: Any,
+        message_builder: Any,
     ) -> None:
         self._registry = registry
         self._auto_approve_service = auto_approve_service

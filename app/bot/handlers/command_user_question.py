@@ -181,7 +181,7 @@ def register_user_question_handlers(router, *, task_service: TaskService):
             )
             if callback.message is not None and ok and prompt is not None:
                 try:
-                    await callback.message.edit_reply_markup(
+                    await callback.message.edit_reply_markup(  # type: ignore[union-attr]
                         reply_markup=build_user_question_keyboard(
                             prompt,
                             selected_option_indexes=selected_option_indexes,
@@ -207,7 +207,7 @@ def register_user_question_handlers(router, *, task_service: TaskService):
             )
             if callback.message is not None and ok:
                 try:
-                    await callback.message.edit_reply_markup(reply_markup=None)
+                    await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
                 except Exception:
                     logger.exception(
                         "failed to clear multi-select inline keyboard",
@@ -219,7 +219,10 @@ def register_user_question_handlers(router, *, task_service: TaskService):
                     )
                 await callback.message.answer(text)
                 await _acknowledge_and_send_next_prompt(
-                    message=callback.message, task_service=task_service, user_id=user_id, next_prompt=next_prompt
+                    message=callback.message,  # type: ignore[arg-type]
+                    task_service=task_service,
+                    user_id=user_id,
+                    next_prompt=next_prompt,
                 )
             elif callback.message is not None and not ok:
                 await callback.message.answer(f"选择失败: {text}")
@@ -235,7 +238,7 @@ def register_user_question_handlers(router, *, task_service: TaskService):
         if callback.message is not None:
             if ok:
                 try:
-                    await callback.message.edit_reply_markup(reply_markup=None)
+                    await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
                 except Exception:
                     logger.exception(
                         "failed to clear user question inline keyboard",
@@ -247,7 +250,10 @@ def register_user_question_handlers(router, *, task_service: TaskService):
                     )
                 await callback.message.answer(text)
                 await _acknowledge_and_send_next_prompt(
-                    message=callback.message, task_service=task_service, user_id=user_id, next_prompt=next_prompt
+                    message=callback.message,  # type: ignore[arg-type]
+                    task_service=task_service,
+                    user_id=user_id,
+                    next_prompt=next_prompt,
                 )
             else:
                 await callback.message.answer(f"选择失败: {text}")
