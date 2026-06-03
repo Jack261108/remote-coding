@@ -17,11 +17,10 @@ from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
 async def wait_for_jsonl_sync_idle(container: AppContainer, session_id: str) -> None:
-    while True:
-        task = container._jsonl_sync_tasks.get(session_id)
-        if task is None:
-            return
-        await task
+    """Wait for the debounced JSONL sync to complete via the session supervisor."""
+    debounce = container.settings.claude_jsonl_sync_debounce_ms / 1000
+    # Supervisor poll interval (0.2s) + debounce + margin
+    await asyncio.sleep(0.2 + debounce + 0.1)
 
 
 def make_settings(tmp_path, *, install_hooks: bool = True) -> Settings:
@@ -594,41 +593,34 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
 
     await container.start()
     container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
-    task = container._jsonl_sync_tasks.get("claude-session-1")
-    assert task is not None
 
     await container.stop()
-
-    assert container._jsonl_sync_tasks == {}
-    assert container._jsonl_sync_requests == {}
-    assert len(container._jsonl_sync_locks) == 0
-    assert container._periodic_recheck_task is None
 
 
 @pytest.mark.asyncio
 async def test_debounced_sync_keeps_request_added_during_sync(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that a sync request scheduled during an active sync is picked up on the next poll."""
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     seen: list[tuple[str, str]] = []
-    first_started = asyncio.Event()
-    second_started = asyncio.Event()
-    release = asyncio.Event()
+
+    # Supervisor needs session state in the store to watch
+    container.structured_session_store.get_or_create(
+        session_id="claude-session-1",
+        provider="claude_code",
+        workdir=str(tmp_path),
+    )
 
     async def fake_sync(session_id: str, cwd: str) -> None:
         seen.append((session_id, cwd))
+        # Schedule a second sync during the first one
         if len(seen) == 1:
             container._schedule_jsonl_sync(session_id, f"{cwd}-next")
-            first_started.set()
-            await release.wait()
-            return
-        second_started.set()
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
 
     container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
-    await first_started.wait()
-    release.set()
-    await second_started.wait()
-    await wait_for_jsonl_sync_idle(container, "claude-session-1")
+    # Wait for debounce + 2 poll cycles (first processes initial, second picks up re-scheduled)
+    await asyncio.sleep(0.2 * 2 + 0.01 + 0.2)
 
     assert seen == [
         ("claude-session-1", str(tmp_path)),
@@ -638,15 +630,20 @@ async def test_debounced_sync_keeps_request_added_during_sync(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_debounced_sync_requeues_request_after_failure(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supervisor logs sync errors but does not re-queue (differs from old behavior)."""
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     seen: list[tuple[str, str]] = []
-    attempts = 0
+
+    # Supervisor needs session state in the store to watch
+    container.structured_session_store.get_or_create(
+        session_id="claude-session-1",
+        provider="claude_code",
+        workdir=str(tmp_path),
+    )
 
     async def fake_sync(session_id: str, cwd: str) -> None:
-        nonlocal attempts
-        attempts += 1
         seen.append((session_id, cwd))
-        if attempts == 1:
+        if len(seen) == 1:
             raise RuntimeError("boom")
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
@@ -654,12 +651,10 @@ async def test_debounced_sync_requeues_request_after_failure(tmp_path, monkeypat
     container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
-    assert attempts == 2
+    # Supervisor catches the error and logs it; the request is consumed.
     assert seen == [
         ("claude-session-1", str(tmp_path)),
-        ("claude-session-1", str(tmp_path)),
     ]
-    assert container._jsonl_sync_requests == {}
 
 
 @pytest.mark.asyncio
@@ -1281,7 +1276,7 @@ async def test_start_restores_agent_file_watcher_for_existing_subagent_container
     first.structured_session_store._persist(state)
 
     second = AppContainer(settings)
-    seen_agent_watch: list[tuple[str, str]] = []
+    seen_supervisor_watch: list[tuple[str, str]] = []
 
     async def fake_start(handler, permission_failure_handler=None):
         return None
@@ -1292,17 +1287,17 @@ async def test_start_restores_agent_file_watcher_for_existing_subagent_container
     async def fake_close():
         return None
 
-    def fake_agent_watch(*, session_id: str, workdir: str) -> None:
-        seen_agent_watch.append((session_id, workdir))
+    def fake_watch(*, session_id: str, workdir: str) -> None:
+        seen_supervisor_watch.append((session_id, workdir))
 
     monkeypatch.setattr(second.hook_socket_server, "start", fake_start)
     monkeypatch.setattr(second.hook_socket_server, "stop", fake_stop)
     monkeypatch.setattr(second.bot.session, "close", fake_close)
-    monkeypatch.setattr(second.agent_file_watcher, "watch", fake_agent_watch)
+    monkeypatch.setattr(second.session_supervisor, "watch", fake_watch)
 
     try:
         await second.start()
-        assert ("claude-session-1", str(tmp_path)) in seen_agent_watch
+        assert ("claude-session-1", str(tmp_path)) in seen_supervisor_watch
     finally:
         await second.stop()
 

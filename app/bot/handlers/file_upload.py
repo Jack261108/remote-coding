@@ -8,13 +8,14 @@ from aiogram.types import Message
 
 from app.domain.file_models import FileUploadResult, FileValidationError
 from app.domain.models import TaskStatus
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.file_receiver import FileReceiverService
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 from app.services.upload_queue import UploadQueueManager
 
 logger = logging.getLogger(__name__)
-_ACTIVE_UPLOAD_TASKS: set[asyncio.Task[None]] = set()
+_ACTIVE_UPLOAD_TASKS = BackgroundTaskRegistry(label="upload")
 
 
 def _format_size(size_bytes: int) -> str:
@@ -183,7 +184,7 @@ def schedule_pending_upload_processing(
     completed_task_id: str | None = None,
 ) -> asyncio.Task[None]:
     """Schedule queued uploads to be processed in the background."""
-    task: asyncio.Task[None] = asyncio.create_task(
+    return _ACTIVE_UPLOAD_TASKS.spawn(
         process_pending_uploads(
             message,
             file_receiver=file_receiver,
@@ -194,23 +195,6 @@ def schedule_pending_upload_processing(
             completed_task_id=completed_task_id,
         )
     )
-    _ACTIVE_UPLOAD_TASKS.add(task)
-
-    def _on_done(done_task: asyncio.Task[None]) -> None:
-        _ACTIVE_UPLOAD_TASKS.discard(done_task)
-        if done_task.cancelled():
-            return
-        exc = done_task.exception()
-        if exc is None:
-            return
-        logger.error(
-            "queued upload background task failed",
-            extra={"user_id": user_id, "error": str(exc)},
-            exc_info=(type(exc), exc, exc.__traceback__),
-        )
-
-    task.add_done_callback(_on_done)
-    return task
 
 
 def register_file_upload_handler(

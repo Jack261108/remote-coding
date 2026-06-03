@@ -34,8 +34,8 @@ from app.bot.presenters.permission_message_builder import PermissionMessageBuild
 from app.bot.router import create_router
 from app.config.settings import Settings
 from app.infra.lock_registry import RefCountedLockRegistry
-from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.auto_approve_service import AutoApproveService
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.context_builder import ContextBuilderService
 from app.services.diff_generator import DiffGeneratorService
@@ -47,7 +47,7 @@ from app.services.external_session_discovery import ExternalSessionDiscoveryServ
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 from app.services.file_receiver import FileReceiverService
 from app.services.file_sender import FileSenderService
-from app.services.interrupt_watcher import InterruptWatcher
+from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
 from app.services.result_exporter import ResultExporterService
@@ -56,6 +56,7 @@ from app.services.session_registry import SessionRegistryService
 from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
+from app.services.session_supervisor import SessionSupervisor
 from app.services.task_service import TaskService
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
@@ -121,14 +122,12 @@ class AppContainer(
         self.session_context_store = FileSessionContextStore(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
         self.structured_session_store = SessionStore(self.file_session_store)
-        self.interrupt_watcher = InterruptWatcher(
+        self.session_supervisor = SessionSupervisor(
             session_store=self.structured_session_store,
             claude_jsonl_parser=self.claude_jsonl_parser,
-        )
-        self.agent_file_watcher = AgentFileWatcher(
-            session_store=self.structured_session_store,
-            claude_jsonl_parser=self.claude_jsonl_parser,
-            on_update=self.sync_claude_session,
+            on_jsonl_sync=lambda: self.sync_claude_session,
+            on_dispatch_event=self._dispatch_session_event,
+            debounce_sec=settings.claude_jsonl_sync_debounce_ms / 1000,
         )
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
@@ -256,8 +255,6 @@ class AppContainer(
 
         self.external_uq_state = ExternalUserQuestionState()
 
-        self._jsonl_sync_tasks: dict[str, asyncio.Task[None]] = {}
-        self._jsonl_sync_requests: dict[str, str] = {}
         self._jsonl_sync_locks = RefCountedLockRegistry(
             ttl_sec=settings.session_lock_ttl_sec,
             cleanup_interval_sec=settings.lock_cleanup_interval_sec,
@@ -268,8 +265,8 @@ class AppContainer(
             cleanup_interval_sec=settings.lock_cleanup_interval_sec,
             cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
-        self._periodic_recheck_task: asyncio.Task[None] | None = None
-        self._background_tasks: set[asyncio.Task[None]] = set()
+        self._background_tasks = BackgroundTaskRegistry(label="bootstrap")
+        self._janitor = PeriodicJanitor()
         self._started = False
 
     async def start(self) -> None:
@@ -284,6 +281,40 @@ class AppContainer(
             logger.warning("Failed to register bot commands: %s", exc)
         if self.settings.claude_install_hooks:
             self.hook_installer.install()
+        await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
+        await self._restore_session_bindings()
+
+        # Initial cleanup passes (before periodic loop starts)
+        await self.external_binding_cleanup_service._cleanup()
+        await self.upload_cleanup.run_cleanup()
+
+        # Register periodic jobs
+        self._janitor.register(
+            "upload_queue_cleanup",
+            self.settings.upload_queue_cleanup_interval_sec,
+            self.upload_queue.prune_expired,
+        )
+        self._janitor.register(
+            "upload_file_cleanup",
+            self.settings.upload_cleanup_interval_min * 60,
+            self.upload_cleanup.run_cleanup,
+        )
+        self._janitor.register(
+            "external_binding_cleanup",
+            self.settings.session_health_check_interval_sec,
+            self.external_binding_cleanup_service._cleanup,
+        )
+        self._janitor.register(
+            "session_health_check",
+            self.settings.session_health_check_interval_sec,
+            self.session_registry._run_health_check,
+        )
+        self._janitor.register(
+            "periodic_recheck",
+            self.settings.claude_periodic_recheck_ms / 1000,
+            self._recheck_active_claude_sessions,
+        )
+        await self._janitor.start()
         self._started = True
         try:
             await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
@@ -303,14 +334,8 @@ class AppContainer(
         if not self._started:
             await self.bot.session.close()
             return
-        await self.upload_cleanup.stop()
-        await self.upload_queue.stop_cleanup()
-        await self.external_binding_cleanup_service.stop()
-        await self.session_registry.stop_health_check()
-        await self._stop_periodic_recheck_task()
-        await self._stop_jsonl_sync_tasks()
-        await self.agent_file_watcher.stop_all()
-        await self.interrupt_watcher.stop_all()
+        await self._janitor.stop()
+        await self.session_supervisor.stop_all()
         await self.hook_socket_server.stop()
         await self._stop_background_tasks()
         await self.bot.session.close()

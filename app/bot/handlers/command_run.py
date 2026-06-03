@@ -360,13 +360,16 @@ async def run_prompt_and_stream(
                     extra={"task_id": start.task.task_id, "user_id": user_id},
                 )
 
-        try:
-            asyncio.get_running_loop().create_task(_notify_error())
-        except RuntimeError:
-            logger.warning(
-                "could not schedule error notification, event loop may be shutting down",
-                extra={"task_id": start.task.task_id, "user_id": user_id},
-            )
+        notify_task = asyncio.get_running_loop().create_task(_notify_error())
+
+        def _log_notify_error(done: asyncio.Task[None]) -> None:
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.error("error notification task failed", exc_info=exc)
+
+        notify_task.add_done_callback(_log_notify_error)
 
     task.add_done_callback(_on_done)
     return task

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from app.domain.session_models import SessionState
+
+logger = logging.getLogger(__name__)
 
 
 class SessionNotifier:
@@ -39,7 +42,16 @@ class SessionNotifier:
             async with condition:
                 condition.notify_all()
 
-        loop.create_task(_notify())
+        task = loop.create_task(_notify())
+
+        def _log_notify_error(done: asyncio.Task[None]) -> None:
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.warning("session notify failed", exc_info=exc)
+
+        task.add_done_callback(_log_notify_error)
 
     def get_cursor(self, session_id: str) -> int:
         """Return the current revision cursor for *session_id* (0 if unknown)."""
