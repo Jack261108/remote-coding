@@ -316,20 +316,17 @@ class HookHandlingMixin(AppContainerBase):
             # Permission handling
             async def _permission_handling() -> None:
                 if event.expects_response and hasattr(self, "unbound_permission_handler"):
-                    if event.tool == "AskUserQuestion":
-                        await self._auto_allow_ask_user_question(event)
-                    else:
-                        candidate_user_id = None
-                        if hasattr(self, "auto_approve_service"):
-                            candidate_user_id = self.auto_approve_service.get_active_user_for_session(event.session_id)
-                        outcome = await self._run_auto_approve_check(
-                            event,
-                            origin=SessionOrigin.EXTERNAL_UNBOUND,
-                            candidate_user_id=candidate_user_id,
-                        )
-                        if outcome in {AutoApproveOutcome.APPROVED, AutoApproveOutcome.APPROVAL_UNKNOWN}:
-                            return
-                        await self.unbound_permission_handler.handle_unbound_permission(event)
+                    candidate_user_id = None
+                    if hasattr(self, "auto_approve_service"):
+                        candidate_user_id = self.auto_approve_service.get_active_user_for_session(event.session_id)
+                    outcome = await self._run_auto_approve_check(
+                        event,
+                        origin=SessionOrigin.EXTERNAL_UNBOUND,
+                        candidate_user_id=candidate_user_id,
+                    )
+                    if outcome in {AutoApproveOutcome.APPROVED, AutoApproveOutcome.APPROVAL_UNKNOWN}:
+                        return
+                    await self.unbound_permission_handler.handle_unbound_permission(event)
 
             stages.append(("permission_handling", _permission_handling()))
 
@@ -418,27 +415,11 @@ class HookHandlingMixin(AppContainerBase):
                         )
                         return
 
-                # Fallback: no tmux pane found or no PID — auto-allow and show read-only
-                await self._auto_allow_ask_user_question(event)
-                if prompts:
-                    await self.push_notifier.notify_user_question(
-                        user_id=user_id,
-                        session_id=event.session_id,
-                        prompts=prompts,
-                        interactive=False,
-                    )
-                else:
-                    # Fallback: couldn't parse structured prompts
-                    short_id = event.session_id[:8]
-                    question = ""
-                    if event.tool_input:
-                        question = event.tool_input.get("question", "")
-                    text = f"❓ [{short_id}] 等待用户输入 — 请在终端中选择"
-                    if question:
-                        truncated = question[:150] + ("..." if len(question) > 150 else "")
-                        text += f"\n{truncated}"
-                    await self.push_notifier.notify_info(user_id=user_id, text=text)
-                return
+                # Fallback: no tmux pane found or no PID — fall through to normal
+                # permission flow (notify_permission_request below). The user sees
+                # the permission request in Telegram and clicks allow; Claude Code
+                # then shows the question UI in the terminal.
+                pass
             # Resolve title for permission notification
             _title: str | None = None
             if hasattr(self, "claude_jsonl_parser"):
@@ -461,17 +442,6 @@ class HookHandlingMixin(AppContainerBase):
                 session_id=event.session_id,
                 cwd=event.cwd,
             )
-
-    async def _auto_allow_ask_user_question(self, event: HookEvent) -> None:
-        """Auto-allow AskUserQuestion permission requests — user answers in terminal."""
-        tool_use_id = event.tool_use_id or ""
-        if not tool_use_id:
-            return
-        await self.hook_socket_server.respond_to_permission(
-            tool_use_id=tool_use_id,
-            decision="allow",
-            reason="AskUserQuestion auto-allowed",
-        )
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
         logger.warning(
