@@ -90,7 +90,7 @@ def register_list_handler(
                     status_icon="\U0001f4e1",
                     status_text=status,
                     source="external",
-                    buttons=[("📋 选择", f"sess:select:{ext.session_id[:16]}")],
+                    buttons=[(_short_cwd(ext.cwd), f"sess:select:{ext.session_id[:16]}")],
                 )
             )
 
