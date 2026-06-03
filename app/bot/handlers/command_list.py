@@ -128,7 +128,7 @@ def register_list_handler(
                     status_icon="\U0001f517",
                     status_text="已绑定",
                     source="bound",
-                    buttons=[("📋 选择", f"sess:select:{b.session_id[:16]}")],
+                    buttons=[(_short_cwd(b.cwd), f"sess:select:{b.session_id[:16]}")],
                 )
             )
 
