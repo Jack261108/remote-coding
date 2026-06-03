@@ -256,7 +256,8 @@ def render_diff_to_image(diff_text: str, max_width: int = 1200) -> bytes:
 def render_permission_diff_to_image(command: str) -> bytes:
     """Render permission diff content (Edit tool command) as an image.
 
-    This renders the code content with 🟢/🔴 indicators for added/deleted lines.
+    This renders the code with line numbers, syntax highlighting, and
+    red/green backgrounds for deleted/added lines.
 
     Args:
         command: The command content from the Edit tool
@@ -267,12 +268,15 @@ def render_permission_diff_to_image(command: str) -> bytes:
     font = _get_font()
 
     # Parse the command to extract lines with indicators
-    lines = command.splitlines()
+    raw_lines = command.splitlines()
 
     # Calculate dimensions
-    max_line_len = max((len(line) for line in lines), default=20)
+    max_line_len = max((len(line) for line in raw_lines), default=20)
     width = min(1200, _calculate_text_width("x" * (max_line_len + 30), font) + PADDING * 2)
-    height = len(lines) * LINE_HEIGHT + PADDING * 2
+
+    # Calculate total height including file header and project path
+    total_lines = len(raw_lines) + 2  # +2 for file header and project path
+    height = total_lines * LINE_HEIGHT + PADDING * 2
 
     # Create image
     img = Image.new("RGB", (width, height), COLORS["background"])
@@ -280,36 +284,56 @@ def render_permission_diff_to_image(command: str) -> bytes:
 
     y = PADDING
 
-    for line in lines:
+    # Draw file header (empty line like in the example)
+    y += LINE_HEIGHT
+
+    # Draw code lines with line numbers and syntax highlighting
+    line_num = 1
+    for line in raw_lines:
         # Determine line type based on content
-        # Lines starting with + are additions, - are deletions
         if line.startswith("+"):
-            indicator = "🟢"
-            text_color = COLORS["add_text"]
+            line_type = "add"
             display_line = line[1:]  # Remove the + prefix
         elif line.startswith("-"):
-            indicator = "🔴"
-            text_color = COLORS["del_text"]
+            line_type = "del"
             display_line = line[1:]  # Remove the - prefix
         else:
-            indicator = "  "
-            text_color = COLORS["context_text"]
+            line_type = "context"
             display_line = line
 
-        # Draw indicator
-        draw.text((PADDING, y + 2), indicator, fill=text_color, font=font)
+        # Draw background based on line type
+        if line_type == "add":
+            bg_color = COLORS["add_bg"]
+        elif line_type == "del":
+            bg_color = COLORS["del_bg"]
+        else:
+            bg_color = COLORS["background"]
+        draw.rectangle([(0, y), (width, y + LINE_HEIGHT)], fill=bg_color)
 
-        # Draw content
-        content_x = PADDING + 30
-        # Truncate content if too long
-        max_chars = (width - content_x - PADDING) // (FONT_SIZE // 2)
-        display_content = display_line[:max_chars]
-        draw.text((content_x, y + 2), display_content, fill=text_color, font=font)
+        # Draw line number
+        line_num_str = f"{line_num:2d}"
+        draw.text((PADDING, y + 2), line_num_str, fill=COLORS["line_num_text"], font=font)
+
+        # Draw +/- indicator
+        indicator_x = PADDING + 30
+        if line_type == "add":
+            draw.text((indicator_x, y + 2), "+", fill=COLORS["add_text"], font=font)
+        elif line_type == "del":
+            draw.text((indicator_x, y + 2), "-", fill=COLORS["del_text"], font=font)
+
+        # Draw code content with syntax highlighting
+        content_x = indicator_x + 15
+        _draw_syntax_highlighted_line(draw, display_line, content_x, y + 2, font, line_type)
 
         y += LINE_HEIGHT
+        line_num += 1
+
+    # Draw project path at the bottom
+    y += LINE_HEIGHT // 2
+    draw.text((PADDING, y), "📂", fill=COLORS["context_text"], font=font)
 
     # Crop to actual content height
-    img = img.crop((0, 0, width, y + PADDING))
+    img = img.crop((0, 0, width, y + LINE_HEIGHT))
 
     # Add subtle border
     border_img = Image.new("RGB", (img.width + 4, img.height + 4), COLORS["border"])
@@ -319,6 +343,152 @@ def render_permission_diff_to_image(command: str) -> bytes:
     buffer = io.BytesIO()
     border_img.save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()
+
+
+def _draw_syntax_highlighted_line(
+    draw: ImageDraw.ImageDraw,
+    line: str,
+    x: int,
+    y: int,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    line_type: str,
+) -> None:
+    """Draw a line of code with Python syntax highlighting."""
+    # Simple token-based highlighting
+    tokens = _tokenize_python(line)
+    current_x = x
+
+    for token_type, token_value in tokens:
+        if token_type == "keyword":
+            color = "#569cd6"  # Blue for keywords
+        elif token_type == "builtin":
+            color = "#dcdcaa"  # Yellow for builtins
+        elif token_type == "string":
+            color = "#ce9178"  # Orange for strings
+        elif token_type == "comment":
+            color = "#6a9955"  # Green for comments
+        elif token_type == "number":
+            color = "#b5cea8"  # Light green for numbers
+        elif token_type == "operator":
+            color = "#d4d4d4"  # Light gray for operators
+        elif token_type == "function":
+            color = "#dcdcaa"  # Yellow for function names
+        else:
+            if line_type == "add":
+                color = COLORS["add_text"]
+            elif line_type == "del":
+                color = COLORS["del_text"]
+            else:
+                color = COLORS["context_text"]
+
+        draw.text((current_x, y), token_value, fill=color, font=font)
+        current_x += _calculate_text_width(token_value, font)
+
+
+def _tokenize_python(line: str) -> list[tuple[str, str]]:
+    """Simple tokenizer for Python code with basic syntax highlighting."""
+    import keyword
+
+    keywords = set(keyword.kwlist)
+    builtins = {"print", "range", "len", "int", "str", "float", "list", "dict", "set", "tuple", "bool", "None", "True", "False"}
+
+    tokens: list[tuple[str, str]] = []
+    i = 0
+    n = len(line)
+
+    while i < n:
+        # Skip whitespace
+        if line[i].isspace():
+            j = i
+            while j < n and line[j].isspace():
+                j += 1
+            tokens.append(("whitespace", line[i:j]))
+            i = j
+            continue
+
+        # Comments
+        if line[i] == "#":
+            tokens.append(("comment", line[i:]))
+            break
+
+        # Strings (single and double quotes)
+        if line[i] in ('"', "'"):
+            quote = line[i]
+            j = i + 1
+            # Check for triple quotes
+            if i + 2 < n and line[i + 1] == quote and line[i + 2] == quote:
+                quote = line[i : i + 3]
+                j = i + 3
+                while j < n:
+                    if line[j : j + 3] == quote:
+                        j += 3
+                        break
+                    j += 1
+            else:
+                while j < n and line[j] != quote:
+                    if line[j] == "\\":
+                        j += 1
+                    j += 1
+                if j < n:
+                    j += 1
+            tokens.append(("string", line[i:j]))
+            i = j
+            continue
+
+        # f-strings
+        if line[i] == "f" and i + 1 < n and line[i + 1] in ('"', "'"):
+            quote = line[i + 1]
+            j = i + 2
+            if i + 3 < n and line[i + 2] == quote and line[i + 3] == quote:
+                quote = line[i + 1 : i + 4]
+                j = i + 4
+                while j < n:
+                    if line[j : j + 3] == quote:
+                        j += 3
+                        break
+                    j += 1
+            else:
+                while j < n and line[j] != quote:
+                    if line[j] == "\\":
+                        j += 1
+                    j += 1
+                if j < n:
+                    j += 1
+            tokens.append(("string", line[i:j]))
+            i = j
+            continue
+
+        # Numbers
+        if line[i].isdigit():
+            j = i
+            while j < n and (line[j].isdigit() or line[j] in ".xXeE"):
+                j += 1
+            tokens.append(("number", line[i:j]))
+            i = j
+            continue
+
+        # Identifiers and keywords
+        if line[i].isalpha() or line[i] == "_":
+            j = i
+            while j < n and (line[j].isalnum() or line[j] == "_"):
+                j += 1
+            word = line[i:j]
+            if word in keywords:
+                tokens.append(("keyword", word))
+            elif word in builtins:
+                tokens.append(("builtin", word))
+            elif j < n and line[j] == "(":
+                tokens.append(("function", word))
+            else:
+                tokens.append(("identifier", word))
+            i = j
+            continue
+
+        # Operators and punctuation
+        tokens.append(("operator", line[i]))
+        i += 1
+
+    return tokens
 
 
 def render_diff_summary_to_image(file_count: int, add_count: int, del_count: int, diff_text: str) -> bytes:
