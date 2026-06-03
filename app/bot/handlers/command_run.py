@@ -353,7 +353,16 @@ async def run_prompt_and_stream(
         async def _notify_error() -> None:
             await messenger.answer_safely(f"任务处理异常: {exc}")
 
-        asyncio.get_running_loop().create_task(_notify_error())
+        notify_task = asyncio.get_running_loop().create_task(_notify_error())
+
+        def _log_notify_error(done: asyncio.Task[None]) -> None:
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.error("error notification task failed", exc_info=exc)
+
+        notify_task.add_done_callback(_log_notify_error)
 
     task.add_done_callback(_on_done)
     return task

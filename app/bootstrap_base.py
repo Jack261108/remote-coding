@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 from app.adapters.claude.hook_installer import HookInstaller
@@ -13,13 +12,13 @@ from app.adapters.storage.file_session_context_store import FileSessionContextSt
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
-from app.services.agent_file_watcher import AgentFileWatcher
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
-from app.services.interrupt_watcher import InterruptWatcher
 from app.services.lock_registry import RefCountedLockRegistry
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
+from app.services.session_supervisor import SessionSupervisor
 from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
@@ -41,17 +40,13 @@ class AppContainerBase:
     session_context_store: FileSessionContextStore
     claude_jsonl_parser: ClaudeJSONLParser
     structured_session_store: SessionStore
-    interrupt_watcher: InterruptWatcher
-    agent_file_watcher: AgentFileWatcher
+    session_supervisor: SessionSupervisor
     tmux_runner: TmuxRunner
     cli_factory: CLIAdapterFactory
     session_service: SessionService
     task_service: TaskService
     session_registry: SessionRegistryService
-    _jsonl_sync_tasks: dict[str, asyncio.Task[None]]
-    _jsonl_sync_requests: dict[str, str]
     _jsonl_sync_locks: RefCountedLockRegistry
     _session_event_locks: RefCountedLockRegistry
-    _periodic_recheck_task: asyncio.Task[None] | None
-    _background_tasks: set[asyncio.Task[None]]
+    _background_tasks: BackgroundTaskRegistry
     _started: bool

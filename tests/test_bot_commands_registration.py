@@ -43,12 +43,9 @@ async def test_start_registers_commands(tmp_path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(container.bot, "set_my_commands", mock_set_commands)
     # Stub out remaining startup steps
     monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock())
-    monkeypatch.setattr(container.session_registry, "start_health_check", AsyncMock())
-    monkeypatch.setattr(container.upload_cleanup, "start", AsyncMock())
+    monkeypatch.setattr(container.external_binding_cleanup_service, "_cleanup", AsyncMock())
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock())
     monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock())
-    monkeypatch.setattr(container, "_start_interrupt_watchers", lambda: None)
-    monkeypatch.setattr(container, "_start_agent_file_watchers", lambda: None)
-
     await container.start()
 
     mock_set_commands.assert_called_once_with(BOT_COMMANDS)
@@ -64,12 +61,9 @@ async def test_start_survives_command_registration_failure(tmp_path, monkeypatch
     monkeypatch.setattr(container.bot, "set_my_commands", mock_set_commands)
     # Stub out remaining startup steps
     monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock())
-    monkeypatch.setattr(container.session_registry, "start_health_check", AsyncMock())
-    monkeypatch.setattr(container.upload_cleanup, "start", AsyncMock())
+    monkeypatch.setattr(container.external_binding_cleanup_service, "_cleanup", AsyncMock())
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock())
     monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock())
-    monkeypatch.setattr(container, "_start_interrupt_watchers", lambda: None)
-    monkeypatch.setattr(container, "_start_agent_file_watchers", lambda: None)
-
     await container.start()
 
     # Startup completed despite the exception

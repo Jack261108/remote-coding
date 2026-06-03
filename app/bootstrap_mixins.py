@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable
-from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,53 +60,9 @@ class JsonlSyncMixin(AppContainerBase):
                 )
             )
 
-    async def _stop_jsonl_sync_tasks(self) -> None:
-        tasks = list(self._jsonl_sync_tasks.values())
-        self._jsonl_sync_tasks.clear()
-        self._jsonl_sync_requests.clear()
-        await self._jsonl_sync_locks.clear()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with suppress(asyncio.CancelledError):
-                await task
-
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
-        self._jsonl_sync_requests[session_id] = cwd
-        self._start_interrupt_watchers_by_session_id(session_id, cwd)  # type: ignore[attr-defined]
-        self._start_agent_file_watchers_by_session_id(session_id, cwd)  # type: ignore[attr-defined]
-        existing = self._jsonl_sync_tasks.get(session_id)
-        if existing is None or existing.done():
-            self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
-
-    async def _debounced_sync_claude_session(self, session_id: str) -> None:
-        current_cwd: str | None = None
-        try:
-            while True:
-                await asyncio.sleep(self.settings.claude_jsonl_sync_debounce_ms / 1000)
-                current_cwd = self._jsonl_sync_requests.pop(session_id, None)
-                if current_cwd is None:
-                    return
-                await self.sync_claude_session(session_id, current_cwd)
-                current_cwd = None
-                if session_id not in self._jsonl_sync_requests:
-                    return
-        except asyncio.CancelledError:
-            if current_cwd is not None and session_id not in self._jsonl_sync_requests:
-                self._jsonl_sync_requests[session_id] = current_cwd
-            raise
-        except Exception:
-            if current_cwd is not None and session_id not in self._jsonl_sync_requests:
-                self._jsonl_sync_requests[session_id] = current_cwd
-            logger.exception("debounced jsonl sync failed", extra={"session_id": session_id})
-        finally:
-            current = self._jsonl_sync_tasks.get(session_id)
-            if current is asyncio.current_task():
-                self._jsonl_sync_tasks.pop(session_id, None)
-                if session_id in self._jsonl_sync_requests:
-                    self._jsonl_sync_tasks[session_id] = asyncio.create_task(self._debounced_sync_claude_session(session_id))
-                else:
-                    await self._jsonl_sync_locks.cleanup_key(session_id)
+        self.session_supervisor.watch(session_id=session_id, workdir=cwd)
+        self.session_supervisor.schedule_jsonl_sync(session_id, cwd)
 
 
 class HookHandlingMixin(AppContainerBase):
@@ -412,23 +367,13 @@ class HookHandlingMixin(AppContainerBase):
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
         if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
             file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
-            task = asyncio.create_task(
+            self._background_tasks.spawn(
                 self.file_sender.send_if_eligible(
                     file_path_raw=file_path_raw,
                     cwd=event.cwd,
                     chat_id=owner_user_id,
                 )
             )
-            self._background_tasks.add(task)
-            task.add_done_callback(self._on_background_task_done)
-
-    def _on_background_task_done(self, task: asyncio.Task[None]) -> None:
-        self._background_tasks.discard(task)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.warning("background task failed", exc_info=exc)
 
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""
@@ -767,43 +712,19 @@ class SessionMatchingMixin(AppContainerBase):
 
 
 class WatcherMixin(AppContainerBase):
-    """Interrupt and agent file watcher management."""
+    """Session watcher management (unified interrupt + file + JSONL sync)."""
 
-    def _start_interrupt_watchers(self) -> None:
+    def _start_session_watchers(self) -> None:
+        """Start session supervisor watchers for all claude_code sessions."""
         sessions = self.structured_session_store.values()
         for state in sessions:
-            self._start_interrupt_watcher(state)
+            if state.provider != "claude_code":
+                continue
+            self.session_supervisor.watch(session_id=state.session_id, workdir=state.workdir)
 
-    def _start_interrupt_watchers_by_session_id(self, session_id: str, workdir: str) -> None:
-        state = self.structured_session_store.get(session_id)
-        if state is None:
-            self.interrupt_watcher.watch(session_id=session_id, workdir=workdir)
-            return
-        self._start_interrupt_watcher(state)
-
-    def _start_interrupt_watcher(self, state: SessionState) -> None:
-        if state.provider != "claude_code":
-            return
-        if state.phase not in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
-            return
-        self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
-
-    def _start_agent_file_watchers(self) -> None:
-        sessions = self.structured_session_store.values()
-        for state in sessions:
-            self._start_agent_file_watcher(state)
-
-    def _start_agent_file_watchers_by_session_id(self, session_id: str, workdir: str) -> None:
-        state = self.structured_session_store.get(session_id)
-        if state is None:
-            self.agent_file_watcher.watch(session_id=session_id, workdir=workdir)
-            return
-        self._start_agent_file_watcher(state)
-
-    def _start_agent_file_watcher(self, state: SessionState) -> None:
-        if state.provider != "claude_code":
-            return
-        self.agent_file_watcher.watch(session_id=state.session_id, workdir=state.workdir)
+    def _start_session_watchers_by_session_id(self, session_id: str, workdir: str) -> None:
+        """Start session supervisor watcher for a specific session."""
+        self.session_supervisor.watch(session_id=session_id, workdir=workdir)
 
 
 class PeriodicRecheckMixin(AppContainerBase):
@@ -841,15 +762,6 @@ class PeriodicRecheckMixin(AppContainerBase):
             )
             await self.sync_claude_session(session.claude_session_id, session.workdir)  # type: ignore[attr-defined]
 
-    async def _stop_periodic_recheck_task(self) -> None:
-        task = self._periodic_recheck_task
-        self._periodic_recheck_task = None
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-
 
 class SessionRestoreMixin(AppContainerBase):
     """Session restoration on startup."""
@@ -869,14 +781,12 @@ class SessionRestoreMixin(AppContainerBase):
                 claude_session_id=claude_session_id,
             )
             if state.turns or state.tool_calls or state.pending_permission is not None:
-                self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
-                self.agent_file_watcher.watch(session_id=state.session_id, workdir=state.workdir)
+                self.session_supervisor.watch(session_id=state.session_id, workdir=state.workdir)
                 continue
             session_file = self.claude_jsonl_parser.session_file_path(session_id=claude_session_id, cwd=session.workdir)
             if session_file.exists():
                 await self.sync_claude_session(claude_session_id, session.workdir)  # type: ignore[attr-defined]
-                self.interrupt_watcher.watch(session_id=state.session_id, workdir=state.workdir)
-                self.agent_file_watcher.watch(session_id=state.session_id, workdir=state.workdir)
+                self.session_supervisor.watch(session_id=state.session_id, workdir=state.workdir)
                 continue
             terminal_state = self.structured_session_store.find_by_terminal_id(session.terminal_id) if session.terminal_id else None
             if (
@@ -884,8 +794,7 @@ class SessionRestoreMixin(AppContainerBase):
                 and terminal_state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}
                 and (terminal_state.turns or terminal_state.tool_calls or terminal_state.pending_permission is not None)
             ):
-                self.interrupt_watcher.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
-                self.agent_file_watcher.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
+                self.session_supervisor.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
                 continue
             await self.session_service.clear_claude_session(user_id=session.user_id)
 
