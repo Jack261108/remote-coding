@@ -33,6 +33,7 @@ from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.presenters.permission_message_builder import PermissionMessageBuilder
 from app.bot.router import create_router
 from app.config.settings import Settings
+from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.auto_approve_service import AutoApproveService
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
@@ -47,7 +48,6 @@ from app.services.external_session_push_notifier import ExternalSessionPushNotif
 from app.services.file_receiver import FileReceiverService
 from app.services.file_sender import FileSenderService
 from app.services.interrupt_watcher import InterruptWatcher
-from app.services.lock_registry import RefCountedLockRegistry
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
 from app.services.result_exporter import ResultExporterService

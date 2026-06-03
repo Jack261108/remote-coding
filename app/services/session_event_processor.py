@@ -38,13 +38,9 @@ class SessionEventProcessor:
         self._notifier = notifier
 
     def _persist(self, state: SessionState, *, publish: bool = True) -> None:
-        if publish:
-            state.revision += 1
-        self._cache.put(state)
-        self._repository.save_checkpoint(state.session_id, state.checkpoint)
-        self._repository.save(state)
-        if publish:
-            self._notifier.publish(state.session_id, state)
+        from app.services.session_store import persist_session_state
+
+        persist_session_state(state, self._cache, self._repository, self._notifier, publish=publish)
 
     def process(self, event: SessionEvent) -> SessionState:
         event.session_id = validate_session_id(event.session_id)

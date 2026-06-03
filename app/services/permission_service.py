@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState
-from app.services.lock_registry import RefCountedLockRegistry
+from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import suppress
 
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.domain.models import SessionContext, TerminalSessionInfo, utc_now
+from app.infra.async_utils import cancel_optional_task
 from app.services.auto_approve_service import AutoApproveService
 from app.services.session_lookup_service import SessionLookupService
 from app.services.session_service import SessionService
@@ -299,11 +299,7 @@ class SessionRegistryService:
         """Stop the health check background task."""
         task = self._health_check_task
         self._health_check_task = None
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        await cancel_optional_task(task)
 
     async def _health_check_loop(self) -> None:
         """Periodically check session liveness."""

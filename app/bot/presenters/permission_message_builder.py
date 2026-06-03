@@ -2,21 +2,16 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+
+from app.domain.permission_models import PermissionPromptInput
+
+# Re-export for backward compatibility
+__all__ = ["PermissionMessageBuilder", "PermissionPromptInput"]
 
 _COMMAND_MAX_CHARS = 300
 _DESCRIPTION_MAX_CHARS = 200
 _ZWNJ = "\u200c"
 _BACKTICK_RUN_RE = re.compile(r"`{3,}")
-
-
-@dataclass(frozen=True, slots=True)
-class PermissionPromptInput:
-    tool_name: str
-    tool_input: Mapping[str, object] | None
-    cwd: str
-    session_id: str
-    session_title: str | None
 
 
 class PermissionMessageBuilder:

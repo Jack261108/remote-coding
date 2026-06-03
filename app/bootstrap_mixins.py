@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable
-from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +13,7 @@ from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus, utc_now
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.domain.user_question_models import extract_user_question_prompts
+from app.infra.async_utils import cancel_and_await_tasks, cancel_optional_task
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 
 if TYPE_CHECKING:
@@ -66,11 +66,7 @@ class JsonlSyncMixin(AppContainerBase):
         self._jsonl_sync_tasks.clear()
         self._jsonl_sync_requests.clear()
         await self._jsonl_sync_locks.clear()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with suppress(asyncio.CancelledError):
-                await task
+        await cancel_and_await_tasks(tasks)
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         self._jsonl_sync_requests[session_id] = cwd
@@ -433,11 +429,7 @@ class HookHandlingMixin(AppContainerBase):
     async def _stop_background_tasks(self) -> None:
         tasks = list(self._background_tasks)
         self._background_tasks.clear()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with suppress(asyncio.CancelledError):
-                await task
+        await cancel_and_await_tasks(tasks)
 
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""
@@ -853,11 +845,7 @@ class PeriodicRecheckMixin(AppContainerBase):
     async def _stop_periodic_recheck_task(self) -> None:
         task = self._periodic_recheck_task
         self._periodic_recheck_task = None
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        await cancel_optional_task(task)
 
 
 class SessionRestoreMixin(AppContainerBase):

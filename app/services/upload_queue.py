@@ -4,8 +4,9 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
+
+from app.infra.async_utils import cancel_optional_task
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,11 +85,7 @@ class UploadQueueManager:
     async def stop_cleanup(self) -> None:
         task = self._cleanup_task
         self._cleanup_task = None
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        await cancel_optional_task(task)
 
     async def _cleanup_loop(self) -> None:
         while True:

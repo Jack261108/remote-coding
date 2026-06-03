@@ -601,7 +601,7 @@ async def test_interactive_timeout_keeps_session_alive(tmp_path: Path, caplog: p
 
     assert events[-1].type == EventType.TIMEOUT
     assert any(record.message == "tmux task timeout" for record in caplog.records)
-    assert any(record.message == "tmux task finished" and record.result == "timeout" for record in caplog.records)
+    assert any(record.message == "task finished" and record.result == "timeout" for record in caplog.records)
     state = runner._session_store.get(session_name)
     assert state is not None
     assert state.phase == SessionPhase.PROCESSING
@@ -1705,8 +1705,7 @@ async def test_cancel_returns_false_when_ephemeral_terminate_fails(
         workdir=str(tmp_path),
         persistent_terminal=False,
     )
-    async with runner._lock:
-        runner._tasks[meta.task_id] = meta
+    runner.registry.register(meta.task_id, meta)
 
     async def fake_terminate(session_name: str) -> bool:
         assert session_name == "tgcli_task_cancel"

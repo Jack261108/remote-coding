@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.bot.presenters.permission_message_builder import PermissionPromptInput
-from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
+from app.domain.permission_models import PermissionPromptInput
+from app.infra.text_formatting import render_markdownish_to_telegram_html
 from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 

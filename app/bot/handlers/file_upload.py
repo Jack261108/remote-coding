@@ -54,6 +54,61 @@ async def _user_has_running_task(task_service: TaskService, user_id: int, *, exc
     )
 
 
+async def _download_telegram_file(message: Message, file_id: str) -> bytes | None:
+    """从 Telegram 下载文件，失败时发送错误消息并返回 None。"""
+    try:
+        bot = message.bot
+        if bot is None:
+            await message.answer("❌ 内部错误: 无法获取 bot 实例。")
+            return None
+        file_obj = await bot.get_file(file_id)
+        if file_obj.file_path is None:
+            await message.answer("❌ 下载失败: Telegram 未返回文件路径。")
+            return None
+        bio = await bot.download_file(file_obj.file_path)
+        if bio is None:
+            await message.answer("❌ 下载失败: 无法从 Telegram 下载文件。")
+            return None
+        return bio.read()
+    except Exception as exc:
+        logger.exception("Failed to download file %s: %s", file_id, exc)
+        return None
+
+
+async def _enqueue_or_process_upload(
+    message: Message,
+    *,
+    file_receiver: FileReceiverService,
+    session_service: SessionService,
+    task_service: TaskService,
+    upload_queue: UploadQueueManager,
+    upload_queue_ttl_sec: int,
+    user_id: int,
+    filename: str,
+    data: bytes,
+) -> None:
+    """If the user has a running task, queue the upload; otherwise process it."""
+    if await _user_has_running_task(task_service, user_id):
+        queued = await upload_queue.enqueue(user_id=user_id, filename=filename, data=data)
+        if not queued.accepted:
+            await message.answer(f"❌ 文件未加入队列: {filename}\n原因: {queued.reason}")
+            return
+        await message.answer(
+            f"⏳ 任务运行中，文件 {filename} 已加入队列，将在任务完成后处理。\n"
+            f"注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失；"
+            f"排队文件超过 {_format_ttl(upload_queue_ttl_sec)} 未处理会过期。"
+        )
+        return
+
+    await _process_upload(
+        message,
+        file_receiver=file_receiver,
+        session_service=session_service,
+        filename=filename,
+        data=data,
+    )
+
+
 async def _process_upload(
     message: Message,
     *,
@@ -187,24 +242,8 @@ def register_file_upload_handler(
             )
             return
 
-        # Download file via Telegram Bot API
-        try:
-            bot = message.bot
-            if bot is None:
-                await message.answer("❌ 内部错误: 无法获取 bot 实例。")
-                return
-            file_obj = await bot.get_file(document.file_id)
-            if file_obj.file_path is None:
-                await message.answer("❌ 下载失败: Telegram 未返回文件路径。")
-                return
-            bio = await bot.download_file(file_obj.file_path)
-            if bio is None:
-                await message.answer("❌ 下载失败: 无法从 Telegram 下载文件。")
-                return
-            data = bio.read()
-        except Exception as exc:
-            logger.exception("Failed to download document from Telegram", extra={"user_id": user_id, "filename": filename})
-            await message.answer(f"❌ 文件下载失败: {exc}")
+        data = await _download_telegram_file(message, document.file_id)
+        if data is None:
             return
 
         if len(data) > max_size_bytes:
@@ -216,23 +255,14 @@ def register_file_upload_handler(
             )
             return
 
-        # Queue if task is running
-        if await _user_has_running_task(task_service, user_id):
-            queued = await upload_queue.enqueue(user_id=user_id, filename=filename, data=data)
-            if not queued.accepted:
-                await message.answer(f"❌ 文件未加入队列: {filename}\n原因: {queued.reason}")
-                return
-            await message.answer(
-                f"⏳ 任务运行中，文件 {filename} 已加入队列，将在任务完成后处理。\n"
-                f"注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失；"
-                f"排队文件超过 {_format_ttl(upload_queue_ttl_sec)} 未处理会过期。"
-            )
-            return
-
-        await _process_upload(
+        await _enqueue_or_process_upload(
             message,
             file_receiver=file_receiver,
             session_service=session_service,
+            task_service=task_service,
+            upload_queue=upload_queue,
+            upload_queue_ttl_sec=upload_queue_ttl_sec,
+            user_id=user_id,
             filename=filename,
             data=data,
         )
@@ -257,23 +287,8 @@ def register_file_upload_handler(
             )
             return
 
-        try:
-            bot = message.bot
-            if bot is None:
-                await message.answer("❌ 内部错误: 无法获取 bot 实例。")
-                return
-            file_obj = await bot.get_file(photo.file_id)
-            if file_obj.file_path is None:
-                await message.answer("❌ 下载失败: Telegram 未返回文件路径。")
-                return
-            bio = await bot.download_file(file_obj.file_path)
-            if bio is None:
-                await message.answer("❌ 下载失败: 无法从 Telegram 下载文件。")
-                return
-            data = bio.read()
-        except Exception as exc:
-            logger.exception("Failed to download photo from Telegram", extra={"user_id": user_id})
-            await message.answer(f"❌ 文件下载失败: {exc}")
+        data = await _download_telegram_file(message, photo.file_id)
+        if data is None:
             return
 
         if len(data) > max_size_bytes:
@@ -285,23 +300,14 @@ def register_file_upload_handler(
             )
             return
 
-        # Queue if task is running
-        if await _user_has_running_task(task_service, user_id):
-            queued = await upload_queue.enqueue(user_id=user_id, filename=filename, data=data)
-            if not queued.accepted:
-                await message.answer(f"❌ 文件未加入队列: {filename}\n原因: {queued.reason}")
-                return
-            await message.answer(
-                f"⏳ 任务运行中，文件 {filename} 已加入队列，将在任务完成后处理。\n"
-                f"注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失；"
-                f"排队文件超过 {_format_ttl(upload_queue_ttl_sec)} 未处理会过期。"
-            )
-            return
-
-        await _process_upload(
+        await _enqueue_or_process_upload(
             message,
             file_receiver=file_receiver,
             session_service=session_service,
+            task_service=task_service,
+            upload_queue=upload_queue,
+            upload_queue_ttl_sec=upload_queue_ttl_sec,
+            user_id=user_id,
             filename=filename,
             data=data,
         )

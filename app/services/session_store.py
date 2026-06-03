@@ -9,6 +9,7 @@ from app.domain.session_models import (
     SessionPhase,
     SessionState,
     is_claude_session_id,
+    parse_user_question_key,
 )
 from app.services.session_event_processor import SessionEventProcessor
 from app.services.session_lookup_service import SessionLookupService
@@ -17,17 +18,26 @@ from app.services.session_state_cache import SessionStateCache
 from app.services.session_state_repository import SessionStateRepository
 from app.services.structured_reply_tracker import StructuredReplyTracker
 
+# Re-export for backward compatibility
+__all__ = ["SessionStore", "SessionStoreFacade", "is_claude_session_id", "parse_user_question_key", "persist_session_state"]
 
-def parse_user_question_key(question_key: str | None) -> tuple[str, int] | None:
-    if not question_key:
-        return None
-    tool_use_id, separator, index_text = str(question_key).rpartition(":")
-    if not separator or not tool_use_id:
-        return None
-    try:
-        return tool_use_id, int(index_text)
-    except ValueError:
-        return None
+
+def persist_session_state(
+    state: SessionState,
+    cache: SessionStateCache,
+    repository: SessionStateRepository,
+    notifier: SessionNotifier,
+    *,
+    publish: bool = True,
+) -> None:
+    """持久化 SessionState 到缓存和仓库。"""
+    if publish:
+        state.revision += 1
+    cache.put(state)
+    repository.save_checkpoint(state.session_id, state.checkpoint)
+    repository.save(state)
+    if publish:
+        notifier.publish(state.session_id, state)
 
 
 def _normalize_turn_match_text(text: str) -> str:
@@ -248,13 +258,7 @@ class SessionStoreFacade:
         return state
 
     def _persist(self, state: SessionState, *, publish: bool = True) -> None:
-        if publish:
-            state.revision += 1
-        self._cache.put(state)
-        self._repository.save_checkpoint(state.session_id, state.checkpoint)
-        self._repository.save(state)
-        if publish:
-            self._notifier.publish(state.session_id, state)
+        persist_session_state(state, self._cache, self._repository, self._notifier, publish=publish)
 
 
 # Backward-compat alias

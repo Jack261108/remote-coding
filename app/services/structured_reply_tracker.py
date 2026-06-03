@@ -3,28 +3,15 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from app.domain.session_models import SessionState
+from app.domain.session_models import SessionState, parse_user_question_key
 from app.services.session_state_cache import SessionStateCache
 from app.services.session_state_repository import SessionStateRepository
 
 logger = logging.getLogger(__name__)
 
 
-def parse_user_question_key(question_key: str | None) -> tuple[str, int] | None:
-    """Parse a user question key into (tool_use_id, index) tuple.
-
-    The question_key format is "tool_use_id:index" where index is an integer.
-    Returns None if the key is invalid, empty, or cannot be parsed.
-    """
-    if not question_key:
-        return None
-    tool_use_id, separator, index_text = str(question_key).rpartition(":")
-    if not separator or not tool_use_id:
-        return None
-    try:
-        return tool_use_id, int(index_text)
-    except ValueError:
-        return None
+# Re-export for backward compatibility
+__all__ = ["StructuredReplyTracker", "parse_user_question_key"]
 
 
 class StructuredReplyTracker:
