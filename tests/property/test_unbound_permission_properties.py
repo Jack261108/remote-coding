@@ -104,13 +104,15 @@ class TestUnboundPermissionBroadcast:
     )
     def test_all_allowed_users_notified(self, event: HookEvent, allowed_users: frozenset[int]):
         """All users in allowed set receive notification with session_id and cwd."""
-        message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock()
         hook_socket_server = MagicMock()
         hook_socket_server.respond_to_permission = AsyncMock()
 
         handler = UnboundPermissionHandler(
-            message_sender=message_sender,
+            bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids=set(allowed_users),
         )
@@ -119,11 +121,11 @@ class TestUnboundPermissionBroadcast:
         asyncio.run(handler.handle_unbound_permission(event))
 
         # Every allowed user should have been sent a message
-        notified_user_ids = {call.kwargs["chat_id"] for call in message_sender.send_message.call_args_list}
+        notified_user_ids = {call.kwargs["chat_id"] for call in bot.send_message.call_args_list}
         assert notified_user_ids == set(allowed_users)
 
         # Each message should contain session short_id and cwd
-        for call in message_sender.send_message.call_args_list:
+        for call in bot.send_message.call_args_list:
             text = call.kwargs["text"]
             assert event.session_id[:8] in text
             assert event.cwd in text
@@ -148,13 +150,15 @@ class TestFirstResponderWins:
     )
     def test_only_first_response_wins(self, event: HookEvent, responders: list[int]):
         """Only the first responder's decision is forwarded; others return False."""
-        message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock()
         hook_socket_server = MagicMock()
         hook_socket_server.respond_to_permission = AsyncMock()
 
         handler = UnboundPermissionHandler(
-            message_sender=message_sender,
+            bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={responders[0]},
         )
@@ -196,8 +200,10 @@ class TestPermissionApprovalNoAutoBind:
     )
     def test_session_remains_in_discovery_after_approval(self, event: HookEvent, approver: int):
         """Approving a permission does not remove session from discovery."""
-        message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock()
         hook_socket_server = MagicMock()
         hook_socket_server.respond_to_permission = AsyncMock()
 
@@ -206,7 +212,7 @@ class TestPermissionApprovalNoAutoBind:
         discovery.record_event(event)
 
         handler = UnboundPermissionHandler(
-            message_sender=message_sender,
+            bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={approver},
         )
@@ -236,13 +242,15 @@ class TestTTLExpiryAutoDenies:
     @pytest.mark.asyncio
     async def test_ttl_expiry_triggers_auto_deny(self):
         """After TTL expires without response, permission is auto-denied."""
-        message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock()
         hook_socket_server = MagicMock()
         hook_socket_server.respond_to_permission = AsyncMock()
 
         handler = UnboundPermissionHandler(
-            message_sender=message_sender,
+            bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={12345},
             permission_ttl_sec=0,  # Expire immediately
@@ -273,13 +281,15 @@ class TestTTLExpiryAutoDenies:
     @pytest.mark.asyncio
     async def test_ttl_expiry_prevents_late_response(self):
         """After TTL auto-deny, late user responses are rejected."""
-        message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock()
         hook_socket_server = MagicMock()
         hook_socket_server.respond_to_permission = AsyncMock()
 
         handler = UnboundPermissionHandler(
-            message_sender=message_sender,
+            bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={12345},
             permission_ttl_sec=0,
@@ -312,13 +322,15 @@ class TestResponseRemovesPendingAndExpiry:
     @pytest.mark.asyncio
     async def test_response_removes_unbound_pending_and_expiry_task(self):
         """handle_response returns accepted=True, forwarded=True and cleans up state."""
-        message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock()
         hook_socket_server = MagicMock()
         hook_socket_server.respond_to_permission = AsyncMock()
 
         handler = UnboundPermissionHandler(
-            message_sender=message_sender,
+            bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={42},
             permission_ttl_sec=60,
@@ -353,13 +365,15 @@ class TestExpiryRemovesPendingAndExpiry:
     @pytest.mark.asyncio
     async def test_expiry_removes_unbound_pending_and_expiry_task(self):
         """With TTL=0, after short sleep _pending and _expiry_tasks are empty."""
-        message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock()
         hook_socket_server = MagicMock()
         hook_socket_server.respond_to_permission = AsyncMock()
 
         handler = UnboundPermissionHandler(
-            message_sender=message_sender,
+            bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={42},
             permission_ttl_sec=0,
@@ -390,13 +404,15 @@ class TestConcurrentUnboundResponses:
     @pytest.mark.asyncio
     async def test_concurrent_unbound_responses_preserve_first_responder_wins(self):
         """Multiple concurrent handle_response tasks: exactly 1 accepted."""
-        message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock()
         hook_socket_server = MagicMock()
         hook_socket_server.respond_to_permission = AsyncMock()
 
         handler = UnboundPermissionHandler(
-            message_sender=message_sender,
+            bot=bot,
             hook_socket_server=hook_socket_server,
             allowed_user_ids={100, 200, 300},
             permission_ttl_sec=60,

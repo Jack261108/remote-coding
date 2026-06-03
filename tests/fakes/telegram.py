@@ -82,6 +82,13 @@ class DummyMessage:
         self.sent_messages.append(sent)
         return sent
 
+    async def answer_photo(self, photo, caption: str | None = None) -> DummyAnswerMessage:
+        filename = getattr(photo, "filename", None) or "unknown"
+        self.sent_documents.append({"photo": photo, "filename": filename, "caption": caption})
+        sent = DummyAnswerMessage(caption or "", reply_markup=None)
+        self.sent_messages.append(sent)
+        return sent
+
 
 class DummyCallbackQuery:
     def __init__(self, data: str, *, user_id: int = 1, message: DummyMessage | None = None) -> None:

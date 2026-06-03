@@ -214,14 +214,14 @@ class TestUnboundPermissionBroadcast:
     @pytest.mark.asyncio
     async def test_broadcast_and_first_responder_wins(self) -> None:
         """Broadcast to all users, respond from one user, verify decision forwarded."""
-        mock_message_sender = AsyncMock()
+        mock_bot = AsyncMock()
         mock_hook_socket = AsyncMock()
 
         allowed_users = {100, 200, 300}
 
         registry = PermissionCallbackRegistry(ttl_sec=60, token_factory=lambda: "tok12345")
         handler = UnboundPermissionHandler(
-            message_sender=mock_message_sender,
+            bot=mock_bot,
             hook_socket_server=mock_hook_socket,
             allowed_user_ids=allowed_users,
             permission_ttl_sec=60,
@@ -231,7 +231,7 @@ class TestUnboundPermissionBroadcast:
             hook_socket_server=mock_hook_socket,
             unbound_handler=handler,
             allowed_user_ids=allowed_users,
-            message_sender=mock_message_sender,
+            message_sender=AsyncMock(),
         )
         handler.set_permission_gateway(gateway)
 
@@ -253,8 +253,8 @@ class TestUnboundPermissionBroadcast:
         await handler.handle_unbound_permission(event)
 
         # Verify broadcast sent to all allowed users
-        assert mock_message_sender.send_message.call_count == len(allowed_users)
-        notified_chat_ids = {call.kwargs["chat_id"] for call in mock_message_sender.send_message.call_args_list}
+        assert mock_bot.send_message.call_count == len(allowed_users)
+        notified_chat_ids = {call.kwargs["chat_id"] for call in mock_bot.send_message.call_args_list}
         assert notified_chat_ids == allowed_users
 
         # Step 2: First user responds with "approve" through the gateway callback path
@@ -335,7 +335,7 @@ class TestUnboundPermissionKeyboardToken:
     async def test_unbound_permission_keyboard_uses_gateway_short_token(self) -> None:
         """Keyboard callback_data uses perm:{token}:{decision} format, all <= 64 bytes,
         and the registry record points back to the full tool_use_id."""
-        mock_message_sender = AsyncMock()
+        mock_bot = AsyncMock()
         mock_hook_socket = AsyncMock()
 
         registry = PermissionCallbackRegistry(
@@ -344,7 +344,7 @@ class TestUnboundPermissionKeyboardToken:
         )
 
         handler = UnboundPermissionHandler(
-            message_sender=mock_message_sender,
+            bot=mock_bot,
             hook_socket_server=mock_hook_socket,
             allowed_user_ids={42},
             permission_ttl_sec=60,
@@ -354,7 +354,7 @@ class TestUnboundPermissionKeyboardToken:
             hook_socket_server=mock_hook_socket,
             unbound_handler=handler,
             allowed_user_ids={42},
-            message_sender=mock_message_sender,
+            message_sender=AsyncMock(),
         )
         handler.set_permission_gateway(gateway)
 
@@ -374,8 +374,8 @@ class TestUnboundPermissionKeyboardToken:
         await handler.handle_unbound_permission(event)
 
         # Get the keyboard that was sent
-        call_kwargs = mock_message_sender.send_message.call_args.kwargs
-        keyboard = call_kwargs["keyboard"]
+        call_kwargs = mock_bot.send_message.call_args.kwargs
+        keyboard = call_kwargs["reply_markup"]
 
         # Extract callback_data from all buttons
         callback_data = []

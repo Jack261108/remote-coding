@@ -63,8 +63,8 @@ class DummyTaskService:
 
 
 @pytest.mark.asyncio
-async def test_diff_integration_sends_short_diff_as_message(tmp_path: Path) -> None:
-    """When diff is short (<4096), it should be sent as a code-block message."""
+async def test_diff_integration_sends_diff_as_image(tmp_path: Path) -> None:
+    """Diff should be sent as an image via Telegram."""
     diff_generator = DiffGeneratorService()
     snapshot = {tmp_path / "file.py": 100.0}
     small_diff = DiffResult(content="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new", file_count=1, is_patch_file=False)
@@ -109,15 +109,16 @@ async def test_diff_integration_sends_short_diff_as_message(tmp_path: Path) -> N
     mock_detect.assert_called_once()
     mock_gen.assert_called_once()
 
-    # Check that a message containing the diff was sent
-    sent_texts = message.answers
-    diff_sent = any("```diff" in t or "--- a/file.py" in t for t in sent_texts)
-    assert diff_sent, f"Expected diff message in sent texts: {sent_texts}"
+    # Check that a photo was sent (diff as image)
+    sent_photos = [d for d in message.sent_documents if "photo" in d]
+    assert len(sent_photos) >= 1, f"Expected photo to be sent, got: {message.sent_documents}"
+    assert sent_photos[0]["caption"] is not None
+    assert "Code Changes" in sent_photos[0]["caption"]
 
 
 @pytest.mark.asyncio
-async def test_diff_integration_sends_large_diff_as_patch_file(tmp_path: Path) -> None:
-    """When diff is large (>=4096), it should be sent as a .patch file."""
+async def test_diff_integration_sends_large_diff_as_image(tmp_path: Path) -> None:
+    """Large diff should also be sent as an image."""
     diff_generator = DiffGeneratorService()
     snapshot = {tmp_path / "file.py": 100.0}
     large_content = "x" * 5000
@@ -159,10 +160,9 @@ async def test_diff_integration_sends_large_diff_as_patch_file(tmp_path: Path) -
         if task:
             await task
 
-    # Check that a document was sent
-    assert len(message.sent_documents) >= 1
-    doc = message.sent_documents[0]
-    assert doc["filename"].endswith(".patch")
+    # Check that a photo was sent (diff as image)
+    sent_photos = [d for d in message.sent_documents if "photo" in d]
+    assert len(sent_photos) >= 1, f"Expected photo to be sent, got: {message.sent_documents}"
 
 
 @pytest.mark.asyncio

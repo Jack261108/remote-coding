@@ -213,7 +213,7 @@ class AppContainer(
             sync_callback=self.sync_claude_session,
         )
         self.unbound_permission_handler = UnboundPermissionHandler(
-            message_sender=self.message_sender,
+            bot=self.bot,
             hook_socket_server=self.hook_socket_server,
             allowed_user_ids=settings.allowed_user_id_set,
             permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,

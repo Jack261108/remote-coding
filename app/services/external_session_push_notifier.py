@@ -72,7 +72,16 @@ class ExternalSessionPushNotifier:
             session_id=session_id,
             session_title=title,
         )
-        text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
+        prompt_result = gateway.message_builder.build_permission_prompt_result(prompt)
+        text = render_markdownish_to_telegram_html(prompt_result.text)
+
+        # Send image first if available
+        if prompt_result.image_bytes:
+            from aiogram.types import BufferedInputFile
+
+            photo = BufferedInputFile(file=prompt_result.image_bytes, filename="diff.png")
+            await self._bot.send_photo(chat_id=user_id, photo=photo)
+
         message_id = await self._send_with_retry(chat_id=user_id, text=text, keyboard=result.keyboard, parse_mode="HTML")
         if message_id is not None:
             # Store the message ID and text in the token record for later editing
