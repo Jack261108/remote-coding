@@ -99,16 +99,30 @@ class PresenterOutputDispatcher:
                     )
                 )
                 # Try editing the existing tool status message into the permission prompt
-                edited = await self._tool_message_manager.edit_with_keyboard(
+                edited, edited_message = await self._tool_message_manager.edit_with_keyboard(
                     tool_use_id=output.tool_use_id,
                     text=text,
                     reply_markup=keyboard,
                 )
-                if edited:
+                if edited and edited_message:
+                    # Store message info for terminal approval sync
+                    await self._permission_gateway.registry.update_telegram_message(
+                        token=result.token,
+                        chat_id=edited_message.chat.id,
+                        message_id=edited_message.message_id,
+                        message_text=text,
+                    )
                     await self._presenter.acknowledge_delivery(output)
                     continue
-                sent = await self._messenger.answer_safely(text, reply_markup=keyboard)
-                if sent:
+                sent_message = await self._messenger.send_message_safely(text, reply_markup=keyboard)
+                if sent_message:
+                    # Store message info for terminal approval sync
+                    await self._permission_gateway.registry.update_telegram_message(
+                        token=result.token,
+                        chat_id=sent_message.chat.id,
+                        message_id=sent_message.message_id,
+                        message_text=text,
+                    )
                     await self._presenter.acknowledge_delivery(output)
                 continue
             if isinstance(output, UserQuestionOutput):

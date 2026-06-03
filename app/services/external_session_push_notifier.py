@@ -75,11 +75,12 @@ class ExternalSessionPushNotifier:
         text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
         message_id = await self._send_with_retry(chat_id=user_id, text=text, keyboard=result.keyboard, parse_mode="HTML")
         if message_id is not None:
-            # Store the message ID in the token record for later editing
+            # Store the message ID and text in the token record for later editing
             await gateway.registry.update_telegram_message(
                 token=result.token,
                 chat_id=user_id,
                 message_id=message_id,
+                message_text=text,
             )
         return message_id is not None
 

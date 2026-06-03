@@ -149,9 +149,15 @@ async def _run_and_wait(
         await task
 
 
+class FakeRegistry:
+    async def update_telegram_message(self, token: str, chat_id: int, message_id: int, message_text: str | None = None) -> bool:
+        return True
+
+
 class FakePermissionGateway:
     def __init__(self) -> None:
         self.message_builder = PermissionMessageBuilder()
+        self.registry = FakeRegistry()
         self.registrations: list[tuple[str, str, SessionOrigin, int | None]] = []
         self.auto_approve_calls: list[tuple[str, SessionOrigin, int | None, str]] = []
         self.keyboard = InlineKeyboardMarkup(

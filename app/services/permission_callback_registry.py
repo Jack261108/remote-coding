@@ -65,6 +65,7 @@ class PermissionCallbackRecord:
     dispatch_error_reason: str | None
     telegram_chat_id: int | None = None
     telegram_message_id: int | None = None
+    telegram_message_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +85,7 @@ class PermissionCallbackRecordSnapshot:
     dispatch_error_reason: str | None
     telegram_chat_id: int | None = None
     telegram_message_id: int | None = None
+    telegram_message_text: str | None = None
 
     @classmethod
     def from_record(cls, record: PermissionCallbackRecord) -> PermissionCallbackRecordSnapshot:
@@ -103,6 +105,7 @@ class PermissionCallbackRecordSnapshot:
             dispatch_error_reason=record.dispatch_error_reason,
             telegram_chat_id=record.telegram_chat_id,
             telegram_message_id=record.telegram_message_id,
+            telegram_message_text=record.telegram_message_text,
         )
 
 
@@ -372,7 +375,7 @@ class PermissionCallbackRegistry:
                     self._compound_index.pop(compound_key, None)
             return len(transitioned_tokens)
 
-    async def update_telegram_message(self, token: str, chat_id: int, message_id: int) -> bool:
+    async def update_telegram_message(self, token: str, chat_id: int, message_id: int, message_text: str | None = None) -> bool:
         """Update the Telegram message ID for a permission token."""
         async with self._lock:
             record = self._records.get(token)
@@ -380,6 +383,7 @@ class PermissionCallbackRegistry:
                 return False
             record.telegram_chat_id = chat_id
             record.telegram_message_id = message_id
+            record.telegram_message_text = message_text
             return True
 
     async def get_record(self, token: str) -> PermissionCallbackRecordSnapshot | None:

@@ -76,26 +76,26 @@ class ToolMessageManager:
                 return
             await self._send_and_track(message_key, text)
 
-    async def edit_with_keyboard(self, *, tool_use_id: str, text: str, reply_markup) -> bool:
+    async def edit_with_keyboard(self, *, tool_use_id: str, text: str, reply_markup) -> tuple[bool, Message | None]:
         """Edit an existing tracked tool message and attach a reply_markup.
 
-        Returns True if the edit succeeded; False if the tool was not tracked
+        Returns (True, message) if the edit succeeded; (False, None) if the tool was not tracked
         or the edit failed (caller should send a new message instead).
         """
         async with self._lock:
             existing = self._messages.get(tool_use_id)
             if existing is None:
-                return False
+                return False, None
             try:
                 rendered = self._render(text)
                 await existing.message.edit_text(rendered, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-                return True
+                return True, existing.message
             except Exception as exc:
                 if _is_message_not_modified(exc):
                     # Text unchanged, but we still need to attach the keyboard
                     try:
                         await existing.message.edit_reply_markup(reply_markup=reply_markup)
-                        return True
+                        return True, existing.message
                     except Exception:
                         logger.exception(
                             "telegram tool message reply_markup edit failed",
@@ -106,7 +106,7 @@ class ToolMessageManager:
                                 "tool_use_id": tool_use_id,
                             },
                         )
-                        return False
+                        return False, None
                 logger.exception(
                     "telegram tool message edit_with_keyboard failed",
                     extra={
@@ -116,7 +116,7 @@ class ToolMessageManager:
                         "tool_use_id": tool_use_id,
                     },
                 )
-                return False
+                return False, None
 
     async def _send_and_track(self, tool_use_id: str, text: str) -> None:
         sent = await self._send(text, tool_use_id=tool_use_id)

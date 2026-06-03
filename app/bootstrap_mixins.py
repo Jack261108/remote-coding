@@ -484,12 +484,16 @@ class HookHandlingMixin(AppContainerBase):
                 _INSTRUCTION_LINE = "请点击下方按钮选择允许或拒绝。"
                 approval_text = "✅ 已在终端批准"
                 try:
-                    # We need to get the original message text to replace the instruction line
-                    # Since we can't retrieve it, we'll just edit with the approval text
+                    # Use stored original message text to replace instruction line (same as Telegram approval)
+                    original_text = record.telegram_message_text or ""
+                    if _INSTRUCTION_LINE in original_text:
+                        new_text = original_text.replace(_INSTRUCTION_LINE, approval_text)
+                    else:
+                        new_text = f"{approval_text}\n工具: {tool_use_id[:16]}..."
                     await self.message_sender.edit_message(
                         chat_id=record.telegram_chat_id,
                         message_id=record.telegram_message_id,
-                        text=f"{approval_text}\n工具: {tool_use_id[:16]}...",
+                        text=new_text,
                     )
                 except Exception:
                     logger.warning(

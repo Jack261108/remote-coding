@@ -13,6 +13,8 @@ class DummyAnswerMessage:
         self.edits: list[str] = []
         self.edit_parse_modes: list[ParseMode | None] = []
         self.fail_next_edit = fail_next_edit
+        self.chat = SimpleNamespace(id=1)
+        self.message_id = 1
 
     async def edit_text(self, text: str, parse_mode=None, reply_markup=None) -> "DummyAnswerMessage":
         if self.fail_next_edit:
