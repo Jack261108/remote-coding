@@ -397,13 +397,15 @@ class FlatToolTracker:
         return tuple(outputs)
 
 
-class TaskListTracker:
+class _FingerprintTracker:
     def __init__(self) -> None:
         self._fingerprint: tuple | None = None
 
     def reset(self) -> None:
         self._fingerprint = None
 
+
+class TaskListTracker(_FingerprintTracker):
     def baseline(self, tool_states: tuple[_ToolStateSnapshot, ...]) -> None:
         self._fingerprint = _task_list_status_fingerprint(_task_list_status_output(tool_states))
 
@@ -466,13 +468,7 @@ class SubagentAggregateTracker:
         return tuple(merged_containers)
 
 
-class FileToolAggregateTracker:
-    def __init__(self) -> None:
-        self._fingerprint: tuple | None = None
-
-    def reset(self) -> None:
-        self._fingerprint = None
-
+class FileToolAggregateTracker(_FingerprintTracker):
     def baseline(self, file_tools: tuple[ToolStatusOutput, ...]) -> None:
         self._fingerprint = _file_tool_aggregate_fingerprint(file_tools)
 

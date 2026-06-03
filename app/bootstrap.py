@@ -125,7 +125,7 @@ class AppContainer(
         self.session_supervisor = SessionSupervisor(
             session_store=self.structured_session_store,
             claude_jsonl_parser=self.claude_jsonl_parser,
-            on_jsonl_sync=lambda: self.sync_claude_session,
+            on_jsonl_sync=self.sync_claude_session,
             on_dispatch_event=self._dispatch_session_event,
             debounce_sec=settings.claude_jsonl_sync_debounce_ms / 1000,
         )
@@ -316,19 +316,6 @@ class AppContainer(
         )
         await self._janitor.start()
         self._started = True
-        try:
-            await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
-            await self._restore_session_bindings()
-            self._start_interrupt_watchers()
-            self._start_agent_file_watchers()
-            self._periodic_recheck_task = asyncio.create_task(self._periodic_recheck_loop())
-            await self.session_registry.start_health_check()
-            await self.external_binding_cleanup_service.start()
-            await self.upload_queue.start_cleanup()
-            await self.upload_cleanup.start()
-        except Exception:
-            await self.stop()
-            raise
 
     async def stop(self) -> None:
         if not self._started:

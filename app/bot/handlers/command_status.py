@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.session_text import render_structured_session
 from app.services.task_service import TaskService
 
@@ -22,7 +23,7 @@ def _render_task(task) -> str:
 def register_status_handler(router, *, task_service: TaskService):
     @router.message(Command("status"))
     async def command_status(message: Message, command: CommandObject) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         task_id = (command.args or "").strip()
 
         if task_id:

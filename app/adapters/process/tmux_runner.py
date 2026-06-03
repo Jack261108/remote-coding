@@ -14,9 +14,17 @@ from app.adapters.process.tmux_log import TmuxLogMixin
 from app.adapters.process.tmux_session import TmuxSessionMixin
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
-from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
+from app.domain.session_models import (
+    ConversationTurn,
+    SessionEvent,
+    SessionEventType,
+    SessionPhase,
+    SessionState,
+    ToolStatus,
+    is_claude_session_id,
+)
 from app.services.lock_registry import RefCountedLockRegistry
-from app.services.session_store import SessionStore, is_claude_session_id
+from app.services.session_store import SessionStore
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
@@ -158,7 +166,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         session_id = terminal_key or task_id
-        session_name = self._build_session_name(session_id)
+        session_name = self.build_session_name(session_id)
         log_file = self._file_store.raw_transcript_path(session_name) if interactive else self._data_dir / f"{task_id}.log"
         exit_file = self._data_dir / f"{task_id}.exit"
         command_file = self._data_dir / f"{task_id}.cmd.sh"
@@ -542,7 +550,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         session_id = state.session_id
         if is_claude_session_id(session_id):
             meta.claude_session_id = session_id
-        self._session_store._persist(state)
 
     async def cancel(self, task_id: str) -> bool:
         async with self._lock:
@@ -562,42 +569,42 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         state = self._session_store.get(terminal_key)
         if state is not None:
             return state
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         return self._session_store.get(session_name)
 
     async def close_terminal(self, terminal_key: str) -> bool:
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         # Cancel any tasks running on this terminal so they release the session lock.
         async with self._lock:
             for meta in self._tasks.values():
                 if meta.session_name == session_name and not meta.cancel_requested:
                     meta.cancel_requested = True
-        exists = await self._session_exists(session_name)
+        exists = await self.session_exists(session_name)
         if not exists:
             return False
         return await self._terminate_session(session_name)
 
     async def ensure_terminal(self, *, terminal_key: str, workdir: str, env: dict[str, str] | None = None) -> tuple[bool, str]:
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         async with self._session_lock(session_name):
             return await self._ensure_persistent_session(session_name, workdir=workdir, env=env)
 
     async def ensure_claude_interactive_session(
         self, *, terminal_key: str, workdir: str, env: dict[str, str] | None = None
     ) -> tuple[bool, str]:
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         async with self._session_lock(session_name):
             return await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=env)
 
     async def ensure_claude_resume_session(
         self, *, terminal_key: str, workdir: str, session_id: str, env: dict[str, str] | None = None
     ) -> tuple[bool, str]:
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         async with self._session_lock(session_name):
             return await self._ensure_claude_resume_session(session_name=session_name, workdir=workdir, session_id=session_id, env=env)
 
     async def send_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         prompt = self._wrap_interactive_prompt(prompt=text)
         ready, err = await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=None)
         if not ready:
@@ -612,7 +619,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         option_index: int,
         submit_after: bool = False,
     ) -> tuple[bool, str]:
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
         if not ready:
             return False, err
@@ -638,7 +645,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         text: str,
         submit_after: bool = False,
     ) -> tuple[bool, str]:
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
         if not ready:
             return False, err
@@ -669,7 +676,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         workdir: str,
         final_question: bool,
     ) -> tuple[bool, str]:
-        session_name = self._build_session_name(terminal_key)
+        session_name = self.build_session_name(terminal_key)
         ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
         if not ready:
             return False, err
@@ -684,8 +691,8 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         return True, ""
 
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
-        session_name = self._build_session_name(terminal_key)
-        exists = await self._session_exists(session_name)
+        session_name = self.build_session_name(terminal_key)
+        exists = await self.session_exists(session_name)
         if not exists:
             return False, f"tmux 会话不存在: {session_name}\nhint: 请先发送 /claude 创建会话后再打开桌面终端"
         try:

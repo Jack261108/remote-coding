@@ -8,6 +8,7 @@ from pathlib import Path
 from aiogram.filters import Command, CommandObject
 from aiogram.types import FSInputFile, Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.services.result_exporter import ResultExporterService, ZipSizeLimitError
 from app.services.task_service import TaskService
 
@@ -36,7 +37,7 @@ def register_export_handler(
 ):
     @router.message(Command("export"))
     async def command_export(message: Message, command: CommandObject) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         task_id, use_zip = parse_export_args(command.args)
 
         if not task_id:

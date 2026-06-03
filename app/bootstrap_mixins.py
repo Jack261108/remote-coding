@@ -13,7 +13,6 @@ from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus, utc_now
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.domain.user_question_models import extract_user_question_prompts
-from app.infra.async_utils import cancel_and_await_tasks
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 
 if TYPE_CHECKING:
@@ -377,9 +376,7 @@ class HookHandlingMixin(AppContainerBase):
             )
 
     async def _stop_background_tasks(self) -> None:
-        tasks = list(self._background_tasks)
-        self._background_tasks.clear()
-        await cancel_and_await_tasks(tasks)
+        await self._background_tasks.cancel_all()
 
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""

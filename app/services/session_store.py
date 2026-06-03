@@ -40,10 +40,6 @@ def persist_session_state(
         notifier.publish(state.session_id, state)
 
 
-def _normalize_turn_match_text(text: str) -> str:
-    return " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
-
-
 class SessionStoreFacade:
     """Backward-compatible facade delegating to new components."""
 
@@ -58,9 +54,6 @@ class SessionStoreFacade:
 
     def process(self, event) -> SessionState:
         return self._event_processor.process(event)
-
-    def _is_claude_session_id(self, session_id: str | None) -> bool:
-        return is_claude_session_id(session_id)
 
     # ─── Delegated lookup/resolution methods ───────────────────────
 

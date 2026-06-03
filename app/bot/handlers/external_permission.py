@@ -6,28 +6,16 @@ from typing import TYPE_CHECKING
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
+from app.bot.handlers.callback_utils import apply_callback_response
+from app.bot.handlers.user_utils import extract_user_id
+
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
     from app.services.external_user_question_state import ExternalUserQuestionState
-    from app.services.permission_gateway import CallbackResponse, PermissionGateway
+    from app.services.permission_gateway import PermissionGateway
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 logger = logging.getLogger(__name__)
-
-
-async def _apply_callback_response(callback: CallbackQuery, response: CallbackResponse) -> None:
-    if callback.message is not None:
-        if response.edit_message_text:
-            try:
-                await callback.message.edit_text(response.edit_message_text)  # type: ignore[union-attr]
-            except Exception:
-                logger.exception("failed to edit external permission callback message")
-        if response.clear_keyboard:
-            try:
-                await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
-            except Exception:
-                logger.exception("failed to clear external permission inline keyboard")
-    await callback.answer(response.alert_text, show_alert=response.show_alert)
 
 
 def register_external_permission_handler(
@@ -51,9 +39,16 @@ def register_external_permission_handler(
             await callback.answer("Invalid decision", show_alert=True)
             return
 
-        user_id = callback.from_user.id if callback.from_user else 0
+        user_id = extract_user_id(callback)
         response = await permission_gateway.handle_callback(data=f"perm:{token}:{decision}", user_id=user_id)
-        await _apply_callback_response(callback, response)
+        await apply_callback_response(
+            callback,
+            edit_text=response.edit_message_text,
+            clear_keyboard=response.clear_keyboard,
+            alert_text=response.alert_text,
+            show_alert=response.show_alert,
+            log_prefix="external permission",
+        )
 
     @router.callback_query(F.data.startswith("ext_uq:"))
     async def handle_external_user_question_callback(callback: CallbackQuery) -> None:
@@ -92,7 +87,7 @@ def register_external_permission_handler(
             await callback.answer("Invalid option", show_alert=True)
             return
 
-        user_id = callback.from_user.id if callback.from_user else 0
+        user_id = extract_user_id(callback)
         selected_label = prompt.options[option_index].label
 
         # Determine if this is the final question (submit after selection)

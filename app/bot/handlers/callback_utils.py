@@ -22,12 +22,12 @@ async def apply_callback_response(
     if callback.message is not None:
         if edit_text:
             try:
-                await callback.message.edit_text(edit_text)
+                await callback.message.edit_text(edit_text)  # type: ignore[union-attr]
             except Exception:
                 logger.exception("failed to edit %s callback message", log_prefix)
         if clear_keyboard:
             try:
-                await callback.message.edit_reply_markup(reply_markup=None)
+                await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
             except Exception:
                 logger.exception("failed to clear %s inline keyboard", log_prefix)
     await callback.answer(alert_text, show_alert=show_alert)

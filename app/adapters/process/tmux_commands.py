@@ -9,7 +9,7 @@ _INTERACTIVE_SYSTEM_PROMPT = "你是 Telegram CLI 网关的后端。直接输出
 class TmuxCommandMixin:
     _claude_cli_bin: str
 
-    def _build_session_name(self, terminal_key: str) -> str:
+    def build_session_name(self, terminal_key: str) -> str:
         sanitized = "".join(ch for ch in terminal_key if ch.isalnum() or ch in {"-", "_"})
         if not sanitized:
             sanitized = "terminal"

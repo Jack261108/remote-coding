@@ -8,6 +8,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.services.claude_command_discovery import ClaudeCommand, discover_commands
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
@@ -49,7 +50,7 @@ def register_cmds_handler(
 ) -> None:
     @router.message(Command("cmds"))
     async def command_cmds(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         session = await session_service.get(user_id)
 
         if session is None or not session.claude_chat_active:
@@ -102,7 +103,7 @@ def register_cmds_handler(
 
     @router.callback_query(F.data.startswith(_CB_PREFIX))
     async def handle_cmd_callback(callback: CallbackQuery) -> None:
-        user_id = callback.from_user.id if callback.from_user else 0
+        user_id = extract_user_id(callback)
         slash_text = _parse_callback_data(callback.data or "")
         if not slash_text:
             await callback.answer("Invalid command", show_alert=True)

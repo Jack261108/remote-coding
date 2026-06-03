@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from typing import Any
 
 from app.bot.presenters.structured_reply_models import (
     FileToolAggregateStatusOutput,
@@ -15,6 +17,10 @@ from app.domain.session_models import ToolStatus
 from app.domain.user_question_models import UserQuestionPrompt, extract_user_question_prompts
 
 _TASK_LIST_VISIBLE_LIMIT = 20
+
+
+def _format_omitted(omitted: int) -> str:
+    return f"...另有 {omitted} 项未显示"
 
 
 def _format_tool_input_detail(tool_name: str | None, tool_input: dict | None) -> tuple[str, str] | None:
@@ -127,7 +133,7 @@ def build_tool_task_list_message(output: ToolStatusOutput) -> str:
 
     omitted = len(visible_tools) - len(display_indexes)
     if omitted > 0:
-        lines.append(f"...另有 {omitted} 项未显示")
+        lines.append(_format_omitted(omitted))
 
     return "\n".join(lines)
 
@@ -155,7 +161,7 @@ def build_task_list_status_message(output: TaskListStatusOutput) -> str:
 
     omitted = len(visible_items) - len(display_indexes)
     if omitted > 0:
-        lines.append(f"...另有 {omitted} 项未显示")
+        lines.append(_format_omitted(omitted))
 
     return "\n".join(lines)
 
@@ -216,7 +222,7 @@ def build_file_tool_aggregate_status_message(output: FileToolAggregateStatusOutp
 
     omitted = len(tools) - len(display_tools)
     if omitted > 0:
-        lines.append(f"...另有 {omitted} 项未显示")
+        lines.append(_format_omitted(omitted))
 
     return "\n".join(lines)
 
@@ -263,12 +269,27 @@ def _file_tool_aggregate_summary(tools: tuple[ToolStatusOutput, ...]) -> str | N
     return "，".join(parts) or None
 
 
-def _select_active_file_tool_index(tools: tuple[ToolStatusOutput, ...]) -> int | None:
-    for status in (ToolStatus.RUNNING.value, ToolStatus.WAITING_FOR_APPROVAL.value, ToolStatus.ERROR.value, ToolStatus.INTERRUPTED.value):
-        for index, tool in enumerate(tools):
-            if tool.status == status:
+def _select_active_index(
+    items: tuple[Any, ...], *, get_status: Callable[[Any], str | None], priority_statuses: tuple[str, ...]
+) -> int | None:
+    for status in priority_statuses:
+        for index, item in enumerate(items):
+            if get_status(item) == status:
                 return index
     return None
+
+
+def _select_active_file_tool_index(tools: tuple[ToolStatusOutput, ...]) -> int | None:
+    return _select_active_index(
+        tools,
+        get_status=lambda t: t.status,
+        priority_statuses=(
+            ToolStatus.RUNNING.value,
+            ToolStatus.WAITING_FOR_APPROVAL.value,
+            ToolStatus.ERROR.value,
+            ToolStatus.INTERRUPTED.value,
+        ),
+    )
 
 
 def _file_tool_detail(tool: ToolStatusOutput) -> str | None:
@@ -299,20 +320,7 @@ def _subagent_aggregate_status_text(containers: tuple[ToolStatusOutput, ...]) ->
 
 
 def _subagent_aggregate_status_count(containers: tuple[ToolStatusOutput, ...], *, status_text: str) -> int:
-    return sum(1 for container in containers if _subagent_container_aggregate_status_text(container) == status_text)
-
-
-def _subagent_container_aggregate_status_text(container: ToolStatusOutput) -> str:
-    statuses = _subagent_container_status_values((container,))
-    if ToolStatus.WAITING_FOR_APPROVAL.value in statuses:
-        return "waiting"
-    if ToolStatus.RUNNING.value in statuses:
-        return "running"
-    if ToolStatus.ERROR.value in statuses:
-        return "failed"
-    if ToolStatus.INTERRUPTED.value in statuses:
-        return "interrupted"
-    return "finished"
+    return sum(1 for container in containers if _subagent_aggregate_status_text((container,)) == status_text)
 
 
 def _subagent_container_status_text(container: ToolStatusOutput) -> str:
@@ -377,94 +385,94 @@ def _subagent_tool_names_summary(tools: tuple[SubagentToolStatusOutput, ...]) ->
     return _truncate_permission_text("、".join(parts))
 
 
+_TOOL_STATUS_ICON: dict[str | None, str] = {
+    ToolStatus.RUNNING.value: "🔄",
+    ToolStatus.SUCCESS.value: "✅",
+    ToolStatus.ERROR.value: "❌",
+    ToolStatus.INTERRUPTED.value: "⏹️",
+    ToolStatus.WAITING_FOR_APPROVAL.value: "⏳",
+}
+
+
 def _tool_status_icon(status: str | None) -> str:
-    if status == ToolStatus.RUNNING.value:
-        return "🔄"
-    if status == ToolStatus.SUCCESS.value:
-        return "✅"
-    if status == ToolStatus.ERROR.value:
-        return "❌"
-    if status == ToolStatus.INTERRUPTED.value:
-        return "⏹️"
-    if status == ToolStatus.WAITING_FOR_APPROVAL.value:
-        return "⏳"
-    return "⏳"
+    return _TOOL_STATUS_ICON.get(status, "⏳")
+
+
+_TOOL_STATUS_LABEL: dict[str | None, str] = {
+    ToolStatus.RUNNING.value: "执行中",
+    ToolStatus.SUCCESS.value: "完成",
+    ToolStatus.ERROR.value: "失败",
+    ToolStatus.INTERRUPTED.value: "已中断",
+    ToolStatus.WAITING_FOR_APPROVAL.value: "等待权限",
+}
 
 
 def _tool_status_label(status: str | None) -> str:
-    if status == ToolStatus.RUNNING.value:
-        return "执行中"
-    if status == ToolStatus.SUCCESS.value:
-        return "完成"
-    if status == ToolStatus.ERROR.value:
-        return "失败"
-    if status == ToolStatus.INTERRUPTED.value:
-        return "已中断"
-    if status == ToolStatus.WAITING_FOR_APPROVAL.value:
-        return "等待权限"
-    return "未知"
+    return _TOOL_STATUS_LABEL.get(status, "未知")
 
 
 def _select_active_subagent_index(tools: tuple[SubagentToolStatusOutput, ...]) -> int | None:
-    for status in (ToolStatus.RUNNING.value, ToolStatus.WAITING_FOR_APPROVAL.value, ToolStatus.ERROR.value, ToolStatus.INTERRUPTED.value):
-        for index, tool in enumerate(tools):
-            if tool.status == status:
-                return index
-    return None
+    return _select_active_index(
+        tools,
+        get_status=lambda t: t.status,
+        priority_statuses=(
+            ToolStatus.RUNNING.value,
+            ToolStatus.WAITING_FOR_APPROVAL.value,
+            ToolStatus.ERROR.value,
+            ToolStatus.INTERRUPTED.value,
+        ),
+    )
+
+
+def _select_visible_indexes(count: int, *, active_index: int | None, limit: int = _TASK_LIST_VISIBLE_LIMIT) -> tuple[int, ...]:
+    if count <= limit:
+        return tuple(range(count))
+    indexes = list(range(limit))
+    if active_index is not None and active_index not in indexes:
+        indexes[-1] = active_index
+    return tuple(indexes)
 
 
 def _select_visible_subagent_indexes(tools: tuple[SubagentToolStatusOutput, ...], *, active_index: int | None) -> tuple[int, ...]:
-    if len(tools) <= _TASK_LIST_VISIBLE_LIMIT:
-        return tuple(range(len(tools)))
-    indexes = list(range(_TASK_LIST_VISIBLE_LIMIT))
-    if active_index is not None and active_index not in indexes:
-        indexes[-1] = active_index
-    return tuple(indexes)
+    return _select_visible_indexes(len(tools), active_index=active_index)
 
 
 def _select_active_task_list_item_index(items: tuple[TaskListItemStatusOutput, ...]) -> int | None:
-    for status in ("in_progress", "failed", "interrupted", "pending"):
-        for index, item in enumerate(items):
-            if item.status == status:
-                return index
-    return None
+    return _select_active_index(
+        items,
+        get_status=lambda t: t.status,
+        priority_statuses=("in_progress", "failed", "interrupted", "pending"),
+    )
 
 
 def _select_visible_task_list_item_indexes(items: tuple[TaskListItemStatusOutput, ...], *, active_index: int | None) -> tuple[int, ...]:
-    if len(items) <= _TASK_LIST_VISIBLE_LIMIT:
-        return tuple(range(len(items)))
-    indexes = list(range(_TASK_LIST_VISIBLE_LIMIT))
-    if active_index is not None and active_index not in indexes:
-        indexes[-1] = active_index
-    return tuple(indexes)
+    return _select_visible_indexes(len(items), active_index=active_index)
+
+
+_TASK_LIST_ITEM_STATUS_ICON: dict[str | None, str] = {
+    "in_progress": "🔄",
+    "completed": "✅",
+    "failed": "❌",
+    "interrupted": "⏹️",
+    "deleted": "🗑️",
+}
 
 
 def _task_list_item_status_icon(status: str | None) -> str:
-    if status == "in_progress":
-        return "🔄"
-    if status == "completed":
-        return "✅"
-    if status == "failed":
-        return "❌"
-    if status == "interrupted":
-        return "⏹️"
-    if status == "deleted":
-        return "🗑️"
-    return "⏳"
+    return _TASK_LIST_ITEM_STATUS_ICON.get(status, "⏳")
+
+
+_TASK_LIST_ITEM_STATUS_LABEL: dict[str | None, str] = {
+    "in_progress": "执行中",
+    "completed": "完成",
+    "failed": "失败",
+    "interrupted": "已中断",
+    "deleted": "已删除",
+}
 
 
 def _task_list_item_status_label(status: str | None) -> str:
-    if status == "in_progress":
-        return "执行中"
-    if status == "completed":
-        return "完成"
-    if status == "failed":
-        return "失败"
-    if status == "interrupted":
-        return "已中断"
-    if status == "deleted":
-        return "已删除"
-    return "待执行"
+    return _TASK_LIST_ITEM_STATUS_LABEL.get(status, "待执行")
 
 
 def _is_user_question_tool(tool_name: str | None, tool_input: dict | None) -> bool:

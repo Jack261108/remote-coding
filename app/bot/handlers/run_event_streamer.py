@@ -151,7 +151,7 @@ class RunEventStreamer:
         try:
             task.exception()
         except Exception:
-            pass
+            logger.exception("background task raised an exception", extra={"task_name": task.get_name()})
 
     def _forget_abandoned_interactive_pump(self, task: asyncio.Task) -> None:
         _ABANDONED_INTERACTIVE_PUMP_TASKS.discard(task)
@@ -222,6 +222,8 @@ class RunEventStreamer:
                     await self._dispatcher.emit_presenter_messages(log_missing=False)
         except asyncio.CancelledError:
             raise
+        except Exception:
+            logger.exception("interactive pump failed", extra={"user_id": self._user_id})
 
     def _capture_diff_snapshot(self) -> None:
         """Capture pre-task filesystem snapshot for diff generation (non-blocking)."""
@@ -297,7 +299,6 @@ class RunEventStreamer:
             )
 
     async def stream_events(self) -> None:
-        saw_exit = False
         saw_terminal = False
         try:
             async for event in self._start.events:
@@ -331,8 +332,6 @@ class RunEventStreamer:
 
                 if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
                     saw_terminal = True
-                if event.type == EventType.EXITED:
-                    saw_exit = True
 
                 if self._start.interactive:
                     async with self._emit_lock:
@@ -381,7 +380,7 @@ class RunEventStreamer:
             try:
                 await self._stop_spinner()
                 await self._messenger.set_reaction(None)
-                if saw_exit and self._start.interactive:
+                if saw_terminal and self._start.interactive:
                     await asyncio.sleep(0.1)
                     # Freeze the presenter's last turn ID to prevent emitting
                     # new turns that arrive after task completion (e.g., idle greetings).

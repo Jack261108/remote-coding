@@ -21,13 +21,12 @@ from app.domain.models import (
     TaskStatus,
     utc_now,
 )
-from app.domain.session_models import SessionState
+from app.domain.session_models import SessionState, is_claude_session_id
 from app.domain.user_question_models import UserQuestionPrompt
 from app.services.permission_service import PermissionService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.structured_session_resolver import StructuredSessionResolver
-from app.services.task_interaction_facade import TaskInteractionFacade
 from app.services.task_lifecycle_service import apply_task_event
 from app.services.terminal_session_service import TerminalSessionService
 from app.services.user_question_service import UserQuestionService
@@ -46,11 +45,7 @@ class StartTaskResult:
 
 
 class TaskService:
-    """Core task orchestration service.
-
-    Interaction methods (structured session, user questions, permissions) are
-    explicitly forwarded to the internal TaskInteractionFacade.
-    """
+    """Core task orchestration service."""
 
     def __init__(
         self,
@@ -82,23 +77,16 @@ class TaskService:
             cli_factory=cli_factory,
             structured_session_store=structured_session_store,
             hook_socket_server=hook_socket_server,
-            get_structured_session=self._structured_session_resolver.get_structured_session,
-            is_state_owned_by_user=self._structured_session_resolver.is_state_owned_by_user,
+            session_resolver=self._structured_session_resolver,
         )
         self._permission_service = PermissionService(
             session_service=session_service,
             structured_session_store=structured_session_store,
             hook_socket_server=hook_socket_server,
-            get_structured_session=self._structured_session_resolver.get_structured_session,
-            is_state_owned_by_user=self._structured_session_resolver.is_state_owned_by_user,
+            session_resolver=self._structured_session_resolver,
             permission_lock_ttl_sec=settings.effective_permission_lock_ttl_sec,
             lock_cleanup_interval_sec=settings.lock_cleanup_interval_sec,
             lock_cleanup_batch_size=settings.lock_cleanup_batch_size,
-        )
-        self._interaction_facade = TaskInteractionFacade(
-            structured_session_resolver=self._structured_session_resolver,
-            user_question_service=self._user_question_service,
-            permission_service=self._permission_service,
         )
         self._terminal_session_service = TerminalSessionService(
             settings=settings,
@@ -117,16 +105,20 @@ class TaskService:
     def _cleanup_task_lifecycle_lock(self, task_id: str) -> None:
         self._task_lifecycle_locks.pop(task_id, None)
 
-    # ─── Forwarded interaction methods (from TaskInteractionFacade) ────
+    # ─── Structured session methods ───────────────────────────────
 
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True) -> SessionState | None:
-        return await self._interaction_facade.get_structured_session(user_id, log_missing=log_missing)
+        return await self._structured_session_resolver.get_structured_session(user_id, log_missing=log_missing)
 
     async def get_structured_session_for_task(self, *, task_id: str, user_id: int, log_missing: bool = True) -> SessionState | None:
-        return await self._interaction_facade.get_structured_session_for_task(task_id=task_id, user_id=user_id, log_missing=log_missing)
+        return await self._structured_session_resolver.get_structured_session_for_task(
+            task_id=task_id, user_id=user_id, log_missing=log_missing
+        )
 
     async def get_structured_session_for_scope(self, *, user_id: int, task_id: str | None, log_missing: bool) -> SessionState | None:
-        return await self._interaction_facade.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=log_missing)
+        return await self._structured_session_resolver.get_structured_session_for_scope(
+            user_id=user_id, task_id=task_id, log_missing=log_missing
+        )
 
     def lookup_structured_session(
         self,
@@ -139,7 +131,7 @@ class TaskService:
         claude_chat_active: bool,
         log_missing: bool,
     ) -> SessionState | None:
-        return self._interaction_facade.lookup_structured_session(
+        return self._structured_session_resolver._lookup_structured_session(
             user_id=user_id,
             provider=provider,
             workdir=workdir,
@@ -150,86 +142,99 @@ class TaskService:
         )
 
     def is_claude_session_id(self, session_id: str | None) -> bool:
-        return self._interaction_facade.is_claude_session_id(session_id)
+        return is_claude_session_id(session_id)
 
     async def is_state_owned_by_user(self, *, state: SessionState | None, user_id: int) -> bool:
-        return await self._interaction_facade.is_state_owned_by_user(state=state, user_id=user_id)
+        return await self._structured_session_resolver.is_state_owned_by_user(state=state, user_id=user_id)
 
     async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
-        return await self._interaction_facade.get_structured_session_cursor(user_id, task_id=task_id)
+        return await self._structured_session_resolver.get_structured_session_cursor(user_id, task_id=task_id)
 
     async def get_structured_session_revision(self, user_id: int) -> int:
-        return await self._interaction_facade.get_structured_session_revision(user_id)
+        return await self._structured_session_resolver.get_structured_session_revision(user_id)
 
     async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None) -> tuple[str | None, str | None]:
-        return await self._interaction_facade.get_structured_reply_cursor(user_id, task_id=task_id)
+        return await self._structured_session_resolver.get_structured_reply_cursor(user_id, task_id=task_id)
 
     async def acknowledge_structured_reply(
         self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
     ) -> None:
-        await self._interaction_facade.acknowledge_structured_reply(
+        await self._structured_session_resolver.acknowledge_structured_reply(
             user_id, turn_id=turn_id, permission_key=permission_key, task_id=task_id
         )
-
-    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None) -> str | None:
-        return await self._interaction_facade.get_structured_user_question_cursor(user_id, task_id=task_id)
-
-    async def acknowledge_structured_user_question(
-        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
-    ) -> None:
-        await self._interaction_facade.acknowledge_structured_user_question(user_id, question_key=question_key, task_id=task_id)
 
     async def wait_for_structured_session_update(
         self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
     ) -> bool:
-        return await self._interaction_facade.wait_for_structured_session_update(
+        return await self._structured_session_resolver.wait_for_structured_session_update(
             user_id=user_id, since_cursor=since_cursor, timeout_sec=timeout_sec, task_id=task_id
         )
 
     async def wait_for_structured_session_change(self, *, user_id: int, since_revision: int, timeout_sec: float) -> bool:
-        return await self._interaction_facade.wait_for_structured_session_change(
+        return await self._structured_session_resolver.wait_for_structured_session_change(
             user_id=user_id, since_revision=since_revision, timeout_sec=timeout_sec
         )
 
+    # ─── User question methods ───────────────────────────────────
+
+    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None) -> str | None:
+        if task_id is not None:
+            return await self._structured_session_resolver.get_structured_user_question_cursor_for_task(user_id, task_id=task_id)
+        return await self._user_question_service.get_structured_user_question_cursor(user_id)
+
+    async def acknowledge_structured_user_question(
+        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
+    ) -> None:
+        if task_id is not None:
+            await self._structured_session_resolver.acknowledge_structured_user_question_for_task(
+                user_id,
+                question_key=question_key,
+                task_id=task_id,
+            )
+            return
+        await self._user_question_service.acknowledge_structured_user_question(user_id, question_key=question_key)
+
     async def get_pending_user_questions(self, user_id: int) -> tuple[UserQuestionPrompt, ...]:
-        return await self._interaction_facade.get_pending_user_questions(user_id)
+        return await self._user_question_service.get_pending_user_questions(user_id)
 
     async def answer_pending_user_question_option(
         self, *, user_id: int, tool_use_id: str, question_index: int, option_index: int
     ) -> tuple[bool, str, UserQuestionPrompt | None]:
-        return await self._interaction_facade.answer_pending_user_question_option(
+        return await self._user_question_service.answer_pending_user_question_option(
             user_id=user_id, tool_use_id=tool_use_id, question_index=question_index, option_index=option_index
         )
 
     async def toggle_pending_user_question_multi_select_option(
         self, *, user_id: int, tool_use_id: str, question_index: int, option_index: int
     ) -> tuple[bool, str, UserQuestionPrompt | None, frozenset[int] | None]:
-        return await self._interaction_facade.toggle_pending_user_question_multi_select_option(
+        return await self._user_question_service.toggle_pending_user_question_multi_select_option(
             user_id=user_id, tool_use_id=tool_use_id, question_index=question_index, option_index=option_index
         )
 
     async def submit_pending_user_question_multi_select(
         self, *, user_id: int, tool_use_id: str, question_index: int
     ) -> tuple[bool, str, UserQuestionPrompt | None]:
-        return await self._interaction_facade.submit_pending_user_question_multi_select(
+        return await self._user_question_service.submit_pending_user_question_multi_select(
             user_id=user_id, tool_use_id=tool_use_id, question_index=question_index
         )
 
     async def answer_pending_user_question_text(self, *, user_id: int, text: str) -> tuple[bool, str, UserQuestionPrompt | None]:
-        return await self._interaction_facade.answer_pending_user_question_text(user_id=user_id, text=text)
+        return await self._user_question_service.answer_pending_user_question_text(user_id=user_id, text=text)
 
     def extract_user_question_prompts_for_tool_use_id(
         self, state: SessionState | None, *, tool_use_id: str
     ) -> tuple[UserQuestionPrompt, ...]:
-        return self._interaction_facade.extract_user_question_prompts_for_tool_use_id(state, tool_use_id=tool_use_id)
+        return self._user_question_service._extract_user_question_prompts_for_tool_use_id(state, tool_use_id=tool_use_id)
 
     def ensure_user_question_draft(self, *, user_id: int, prompts: tuple[UserQuestionPrompt, ...]) -> object:
-        return self._interaction_facade.ensure_user_question_draft(user_id=user_id, prompts=prompts)
+        return self._user_question_service._ensure_user_question_draft(user_id=user_id, prompts=prompts)
+
+    # ─── Permission methods ──────────────────────────────────────
 
     async def respond_to_pending_permission(
         self, *, user_id: int, decision: str, reason: str | None = None, expected_tool_use_id: str | None = None
     ) -> tuple[bool, str]:
-        return await self._interaction_facade.respond_to_pending_permission(
+        return await self._permission_service.respond_to_pending_permission(
             user_id=user_id, decision=decision, reason=reason, expected_tool_use_id=expected_tool_use_id
         )
 
@@ -471,7 +476,7 @@ class TaskService:
         return self._is_workdir_allowed(str(Path(workdir).resolve()))
 
     async def bind_claude_session(self, *, user_id: int, claude_session_id: str, workdir: str | None = None) -> None:
-        await self._terminal_session_service.bind_claude_session(
+        await self._session_service.bind_claude_session(
             user_id=user_id,
             claude_session_id=claude_session_id,
             workdir=workdir,
@@ -514,7 +519,10 @@ class TaskService:
         )
         # Cleanup uploaded files when task reaches final state
         if record.is_final and self._context_builder is not None:
-            await self._context_builder.cleanup_after_task(record.user_id, record.workdir)
+            try:
+                await self._context_builder.cleanup_after_task(record.user_id, record.workdir)
+            except Exception:
+                logger.warning("cleanup_after_task failed", exc_info=True, extra={"task_id": record.task_id, "user_id": record.user_id})
 
     async def _get_last_task_ended_at(self, user_id: int) -> datetime:
         """Return the ended_at timestamp of the user's most recently completed task, or epoch if none."""

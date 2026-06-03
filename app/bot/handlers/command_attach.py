@@ -6,6 +6,7 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.services.session_registry import SessionRegistryService
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 def register_attach_handler(router: Router, *, registry_service: SessionRegistryService) -> None:
     @router.message(Command("attach"))
     async def command_attach(message: Message, command: CommandObject) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         terminal_id = (command.args or "").strip()
 
         if not terminal_id:
@@ -35,6 +36,6 @@ def register_attach_handler(router: Router, *, registry_service: SessionRegistry
 
     @router.message(Command("detach"))
     async def command_detach(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         ok, text = await registry_service.detach_user(user_id=user_id)
         await message.answer(text)

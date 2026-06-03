@@ -53,7 +53,11 @@ class SessionEventProcessor:
             state.phase = SessionPhase.PROCESSING
             state.interrupted = False
         elif event.type == SessionEventType.TURN_STARTED:
-            turn = ConversationTurn(turn_id=str(event.payload["turn_id"]), role=str(event.payload.get("role", "assistant")))
+            raw_turn_id = event.payload.get("turn_id")
+            if raw_turn_id is None:
+                self._persist(state)
+                return state
+            turn = ConversationTurn(turn_id=str(raw_turn_id), role=str(event.payload.get("role", "assistant")))
             state.turns.append(turn)
             state.current_turn_id = turn.turn_id
             state.phase = SessionPhase.PROCESSING
@@ -198,7 +202,10 @@ class SessionEventProcessor:
         payload = event.payload
         state.workdir = str(payload.get("cwd", state.workdir))
         state.claude_session_id = str(payload.get("claude_session_id") or state.claude_session_id or state.session_id)
-        last_offset = int(payload["last_offset"]) if payload.get("last_offset") is not None else None
+        try:
+            last_offset = int(payload["last_offset"]) if payload.get("last_offset") is not None else None
+        except (ValueError, TypeError):
+            last_offset = None
         reset_detected = bool(payload.get("reset_detected", False))
         turns_payload = payload.get("turns", [])
         parsed_turns = [item if isinstance(item, ConversationTurn) else ConversationTurn.from_dict(item) for item in turns_payload]

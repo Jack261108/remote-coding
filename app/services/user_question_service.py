@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState, ToolStatus
 from app.domain.user_question_models import (
-    USER_QUESTION_TUI_FALLBACK_ERROR,
-    USER_QUESTION_TUI_FALLBACK_ERROR_PREFIX,
     UserQuestionPrompt,
     compose_user_question_answers,
     extract_user_question_prompts,
 )
+from app.infra.user_question_constants import (
+    USER_QUESTION_TUI_FALLBACK_ERROR,
+    USER_QUESTION_TUI_FALLBACK_ERROR_PREFIX,
+)
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
+from app.services.structured_session_resolver import StructuredSessionResolver
 
 
 @dataclass
@@ -35,15 +37,13 @@ class UserQuestionService:
         cli_factory: CLIAdapterFactory,
         structured_session_store: SessionStore | None,
         hook_socket_server: HookSocketServer | None,
-        get_structured_session: Callable[..., Awaitable[SessionState | None]],
-        is_state_owned_by_user: Callable[..., Awaitable[bool]],
+        session_resolver: StructuredSessionResolver,
     ) -> None:
         self._session_service = session_service
         self._cli_factory = cli_factory
         self._structured_session_store = structured_session_store
         self._hook_socket_server = hook_socket_server
-        self._get_structured_session = get_structured_session
-        self._is_state_owned_by_user = is_state_owned_by_user
+        self._session_resolver = session_resolver
         self._user_question_drafts: dict[int, _UserQuestionDraft] = {}
         self._completed_user_question_tool_use_ids_by_user: dict[int, set[str]] = {}
         self._user_question_locks: dict[int, asyncio.Lock] = {}
@@ -51,6 +51,7 @@ class UserQuestionService:
     def clear_user(self, user_id: int) -> None:
         self._user_question_drafts.pop(user_id, None)
         self._completed_user_question_tool_use_ids_by_user.pop(user_id, None)
+        self._user_question_locks.pop(user_id, None)
 
     def _get_user_question_lock(self, *, user_id: int) -> asyncio.Lock:
         lock = self._user_question_locks.get(user_id)
@@ -62,7 +63,7 @@ class UserQuestionService:
     async def get_structured_user_question_cursor(self, user_id: int) -> str | None:
         if self._structured_session_store is None:
             return None
-        state = await self._get_structured_session(user_id, log_missing=False)
+        state = await self._session_resolver.get_structured_session(user_id, log_missing=False)
         if state is not None:
             cursor = self._structured_session_store.get_structured_user_question_cursor(state.session_id)
             if cursor is not None:
@@ -70,7 +71,7 @@ class UserQuestionService:
         draft = self._user_question_drafts.get(user_id)
         if draft is not None:
             targeted_state = self._structured_session_store.find_by_active_user_question_tool_use_id(draft.tool_use_id)
-            if targeted_state is not None and await self._is_state_owned_by_user(state=targeted_state, user_id=user_id):
+            if targeted_state is not None and await self._session_resolver.is_state_owned_by_user(state=targeted_state, user_id=user_id):
                 return self._structured_session_store.get_structured_user_question_cursor(targeted_state.session_id)
         return None
 
@@ -78,17 +79,17 @@ class UserQuestionService:
         if self._structured_session_store is None or question_key is None:
             return
         state = self._structured_session_store.find_by_active_user_question_key(question_key)
-        if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+        if state is not None and not await self._session_resolver.is_state_owned_by_user(state=state, user_id=user_id):
             state = None
         if state is None:
             draft = self._user_question_drafts.get(user_id)
             if draft is not None and draft.tool_use_id:
                 state = self._structured_session_store.find_by_active_user_question_tool_use_id(draft.tool_use_id)
-                if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+                if state is not None and not await self._session_resolver.is_state_owned_by_user(state=state, user_id=user_id):
                     state = None
         if state is None:
-            state = await self._get_structured_session(user_id, log_missing=False)
-        if state is None or not await self._is_state_owned_by_user(state=state, user_id=user_id):
+            state = await self._session_resolver.get_structured_session(user_id, log_missing=False)
+        if state is None or not await self._session_resolver.is_state_owned_by_user(state=state, user_id=user_id):
             return
         self._structured_session_store.mark_structured_user_question_emitted(state.session_id, question_key=question_key)
 
@@ -408,11 +409,11 @@ class UserQuestionService:
         state = None
         if expected_tool_use_id and self._structured_session_store is not None:
             candidate = self._structured_session_store.find_by_active_user_question_tool_use_id(expected_tool_use_id)
-            if candidate is not None and await self._is_state_owned_by_user(state=candidate, user_id=user_id):
+            if candidate is not None and await self._session_resolver.is_state_owned_by_user(state=candidate, user_id=user_id):
                 state = candidate
         if state is None:
-            state = await self._get_structured_session(user_id, log_missing=False)
-            if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+            state = await self._session_resolver.get_structured_session(user_id, log_missing=False)
+            if state is not None and not await self._session_resolver.is_state_owned_by_user(state=state, user_id=user_id):
                 state = None
         current_state = state
         prompts = (
@@ -435,7 +436,7 @@ class UserQuestionService:
             draft = self._user_question_drafts.get(user_id)
             if draft is not None:
                 draft_state = self._structured_session_store.find_by_active_user_question_tool_use_id(draft.tool_use_id)
-                if draft_state is not None and await self._is_state_owned_by_user(state=draft_state, user_id=user_id):
+                if draft_state is not None and await self._session_resolver.is_state_owned_by_user(state=draft_state, user_id=user_id):
                     state = draft_state
                     prompts = self._extract_user_question_prompts_for_tool_use_id(state, tool_use_id=draft.tool_use_id)
         return state, prompts
@@ -553,7 +554,7 @@ class UserQuestionService:
         target_state = self._structured_session_store.find_by_active_user_question_tool_use_id(tool_use_id)
         if target_state is None and state is not None:
             target_state = self._structured_session_store.get(state.session_id)
-        if target_state is None or not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
+        if target_state is None or not await self._session_resolver.is_state_owned_by_user(state=target_state, user_id=user_id):
             return None
         return target_state
 
@@ -575,15 +576,15 @@ class UserQuestionService:
             return
 
         target_state = self._structured_session_store.find_by_active_user_question_key(prompt.key)
-        if target_state is not None and not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
+        if target_state is not None and not await self._session_resolver.is_state_owned_by_user(state=target_state, user_id=user_id):
             target_state = None
         if target_state is None and prompt.tool_use_id:
             target_state = self._structured_session_store.find_by_active_user_question_tool_use_id(prompt.tool_use_id)
-            if target_state is not None and not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
+            if target_state is not None and not await self._session_resolver.is_state_owned_by_user(state=target_state, user_id=user_id):
                 target_state = None
         if target_state is None and state is not None:
             target_state = self._structured_session_store.get(state.session_id)
-        if target_state is None or not await self._is_state_owned_by_user(state=target_state, user_id=user_id):
+        if target_state is None or not await self._session_resolver.is_state_owned_by_user(state=target_state, user_id=user_id):
             return
 
         self._structured_session_store.mark_structured_user_question_emitted(
@@ -661,7 +662,7 @@ class UserQuestionService:
         state: SessionState | None,
     ) -> tuple[str | None, str | None, str | None]:
         if state is not None and state.terminal_id and state.workdir:
-            if not await self._is_state_owned_by_user(state=state, user_id=user_id):
+            if not await self._session_resolver.is_state_owned_by_user(state=state, user_id=user_id):
                 return None, None, "当前没有可用的 Claude 持久终端"
             return state.terminal_id, state.workdir, None
 
@@ -672,6 +673,22 @@ class UserQuestionService:
             return None, None, "当前没有可用的 Claude 持久终端"
         return session.terminal_id, session.workdir, None
 
+    async def _invoke_terminal_cli_method(
+        self,
+        *,
+        user_id: int,
+        state: SessionState | None,
+        method_name: str,
+        **kwargs: object,
+    ) -> tuple[bool, str]:
+        terminal_id, workdir, err = await self._resolve_user_question_terminal(user_id=user_id, state=state)
+        if err is not None or terminal_id is None or workdir is None:
+            return False, err or "当前没有可用的 Claude 持久终端"
+        method = getattr(self._cli_factory, method_name, None)
+        if method is None:
+            return False, USER_QUESTION_TUI_FALLBACK_ERROR
+        return await method(terminal_key=terminal_id, workdir=workdir, **kwargs)
+
     async def _select_user_question_option_in_terminal(
         self,
         *,
@@ -680,15 +697,10 @@ class UserQuestionService:
         option_index: int,
         submit_after: bool,
     ) -> tuple[bool, str]:
-        terminal_id, workdir, err = await self._resolve_user_question_terminal(user_id=user_id, state=state)
-        if err is not None or terminal_id is None or workdir is None:
-            return False, err or "当前没有可用的 Claude 持久终端"
-        select_option = getattr(self._cli_factory, "select_claude_user_question_option", None)
-        if select_option is None:
-            return False, USER_QUESTION_TUI_FALLBACK_ERROR
-        return await select_option(
-            terminal_key=terminal_id,
-            workdir=workdir,
+        return await self._invoke_terminal_cli_method(
+            user_id=user_id,
+            state=state,
+            method_name="select_claude_user_question_option",
             option_index=option_index,
             submit_after=submit_after,
         )
@@ -719,15 +731,10 @@ class UserQuestionService:
         text: str,
         submit_after: bool,
     ) -> tuple[bool, str]:
-        terminal_id, workdir, err = await self._resolve_user_question_terminal(user_id=user_id, state=state)
-        if err is not None or terminal_id is None or workdir is None:
-            return False, err or "当前没有可用的 Claude 持久终端"
-        answer_with_text = getattr(self._cli_factory, "answer_claude_user_question_with_text", None)
-        if answer_with_text is None:
-            return False, USER_QUESTION_TUI_FALLBACK_ERROR
-        return await answer_with_text(
-            terminal_key=terminal_id,
-            workdir=workdir,
+        return await self._invoke_terminal_cli_method(
+            user_id=user_id,
+            state=state,
+            method_name="answer_claude_user_question_with_text",
             option_count=option_count,
             text=text,
             submit_after=submit_after,
@@ -740,15 +747,10 @@ class UserQuestionService:
         state: SessionState | None,
         final_question: bool,
     ) -> tuple[bool, str]:
-        terminal_id, workdir, err = await self._resolve_user_question_terminal(user_id=user_id, state=state)
-        if err is not None or terminal_id is None or workdir is None:
-            return False, err or "当前没有可用的 Claude 持久终端"
-        advance_after_multi_select = getattr(self._cli_factory, "advance_claude_user_question_after_multi_select", None)
-        if advance_after_multi_select is None:
-            return False, USER_QUESTION_TUI_FALLBACK_ERROR
-        return await advance_after_multi_select(
-            terminal_key=terminal_id,
-            workdir=workdir,
+        return await self._invoke_terminal_cli_method(
+            user_id=user_id,
+            state=state,
+            method_name="advance_claude_user_question_after_multi_select",
             final_question=final_question,
         )
 

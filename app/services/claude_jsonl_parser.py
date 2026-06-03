@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ from app.adapters.claude.paths import ClaudePaths
 from app.domain.hook_models import validate_path_component, validate_session_id
 from app.domain.models import utc_now
 from app.domain.session_models import ConversationTurn, SubagentToolCall, ToolCallRecord, ToolStatus
+
+logger = logging.getLogger(__name__)
 
 _SUBAGENT_TOOL_RESULT_KEYS = {"agentId", "status", "content", "prompt", "totalDurationMs", "totalTokens", "totalToolUseCount"}
 _INTERRUPT_PATTERNS = (
@@ -103,7 +106,9 @@ class ClaudeJSONLParser:
                 try:
                     self._process_line(line, state, session_id=session_id, cwd=cwd)
                 except json.JSONDecodeError:
-                    break
+                    logger.warning("Skipping malformed JSONL line at offset %d", state.last_offset + consumed)
+                    consumed += len(raw_line)
+                    continue
                 consumed += len(raw_line)
             state.last_offset += consumed
 
@@ -177,6 +182,7 @@ class ClaudeJSONLParser:
         tools: list[SubagentToolCall] = []
         seen_tool_ids: set[str] = set()
         completed_tool_ids: set[str] = set()
+        error_tool_ids: set[str] = set()
         results_by_tool_id: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
 
         for raw_line in agent_file.read_text(encoding="utf-8").splitlines():
@@ -200,6 +206,8 @@ class ClaudeJSONLParser:
                 if not tool_use_id:
                     continue
                 completed_tool_ids.add(tool_use_id)
+                if block.get("is_error"):
+                    error_tool_ids.add(tool_use_id)
                 results_by_tool_id[tool_use_id] = (
                     self._tool_result_text(block, payload),
                     self._tool_result_payload(block, payload),
@@ -228,12 +236,18 @@ class ClaudeJSONLParser:
                     continue
                 seen_tool_ids.add(tool_id)
                 result_text, structured_result = results_by_tool_id.get(tool_id, (None, None))
+                if tool_id in error_tool_ids:
+                    status = ToolStatus.ERROR
+                elif tool_id in completed_tool_ids:
+                    status = ToolStatus.SUCCESS
+                else:
+                    status = ToolStatus.RUNNING
                 tools.append(
                     SubagentToolCall(
                         tool_use_id=tool_id,
                         name=str(block.get("name") or "Tool"),
                         input=dict(block.get("input", {})) if isinstance(block.get("input"), dict) else {},
-                        status=ToolStatus.SUCCESS if tool_id in completed_tool_ids else ToolStatus.RUNNING,
+                        status=status,
                         result=result_text,
                         structured_result=structured_result,
                         started_at=timestamp,

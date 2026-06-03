@@ -7,6 +7,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.process_liveness import process_is_alive
@@ -44,7 +45,7 @@ def register_list_handler(
 ) -> None:
     @router.message(Command("list"))
     async def command_list(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         sessions = await registry_service.list_active_sessions()
 
         # Gather external sessions if discovery service is available

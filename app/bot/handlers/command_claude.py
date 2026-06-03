@@ -6,6 +6,7 @@ from pathlib import Path
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ def resolve_claude_workdir_arg(arg_text: str | None) -> str | None:
 def register_claude_handler(router, *, task_service: TaskService):
     @router.message(Command("claude"))
     async def command_claude(message: Message, command: CommandObject) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         workdir = resolve_claude_workdir_arg(command.args)
         if workdir is not None:
             if not task_service.is_workdir_allowed(workdir):

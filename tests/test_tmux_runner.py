@@ -217,7 +217,7 @@ async def test_select_user_question_option_sends_expected_tmux_keys(monkeypatch:
             key_calls.append(args)
         return 0, "", ""
 
-    monkeypatch.setattr(runner, "_session_exists", fake_session_exists)
+    monkeypatch.setattr(runner, "session_exists", fake_session_exists)
     monkeypatch.setattr(runner, "_session_current_command", fake_session_current_command)
     monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
 
@@ -263,7 +263,7 @@ async def test_answer_user_question_with_text_uses_type_something_path(monkeypat
             key_calls.append(args)
         return 0, "", ""
 
-    monkeypatch.setattr(runner, "_session_exists", fake_session_exists)
+    monkeypatch.setattr(runner, "session_exists", fake_session_exists)
     monkeypatch.setattr(runner, "_session_current_command", fake_session_current_command)
     monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
 
@@ -300,7 +300,7 @@ async def test_select_user_question_option_returns_text_fallback_when_not_tui(mo
             return 0, "请直接按选项回复我，格式示例：2 / 3 / 3\n", ""
         return 0, "", ""
 
-    monkeypatch.setattr(runner, "_session_exists", fake_session_exists)
+    monkeypatch.setattr(runner, "session_exists", fake_session_exists)
     monkeypatch.setattr(runner, "_session_current_command", fake_session_current_command)
     monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
 
@@ -601,7 +601,7 @@ async def test_interactive_timeout_keeps_session_alive(tmp_path: Path, caplog: p
 
     assert events[-1].type == EventType.TIMEOUT
     assert any(record.message == "tmux task timeout" for record in caplog.records)
-    assert any(record.message == "task finished" and record.result == "timeout" for record in caplog.records)
+    assert any(record.message == "tmux task finished" and record.result == "timeout" for record in caplog.records)
     state = runner._session_store.get(session_name)
     assert state is not None
     assert state.phase == SessionPhase.PROCESSING
@@ -1705,7 +1705,7 @@ async def test_cancel_returns_false_when_ephemeral_terminate_fails(
         workdir=str(tmp_path),
         persistent_terminal=False,
     )
-    runner.registry.register(meta.task_id, meta)
+    runner._tasks[meta.task_id] = meta
 
     async def fake_terminate(session_name: str) -> bool:
         assert session_name == "tgcli_task_cancel"

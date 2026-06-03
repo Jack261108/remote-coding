@@ -162,6 +162,7 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
         )
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(
         HookEvent(
@@ -202,6 +203,7 @@ async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_work
         return None
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(
         HookEvent(
@@ -237,6 +239,7 @@ async def test_handle_hook_event_does_not_bind_session_by_unique_workdir_when_cl
         return None
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(
         HookEvent(
@@ -281,6 +284,7 @@ async def test_handle_hook_event_does_not_bind_session_for_stale_processing_term
         return None
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(
         HookEvent(
@@ -338,6 +342,7 @@ async def test_handle_hook_event_binds_session_when_terminal_state_has_content_w
         return None
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(
         HookEvent(
@@ -386,6 +391,7 @@ async def test_handle_hook_event_binds_session_when_pending_interactive_task_mat
         return None
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(
         HookEvent(
@@ -433,6 +439,7 @@ async def test_handle_hook_event_does_not_bind_session_when_only_final_task_matc
         return None
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(
         HookEvent(
@@ -519,6 +526,7 @@ async def test_handle_hook_event_debounces_jsonl_sync(tmp_path, monkeypatch: pyt
         seen.append((session_id, cwd))
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running"))
     await container._handle_hook_event(HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="Notification", status="running"))
@@ -590,6 +598,7 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
     monkeypatch.setattr(container.hook_socket_server, "stop", fake_stop)
     monkeypatch.setattr(container.bot.session, "close", fake_close)
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container.start()
     container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
@@ -617,6 +626,7 @@ async def test_debounced_sync_keeps_request_added_during_sync(tmp_path, monkeypa
             container._schedule_jsonl_sync(session_id, f"{cwd}-next")
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
     # Wait for debounce + 2 poll cycles (first processes initial, second picks up re-scheduled)
@@ -647,6 +657,7 @@ async def test_debounced_sync_requeues_request_after_failure(tmp_path, monkeypat
             raise RuntimeError("boom")
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     container._schedule_jsonl_sync("claude-session-1", str(tmp_path))
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
@@ -675,6 +686,7 @@ async def test_session_end_keeps_pending_sync_until_flushed(tmp_path, monkeypatc
         seen.append((session_id, cwd))
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._handle_hook_event(HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionEnd", status="ended"))
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
@@ -886,6 +898,7 @@ async def test_periodic_recheck_syncs_processing_claude_session(tmp_path, monkey
         seen.append((session_id, cwd))
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
 
     await container._recheck_active_claude_sessions()
 

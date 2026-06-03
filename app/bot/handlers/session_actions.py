@@ -5,39 +5,12 @@ import logging
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.session_id_resolver import _resolve_session_id
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_session_id(
-    session_id_prefix: str,
-    discovery: ExternalSessionDiscoveryService,
-    binder: ExternalSessionBinder,
-) -> tuple[str | None, str | None]:
-    """Resolve a partial session_id prefix to a full session_id.
-
-    Searches both unbound discovery list and bound sessions.
-    Returns (full_session_id, error_message).
-    """
-    prefix = session_id_prefix.rstrip(".")
-    candidates: list[str] = []
-
-    for s in discovery.list_unbound():
-        if s.session_id == prefix or s.session_id.startswith(prefix):
-            candidates.append(s.session_id)
-
-    for b in binder._binding_store.load_all().values():
-        if b.session_id == prefix or b.session_id.startswith(prefix):
-            if b.session_id not in candidates:
-                candidates.append(b.session_id)
-
-    if len(candidates) == 1:
-        return candidates[0], None
-    if len(candidates) == 0:
-        return None, "Session not found"
-    return None, f"Ambiguous prefix, {len(candidates)} matches. Be more specific."
 
 
 def register_session_action_handlers(
@@ -48,7 +21,7 @@ def register_session_action_handlers(
 ) -> None:
     @router.callback_query(F.data.startswith("sess:select:"))
     async def handle_session_select(callback: CallbackQuery) -> None:
-        user_id = callback.from_user.id if callback.from_user else 0
+        user_id = extract_user_id(callback)
         data = callback.data or ""
         parts = data.split(":", 2)
         if len(parts) < 3:
@@ -92,7 +65,7 @@ def register_session_action_handlers(
 
     @router.callback_query(F.data.startswith("sess:bind:"))
     async def handle_session_bind(callback: CallbackQuery) -> None:
-        user_id = callback.from_user.id if callback.from_user else 0
+        user_id = extract_user_id(callback)
         data = callback.data or ""
         parts = data.split(":", 2)
         if len(parts) < 3:
@@ -116,7 +89,7 @@ def register_session_action_handlers(
 
     @router.callback_query(F.data.startswith("sess:unbind:"))
     async def handle_session_unbind(callback: CallbackQuery) -> None:
-        user_id = callback.from_user.id if callback.from_user else 0
+        user_id = extract_user_id(callback)
         data = callback.data or ""
         parts = data.split(":", 2)
         if len(parts) < 3:

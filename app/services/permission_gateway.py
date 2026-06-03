@@ -287,22 +287,20 @@ class PermissionGateway:
             return self._response(self._alert_for_consume_result(consume_result))
 
         dispatch_result = await self._dispatch_with_completion_tracking(consume_result.snapshot, action)
-        if isinstance(dispatch_result, BackendDispatchFailed):
-            transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, dispatch_result.reason))
-            return self._response("上次发送审批结果失败，请重新触发请求" if transitioned else "会话已结束，按钮已失效")
-        if isinstance(dispatch_result, BackendDispatchUnknown):
-            transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, "dispatch_unknown"))
-            return self._response(
-                "审批结果发送状态未知，请检查最近的操作是否已生效；如未生效请重新触发"
-                if transitioned
-                else "会话已结束；本次响应结果未知，后端可能已收到，请检查会话输出或重新触发"
-            )
+        failure = await self._transition_for_dispatch_failure(token=token, dispatch_result=dispatch_result)
+        if failure is not None:
+            return self._response(failure[1])
 
-        transitioned = await asyncio.shield(self._registry.mark_resolved(token))
+        try:
+            transitioned = await asyncio.shield(self._registry.mark_resolved(token))
+        except asyncio.CancelledError:
+            await self._registry.mark_resolved(token)
+            raise
         if not transitioned:
             return self._response("会话已结束，按钮已失效")
         if action is PermissionAction.AUTO_APPROVE and consume_result.snapshot.origin is not SessionOrigin.EXTERNAL_UNBOUND:
-            assert deny_epoch_before is not None
+            if deny_epoch_before is None:
+                return self._response("已批准本次请求")
             return await self._activate_owned_or_bound(
                 token=token,
                 user_id=user_id,
@@ -347,8 +345,8 @@ class PermissionGateway:
                 return self._response(self._alert_for_consume_result(consume_result))
 
             dispatch_result = await self._dispatch_with_completion_tracking(consume_result.snapshot, PermissionAction.AUTO_APPROVE)
-            if isinstance(dispatch_result, BackendDispatchFailed):
-                transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, dispatch_result.reason))
+            failure = await self._transition_for_dispatch_failure(token=token, dispatch_result=dispatch_result)
+            if failure is not None:
                 released = await self._auto_approve_service.release_slot(
                     session_id=consume_result.snapshot.session_id,
                     user_id=user_id,
@@ -356,21 +354,7 @@ class PermissionGateway:
                 )
                 if released:
                     slot_open = False
-                return self._response("上次发送审批结果失败，请重新触发请求" if transitioned else "会话已结束，按钮已失效")
-            if isinstance(dispatch_result, BackendDispatchUnknown):
-                transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, "dispatch_unknown"))
-                released = await self._auto_approve_service.release_slot(
-                    session_id=consume_result.snapshot.session_id,
-                    user_id=user_id,
-                    attempt_id=slot_attempt_id,
-                )
-                if released:
-                    slot_open = False
-                return self._response(
-                    "审批结果发送状态未知，请检查最近的操作是否已生效；如未生效请重新触发"
-                    if transitioned
-                    else "会话已结束；本次响应结果未知，后端可能已收到，请检查会话输出或重新触发"
-                )
+                return self._response(failure[1])
 
             async with self._auto_approve_service.per_user_lock(user_id):
                 response, slot_open = await self._resolve_and_commit_unbound(
@@ -570,6 +554,39 @@ class PermissionGateway:
             return BackendDispatchSucceeded() if result else BackendDispatchFailed("backend_rejected")
         return BackendDispatchSucceeded() if bool(result) else BackendDispatchFailed("backend_rejected")
 
+    async def _transition_for_dispatch_failure(
+        self,
+        *,
+        token: str,
+        dispatch_result: BackendDispatchResult,
+        failed_text: str = "上次发送审批结果失败，请重新触发请求",
+    ) -> tuple[bool, str] | None:
+        """Handle Failed/Unknown dispatch results with state transition.
+
+        Returns None if *dispatch_result* is Succeeded (caller must handle).
+        Returns ``(transitioned, message_text)`` for Failed/Unknown.
+        """
+        if isinstance(dispatch_result, BackendDispatchSucceeded):
+            return None
+        if isinstance(dispatch_result, BackendDispatchFailed):
+            try:
+                transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, dispatch_result.reason))
+            except asyncio.CancelledError:
+                await self._registry.mark_dispatch_failed(token, dispatch_result.reason)
+                raise
+            return transitioned, failed_text if transitioned else "会话已结束，按钮已失效"
+        # BackendDispatchUnknown
+        try:
+            transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, "dispatch_unknown"))
+        except asyncio.CancelledError:
+            await self._registry.mark_dispatch_failed(token, "dispatch_unknown")
+            raise
+        return transitioned, (
+            "审批结果发送状态未知，请检查最近的操作是否已生效；如未生效请重新触发"
+            if transitioned
+            else "会话已结束；本次响应结果未知，后端可能已收到，请检查会话输出或重新触发"
+        )
+
     async def _text_after_dispatch(
         self,
         *,
@@ -581,16 +598,9 @@ class PermissionGateway:
         if isinstance(dispatch_result, BackendDispatchSucceeded):
             transitioned = await asyncio.shield(self._registry.mark_resolved(token))
             return success_text if transitioned else "会话已结束，按钮已失效"
-        if isinstance(dispatch_result, BackendDispatchFailed):
-            transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, dispatch_result.reason))
-            return failed_text if transitioned else "会话已结束，按钮已失效"
-
-        transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, "dispatch_unknown"))
-        return (
-            "审批结果发送状态未知，请检查最近的操作是否已生效；如未生效请重新触发"
-            if transitioned
-            else "会话已结束；本次响应结果未知，后端可能已收到，请检查会话输出或重新触发"
-        )
+        failure = await self._transition_for_dispatch_failure(token=token, dispatch_result=dispatch_result, failed_text=failed_text)
+        assert failure is not None
+        return failure[1]
 
     def _text_for_non_consumed(self, result: object) -> str:
         if isinstance(result, (ConsumeUnauthorized, ConsumeNotFound)):

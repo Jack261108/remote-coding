@@ -22,13 +22,13 @@ class FakeTmuxRunner:
         self._alive_sessions: set[str] = set()
         self._session_name_prefix = "tgcli_"
 
-    def _build_session_name(self, terminal_key: str) -> str:
+    def build_session_name(self, terminal_key: str) -> str:
         return f"tgcli_{terminal_key}"[:64]
 
-    async def _session_exists(self, session_name: str) -> bool:
+    async def session_exists(self, session_name: str) -> bool:
         return session_name in self._alive_sessions
 
-    async def _list_managed_sessions(self) -> list[str]:
+    async def list_managed_sessions(self) -> list[str]:
         return sorted(s for s in self._alive_sessions if s.startswith("tgcli_"))
 
 

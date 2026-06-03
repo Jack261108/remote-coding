@@ -9,6 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.adapters.claude.paths import ClaudePaths
+from app.bot.handlers.user_utils import extract_user_id
 from app.services.session_scanner import SessionInfo, SessionScanner
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
@@ -41,7 +42,7 @@ def register_resume_handler(
 ) -> None:
     @router.message(Command("resume"))
     async def command_resume(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
 
         session = await session_service.get(user_id)
         if session is None or not session.workdir:
@@ -59,7 +60,7 @@ def register_resume_handler(
 
     @router.callback_query(lambda cb: cb.data and cb.data.startswith(CALLBACK_PREFIX))
     async def callback_resume(callback: CallbackQuery) -> None:
-        user_id = callback.from_user.id if callback.from_user else 0
+        user_id = extract_user_id(callback)
         data = callback.data or ""
         session_id = data[len(CALLBACK_PREFIX) :]
 

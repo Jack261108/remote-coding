@@ -175,13 +175,6 @@ class TerminalSessionService:
             message = f"{message}\n{reveal_text}"
         return True, message
 
-    async def bind_claude_session(self, *, user_id: int, claude_session_id: str, workdir: str | None = None) -> None:
-        await self._session_service.bind_claude_session(
-            user_id=user_id,
-            claude_session_id=claude_session_id,
-            workdir=workdir,
-        )
-
     async def ensure_and_reveal_terminal(
         self,
         *,

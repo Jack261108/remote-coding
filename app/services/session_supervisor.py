@@ -26,14 +26,14 @@ class SessionSupervisor:
         *,
         session_store: SessionStore,
         claude_jsonl_parser: ClaudeJSONLParser,
-        on_jsonl_sync: Callable[[], Callable[[str, str], Awaitable[None]]],
+        on_jsonl_sync: Callable[[str, str], Awaitable[None]],
         on_dispatch_event: Callable[[SessionEvent], Awaitable[None]],
         poll_interval_sec: float = 0.2,
         debounce_sec: float = 0.1,
     ) -> None:
         self._session_store = session_store
         self._claude_jsonl_parser = claude_jsonl_parser
-        self._get_on_jsonl_sync = on_jsonl_sync
+        self._on_jsonl_sync = on_jsonl_sync
         self._on_dispatch_event = on_dispatch_event
         self._poll_interval_sec = poll_interval_sec
         self._debounce_sec = debounce_sec
@@ -206,6 +206,6 @@ class SessionSupervisor:
             return
         self._jsonl_sync_requests.pop(session_id, None)
         try:
-            await self._get_on_jsonl_sync()(session_id, cwd)
+            await self._on_jsonl_sync(session_id, cwd)
         except Exception:
             logger.exception("jsonl sync failed", extra={"session_id": session_id})

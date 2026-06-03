@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.domain.session_models import SessionEvent, SessionEventType, SessionState
 from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
+from app.services.structured_session_resolver import StructuredSessionResolver
 
 _VALID_PERMISSION_DECISIONS = {"allow", "deny"}
 
@@ -18,8 +17,7 @@ class PermissionService:
         session_service: SessionService,
         structured_session_store: SessionStore | None,
         hook_socket_server: HookSocketServer | None,
-        get_structured_session: Callable[..., Awaitable[SessionState | None]],
-        is_state_owned_by_user: Callable[..., Awaitable[bool]],
+        session_resolver: StructuredSessionResolver,
         permission_lock_ttl_sec: int = 600,
         lock_cleanup_interval_sec: int = 60,
         lock_cleanup_batch_size: int = 50,
@@ -27,8 +25,7 @@ class PermissionService:
         self._session_service = session_service
         self._structured_session_store = structured_session_store
         self._hook_socket_server = hook_socket_server
-        self._get_structured_session = get_structured_session
-        self._is_state_owned_by_user = is_state_owned_by_user
+        self._session_resolver = session_resolver
         self._permission_locks = RefCountedLockRegistry(
             ttl_sec=permission_lock_ttl_sec,
             cleanup_interval_sec=lock_cleanup_interval_sec,
@@ -79,11 +76,11 @@ class PermissionService:
         state = None
         if expected_tool_use_id is not None:
             state = self._structured_session_store.find_by_pending_tool_use_id(expected_tool_use_id)  # type: ignore[union-attr]
-            if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+            if state is not None and not await self._session_resolver.is_state_owned_by_user(state=state, user_id=user_id):
                 return None, "这个权限按钮已经过期，请等待最新的权限请求"
         if state is None:
-            state = await self._get_structured_session(user_id, log_missing=False)
-            if state is not None and not await self._is_state_owned_by_user(state=state, user_id=user_id):
+            state = await self._session_resolver.get_structured_session(user_id, log_missing=False)
+            if state is not None and not await self._session_resolver.is_state_owned_by_user(state=state, user_id=user_id):
                 state = None
         pending = state.pending_permission if state is not None else None
         if pending is None:

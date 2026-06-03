@@ -22,6 +22,13 @@ def _normalize_turn_match_text(text: str) -> str:
     return " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
 
 
+def _same_workdir(a: str | None, b: str | None) -> bool:
+    """Compare two workdir paths for equality after resolving."""
+    if not a or not b:
+        return a == b
+    return Path(a).resolve() == Path(b).resolve()
+
+
 class SessionLookupService:
     """All find_by_* methods plus interactive session resolution.
 
@@ -41,13 +48,10 @@ class SessionLookupService:
 
     # ─── Ranking helpers ───────────────────────────────────────────
 
-    def _is_claude_session_id(self, session_id: str | None) -> bool:
-        return is_claude_session_id(session_id)
-
     def _is_claude_state(self, state: SessionState | None) -> bool:
         if state is None:
             return False
-        return self._is_claude_session_id(state.claude_session_id) or self._is_claude_session_id(state.session_id)
+        return is_claude_session_id(state.claude_session_id) or is_claude_session_id(state.session_id)
 
     def _state_rank(self, state: SessionState) -> tuple[int, int, int, float, int, float, int]:
         has_content = int(bool(state.turns or state.tool_calls or state.pending_permission is not None))
@@ -230,7 +234,7 @@ class SessionLookupService:
             candidate = self._cache.hydrate_and_cache(state)
             if candidate.user_id is not None and candidate.user_id != user_id:
                 continue
-            if str(Path(candidate.workdir).resolve()) != str(Path(workdir).resolve()):
+            if not _same_workdir(candidate.workdir, workdir):
                 continue
             if terminal_id and candidate.terminal_id != terminal_id:
                 continue
@@ -275,7 +279,7 @@ class SessionLookupService:
         require_claude_session: bool = False,
     ) -> str | None:
         bound = self.find_by_terminal_id(terminal_id)
-        if self._is_claude_session_id(claude_session_id):
+        if is_claude_session_id(claude_session_id):
             explicit = self._get(claude_session_id)
             if self._is_claude_state(bound) and bound is not None and bound.session_id != claude_session_id:
                 if explicit is None or self._explicit_resolution_rank(bound) > self._explicit_resolution_rank(explicit):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.services.task_service import TaskService
 
 
@@ -14,7 +15,7 @@ def register_cancel_handler(router, *, task_service: TaskService):
             await message.answer("用法: /cancel <task_id>")
             return
 
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         canceled = await task_service.cancel(task_id=task_id, user_id=user_id)
 
         if canceled:

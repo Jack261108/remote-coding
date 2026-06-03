@@ -12,6 +12,7 @@ from aiogram.types import Message
 from app.bot.handlers.run_event_streamer import RunEventStreamer, _build_created_message
 from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
+from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.structured_reply_presenter import (
     _MARKER_LINE_RE as _PRESENTER_MARKER_LINE_RE,
@@ -393,7 +394,7 @@ def register_run_handler(
             await message.answer(str(exc))
             return
 
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         await run_prompt_and_stream(
             message=message,
             task_service=task_service,

@@ -153,7 +153,7 @@ def test_claude_jsonl_parser_ignores_truncated_tail_until_line_is_complete(tmp_p
     assert snapshot.last_offset == session_file.stat().st_size
 
 
-def test_claude_jsonl_parser_stops_before_invalid_complete_line(tmp_path) -> None:
+def test_claude_jsonl_parser_skips_invalid_complete_line(tmp_path) -> None:
     paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
     parser = ClaudeJSONLParser(paths)
     session_file = parser.session_file_path(session_id="session-1", cwd="/tmp/project")
@@ -173,21 +173,10 @@ def test_claude_jsonl_parser_stops_before_invalid_complete_line(tmp_path) -> Non
 
     snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
 
-    first_line_size = (
-        len(
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "timestamp": "2026-04-16T10:00:00Z",
-                    "message": {"id": "a1", "content": [{"type": "text", "text": "第一行"}]},
-                },
-                ensure_ascii=False,
-            ).encode("utf-8")
-        )
-        + 1
-    )
     assert [turn.text for turn in snapshot.turns] == ["\n第一行\n"]
-    assert snapshot.last_offset == first_line_size
+    # B1 fix: parser now skips malformed lines instead of stopping.
+    # last_offset advances past the bad line to the end of the file.
+    assert snapshot.last_offset == session_file.stat().st_size
 
 
 def test_claude_jsonl_parser_reports_reset_when_file_is_truncated(tmp_path) -> None:

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import timedelta
-from pathlib import Path
 
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.storage.memory import MemoryTaskStore
 from app.domain.session_models import SessionState, is_claude_session_id
-from app.services.session_lookup_service import SessionLookupService
+from app.services.session_lookup_service import SessionLookupService, _same_workdir
 from app.services.session_notifier import SessionNotifier
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
@@ -75,11 +73,7 @@ class StructuredSessionResolver:
         terminal_id = None
         claude_session_id = task.claude_session_id
         claude_chat_active = False
-        if (
-            session is not None
-            and session.provider == "claude_code"
-            and str(Path(session.workdir).resolve()) == str(Path(task.workdir).resolve())
-        ):
+        if session is not None and session.provider == "claude_code" and _same_workdir(session.workdir, task.workdir):
             terminal_id = session.terminal_id
             claude_chat_active = session.claude_chat_active
 
@@ -93,7 +87,7 @@ class StructuredSessionResolver:
                 until=task.ended_at,
                 terminal_id=terminal_id,
             )
-        if prompt_matched_state is not None and self._is_claude_session_id(
+        if prompt_matched_state is not None and is_claude_session_id(
             prompt_matched_state.claude_session_id or prompt_matched_state.session_id
         ):
             if task.claude_session_id != prompt_matched_state.session_id:
@@ -145,7 +139,7 @@ class StructuredSessionResolver:
                 )
             return None
 
-        explicit_claude_session_id = claude_session_id if self._is_claude_session_id(claude_session_id) else None
+        explicit_claude_session_id = claude_session_id if is_claude_session_id(claude_session_id) else None
 
         if self._lookup is not None:
             state = None
@@ -153,7 +147,7 @@ class StructuredSessionResolver:
             if explicit_claude_session_id is not None:
                 state = self._lookup._get(explicit_claude_session_id)
                 matched_by = "claude_session_id"
-                if state is not None and str(Path(state.workdir).resolve()) != str(Path(workdir).resolve()):
+                if state is not None and not _same_workdir(state.workdir, workdir):
                     if log_missing:
                         logger.info(
                             "structured session lookup skipped",
@@ -169,8 +163,8 @@ class StructuredSessionResolver:
                     matched_by = None
             if state is None and terminal_id:
                 candidate = self._lookup.find_by_terminal_id(terminal_id)
-                if candidate is not None and self._is_claude_session_id(candidate.claude_session_id or candidate.session_id):
-                    if str(Path(candidate.workdir).resolve()) == str(Path(workdir).resolve()):
+                if candidate is not None and is_claude_session_id(candidate.claude_session_id or candidate.session_id):
+                    if _same_workdir(candidate.workdir, workdir):
                         state = candidate
                         matched_by = "terminal_id"
                     elif log_missing:
@@ -222,7 +216,7 @@ class StructuredSessionResolver:
                 )
             return None
         state = getter(explicit_claude_session_id)
-        if state is not None and str(Path(state.workdir).resolve()) != str(Path(workdir).resolve()):
+        if state is not None and not _same_workdir(state.workdir, workdir):
             if log_missing:
                 logger.info(
                     "structured session lookup skipped",
@@ -247,9 +241,6 @@ class StructuredSessionResolver:
         )
         return state
 
-    def _is_claude_session_id(self, session_id: str | None) -> bool:
-        return is_claude_session_id(session_id)
-
     async def is_state_owned_by_user(self, *, state: SessionState | None, user_id: int) -> bool:
         if state is None:
             return False
@@ -265,9 +256,7 @@ class StructuredSessionResolver:
                 return True
 
         if session.terminal_id and state.terminal_id and session.terminal_id == state.terminal_id:
-            session_workdir = str(Path(session.workdir).resolve()) if session.workdir else None
-            state_workdir = str(Path(state.workdir).resolve()) if state.workdir else None
-            return session_workdir == state_workdir
+            return _same_workdir(session.workdir, state.workdir)
 
         return False
 
@@ -324,12 +313,10 @@ class StructuredSessionResolver:
         self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
     ) -> bool:
         if self._notifier is None:
-            await asyncio.sleep(timeout_sec)
-            return True
+            return False
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
-            await asyncio.sleep(timeout_sec)
-            return True
+            return False
         return await self._notifier.wait_for_publish(state.session_id, since_cursor=since_cursor, timeout_sec=timeout_sec)
 
     async def wait_for_structured_session_change(self, *, user_id: int, since_revision: int, timeout_sec: float) -> bool:

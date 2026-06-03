@@ -149,25 +149,3 @@ async def test_open_claude_chat_session_rejects_explicit_workdir_outside_allowli
 
     assert factory._ensured_interactive_terminal_key is None
     assert cleared_users == [1]
-
-
-@pytest.mark.asyncio
-async def test_bind_claude_session_delegates_to_session_service(tmp_path: Path) -> None:
-    service, session_service, _, _ = make_terminal_service(tmp_path)
-    workdir = tmp_path / "subdir"
-    workdir.mkdir()
-    await session_service.get_or_create(
-        user_id=1,
-        provider="claude_code",
-        workdir=str(tmp_path),
-        terminal_mode=True,
-        claude_chat_active=True,
-    )
-
-    await service.bind_claude_session(user_id=1, claude_session_id="claude-session", workdir=str(workdir))
-    session = await session_service.get(1)
-
-    assert session is not None
-    assert session.claude_session_id == "claude-session"
-    assert session.workdir == str(workdir)
-    assert session.terminal_id == expected_terminal_id(user_id=1, workdir=str(workdir))

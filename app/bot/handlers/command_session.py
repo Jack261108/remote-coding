@@ -5,6 +5,7 @@ from pathlib import Path
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.session_text import render_structured_session
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
@@ -13,7 +14,7 @@ from app.services.task_service import TaskService
 def register_session_handler(router, *, task_service: TaskService, session_service: SessionService):
     @router.message(Command("session"))
     async def command_session(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         args = (message.text or "").split(maxsplit=2)
 
         if len(args) == 1:

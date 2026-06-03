@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from aiogram import F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.structured_reply_presenter import UserQuestionOutput, build_user_question_prompt
 from app.domain.user_question_models import UserQuestionPrompt
 from app.services.task_service import TaskService
@@ -148,7 +149,7 @@ async def maybe_handle_pending_user_question_text(
     message: Message,
     task_service: TaskService,
 ) -> bool:
-    user_id = message.from_user.id if message.from_user else 0
+    user_id = extract_user_id(message)
     prompts = await task_service.get_pending_user_questions(user_id)
     if not prompts:
         return False
@@ -166,7 +167,7 @@ async def maybe_handle_pending_user_question_text(
 def register_user_question_handlers(router, *, task_service: TaskService):
     @router.callback_query(F.data.startswith(f"{_QUESTION_CALLBACK_PREFIX}:"))
     async def callback_user_question(callback: CallbackQuery) -> None:
-        user_id = callback.from_user.id if callback.from_user else 0
+        user_id = extract_user_id(callback)
         parsed = parse_user_question_callback_data(callback.data)
         if parsed is None:
             await callback.answer("无效的选择操作", show_alert=True)

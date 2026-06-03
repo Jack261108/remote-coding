@@ -6,6 +6,7 @@ import logging
 from aiogram import F, Router
 from aiogram.types import Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.domain.file_models import FileUploadResult, FileValidationError
 from app.domain.models import TaskStatus
 from app.services.background_task_registry import BackgroundTaskRegistry
@@ -119,7 +120,7 @@ async def _process_upload(
     data: bytes,
 ) -> None:
     """Validate and store a file, then reply with result."""
-    user_id = message.from_user.id if message.from_user else 0
+    user_id = extract_user_id(message)
     session = await session_service.get(user_id)
     if session is None:
         await message.answer("请先使用 /session 或 /claude 创建会话后再上传文件。")
@@ -209,7 +210,7 @@ def register_file_upload_handler(
 ) -> None:
     @router.message(F.document)
     async def handle_document(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         document = message.document
         if document is None:
             return
@@ -253,7 +254,7 @@ def register_file_upload_handler(
 
     @router.message(F.photo)
     async def handle_photo(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         if not message.photo:
             return
 

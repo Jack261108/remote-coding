@@ -5,7 +5,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from app.domain.user_question_models import USER_QUESTION_TUI_FALLBACK_ERROR
+from app.infra.user_question_constants import USER_QUESTION_TUI_FALLBACK_ERROR
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class TmuxSessionMixin:
         if not Path(workdir).is_dir():
             return False, f"workdir 不存在或不是目录: {workdir}"
         try:
-            exists = await self._session_exists(session_name)
+            exists = await self.session_exists(session_name)
         except Exception:
             exists = False
         if exists:
@@ -77,7 +77,7 @@ class TmuxSessionMixin:
         if code == 0:
             return True, ""
         try:
-            exists = await self._session_exists(session_name)
+            exists = await self.session_exists(session_name)
         except Exception:
             exists = False
         if exists:
@@ -91,7 +91,7 @@ class TmuxSessionMixin:
         if retry_code == 0:
             return True, ""
         try:
-            exists = await self._session_exists(session_name)
+            exists = await self.session_exists(session_name)
         except Exception:
             exists = False
         if exists:
@@ -236,11 +236,11 @@ class TmuxSessionMixin:
         try:
             await self._run_tmux("send-keys", "-t", session_name, "C-c")
             await asyncio.sleep(self._cancel_grace_sec)
-            exists = await self._session_exists(session_name)
+            exists = await self.session_exists(session_name)
             if not exists:
                 return True
             await self._run_tmux("kill-session", "-t", session_name)
-            exists = await self._session_exists(session_name)
+            exists = await self.session_exists(session_name)
             return not exists
         except FileNotFoundError:
             logger.error("tmux binary not found at %s", self._tmux_bin)
@@ -249,7 +249,7 @@ class TmuxSessionMixin:
             logger.warning("failed to terminate tmux session %s", session_name, exc_info=True)
             return False
 
-    async def _session_exists(self, session_name: str) -> bool:
+    async def session_exists(self, session_name: str) -> bool:
         """Return True if the tmux session exists, False if it does not.
 
         Raises on infrastructure errors (tmux binary not found, permission
@@ -259,7 +259,7 @@ class TmuxSessionMixin:
         code, _, _ = await self._run_tmux("has-session", "-t", session_name)
         return code == 0
 
-    async def _list_managed_sessions(self) -> list[str]:
+    async def list_managed_sessions(self) -> list[str]:
         """List all tmux sessions with the tgcli_ prefix."""
         try:
             code, stdout, _ = await self._run_tmux("list-sessions", "-F", "#{session_name}")
@@ -280,7 +280,7 @@ class TmuxSessionMixin:
 
     async def _ensure_live_claude_session_for_user_question(self, *, session_name: str) -> tuple[bool, str]:
         try:
-            exists = await self._session_exists(session_name)
+            exists = await self.session_exists(session_name)
         except Exception:
             return False, f"无法判断 tmux 会话状态: {session_name}\nhint: 请检查 tmux 是否可用（tmux ls）"
         if not exists:

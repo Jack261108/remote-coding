@@ -35,11 +35,21 @@ class SessionRegistryService:
         self._health_check_interval_sec = health_check_interval_sec
         self._health_check_task: asyncio.Task[None] | None = None
 
+    # ── Helpers ─────────────────────────────────────────────────────────────────
+
+    async def _check_session_liveness(self, tmux_name: str, **log_extra: object) -> bool | None:
+        """Check if a tmux session is alive. Returns None if unable to determine."""
+        try:
+            return await self._tmux_runner.session_exists(tmux_name)
+        except Exception:
+            logger.warning("cannot determine session liveness", extra={"tmux_name": tmux_name, **log_extra})
+            return None
+
     # ── Discovery ──────────────────────────────────────────────────────────────
 
     async def list_active_sessions(self) -> list[TerminalSessionInfo]:
         """List all tgcli_* tmux sessions that are alive."""
-        tmux_names = await self._tmux_runner._list_managed_sessions()
+        tmux_names = await self._tmux_runner.list_managed_sessions()
         if not tmux_names:
             return []
 
@@ -61,10 +71,8 @@ class SessionRegistryService:
             if not terminal_id:
                 continue
 
-            try:
-                alive = await self._tmux_runner._session_exists(tmux_name)
-            except Exception:
-                logger.warning("cannot determine session liveness, marking unknown", extra={"tmux_name": tmux_name})
+            alive = await self._check_session_liveness(tmux_name)
+            if alive is None:
                 alive = False
 
             # Find SessionState for phase/workdir
@@ -94,11 +102,9 @@ class SessionRegistryService:
 
     async def get_session_info(self, terminal_id: str) -> TerminalSessionInfo | None:
         """Get info about a specific session."""
-        tmux_name = self._tmux_runner._build_session_name(terminal_id)
-        try:
-            alive = await self._tmux_runner._session_exists(tmux_name)
-        except Exception:
-            logger.warning("cannot determine session liveness", extra={"terminal_id": terminal_id})
+        tmux_name = self._tmux_runner.build_session_name(terminal_id)
+        alive = await self._check_session_liveness(tmux_name, terminal_id=terminal_id)
+        if alive is None:
             return None
         if not alive:
             return None
@@ -133,11 +139,9 @@ class SessionRegistryService:
 
     async def attach_user(self, *, user_id: int, terminal_id: str) -> tuple[bool, str]:
         """Attach a user to an existing session (may be another user's session)."""
-        tmux_name = self._tmux_runner._build_session_name(terminal_id)
-        try:
-            alive = await self._tmux_runner._session_exists(tmux_name)
-        except Exception:
-            logger.warning("cannot determine session liveness for attach", extra={"terminal_id": terminal_id, "user_id": user_id})
+        tmux_name = self._tmux_runner.build_session_name(terminal_id)
+        alive = await self._check_session_liveness(tmux_name, terminal_id=terminal_id, user_id=user_id)
+        if alive is None:
             return False, f"无法判断会话 {terminal_id} 状态，请稍后重试"
         if not alive:
             return False, f"会话 {terminal_id} 不存在或已关闭"
@@ -234,13 +238,9 @@ class SessionRegistryService:
             return None
 
         terminal_id = current.terminal_id
-        tmux_name = self._tmux_runner._build_session_name(terminal_id)
-        try:
-            alive = await self._tmux_runner._session_exists(tmux_name)
-        except Exception:
-            logger.warning(
-                "cannot determine session liveness, returning current session", extra={"user_id": user_id, "terminal_id": terminal_id}
-            )
+        tmux_name = self._tmux_runner.build_session_name(terminal_id)
+        alive = await self._check_session_liveness(tmux_name, user_id=user_id, terminal_id=terminal_id)
+        if alive is None:
             return current
 
         if alive:
@@ -262,13 +262,12 @@ class SessionRegistryService:
                 or state.terminal_id == terminal_id
             ):
                 continue
-            state_tmux = self._tmux_runner._build_session_name(state.terminal_id)
-            try:
-                if await self._tmux_runner._session_exists(state_tmux):
-                    live_states.append(state)
-            except Exception:
-                logger.warning("cannot determine reattach candidate liveness, skipping", extra={"terminal_id": state.terminal_id})
+            state_tmux = self._tmux_runner.build_session_name(state.terminal_id)
+            alive = await self._check_session_liveness(state_tmux, terminal_id=state.terminal_id)
+            if alive is None:
                 continue
+            if alive:
+                live_states.append(state)
 
         if live_states:
             state = max(live_states, key=lambda candidate: (candidate.last_activity, candidate.created_at, candidate.revision))
@@ -321,17 +320,12 @@ class SessionRegistryService:
         if not contexts_with_terminals:
             return
 
-        tmux_names = [self._tmux_runner._build_session_name(ctx.terminal_id) for ctx in contexts_with_terminals]  # type: ignore[arg-type]
+        tmux_names = [self._tmux_runner.build_session_name(ctx.terminal_id) for ctx in contexts_with_terminals]  # type: ignore[arg-type]
 
         stale: list[SessionContext] = []
         for ctx, tmux_name in zip(contexts_with_terminals, tmux_names, strict=False):
-            try:
-                alive = await self._tmux_runner._session_exists(tmux_name)
-            except Exception:
-                logger.warning(
-                    "health check: cannot determine session liveness, skipping",
-                    extra={"user_id": ctx.user_id, "terminal_id": ctx.terminal_id, "tmux_name": tmux_name},
-                )
+            alive = await self._check_session_liveness(tmux_name, user_id=ctx.user_id, terminal_id=ctx.terminal_id)
+            if alive is None:
                 continue
             if not alive:
                 stale.append(ctx)

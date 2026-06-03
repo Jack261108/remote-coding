@@ -6,6 +6,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.bot.handlers.user_utils import extract_user_id
 from app.domain.models import utc_now
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
@@ -40,7 +41,7 @@ def register_external_session_handler(
 ) -> None:
     @router.message(Command("external"))
     async def command_external(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = extract_user_id(message)
         text = (message.text or "").strip()
         # Parse: /external <subcommand> [args]
         parts = text.split(maxsplit=2)
