@@ -229,6 +229,9 @@ class PermissionGateway:
         tool_input: object,
     ) -> AutoApproveOutcome:
         del tool_input
+        # AskUserQuestion 需要用户看到并回答问题，不应自动批准
+        if (tool_name or "").strip().lower() == "askuserquestion":
+            return AutoApproveOutcome.NOT_APPROVED
         if candidate_user_id is None:
             return AutoApproveOutcome.NOT_APPROVED
         if not self._auto_approve_service.is_active(session_id=session_id, user_id=candidate_user_id):

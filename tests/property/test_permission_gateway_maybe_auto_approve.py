@@ -61,6 +61,30 @@ async def _dispatch(result: object, calls: list[tuple[str, PermissionAction]], s
     return result
 
 
+@pytest.mark.asyncio
+async def test_maybe_auto_approve_skips_ask_user_question() -> None:
+    """AskUserQuestion 需要用户看到并回答问题，不应被自动批准。"""
+    aas = MaybeAutoApproveService(active=True)
+    sender = RecordingMessageSender()
+    gateway = _gateway(aas=aas, allowed_ids={USER_ID}, message_sender=sender)
+    dispatch_calls: list[tuple[str, PermissionAction]] = []
+    gateway._dispatch_with_completion_tracking = lambda snapshot, action: _dispatch(  # type: ignore[method-assign]
+        BackendDispatchSucceeded(), dispatch_calls, snapshot, action
+    )
+
+    outcome = await gateway.maybe_auto_approve(
+        session_id=SESSION_ID,
+        origin=SessionOrigin.OWNED,
+        candidate_user_id=USER_ID,
+        tool_use_id=TOOL_USE_ID,
+        tool_name="AskUserQuestion",
+        tool_input={"questions": [{"question": "Pick one", "options": [{"label": "A"}, {"label": "B"}]}]},
+    )
+
+    assert outcome is AutoApproveOutcome.NOT_APPROVED
+    assert dispatch_calls == []
+
+
 @settings(max_examples=80, deadline=None)
 @given(
     origin=st.sampled_from(list(SessionOrigin)),
