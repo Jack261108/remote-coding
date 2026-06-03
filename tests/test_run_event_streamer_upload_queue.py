@@ -79,11 +79,8 @@ class OrderRecordingMessage(DummyMessage):
             return result
 
         sent.edit_text = record_edit
-        return sent
-
-    async def answer_photo(self, photo, caption: str | None = None):
-        sent = await super().answer_photo(photo, caption=caption)
-        self._order.append("diff-photo")
+        if "--- a/file.py" in text:
+            self._order.append("diff-message")
         return sent
 
 
@@ -204,7 +201,7 @@ async def test_queued_upload_scheduler_runs_after_success_diff_output(tmp_path: 
     assert task is not None
     await task
 
-    assert order == ["success-message", "diff-photo", "scheduler"]
+    assert order == ["success-message", "diff-message", "scheduler"]
 
 
 @pytest.mark.asyncio

@@ -41,19 +41,18 @@ def _make_handler(
     allowed_user_ids: set[int] | None = None,
     permission_ttl_sec: int = 600,
 ) -> tuple[UnboundPermissionHandler, MagicMock, MagicMock]:
-    bot = MagicMock()
-    bot.send_message = AsyncMock()
-    bot.send_photo = AsyncMock()
+    message_sender = MagicMock()
+    message_sender.send_message = AsyncMock()
     hook_socket_server = MagicMock()
     hook_socket_server.respond_to_permission = AsyncMock()
     handler = UnboundPermissionHandler(
-        bot=bot,
+        message_sender=message_sender,
         hook_socket_server=hook_socket_server,
         allowed_user_ids=allowed_user_ids or {111},
         permission_ttl_sec=permission_ttl_sec,
     )
     handler.set_permission_gateway(FakePermissionGateway())
-    return handler, bot, hook_socket_server
+    return handler, message_sender, hook_socket_server
 
 
 def _make_event(tool_use_id: str = "tuid-1", session_id: str = "sess-1") -> HookEvent:

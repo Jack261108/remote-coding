@@ -13,7 +13,6 @@ from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter, normalize_stream_text
 from app.domain.models import EventType
 from app.services.diff_generator import DiffGeneratorService
-from app.services.diff_image_generator import render_diff_to_image
 from app.services.result_exporter import ResultExporterService
 from app.services.task_service import TaskService
 
@@ -239,7 +238,7 @@ class RunEventStreamer:
             self._pre_snapshot = None
 
     async def _generate_and_send_diff(self) -> None:
-        """Generate diff after successful task and send as image via Telegram."""
+        """Generate diff after successful task and send via Telegram (non-blocking)."""
         if self._diff_generator is None or self._pre_snapshot is None:
             return
         try:
@@ -253,13 +252,17 @@ class RunEventStreamer:
             if diff_result is None:
                 return
 
-            # Render diff as image
-            image_bytes = render_diff_to_image(diff_result.content)
-            photo = BufferedInputFile(file=image_bytes, filename="diff.png")
-
-            # Send as photo with caption
-            caption = f"📝 Code Changes ({diff_result.file_count} files)"
-            await self._messenger._root_message.answer_photo(photo, caption=caption)
+            if diff_result.is_patch_file:
+                # Send as .patch file attachment
+                patch_bytes = diff_result.content.encode("utf-8")
+                short_id = self._start.task.task_id[:8]
+                filename = f"{short_id}.patch"
+                doc = BufferedInputFile(file=patch_bytes, filename=filename)
+                await self._messenger._root_message.answer_document(doc, caption=f"📎 Diff ({diff_result.file_count} files)")
+            else:
+                # Send as code-block formatted message
+                diff_msg = f"```diff\n{diff_result.content}\n```"
+                await self._messenger.send_message_safely(diff_msg)
         except Exception:
             logger.exception("diff generation/send failed, skipping")
 

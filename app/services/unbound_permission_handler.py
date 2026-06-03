@@ -6,18 +6,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.bot.presenters.permission_message_builder import PermissionPromptInput
-from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.external_session_models import UnboundPermissionState
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
+from app.domain.permission_models import PermissionPromptInput
+from app.infra.text_formatting import render_markdownish_to_telegram_html
 from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 
 if TYPE_CHECKING:
-    from aiogram import Bot
-
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.message_sender import Keyboard, MessageSender
     from app.services.permission_gateway import PermissionGateway
 
 logger = logging.getLogger(__name__)
@@ -39,13 +38,13 @@ class UnboundPermissionHandler:
     def __init__(
         self,
         *,
-        bot: Bot,
+        message_sender: MessageSender,
         hook_socket_server: HookSocketServer,
         allowed_user_ids: set[int],
         permission_ttl_sec: int = 600,
         title_resolver: Callable[[str, str], str | None] | None = None,
     ) -> None:
-        self._bot = bot
+        self._message_sender = message_sender
         self._hook_socket_server = hook_socket_server
         self._allowed_user_ids = allowed_user_ids
         self._permission_ttl_sec = permission_ttl_sec
@@ -85,7 +84,7 @@ class UnboundPermissionHandler:
             )
             await self._broadcast(
                 text=result.advisory_text,
-                reply_markup=result.keyboard,
+                keyboard=result.keyboard,
                 parse_mode=None,
             )
             return
@@ -112,14 +111,8 @@ class UnboundPermissionHandler:
             session_id=event.session_id,
             session_title=self._resolve_title(event.session_id, event.cwd),
         )
-        prompt_result = gateway.message_builder.build_permission_prompt_result(prompt)
-        text = render_markdownish_to_telegram_html(prompt_result.text)
-        notified_user_ids = await self._broadcast(
-            text=text,
-            reply_markup=result.keyboard,
-            parse_mode="HTML",
-            image_bytes=prompt_result.image_bytes,
-        )
+        text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
+        notified_user_ids = await self._broadcast(text=text, keyboard=result.keyboard, parse_mode="HTML")
         state.notified_user_ids.extend(notified_user_ids)
 
         logger.info(
@@ -134,16 +127,16 @@ class UnboundPermissionHandler:
     async def handle_response(self, *, tool_use_id: str, user_id: int, decision: str) -> UnboundPermissionResponseResult:
         """Process a response from a user.
 
-        Uses a short critical section to pop pending and cancel expiry,
-        then forwards the decision outside the lock.
+        Marks the state as responded inside the lock to prevent concurrent
+        responses, then forwards the decision outside the lock.  On forwarding
+        failure the responded flag is rolled back and the expiry task is
+        re-created so the permission will eventually auto-deny rather than
+        leaving Claude stuck forever.
         """
         async with self._state_lock:
-            state = self._pending.pop(tool_use_id, None)
+            state = self._pending.get(tool_use_id)
             if state is None or state.responded:
-                if state is not None and state.responded:
-                    self._pending[tool_use_id] = state
                 return UnboundPermissionResponseResult(accepted=False, forwarded=False)
-
             state.responded = True
             state.responded_by = user_id
             self._cancel_expiry_task(tool_use_id)
@@ -163,7 +156,18 @@ class UnboundPermissionHandler:
                 extra={"tool_use_id": tool_use_id, "user_id": user_id, "decision": decision},
             )
 
-        if not forwarded:
+        if forwarded:
+            async with self._state_lock:
+                self._pending.pop(tool_use_id, None)
+        else:
+            async with self._state_lock:
+                current = self._pending.get(tool_use_id)
+                if current is state:
+                    state.responded = False
+                    state.responded_by = None
+                    self._expiry_tasks[tool_use_id] = asyncio.create_task(
+                        self._expire_permission(tool_use_id),
+                    )
             logger.warning(
                 "unbound permission decision not forwarded",
                 extra={"tool_use_id": tool_use_id, "user_id": user_id, "decision": decision},
@@ -179,7 +183,7 @@ class UnboundPermissionHandler:
                 "forwarded": forwarded,
             },
         )
-        return UnboundPermissionResponseResult(accepted=True, forwarded=forwarded)
+        return UnboundPermissionResponseResult(accepted=forwarded, forwarded=forwarded)
 
     async def invalidate_session(self, session_id: str) -> int:
         async with self._state_lock:
@@ -224,24 +228,11 @@ class UnboundPermissionHandler:
         state = self._pending.get(tool_use_id)
         return state.session_id if state is not None else None
 
-    async def _broadcast(
-        self,
-        *,
-        text: str,
-        reply_markup: object,
-        parse_mode: str | None,
-        image_bytes: bytes | None = None,
-    ) -> list[int]:
-        from aiogram.types import BufferedInputFile
-
+    async def _broadcast(self, *, text: str, keyboard: Keyboard | None, parse_mode: str | None) -> list[int]:
         notified_user_ids: list[int] = []
         for user_id in self._allowed_user_ids:
             try:
-                # Send image first if available
-                if image_bytes:
-                    photo = BufferedInputFile(file=image_bytes, filename="diff.png")
-                    await self._bot.send_photo(chat_id=user_id, photo=photo)
-                await self._bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)  # type: ignore[arg-type]
+                await self._message_sender.send_message(chat_id=user_id, text=text, keyboard=keyboard, parse_mode=parse_mode)
                 notified_user_ids.append(user_id)
             except Exception:
                 logger.warning(

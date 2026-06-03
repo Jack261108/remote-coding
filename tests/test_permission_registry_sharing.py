@@ -42,6 +42,6 @@ def test_push_notifier_does_not_keep_legacy_registry_field() -> None:
 def test_unbound_permission_handler_does_not_keep_legacy_registry_field() -> None:
     from app.services.unbound_permission_handler import UnboundPermissionHandler
 
-    handler = UnboundPermissionHandler(bot=MagicMock(), hook_socket_server=MagicMock(), allowed_user_ids={1})
+    handler = UnboundPermissionHandler(message_sender=MagicMock(), hook_socket_server=MagicMock(), allowed_user_ids={1})
 
     assert not hasattr(handler, "_permission_callback_registry")

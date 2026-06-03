@@ -1318,7 +1318,7 @@ async def test_start_restores_agent_file_watcher_for_existing_subagent_container
 @pytest.mark.asyncio
 async def test_unbound_permission_handler_requires_gateway_before_notify(tmp_path) -> None:
     handler = UnboundPermissionHandler(
-        bot=type("Bot", (), {"send_message": AsyncMock(), "send_photo": AsyncMock(), "send_document": AsyncMock()})(),
+        message_sender=type("MessageSender", (), {"send_message": AsyncMock(), "send_photo": AsyncMock(), "send_document": AsyncMock()})(),
         hook_socket_server=type("HookSocket", (), {"respond_to_permission": AsyncMock(return_value=True)})(),
         allowed_user_ids={1},
     )

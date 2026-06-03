@@ -1,38 +1,23 @@
 from __future__ import annotations
 
+import difflib
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
 
 from app.domain.permission_models import PermissionPromptInput
 
 # Re-export for backward compatibility
-__all__ = ["PermissionMessageBuilder", "PermissionPromptInput", "PermissionPromptResult"]
+__all__ = ["PermissionMessageBuilder", "PermissionPromptInput"]
 
 _COMMAND_MAX_CHARS = 300
 _DESCRIPTION_MAX_CHARS = 200
-_ZWNJ = "‌"
+_DIFF_MAX_CHARS = 1500
+_ZWNJ = "\u200c"
 _BACKTICK_RUN_RE = re.compile(r"`{3,}")
-
-
-@dataclass(frozen=True, slots=True)
-class PermissionPromptResult:
-    """Result of building a permission prompt.
-
-    Attributes:
-        text: The text message to send.
-        image_bytes: Optional image bytes to send as a photo (for Edit tool).
-    """
-
-    text: str
-    image_bytes: bytes | None = None
 
 
 class PermissionMessageBuilder:
     def build_permission_prompt(self, prompt: PermissionPromptInput) -> str:
-        return self.build_permission_prompt_result(prompt).text
-
-    def build_permission_prompt_result(self, prompt: PermissionPromptInput) -> PermissionPromptResult:
         tool_input = prompt.tool_input or {}
         tool_name = _text(prompt.tool_name)
         command = _truncate(_mapping_text(tool_input, "command"), _COMMAND_MAX_CHARS)
@@ -43,37 +28,22 @@ class PermissionMessageBuilder:
         cwd = _text(prompt.cwd)
         cwd_label = _code_segment(cwd) if cwd else "unknown"
 
-        # For Edit tool with diff-like content, render command as image instead of code block
-        image_bytes: bytes | None = None
-        has_diff_content = command and any(line.startswith(("+", "-")) for line in command.splitlines())
-        if tool_name == "Edit" and has_diff_content:
-            from app.services.diff_image_generator import render_permission_diff_to_image
-
-            image_bytes = render_permission_diff_to_image(command)
-            lines = [
-                f"🔐 [{session_label}] 请求权限: {_code_segment(tool_name)}",
-                "",
-                f"文件: {_code_segment(file_path)}" if file_path else "",
-                "",
-                "变更:",
-            ]
-            # Remove empty lines at the start
-            lines = [line for line in lines if line is not None]
-        else:
-            lines = [
-                f"🔐 [{session_label}] 请求权限: {_code_segment(tool_name)}",
-                "",
-                "命令:",
-                _fenced_code(command),
-            ]
-            if file_path:
-                lines.extend(["", f"文件: {_code_segment(file_path)}"])
-
+        lines = [
+            f"🔐 [{session_label}] 请求权限: {_code_segment(tool_name)}",
+        ]
+        if command:
+            lines.extend(["", "命令:", _fenced_code(command)])
+        if file_path:
+            lines.extend(["", f"文件: {_code_segment(file_path)}"])
         if description:
             lines.extend(["", f"描述: {_code_segment(description)}"])
-        lines.extend(["", f"📂 {cwd_label}", "", "请点击下方按钮选择允许或拒绝。"])
 
-        return PermissionPromptResult(text="\n".join(lines), image_bytes=image_bytes)
+        diff_text = _build_edit_diff(tool_input)
+        if diff_text:
+            lines.extend(["", "变更:", _fenced_code(diff_text)])
+
+        lines.extend(["", f"📂 {cwd_label}", "", "请点击下方按钮选择允许或拒绝。"])
+        return "\n".join(lines)
 
 
 def _mapping_text(mapping: Mapping[str, object], key: str) -> str:
@@ -104,3 +74,32 @@ def _sanitize_fenced_value(value: str) -> str:
     if sanitized and (sanitized.startswith(("\n", "\r")) or sanitized.endswith(("\n", "\r"))):
         return f"{_ZWNJ}{sanitized}{_ZWNJ}"
     return sanitized
+
+
+def _build_edit_diff(tool_input: Mapping[str, object]) -> str:
+    """Build a colorized diff preview for Edit tool old_string → new_string."""
+    old_string = tool_input.get("old_string")
+    new_string = tool_input.get("new_string")
+    if old_string is None or new_string is None:
+        return ""
+    old_lines = str(old_string).splitlines(keepends=True)
+    new_lines = str(new_string).splitlines(keepends=True)
+    diff_lines = list(difflib.unified_diff(old_lines, new_lines, fromfile="a", tofile="b"))
+    if not diff_lines:
+        return ""
+    styled: list[str] = []
+    for line in diff_lines:
+        if line.startswith("---") or line.startswith("+++") or line.startswith("@@"):
+            continue
+        if line.startswith("-"):
+            styled.append(f"🔴 {line[1:].rstrip()}")
+        elif line.startswith("+"):
+            styled.append(f"🟢 {line[1:].rstrip()}")
+        else:
+            styled.append(f"   {line.rstrip()}")
+    if not styled:
+        return ""
+    diff_text = "\n".join(styled)
+    if len(diff_text) > _DIFF_MAX_CHARS:
+        diff_text = diff_text[:_DIFF_MAX_CHARS] + "\n… (truncated)"
+    return diff_text
