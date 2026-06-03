@@ -32,15 +32,15 @@ class MaybeAutoApproveService(AutoApproveService):
         return True
 
 
-class RecordingBot:
+class RecordingMessageSender:
     def __init__(self) -> None:
         self.messages: list[tuple[int, str]] = []
 
-    async def send_message(self, *, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, *, keyboard=None, parse_mode=None) -> None:
         self.messages.append((chat_id, text))
 
 
-def _gateway(*, aas: MaybeAutoApproveService, allowed_ids: set[int], bot: RecordingBot) -> PermissionGateway:
+def _gateway(*, aas: MaybeAutoApproveService, allowed_ids: set[int], message_sender: RecordingMessageSender) -> PermissionGateway:
     return PermissionGateway(
         registry=SimpleNamespace(),
         auto_approve_service=aas,
@@ -48,7 +48,7 @@ def _gateway(*, aas: MaybeAutoApproveService, allowed_ids: set[int], bot: Record
         hook_socket_server=SimpleNamespace(),
         unbound_responder=SimpleNamespace(),
         settings=SimpleNamespace(allow_all_users=False, allowed_user_id_set=allowed_ids),
-        bot=bot,
+        message_sender=message_sender,
         message_builder=SimpleNamespace(),
     )
 
@@ -78,8 +78,8 @@ async def test_maybe_auto_approve_outcome_and_side_effects_are_deterministic(
     dispatch_label: str,
 ) -> None:
     aas = MaybeAutoApproveService(active=active)
-    bot = RecordingBot()
-    gateway = _gateway(aas=aas, allowed_ids={USER_ID} if user_allowed else set(), bot=bot)
+    sender = RecordingMessageSender()
+    gateway = _gateway(aas=aas, allowed_ids={USER_ID} if user_allowed else set(), message_sender=sender)
     dispatch_calls: list[tuple[str, PermissionAction]] = []
     dispatch_result = {
         "succeeded": BackendDispatchSucceeded(),
@@ -103,24 +103,24 @@ async def test_maybe_auto_approve_outcome_and_side_effects_are_deterministic(
         assert outcome is AutoApproveOutcome.NOT_APPROVED
         assert dispatch_calls == []
         assert aas.deactivated == []
-        assert bot.messages == []
+        assert sender.messages == []
     elif origin is SessionOrigin.EXTERNAL_UNBOUND and not user_allowed:
         assert outcome is AutoApproveOutcome.NOT_APPROVED
         assert dispatch_calls == []
         assert aas.deactivated == [(USER_ID, SESSION_ID)]
-        assert bot.messages == []
+        assert sender.messages == []
     elif dispatch_label == "succeeded":
         assert outcome is AutoApproveOutcome.APPROVED
         assert dispatch_calls == [(TOOL_USE_ID, PermissionAction.AUTO_APPROVE)]
         assert aas.deactivated == []
-        assert bot.messages == []
+        assert sender.messages == []
     elif dispatch_label == "failed":
         assert outcome is AutoApproveOutcome.APPROVAL_FAILED
         assert dispatch_calls == [(TOOL_USE_ID, PermissionAction.AUTO_APPROVE)]
         assert aas.deactivated == []
-        assert bot.messages == []
+        assert sender.messages == []
     else:
         assert outcome is AutoApproveOutcome.APPROVAL_UNKNOWN
         assert dispatch_calls == [(TOOL_USE_ID, PermissionAction.AUTO_APPROVE)]
         assert aas.deactivated == []
-        assert bot.messages == [(USER_ID, "本次请求的自动批准结果未知，请检查最近的操作是否已生效；如未生效请重新触发")]
+        assert sender.messages == [(USER_ID, "本次请求的自动批准结果未知，请检查最近的操作是否已生效；如未生效请重新触发")]

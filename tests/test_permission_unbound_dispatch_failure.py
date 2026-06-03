@@ -46,7 +46,7 @@ async def test_unbound_dispatch_failure_transitions_record_to_dispatch_failed() 
         hook_socket_server=SimpleNamespace(),
         unbound_responder=_UnboundResponder(),
         settings=SimpleNamespace(allow_all_users=False, allowed_user_id_set={42}),
-        bot=SimpleNamespace(),
+        message_sender=SimpleNamespace(),
         message_builder=PermissionMessageBuilder(),
     )
 

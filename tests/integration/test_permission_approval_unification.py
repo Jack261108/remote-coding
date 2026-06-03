@@ -65,11 +65,11 @@ class _UnboundResponder:
         return UnboundPermissionResponseResult(accepted=self.accepted, forwarded=self.forwarded)
 
 
-class _Bot:
+class _MessageSender:
     def __init__(self) -> None:
         self.messages: list[tuple[int, str]] = []
 
-    async def send_message(self, *, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, *, keyboard: object | None = None, parse_mode: str | None = None) -> None:
         self.messages.append((chat_id, text))
 
 
@@ -80,7 +80,7 @@ class _Harness:
         self.task_service = _TaskService()
         self.hook_socket_server = _HookSocketServer()
         self.unbound_responder = _UnboundResponder()
-        self.bot = _Bot()
+        self.bot = _MessageSender()
         self.settings = SimpleNamespace(
             allow_all_users=allow_all_users,
             allowed_user_id_set={1, 2} if allowed_ids is None else allowed_ids,
@@ -92,7 +92,7 @@ class _Harness:
             hook_socket_server=self.hook_socket_server,
             unbound_responder=self.unbound_responder,
             settings=self.settings,
-            bot=self.bot,
+            message_sender=self.bot,
             message_builder=PermissionMessageBuilder(),
         )
 
@@ -104,7 +104,7 @@ class _Harness:
             candidate_user_id=user_id,
         )
         assert isinstance(result, RegisterForButtonOk)
-        callback_data = result.keyboard.inline_keyboard[0][0].callback_data
+        callback_data = result.keyboard.rows[0][0].callback_data
         assert callback_data is not None
         _, token, _ = callback_data.split(":")
         return token

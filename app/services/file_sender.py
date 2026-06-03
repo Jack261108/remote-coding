@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from aiogram import Bot
-from aiogram.types import FSInputFile
+from app.services.message_sender import MessageSender
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +19,14 @@ class FileSenderService:
     def __init__(
         self,
         *,
-        bot: Bot,
+        message_sender: MessageSender,
         enabled: bool,
         extensions: set[str],
         image_extensions: set[str],
         photo_max_bytes: int = 10 * 1024 * 1024,
         document_max_bytes: int = 50 * 1024 * 1024,
     ) -> None:
-        self._bot = bot
+        self._message_sender = message_sender
         self._enabled = enabled
         self._extensions = extensions
         self._image_extensions = image_extensions
@@ -120,12 +119,10 @@ class FileSenderService:
                 return
 
             caption = self.build_caption(file_path, cwd)
-            input_file = FSInputFile(file_path)
-
             if classification == "image":
-                await self._bot.send_photo(chat_id, photo=input_file, caption=caption)
+                await self._message_sender.send_photo(chat_id, file_path, caption=caption)
             else:
-                await self._bot.send_document(chat_id, document=input_file, caption=caption)
+                await self._message_sender.send_document(chat_id, file_path, caption=caption)
 
             logger.info("file_sender: sent %s as %s to chat %d", file_path, classification, chat_id)
 

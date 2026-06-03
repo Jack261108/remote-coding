@@ -106,7 +106,7 @@ def _gateway(registry: TextRegistry, aas: AutoApproveService) -> PermissionGatew
         hook_socket_server=SimpleNamespace(),
         unbound_responder=SimpleNamespace(),
         settings=SimpleNamespace(allow_all_users=False, allowed_user_id_set={USER_ID}),
-        bot=SimpleNamespace(),
+        message_sender=SimpleNamespace(),
         message_builder=SimpleNamespace(),
     )
 

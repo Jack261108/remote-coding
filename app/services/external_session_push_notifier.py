@@ -3,16 +3,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
 from app.domain.permission_models import PermissionPromptInput
 from app.infra.text_formatting import render_markdownish_to_telegram_html
+from app.services.message_sender import Button, Keyboard, MessageSender
 from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 
 if TYPE_CHECKING:
-    from aiogram import Bot
-
     from app.domain.session_models import SessionPhase
     from app.domain.user_question_models import UserQuestionPrompt
     from app.services.external_binding_store import ExternalBindingStore
@@ -27,12 +24,12 @@ class ExternalSessionPushNotifier:
     def __init__(
         self,
         *,
-        bot: Bot,
+        message_sender: MessageSender,
         binding_store: ExternalBindingStore,
         retry_count: int = 1,
         permission_gateway: PermissionGateway | None = None,
     ) -> None:
-        self._bot = bot
+        self._message_sender = message_sender
         self._binding_store = binding_store
         self._retry_count = retry_count
         self._permission_gateway = permission_gateway
@@ -64,7 +61,7 @@ class ExternalSessionPushNotifier:
                 "bound permission registration conflict",
                 extra={"tool_use_id": tool_use_id, "session_id": session_id, "user_id": user_id},
             )
-            return await self._send_with_retry(chat_id=user_id, text=result.advisory_text, reply_markup=result.keyboard)
+            return await self._send_with_retry(chat_id=user_id, text=result.advisory_text, keyboard=result.keyboard)
         if not isinstance(result, RegisterForButtonOk):
             raise RuntimeError("unexpected permission gateway registration result")
 
@@ -76,7 +73,7 @@ class ExternalSessionPushNotifier:
             session_title=title,
         )
         text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
-        return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=result.keyboard, parse_mode="HTML")
+        return await self._send_with_retry(chat_id=user_id, text=text, keyboard=result.keyboard, parse_mode="HTML")
 
     async def notify_phase_change(
         self,
@@ -141,7 +138,7 @@ class ExternalSessionPushNotifier:
             text = "\n".join(lines).rstrip()
             # Build option buttons
             # Callback data format: ext_uq:{tool_use_id}:{option_index}
-            buttons: list[list[InlineKeyboardButton]] = []
+            buttons: list[list[Button]] = []
             tool_use_id = prompt.tool_use_id
             for i, option in enumerate(prompt.options):
                 # Telegram callback_data max 64 bytes; truncate tool_use_id if needed
@@ -150,9 +147,9 @@ class ExternalSessionPushNotifier:
                     # Truncate tool_use_id to fit
                     max_id_len = 64 - len(f"ext_uq::{i}".encode())
                     cb_data = f"ext_uq:{tool_use_id[:max_id_len]}:{i}"
-                buttons.append([InlineKeyboardButton(text=f"{i + 1}. {option.label}"[:40], callback_data=cb_data)])
-            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-            return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=keyboard)
+                buttons.append([Button(text=f"{i + 1}. {option.label}"[:40], callback_data=cb_data)])
+            keyboard = Keyboard(rows=buttons)
+            return await self._send_with_retry(chat_id=user_id, text=text, keyboard=keyboard)
         else:
             lines.append("请在终端中选择")
             lines.append("")
@@ -168,13 +165,11 @@ class ExternalSessionPushNotifier:
         """Send an informational notification (no action buttons). Returns True if delivered."""
         return await self._send_with_retry(chat_id=user_id, text=text)
 
-    async def _send_with_retry(
-        self, *, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None, parse_mode: str | None = None
-    ) -> bool:
+    async def _send_with_retry(self, *, chat_id: int, text: str, keyboard: Keyboard | None = None, parse_mode: str | None = None) -> bool:
         """Send message with retry on failure."""
         for attempt in range(1 + self._retry_count):
             try:
-                await self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+                await self._message_sender.send_message(chat_id=chat_id, text=text, keyboard=keyboard, parse_mode=parse_mode)
                 return True
             except Exception:
                 if attempt < self._retry_count:

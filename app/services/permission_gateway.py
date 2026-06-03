@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
 from app.services.auto_approve_service import (
     CommitSlotMismatch,
     CommitSlotSessionEnded,
@@ -19,6 +17,7 @@ from app.services.auto_approve_service import (
     SlotClaimed,
     SlotConflict,
 )
+from app.services.message_sender import Button, Keyboard
 from app.services.permission_callback_registry import (
     AuthorizationMode,
     AutoApproveOutcome,
@@ -41,6 +40,7 @@ from app.services.permission_callback_registry import (
 )
 
 if TYPE_CHECKING:
+    from app.services.message_sender import MessageSender
     from app.services.unbound_permission_handler import UnboundPermissionResponseResult
 
 logger = logging.getLogger(__name__)
@@ -78,13 +78,13 @@ class CallbackResponse:
 
 @dataclass(frozen=True, slots=True)
 class RegisterForButtonOk:
-    keyboard: InlineKeyboardMarkup
+    keyboard: Keyboard
 
 
 @dataclass(frozen=True, slots=True)
 class RegisterForButtonConflict:
     advisory_text: str
-    keyboard: InlineKeyboardMarkup
+    keyboard: Keyboard
 
 
 RegisterForButtonResult = RegisterForButtonOk | RegisterForButtonConflict
@@ -110,7 +110,7 @@ class PermissionGateway:
         hook_socket_server: Any,
         unbound_responder: UnboundResponderProtocol,
         settings: Any,
-        bot: Any,
+        message_sender: MessageSender,
         message_builder: Any,
     ) -> None:
         self._registry = registry
@@ -119,7 +119,7 @@ class PermissionGateway:
         self._hook_socket_server = hook_socket_server
         self._unbound_responder = unbound_responder
         self._settings = settings
-        self._bot = bot
+        self._message_sender = message_sender
         self.message_builder = message_builder
 
     async def register_for_button(
@@ -274,7 +274,7 @@ class PermissionGateway:
             "permission auto-approve dispatch outcome unknown",
             extra={"session_id": session_id, "tool_name": tool_name, "tool_use_id": tool_use_id, "reason": dispatch_result.reason},
         )
-        await self._bot.send_message(
+        await self._message_sender.send_message(
             chat_id=candidate_user_id,
             text="本次请求的自动批准结果未知，请检查最近的操作是否已生效；如未生效请重新触发",
         )
@@ -657,21 +657,21 @@ class PermissionGateway:
 
         return None
 
-    def _build_permission_keyboard(self, token: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
+    def _build_permission_keyboard(self, token: str) -> Keyboard:
+        return Keyboard(
+            rows=[
                 [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=f"perm:{token}:allow"),
-                    InlineKeyboardButton(text="❌ Deny", callback_data=f"perm:{token}:deny"),
+                    Button(text="✅ Approve", callback_data=f"perm:{token}:allow"),
+                    Button(text="❌ Deny", callback_data=f"perm:{token}:deny"),
                 ],
                 [
-                    InlineKeyboardButton(text="🟢 Auto-approve", callback_data=f"perm:{token}:auto_approve"),
+                    Button(text="🟢 Auto-approve", callback_data=f"perm:{token}:auto_approve"),
                 ],
             ]
         )
 
-    def _build_advisory_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="权限请求处理中", callback_data="perm:conflict:wait")]])
+    def _build_advisory_keyboard(self) -> Keyboard:
+        return Keyboard(rows=[[Button(text="权限请求处理中", callback_data="perm:conflict:wait")]])
 
     def _response(self, alert_text: str) -> CallbackResponse:
         return CallbackResponse(alert_text=alert_text, show_alert=True, edit_message_text="", clear_keyboard=True)

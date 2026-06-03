@@ -114,7 +114,7 @@ def _gateway(registry: RecordingRegistry, aas: AutoApproveService) -> Permission
         hook_socket_server=SimpleNamespace(),
         unbound_responder=SimpleNamespace(),
         settings=SimpleNamespace(allow_all_users=False, allowed_user_id_set={USER_ID}),
-        bot=SimpleNamespace(),
+        message_sender=SimpleNamespace(),
         message_builder=SimpleNamespace(),
     )
 
@@ -309,7 +309,7 @@ def _dispatch_gateway(*, task_service: object, hook_socket_server: object, unbou
         hook_socket_server=hook_socket_server,
         unbound_responder=unbound_responder,
         settings=SimpleNamespace(allow_all_users=False, allowed_user_id_set={USER_ID}),
-        bot=SimpleNamespace(),
+        message_sender=SimpleNamespace(),
         message_builder=SimpleNamespace(),
     )
 

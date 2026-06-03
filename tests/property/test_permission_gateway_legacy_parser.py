@@ -72,7 +72,7 @@ def _gateway(registry: ParserRegistry) -> PermissionGateway:
         hook_socket_server=SimpleNamespace(),
         unbound_responder=SimpleNamespace(),
         settings=SimpleNamespace(allow_all_users=False, allowed_user_id_set={USER_ID}),
-        bot=SimpleNamespace(),
+        message_sender=SimpleNamespace(),
         message_builder=SimpleNamespace(),
     )
     gateway._dispatch_with_completion_tracking = lambda snapshot, action: _dispatch(snapshot, action)  # type: ignore[method-assign]

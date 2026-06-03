@@ -28,6 +28,7 @@ from app.bootstrap_mixins import (
     SessionRestoreMixin,
     WatcherMixin,
 )
+from app.bot.adapters.message_sender import AiogramMessageSender
 from app.bot.middleware.auth import AuthMiddleware
 from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.presenters.permission_message_builder import PermissionMessageBuilder
@@ -157,8 +158,9 @@ class AppContainer(
             ttl_sec=settings.upload_queue_ttl_sec,
             cleanup_interval_sec=settings.upload_queue_cleanup_interval_sec,
         )
+        self.message_sender = AiogramMessageSender(self.bot)
         self.file_sender = FileSenderService(
-            bot=self.bot,
+            message_sender=self.message_sender,
             enabled=settings.auto_file_send_enabled,
             extensions=set(settings.auto_file_send_extensions),
             image_extensions={".png", ".jpg", ".jpeg", ".gif", ".webp"},
@@ -211,7 +213,7 @@ class AppContainer(
             sync_callback=self.sync_claude_session,
         )
         self.unbound_permission_handler = UnboundPermissionHandler(
-            bot=self.bot,
+            message_sender=self.message_sender,
             hook_socket_server=self.hook_socket_server,
             allowed_user_ids=settings.allowed_user_id_set,
             permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
@@ -224,12 +226,12 @@ class AppContainer(
             hook_socket_server=self.hook_socket_server,
             unbound_responder=self.unbound_permission_handler,
             settings=settings,
-            bot=self.bot,
+            message_sender=self.message_sender,
             message_builder=self.permission_message_builder,
         )
         self.unbound_permission_handler.set_permission_gateway(self.permission_gateway)
         self.push_notifier = ExternalSessionPushNotifier(
-            bot=self.bot,
+            message_sender=self.message_sender,
             binding_store=self.external_binding_store,
             permission_gateway=self.permission_gateway,
             retry_count=settings.push_notification_retry_count,

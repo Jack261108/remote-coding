@@ -27,12 +27,12 @@ class TestPhaseTransitionPushNotifications:
     @pytest.mark.asyncio
     async def test_phase_change_sends_notification_to_bound_user(self):
         """Phase change triggers push notification with session context."""
-        bot = MagicMock()
-        bot.send_message = AsyncMock()
+        message_sender = MagicMock()
+        message_sender.send_message = AsyncMock()
         binding_store = MagicMock()
 
         notifier = ExternalSessionPushNotifier(
-            bot=bot,
+            message_sender=message_sender,
             binding_store=binding_store,
         )
 
@@ -49,8 +49,8 @@ class TestPhaseTransitionPushNotifications:
         )
 
         assert result is True
-        bot.send_message.assert_called_once()
-        call_kwargs = bot.send_message.call_args.kwargs
+        message_sender.send_message.assert_called_once()
+        call_kwargs = message_sender.send_message.call_args.kwargs
         assert call_kwargs["chat_id"] == user_id
         # Message should contain session info and phase transition
         text = call_kwargs["text"]
@@ -72,12 +72,12 @@ class TestPhaseTransitionPushNotifications:
         ]
 
         for old_phase, new_phase in transitions:
-            bot = MagicMock()
-            bot.send_message = AsyncMock()
+            message_sender = MagicMock()
+            message_sender.send_message = AsyncMock()
             binding_store = MagicMock()
 
             notifier = ExternalSessionPushNotifier(
-                bot=bot,
+                message_sender=message_sender,
                 binding_store=binding_store,
             )
 
@@ -90,20 +90,20 @@ class TestPhaseTransitionPushNotifications:
             )
 
             assert result is True, f"Failed for {old_phase} → {new_phase}"
-            bot.send_message.assert_called_once()
-            text = bot.send_message.call_args.kwargs["text"]
+            message_sender.send_message.assert_called_once()
+            text = message_sender.send_message.call_args.kwargs["text"]
             assert old_phase.value in text
             assert new_phase.value in text
 
     @pytest.mark.asyncio
     async def test_notification_failure_returns_false(self):
-        """When bot.send_message fails, notify_phase_change returns False."""
-        bot = MagicMock()
-        bot.send_message = AsyncMock(side_effect=Exception("Network error"))
+        """When message_sender.send_message fails, notify_phase_change returns False."""
+        message_sender = MagicMock()
+        message_sender.send_message = AsyncMock(side_effect=Exception("Network error"))
         binding_store = MagicMock()
 
         notifier = ExternalSessionPushNotifier(
-            bot=bot,
+            message_sender=message_sender,
             binding_store=binding_store,
             retry_count=0,
         )
@@ -121,12 +121,12 @@ class TestPhaseTransitionPushNotifications:
     @pytest.mark.asyncio
     async def test_notification_contains_session_context(self):
         """Push notification message includes session_id prefix and cwd."""
-        bot = MagicMock()
-        bot.send_message = AsyncMock()
+        message_sender = MagicMock()
+        message_sender.send_message = AsyncMock()
         binding_store = MagicMock()
 
         notifier = ExternalSessionPushNotifier(
-            bot=bot,
+            message_sender=message_sender,
             binding_store=binding_store,
         )
 
@@ -141,7 +141,7 @@ class TestPhaseTransitionPushNotifications:
             cwd=cwd,
         )
 
-        text = bot.send_message.call_args.kwargs["text"]
+        text = message_sender.send_message.call_args.kwargs["text"]
         # Should contain short session id (first 8 chars)
         assert session_id[:8] in text
         # Should contain cwd

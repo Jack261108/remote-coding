@@ -24,7 +24,7 @@ async def test_documented_gap_revoked_user_can_use_already_issued_unbound_button
         hook_socket_server=SimpleNamespace(),
         unbound_responder=unbound_responder,
         settings=settings,
-        bot=SimpleNamespace(),
+        message_sender=SimpleNamespace(),
         message_builder=SimpleNamespace(),
     )
 

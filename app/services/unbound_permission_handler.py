@@ -15,9 +15,8 @@ from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 
 if TYPE_CHECKING:
-    from aiogram import Bot
-
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.message_sender import Keyboard, MessageSender
     from app.services.permission_gateway import PermissionGateway
 
 logger = logging.getLogger(__name__)
@@ -39,13 +38,13 @@ class UnboundPermissionHandler:
     def __init__(
         self,
         *,
-        bot: Bot,
+        message_sender: MessageSender,
         hook_socket_server: HookSocketServer,
         allowed_user_ids: set[int],
         permission_ttl_sec: int = 600,
         title_resolver: Callable[[str, str], str | None] | None = None,
     ) -> None:
-        self._bot = bot
+        self._message_sender = message_sender
         self._hook_socket_server = hook_socket_server
         self._allowed_user_ids = allowed_user_ids
         self._permission_ttl_sec = permission_ttl_sec
@@ -85,7 +84,7 @@ class UnboundPermissionHandler:
             )
             await self._broadcast(
                 text=result.advisory_text,
-                reply_markup=result.keyboard,
+                keyboard=result.keyboard,
                 parse_mode=None,
             )
             return
@@ -113,7 +112,7 @@ class UnboundPermissionHandler:
             session_title=self._resolve_title(event.session_id, event.cwd),
         )
         text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
-        notified_user_ids = await self._broadcast(text=text, reply_markup=result.keyboard, parse_mode="HTML")
+        notified_user_ids = await self._broadcast(text=text, keyboard=result.keyboard, parse_mode="HTML")
         state.notified_user_ids.extend(notified_user_ids)
 
         logger.info(
@@ -229,11 +228,11 @@ class UnboundPermissionHandler:
         state = self._pending.get(tool_use_id)
         return state.session_id if state is not None else None
 
-    async def _broadcast(self, *, text: str, reply_markup: object, parse_mode: str | None) -> list[int]:
+    async def _broadcast(self, *, text: str, keyboard: Keyboard | None, parse_mode: str | None) -> list[int]:
         notified_user_ids: list[int] = []
         for user_id in self._allowed_user_ids:
             try:
-                await self._bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)  # type: ignore[arg-type]
+                await self._message_sender.send_message(chat_id=user_id, text=text, keyboard=keyboard, parse_mode=parse_mode)
                 notified_user_ids.append(user_id)
             except Exception:
                 logger.warning(

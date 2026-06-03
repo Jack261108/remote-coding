@@ -49,7 +49,7 @@ def _gateway(*, registry: RecordingRegistry, aas: AutoApproveService, allow_all_
         hook_socket_server=SimpleNamespace(),
         unbound_responder=SimpleNamespace(),
         settings=settings,
-        bot=SimpleNamespace(),
+        message_sender=SimpleNamespace(),
         message_builder=SimpleNamespace(),
     )
 
@@ -122,7 +122,7 @@ async def test_register_for_button_reuses_one_token_for_all_actions() -> None:
     )
 
     assert isinstance(result, RegisterForButtonOk)
-    callback_data = [button.callback_data for row in result.keyboard.inline_keyboard for button in row]
+    callback_data = [button.callback_data for row in result.keyboard.rows for button in row]
     assert callback_data == [f"perm:{TOKEN}:allow", f"perm:{TOKEN}:deny", f"perm:{TOKEN}:auto_approve"]
     assert len(registry.calls) == 1
 
@@ -141,5 +141,5 @@ async def test_register_for_button_conflict_returns_advisory_keyboard() -> None:
 
     assert isinstance(result, RegisterForButtonConflict)
     assert result.advisory_text == "权限请求处理中，请稍候"
-    assert [button.callback_data for row in result.keyboard.inline_keyboard for button in row] == ["perm:conflict:wait"]
+    assert [button.callback_data for row in result.keyboard.rows for button in row] == ["perm:conflict:wait"]
     assert len(registry.calls) == 1

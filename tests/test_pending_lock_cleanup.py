@@ -15,10 +15,10 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.presenters.permission_message_builder import PermissionMessageBuilder
 from app.domain.hook_models import HookEvent
+from app.services.message_sender import Button, Keyboard
 from app.services.permission_gateway import RegisterForButtonOk
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
@@ -30,7 +30,7 @@ from app.services.unbound_permission_handler import UnboundPermissionHandler
 class FakePermissionGateway:
     def __init__(self) -> None:
         self.message_builder = PermissionMessageBuilder()
-        self.keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Allow", callback_data="perm:tok:allow")]])
+        self.keyboard = Keyboard(rows=[[Button(text="Allow", callback_data="perm:tok:allow")]])
 
     async def register_for_button(self, **kwargs):  # noqa: ANN003, ANN202
         return RegisterForButtonOk(keyboard=self.keyboard)
@@ -41,18 +41,18 @@ def _make_handler(
     allowed_user_ids: set[int] | None = None,
     permission_ttl_sec: int = 600,
 ) -> tuple[UnboundPermissionHandler, MagicMock, MagicMock]:
-    bot = MagicMock()
-    bot.send_message = AsyncMock()
+    message_sender = MagicMock()
+    message_sender.send_message = AsyncMock()
     hook_socket_server = MagicMock()
     hook_socket_server.respond_to_permission = AsyncMock()
     handler = UnboundPermissionHandler(
-        bot=bot,
+        message_sender=message_sender,
         hook_socket_server=hook_socket_server,
         allowed_user_ids=allowed_user_ids or {111},
         permission_ttl_sec=permission_ttl_sec,
     )
     handler.set_permission_gateway(FakePermissionGateway())
-    return handler, bot, hook_socket_server
+    return handler, message_sender, hook_socket_server
 
 
 def _make_event(tool_use_id: str = "tuid-1", session_id: str = "sess-1") -> HookEvent:
