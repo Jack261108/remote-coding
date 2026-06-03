@@ -14,11 +14,12 @@ class DummyAnswerMessage:
         self.edit_parse_modes: list[ParseMode | None] = []
         self.fail_next_edit = fail_next_edit
 
-    async def edit_text(self, text: str, parse_mode=None) -> "DummyAnswerMessage":
+    async def edit_text(self, text: str, parse_mode=None, reply_markup=None) -> "DummyAnswerMessage":
         if self.fail_next_edit:
             self.fail_next_edit = False
             raise TelegramBadRequest(method="editMessageText", message="message is not modified")
         self.text = text
+        self.reply_markup = reply_markup
         self.edits.append(text)
         self.edit_parse_modes.append(parse_mode)
         return self

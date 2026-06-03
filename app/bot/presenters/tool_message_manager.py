@@ -142,7 +142,7 @@ class ToolMessageManager:
     async def _edit(self, message: Message, text: str, *, tool_use_id: str) -> bool:
         try:
             rendered = self._render(text)
-            await message.edit_text(rendered, parse_mode=ParseMode.HTML)
+            await message.edit_text(rendered, parse_mode=ParseMode.HTML, reply_markup=None)
             return True
         except Exception as exc:
             if _is_message_not_modified(exc):
