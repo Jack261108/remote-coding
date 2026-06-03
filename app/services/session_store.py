@@ -9,6 +9,7 @@ from app.domain.session_models import (
     SessionPhase,
     SessionState,
     is_claude_session_id,
+    parse_user_question_key,
 )
 from app.services.session_event_processor import SessionEventProcessor
 from app.services.session_lookup_service import SessionLookupService
@@ -17,17 +18,8 @@ from app.services.session_state_cache import SessionStateCache
 from app.services.session_state_repository import SessionStateRepository
 from app.services.structured_reply_tracker import StructuredReplyTracker
 
-
-def parse_user_question_key(question_key: str | None) -> tuple[str, int] | None:
-    if not question_key:
-        return None
-    tool_use_id, separator, index_text = str(question_key).rpartition(":")
-    if not separator or not tool_use_id:
-        return None
-    try:
-        return tool_use_id, int(index_text)
-    except ValueError:
-        return None
+# Re-export for backward compatibility
+__all__ = ["SessionStore", "SessionStoreFacade", "is_claude_session_id", "parse_user_question_key"]
 
 
 def _normalize_turn_match_text(text: str) -> str:

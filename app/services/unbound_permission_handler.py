@@ -6,11 +6,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.bot.presenters.permission_message_builder import PermissionPromptInput
-from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.external_session_models import UnboundPermissionState
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
+from app.domain.permission_models import PermissionPromptInput
+from app.infra.text_formatting import render_markdownish_to_telegram_html
 from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 

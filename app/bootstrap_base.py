@@ -13,10 +13,10 @@ from app.adapters.storage.file_session_context_store import FileSessionContextSt
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
+from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.interrupt_watcher import InterruptWatcher
-from app.services.lock_registry import RefCountedLockRegistry
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore

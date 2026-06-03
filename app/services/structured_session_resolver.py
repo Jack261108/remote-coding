@@ -7,11 +7,11 @@ from pathlib import Path
 
 from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.storage.memory import MemoryTaskStore
-from app.domain.session_models import SessionState
+from app.domain.session_models import SessionState, is_claude_session_id
 from app.services.session_lookup_service import SessionLookupService
 from app.services.session_notifier import SessionNotifier
 from app.services.session_service import SessionService
-from app.services.session_store import SessionStore, is_claude_session_id
+from app.services.session_store import SessionStore
 from app.services.structured_reply_tracker import StructuredReplyTracker
 
 logger = logging.getLogger(__name__)

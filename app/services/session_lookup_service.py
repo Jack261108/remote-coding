@@ -9,28 +9,17 @@ from app.domain.session_models import (
     SessionPhase,
     SessionState,
     ToolStatus,
+    is_claude_session_id,
+    parse_user_question_key,
 )
 from app.domain.user_question_models import extract_user_question_prompts
-from app.services.session_state_cache import SessionStateCache, is_claude_session_id
+from app.services.session_state_cache import SessionStateCache
 from app.services.session_state_repository import SessionStateRepository
 
 
 def _normalize_turn_match_text(text: str) -> str:
     """Normalize whitespace in turn text for comparison."""
     return " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
-
-
-def parse_user_question_key(question_key: str | None) -> tuple[str, int] | None:
-    """Parse a user question key into (tool_use_id, index) or None."""
-    if not question_key:
-        return None
-    tool_use_id, separator, index_text = str(question_key).rpartition(":")
-    if not separator or not tool_use_id:
-        return None
-    try:
-        return tool_use_id, int(index_text)
-    except ValueError:
-        return None
 
 
 class SessionLookupService:

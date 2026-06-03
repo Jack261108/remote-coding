@@ -13,9 +13,8 @@ from app.bot.presenters.structured_reply_models import (
     UserQuestionOutput,
     _ToolStateSnapshot,
 )
-from app.domain.session_models import ToolStatus
+from app.domain.session_models import ToolStatus, parse_user_question_key
 from app.domain.user_question_models import UserQuestionPrompt
-from app.services.session_store import parse_user_question_key
 
 _TASK_LIST_MESSAGE_KEY = "task-list"
 _SUBAGENT_AGGREGATE_MESSAGE_KEY = "subagent-aggregate"

@@ -14,9 +14,17 @@ from app.adapters.process.tmux_log import TmuxLogMixin
 from app.adapters.process.tmux_session import TmuxSessionMixin
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
-from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
-from app.services.lock_registry import RefCountedLockRegistry
-from app.services.session_store import SessionStore, is_claude_session_id
+from app.domain.session_models import (
+    ConversationTurn,
+    SessionEvent,
+    SessionEventType,
+    SessionPhase,
+    SessionState,
+    ToolStatus,
+    is_claude_session_id,
+)
+from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.session_store import SessionStore
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
