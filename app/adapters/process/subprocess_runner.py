@@ -7,18 +7,17 @@ import signal
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from app.adapters.process.base_runner import BaseRunner, yield_terminal_events
 from app.domain.models import CLIEvent, EventType
 
 logger = logging.getLogger(__name__)
 
 
-class SubprocessRunner:
+class SubprocessRunner(BaseRunner):
     def __init__(self, kill_grace_sec: float = 3.0) -> None:
+        super().__init__()
         self._kill_grace_sec = kill_grace_sec
         self._use_process_group = os.name == "posix" and hasattr(os, "killpg")
-        self._processes: dict[str, asyncio.subprocess.Process] = {}
-        self._cancel_requested: set[str] = set()
-        self._lock = asyncio.Lock()
 
     async def run(
         self,
@@ -32,8 +31,8 @@ class SubprocessRunner:
         interactive: bool = False,
         claude_session_id: str | None = None,
     ) -> AsyncGenerator[CLIEvent, None]:
-        if not argv:
-            yield CLIEvent(type=EventType.FAILED, task_id=task_id, error="命令参数为空")
+        async for event in self.check_empty_argv(argv, task_id):
+            yield event
             return
 
         queue: asyncio.Queue[CLIEvent | None] = asyncio.Queue()
@@ -55,8 +54,7 @@ class SubprocessRunner:
             yield CLIEvent(type=EventType.FAILED, task_id=task_id, error=f"启动失败: {exc}")
             return
 
-        async with self._lock:
-            self._processes[task_id] = process
+        self.registry.register(task_id, process)
 
         logger.info(
             "subprocess task started",
@@ -129,78 +127,30 @@ class SubprocessRunner:
                 if wait_task.done() and stream_done >= 2:
                     break
 
-            canceled = task_id in self._cancel_requested
-            if timed_out:
-                logger.warning(
-                    "subprocess task finished",
-                    extra=self._finish_log_extra(
-                        task_id=task_id,
-                        process=process,
-                        timeout_sec=timeout_sec,
-                        result="timeout",
-                        exit_code=exit_code,
-                        timed_out=True,
-                        canceled=canceled,
-                    ),
-                )
-                yield CLIEvent(type=EventType.TIMEOUT, task_id=task_id, error=f"任务超时({timeout_sec}s)")
-            elif canceled:
-                logger.info(
-                    "subprocess task finished",
-                    extra=self._finish_log_extra(
-                        task_id=task_id,
-                        process=process,
-                        timeout_sec=timeout_sec,
-                        result="canceled",
-                        exit_code=exit_code,
-                        timed_out=False,
-                        canceled=True,
-                    ),
-                )
-                yield CLIEvent(type=EventType.CANCELED, task_id=task_id, error="任务已取消")
-            elif exit_code == 0:
-                logger.info(
-                    "subprocess task finished",
-                    extra=self._finish_log_extra(
-                        task_id=task_id,
-                        process=process,
-                        timeout_sec=timeout_sec,
-                        result="exited",
-                        exit_code=exit_code,
-                        timed_out=False,
-                        canceled=False,
-                    ),
-                )
-                yield CLIEvent(type=EventType.EXITED, task_id=task_id, exit_code=0)
-            else:
-                logger.error(
-                    "subprocess task finished",
-                    extra=self._finish_log_extra(
-                        task_id=task_id,
-                        process=process,
-                        timeout_sec=timeout_sec,
-                        result="failed",
-                        exit_code=exit_code,
-                        timed_out=False,
-                        canceled=False,
-                    ),
-                )
-                yield CLIEvent(
-                    type=EventType.FAILED,
+            canceled = self.registry.is_cancelled(task_id)
+            async for event in yield_terminal_events(
+                task_id=task_id,
+                exit_code=exit_code,
+                timed_out=timed_out,
+                canceled=canceled,
+                timeout_sec=timeout_sec,
+                log_extra=self._finish_log_extra(
                     task_id=task_id,
+                    process=process,
+                    timeout_sec=timeout_sec,
                     exit_code=exit_code,
-                    error=f"进程退出码: {exit_code}",
-                )
+                    timed_out=timed_out,
+                    canceled=canceled,
+                ),
+            ):
+                yield event
         finally:
             for task in (stdout_task, stderr_task):
                 if not task.done():
                     task.cancel()
             if get_task is not None and not get_task.done():
                 get_task.cancel()
-
-            async with self._lock:
-                self._processes.pop(task_id, None)
-                self._cancel_requested.discard(task_id)
+            self.registry.unregister(task_id)
 
     def _finish_log_extra(
         self,
@@ -208,7 +158,6 @@ class SubprocessRunner:
         task_id: str,
         process: asyncio.subprocess.Process,
         timeout_sec: int,
-        result: str,
         exit_code: int | None,
         timed_out: bool,
         canceled: bool,
@@ -220,18 +169,18 @@ class SubprocessRunner:
             "timeout_sec": timeout_sec,
             "kill_grace_sec": self._kill_grace_sec,
             "use_process_group": self._use_process_group,
-            "result": result,
             "exit_code": exit_code,
             "timed_out": timed_out,
             "canceled": canceled,
         }
 
     async def cancel(self, task_id: str) -> bool:
-        async with self._lock:
-            process = self._processes.get(task_id)
-            if process is None:
+        async with self.registry.lock:
+            entry = self.registry.get_entry(task_id)
+            if entry is None:
                 return False
-            self._cancel_requested.add(task_id)
+            entry.cancel_requested = True
+            process: asyncio.subprocess.Process = entry.task
 
         if process.returncode is not None:
             return False

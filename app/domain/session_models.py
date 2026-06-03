@@ -25,6 +25,23 @@ def is_claude_session_id(session_id: str | None) -> bool:
     return text.startswith(CLAUDE_SESSION_PREFIX) or bool(_UUID_SESSION_RE.match(text))
 
 
+def parse_user_question_key(question_key: str | None) -> tuple[str, int] | None:
+    """Parse a user question key into (tool_use_id, index) or None.
+
+    The question_key format is "tool_use_id:index" where index is an integer.
+    Returns None if the key is invalid, empty, or cannot be parsed.
+    """
+    if not question_key:
+        return None
+    tool_use_id, separator, index_text = str(question_key).rpartition(":")
+    if not separator or not tool_use_id:
+        return None
+    try:
+        return tool_use_id, int(index_text)
+    except ValueError:
+        return None
+
+
 class SessionPhase(StrEnum):
     IDLE = "idle"
     PROCESSING = "processing"

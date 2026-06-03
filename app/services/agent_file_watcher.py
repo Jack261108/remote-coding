@@ -3,16 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 
 from app.domain.session_models import SessionPhase, SessionState
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.session_store import SessionStore
+from app.services.session_watcher_base import BaseSessionWatcher
 
 logger = logging.getLogger(__name__)
 
 
-class AgentFileWatcher:
+class AgentFileWatcher(BaseSessionWatcher):
     def __init__(
         self,
         *,
@@ -21,21 +21,13 @@ class AgentFileWatcher:
         on_update: Callable[[str, str], Awaitable[None]],
         poll_interval_sec: float = 0.2,
     ) -> None:
+        super().__init__()
         self._session_store = session_store
         self._claude_jsonl_parser = claude_jsonl_parser
         self._on_update = on_update
         self._poll_interval_sec = poll_interval_sec
-        self._tasks: dict[str, asyncio.Task[None]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._seen_mtimes: dict[str, float] = {}
-        self._active = False
-
-    def watch(self, *, session_id: str, workdir: str) -> None:
-        self._active = True
-        task = self._tasks.get(session_id)
-        if task is not None and not task.done():
-            return
-        self._tasks[session_id] = asyncio.create_task(self._watch_session(session_id=session_id, workdir=workdir))
 
     def _clear_seen_mtimes_for_session(self, session_id: str) -> None:
         prefix = f"{session_id}:"
@@ -53,23 +45,15 @@ class AgentFileWatcher:
         self._session_locks.pop(session_id, None)
 
     def forget(self, session_id: str) -> None:
-        task = self._tasks.pop(session_id, None)
         self._clear_seen_mtimes_for_session(session_id)
+        task = self._tasks.get(session_id)
         if task is None or task.done():
             self._session_locks.pop(session_id, None)
-            return
-        task.cancel()
+        super().forget(session_id)
 
     async def stop_all(self) -> None:
-        self._active = False
-        tasks = list(self._tasks.values())
-        self._tasks.clear()
         self._seen_mtimes.clear()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with suppress(asyncio.CancelledError):
-                await task
+        await super().stop_all()
         self._session_locks.clear()
 
     async def _watch_session(self, *, session_id: str, workdir: str) -> None:
