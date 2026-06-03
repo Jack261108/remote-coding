@@ -8,9 +8,10 @@ from aiogram.types import Message
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.domain.models import utc_now
+from app.infra.text_formatting import short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import _resolve_session_id
+from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind
 from app.services.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -86,16 +87,14 @@ async def _handle_list(
     if unbound:
         lines.append("\n🆓 Unbound:")
         for s in unbound:
-            short_id = s.session_id[:12]
             ago = _time_ago(s.first_seen)
-            lines.append(f"  • {short_id}... | {s.cwd} | first seen {ago}")
+            lines.append(f"  • {short_id(s.session_id, 12)}... | {s.cwd} | first seen {ago}")
 
     if bound:
         lines.append("\n🔗 Your bound sessions:")
         for b in bound:
-            short_id = b.session_id[:12]
             ago = _time_ago(b.bound_at)
-            lines.append(f"  • {short_id}... | {b.cwd} | bound {ago}")
+            lines.append(f"  • {short_id(b.session_id, 12)}... | {b.cwd} | bound {ago}")
 
     await message.answer("\n".join(lines))
 
@@ -112,15 +111,9 @@ async def _handle_bind(
         await message.answer("用法: /external bind <session_id>")
         return
 
-    resolved, error = _resolve_session_id(session_id, discovery, binder)
-    if error or not resolved:
-        await message.answer(f"❌ {error or 'Session not found'}")
-        return
-
-    result = await binder.bind(user_id=user_id, session_id=resolved)
+    result = await resolve_and_bind(session_id, user_id=user_id, discovery=discovery, binder=binder)
     if result.success:
-        conv_status = "✅ conversation available" if result.conversation_available else "⏳ waiting for JSONL"
-        await message.answer(f"🔗 Bound session {resolved[:12]}...\n{conv_status}")
+        await message.answer(f"🔗 Bound session {short_id(result.session_id or '', 12)}...\n{result.message}")
     else:
         await message.answer(f"❌ {result.message}")
 
@@ -137,14 +130,9 @@ async def _handle_unbind(
         await message.answer("用法: /external unbind <session_id>")
         return
 
-    resolved, error = _resolve_session_id(session_id, discovery, binder)
-    if error or not resolved:
-        await message.answer(f"❌ {error or 'Session not found'}")
-        return
-
-    result = await binder.unbind(user_id=user_id, session_id=resolved)
+    result = await resolve_and_unbind(session_id, user_id=user_id, discovery=discovery, binder=binder)
     if result.success:
-        await message.answer(f"🔓 Unbound session {resolved[:12]}...")
+        await message.answer(f"🔓 Unbound session {short_id(result.session_id or '', 12)}...")
     else:
         await message.answer(f"❌ {result.message}")
 
@@ -176,10 +164,10 @@ async def _handle_status(
 
     state = session_store.get(resolved)
     if state is None:
-        await message.answer(f"📊 Session {resolved[:12]}...\n  phase: unknown\n  (no state available)")
+        await message.answer(f"📊 Session {short_id(resolved, 12)}...\n  phase: unknown\n  (no state available)")
         return
 
-    lines = [f"📊 Session {resolved[:12]}..."]
+    lines = [f"📊 Session {short_id(resolved, 12)}..."]
     lines.append(f"  phase: {state.phase.value}")
     if state.last_tool_name:
         lines.append(f"  last tool: {state.last_tool_name}")
