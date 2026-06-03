@@ -494,6 +494,7 @@ class HookHandlingMixin(AppContainerBase):
                         chat_id=record.telegram_chat_id,
                         message_id=record.telegram_message_id,
                         text=new_text,
+                        parse_mode="HTML",
                     )
                 except Exception:
                     logger.warning(
