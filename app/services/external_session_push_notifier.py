@@ -75,7 +75,16 @@ class ExternalSessionPushNotifier:
             session_id=session_id,
             session_title=title,
         )
-        text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
+        prompt_result = gateway.message_builder.build_permission_prompt_result(prompt)
+        text = render_markdownish_to_telegram_html(prompt_result.text)
+
+        # Send image first if available
+        if prompt_result.image_bytes:
+            from aiogram.types import BufferedInputFile
+
+            photo = BufferedInputFile(file=prompt_result.image_bytes, filename="diff.png")
+            await self._bot.send_photo(chat_id=user_id, photo=photo)
+
         return await self._send_with_retry(chat_id=user_id, text=text, reply_markup=result.keyboard, parse_mode="HTML")
 
     async def notify_phase_change(

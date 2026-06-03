@@ -253,6 +253,74 @@ def render_diff_to_image(diff_text: str, max_width: int = 1200) -> bytes:
     return buffer.getvalue()
 
 
+def render_permission_diff_to_image(command: str) -> bytes:
+    """Render permission diff content (Edit tool command) as an image.
+
+    This renders the code content with 🟢/🔴 indicators for added/deleted lines.
+
+    Args:
+        command: The command content from the Edit tool
+
+    Returns:
+        PNG image bytes
+    """
+    font = _get_font()
+
+    # Parse the command to extract lines with indicators
+    lines = command.splitlines()
+
+    # Calculate dimensions
+    max_line_len = max((len(line) for line in lines), default=20)
+    width = min(1200, _calculate_text_width("x" * (max_line_len + 30), font) + PADDING * 2)
+    height = len(lines) * LINE_HEIGHT + PADDING * 2
+
+    # Create image
+    img = Image.new("RGB", (width, height), COLORS["background"])
+    draw = ImageDraw.Draw(img)
+
+    y = PADDING
+
+    for line in lines:
+        # Determine line type based on content
+        # Lines starting with + are additions, - are deletions
+        if line.startswith("+"):
+            indicator = "🟢"
+            text_color = COLORS["add_text"]
+            display_line = line[1:]  # Remove the + prefix
+        elif line.startswith("-"):
+            indicator = "🔴"
+            text_color = COLORS["del_text"]
+            display_line = line[1:]  # Remove the - prefix
+        else:
+            indicator = "  "
+            text_color = COLORS["context_text"]
+            display_line = line
+
+        # Draw indicator
+        draw.text((PADDING, y + 2), indicator, fill=text_color, font=font)
+
+        # Draw content
+        content_x = PADDING + 30
+        # Truncate content if too long
+        max_chars = (width - content_x - PADDING) // (FONT_SIZE // 2)
+        display_content = display_line[:max_chars]
+        draw.text((content_x, y + 2), display_content, fill=text_color, font=font)
+
+        y += LINE_HEIGHT
+
+    # Crop to actual content height
+    img = img.crop((0, 0, width, y + PADDING))
+
+    # Add subtle border
+    border_img = Image.new("RGB", (img.width + 4, img.height + 4), COLORS["border"])
+    border_img.paste(img, (2, 2))
+
+    # Convert to bytes
+    buffer = io.BytesIO()
+    border_img.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
 def render_diff_summary_to_image(file_count: int, add_count: int, del_count: int, diff_text: str) -> bytes:
     """Render a summary image for the diff.
 

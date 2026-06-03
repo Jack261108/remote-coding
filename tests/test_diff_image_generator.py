@@ -8,6 +8,7 @@ from app.services.diff_image_generator import (
     _parse_diff,
     render_diff_summary_to_image,
     render_diff_to_image,
+    render_permission_diff_to_image,
 )
 
 SAMPLE_DIFF = """\
@@ -178,3 +179,38 @@ def test_parse_diff_line_numbers():
     assert any(line.old_line_num is not None for line in del_lines)
     # Should have some context lines with both line numbers
     assert any(line.old_line_num is not None and line.new_line_num is not None for line in context_lines)
+
+
+def test_render_permission_diff_to_image_basic():
+    """Test basic permission diff rendering."""
+    command = "+def hello(name: str = 'world'):\n-    print('hello')\n+    print(f'hello {name}')"
+    image_bytes = render_permission_diff_to_image(command)
+    assert len(image_bytes) > 0
+    assert image_bytes[:4] == b"\x89PNG"
+
+
+def test_render_permission_diff_to_image_additions_only():
+    """Test rendering with only additions."""
+    command = "+line1\n+line2\n+line3"
+    image_bytes = render_permission_diff_to_image(command)
+    assert len(image_bytes) > 0
+
+
+def test_render_permission_diff_to_image_deletions_only():
+    """Test rendering with only deletions."""
+    command = "-line1\n-line2\n-line3"
+    image_bytes = render_permission_diff_to_image(command)
+    assert len(image_bytes) > 0
+
+
+def test_render_permission_diff_to_image_context_only():
+    """Test rendering with only context lines (no +/-)."""
+    command = "line1\nline2\nline3"
+    image_bytes = render_permission_diff_to_image(command)
+    assert len(image_bytes) > 0
+
+
+def test_render_permission_diff_to_image_empty():
+    """Test rendering empty command."""
+    image_bytes = render_permission_diff_to_image("")
+    assert len(image_bytes) > 0

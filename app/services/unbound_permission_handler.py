@@ -112,8 +112,14 @@ class UnboundPermissionHandler:
             session_id=event.session_id,
             session_title=self._resolve_title(event.session_id, event.cwd),
         )
-        text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
-        notified_user_ids = await self._broadcast(text=text, reply_markup=result.keyboard, parse_mode="HTML")
+        prompt_result = gateway.message_builder.build_permission_prompt_result(prompt)
+        text = render_markdownish_to_telegram_html(prompt_result.text)
+        notified_user_ids = await self._broadcast(
+            text=text,
+            reply_markup=result.keyboard,
+            parse_mode="HTML",
+            image_bytes=prompt_result.image_bytes,
+        )
         state.notified_user_ids.extend(notified_user_ids)
 
         logger.info(
@@ -218,10 +224,23 @@ class UnboundPermissionHandler:
         state = self._pending.get(tool_use_id)
         return state.session_id if state is not None else None
 
-    async def _broadcast(self, *, text: str, reply_markup: object, parse_mode: str | None) -> list[int]:
+    async def _broadcast(
+        self,
+        *,
+        text: str,
+        reply_markup: object,
+        parse_mode: str | None,
+        image_bytes: bytes | None = None,
+    ) -> list[int]:
+        from aiogram.types import BufferedInputFile
+
         notified_user_ids: list[int] = []
         for user_id in self._allowed_user_ids:
             try:
+                # Send image first if available
+                if image_bytes:
+                    photo = BufferedInputFile(file=image_bytes, filename="diff.png")
+                    await self._bot.send_photo(chat_id=user_id, photo=photo)
                 await self._bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)  # type: ignore[arg-type]
                 notified_user_ids.append(user_id)
             except Exception:

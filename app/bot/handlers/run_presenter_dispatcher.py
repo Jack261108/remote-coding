@@ -89,7 +89,7 @@ class PresenterOutputDispatcher:
                 if not isinstance(result, RegisterForButtonOk):
                     raise RuntimeError("unexpected permission gateway registration result")
                 keyboard = result.keyboard
-                text = self._permission_gateway.message_builder.build_permission_prompt(
+                prompt_result = self._permission_gateway.message_builder.build_permission_prompt_result(
                     PermissionPromptInput(
                         tool_name=output.tool_name or "unknown tool",
                         tool_input=output.tool_input,
@@ -98,6 +98,8 @@ class PresenterOutputDispatcher:
                         session_title=output.session_title,
                     )
                 )
+                text = prompt_result.text
+
                 # Try editing the existing tool status message into the permission prompt
                 edited = await self._tool_message_manager.edit_with_keyboard(
                     tool_use_id=output.tool_use_id,
@@ -105,8 +107,22 @@ class PresenterOutputDispatcher:
                     reply_markup=keyboard,
                 )
                 if edited:
+                    # If there's an image, send it after the edited message
+                    if prompt_result.image_bytes:
+                        from aiogram.types import BufferedInputFile
+
+                        photo = BufferedInputFile(file=prompt_result.image_bytes, filename="diff.png")
+                        await self._messenger._root_message.answer_photo(photo)
                     await self._presenter.acknowledge_delivery(output)
                     continue
+
+                # If there's an image, send it first, then the text with keyboard
+                if prompt_result.image_bytes:
+                    from aiogram.types import BufferedInputFile
+
+                    photo = BufferedInputFile(file=prompt_result.image_bytes, filename="diff.png")
+                    await self._messenger._root_message.answer_photo(photo)
+
                 sent = await self._messenger.answer_safely(text, reply_markup=keyboard)
                 if sent:
                     await self._presenter.acknowledge_delivery(output)
