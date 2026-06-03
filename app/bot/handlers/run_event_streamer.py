@@ -194,6 +194,7 @@ class RunEventStreamer:
         if schedule_uploads:
             self._schedule_queued_uploads_once()
         await self._stop_spinner()
+        await self._messenger.set_reaction(None)
         await self._cancel_interactive_pump(timeout_sec=cancel_timeout_sec)
 
     async def _spin(self) -> None:
@@ -379,6 +380,7 @@ class RunEventStreamer:
                 self._schedule_queued_uploads_once()
             try:
                 await self._stop_spinner()
+                await self._messenger.set_reaction(None)
                 if saw_exit and self._start.interactive:
                     await asyncio.sleep(0.1)
                     # Freeze the presenter's last turn ID to prevent emitting

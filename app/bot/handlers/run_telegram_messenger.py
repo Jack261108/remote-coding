@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import Message, ReactionTypeEmoji
 
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
 
@@ -57,3 +57,28 @@ class RunTelegramMessenger:
                 extra={"task_id": self._task_id, "user_id": self._user_id, "provider": self._provider},
             )
             return False
+
+    async def set_reaction(self, emoji: str | None) -> None:
+        """Set or clear an emoji reaction on the original user message."""
+        bot = getattr(self._root_message, "bot", None)
+        if bot is None:
+            return
+        try:
+            if emoji:
+                await bot.set_message_reaction(
+                    chat_id=self._root_message.chat.id,
+                    message_id=self._root_message.message_id,
+                    reaction=[ReactionTypeEmoji(emoji=emoji)],
+                    is_big=False,
+                )
+            else:
+                await bot.set_message_reaction(
+                    chat_id=self._root_message.chat.id,
+                    message_id=self._root_message.message_id,
+                    reaction=[],
+                )
+        except Exception:
+            logger.exception(
+                "set_message_reaction failed",
+                extra={"task_id": self._task_id, "user_id": self._user_id, "provider": self._provider},
+            )

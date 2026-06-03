@@ -130,6 +130,7 @@ async def run_prompt_and_stream(
             session_id=start.task.session_id,
         )
     )
+    await messenger.set_reaction("⚡")
 
     sender: ChunkSender = sender_factory()
     presenter = StructuredReplyPresenter(
