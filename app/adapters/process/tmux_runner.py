@@ -14,6 +14,7 @@ from app.adapters.process.tmux_log import TmuxLogMixin
 from app.adapters.process.tmux_session import TmuxSessionMixin
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
+from app.domain.protocols import SessionStoreProtocol
 from app.domain.session_models import (
     ConversationTurn,
     SessionEvent,
@@ -23,8 +24,7 @@ from app.domain.session_models import (
     ToolStatus,
     is_claude_session_id,
 )
-from app.services.lock_registry import RefCountedLockRegistry
-from app.services.session_store import SessionStore
+from app.infra.lock_registry import RefCountedLockRegistry
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
@@ -92,7 +92,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         interactive_completion_grace_sec: float = 0.1,
         claude_cli_bin: str = "claude",
         file_store: FileSessionStore | None = None,
-        session_store: SessionStore | None = None,
+        session_store: SessionStoreProtocol | None = None,
         session_lock_ttl_sec: int = 3600,
         lock_cleanup_interval_sec: int = 60,
         lock_cleanup_batch_size: int = 50,
@@ -116,7 +116,11 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         )
         self._lock = asyncio.Lock()
         self._file_store = file_store or FileSessionStore(str(self._data_dir))
-        self._session_store = session_store or SessionStore(self._file_store)
+        if session_store is None:
+            from app.services.session_store import SessionStore
+
+            session_store = SessionStore(self._file_store)
+        self._session_store = session_store
 
     def _tmux_log_extra(self, meta: _TmuxTaskMeta, **extra) -> dict[str, object]:
         payload: dict[str, object] = {

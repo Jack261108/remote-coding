@@ -245,7 +245,7 @@ class TestTmuxLockCountStable:
         )
 
         # Verify the runner uses RefCountedLockRegistry
-        from app.services.lock_registry import RefCountedLockRegistry
+        from app.infra.lock_registry import RefCountedLockRegistry
 
         assert isinstance(runner._session_locks, RefCountedLockRegistry)
 
@@ -270,7 +270,7 @@ class TestTmuxLockCountStable:
 
     @pytest.mark.asyncio
     async def test_lock_cleanup_after_ttl(self, tmp_path):
-        from app.services.lock_registry import RefCountedLockRegistry
+        from app.infra.lock_registry import RefCountedLockRegistry
 
         now = 100.0
 

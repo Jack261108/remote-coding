@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from app.services.lock_registry import RefCountedLockRegistry
+from app.infra.lock_registry import RefCountedLockRegistry
 
 
 @pytest.mark.asyncio
