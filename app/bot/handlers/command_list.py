@@ -55,21 +55,24 @@ def register_list_handler(
         sessions = await registry_service.list_active_sessions()
         for s in sessions:
             icon = _PHASE_ICONS.get(s.phase, "❓")
-            owner_tag = f" (owner:{s.owner_user_id})" if s.owner_user_id else ""
-            attached = f" +{len(s.attached_user_ids)}人" if s.attached_user_ids else ""
-            alive_tag = "" if s.is_alive else " [已断开]"
+            tags: list[str] = [s.phase]
+            if s.owner_user_id:
+                tags.append(f"owner:{s.owner_user_id}")
+            if s.attached_user_ids:
+                tags.append(f"+{len(s.attached_user_ids)}人")
+            if not s.is_alive:
+                tags.append("已断开")
             sid = s.terminal_id
-            label = sid if len(sid) <= 20 else sid[:18] + "…"
             items.append(
                 SessionListItem(
                     session_id=sid,
                     cwd=s.workdir,
                     status_icon=icon,
-                    status_text=f"{s.phase}{owner_tag}{attached}{alive_tag}",
+                    status_text=" · ".join(tags),
                     source="tmux",
                     buttons=[
-                        (f"🔗 绑定 {label}", f"sess:attach:{sid[:16]}"),
-                        (f"❌ 关闭 {label}", f"sess:close:{sid[:16]}"),
+                        ("🔗 绑定", f"sess:attach:{sid[:16]}"),
+                        ("❌ 关闭", f"sess:close:{sid[:16]}"),
                     ],
                 )
             )
@@ -79,19 +82,15 @@ def register_list_handler(
         if external_discovery is not None:
             external_sessions = external_discovery.list_unbound()
         for ext in external_sessions:
-            short = _short_cwd(ext.cwd)
-            sid_tag = ext.session_id[:8]
-            label = f"{ext.title} ({sid_tag})" if ext.title else f"{short} ({sid_tag})"
-            if len(label) > 60:
-                label = label[:59] + "…"
+            status = ext.title or "未绑定"
             items.append(
                 SessionListItem(
                     session_id=ext.session_id,
                     cwd=ext.cwd,
                     status_icon="\U0001f4e1",
-                    status_text="external",
+                    status_text=status,
                     source="external",
-                    buttons=[(f"📋 {label}", f"sess:select:{ext.session_id[:16]}")],
+                    buttons=[("📋 选择", f"sess:select:{ext.session_id[:16]}")],
                 )
             )
 
@@ -122,17 +121,14 @@ def register_list_handler(
                         )
 
         for b in bound_sessions:
-            short = _short_cwd(b.cwd)
-            sid_tag = b.session_id[:8]
-            label = f"{short} ({sid_tag})"
             items.append(
                 SessionListItem(
                     session_id=b.session_id,
                     cwd=b.cwd,
                     status_icon="\U0001f517",
-                    status_text="bound",
+                    status_text="已绑定",
                     source="bound",
-                    buttons=[(f"📋 {label}", f"sess:select:{b.session_id[:16]}")],
+                    buttons=[("📋 选择", f"sess:select:{b.session_id[:16]}")],
                 )
             )
 
@@ -141,11 +137,18 @@ def register_list_handler(
             await message.answer("当前无活跃会话。")
             return
 
-        lines = ["活跃会话:"]
+        parts: list[str] = ["📋 <b>活跃会话</b>\n"]
         buttons: list[list[InlineKeyboardButton]] = []
         for item in items:
-            lines.append(f"\n{item.status_icon} `{item.session_id}`\n   {item.cwd} · {item.status_text}")
+            short_cwd = _short_cwd(item.cwd)
+            sid_short = item.session_id[:8]
+            # Header line: icon + short path
+            parts.append(f"{item.status_icon} <b>{short_cwd}</b>")
+            # Detail line: short id + status
+            parts.append(f"   <code>{sid_short}</code> · {item.status_text}")
+            # Buttons
             buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data) for btn_text, cb_data in item.buttons])
+            parts.append("")  # blank line between items
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
-        await message.answer("\n".join(lines), reply_markup=keyboard)
+        await message.answer("\n".join(parts), parse_mode="HTML", reply_markup=keyboard)

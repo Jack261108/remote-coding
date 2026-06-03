@@ -27,8 +27,10 @@ async def apply_callback_response(
             original = msg.html_text or ""  # type: ignore[union-attr]
             if edit_text and _INSTRUCTION_LINE in original:
                 new_text = original.replace(_INSTRUCTION_LINE, edit_text)
+                logger.info("editing message: replacing instruction line")
                 await msg.edit_text(new_text, parse_mode="HTML", reply_markup=None)  # type: ignore[union-attr]
             elif edit_text:
+                logger.info("editing message: full replace (instruction not found)")
                 await msg.edit_text(edit_text, parse_mode="HTML", reply_markup=None)  # type: ignore[union-attr]
             elif clear_keyboard:
                 await msg.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
