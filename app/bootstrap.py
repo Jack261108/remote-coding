@@ -367,5 +367,6 @@ class AppContainer(
             claude_paths=self.claude_paths,
             liveness_enabled=self.settings.external_binding_pid_liveness_enabled,
             external_binding_reaper=self.external_binding_reaper,
+            title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
         )
         self.dispatcher.include_router(router)

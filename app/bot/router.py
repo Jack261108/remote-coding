@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
@@ -70,6 +71,7 @@ def create_router(
     claude_paths: ClaudePaths | None = None,
     liveness_enabled: bool = False,
     external_binding_reaper: ExternalBindingReaper | None = None,
+    title_resolver: Callable[[str, str], str | None] | None = None,
 ) -> Router:
     router = Router()
 
@@ -164,6 +166,7 @@ def create_router(
             external_binder=external_binder,
             liveness_enabled=liveness_enabled,
             reaper=external_binding_reaper,
+            title_resolver=title_resolver,
         )
         register_attach_handler(router, registry_service=registry_service)
 

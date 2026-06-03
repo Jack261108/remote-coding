@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from aiogram import Router
@@ -43,6 +44,7 @@ def register_list_handler(
     external_binder: ExternalSessionBinder | None = None,
     liveness_enabled: bool = False,
     reaper: ExternalBindingReaper | None = None,
+    title_resolver: Callable[[str, str], str | None] | None = None,
 ) -> None:
     @router.message(Command("list"))
     async def command_list(message: Message) -> None:
@@ -121,6 +123,16 @@ def register_list_handler(
                         )
 
         for b in bound_sessions:
+            title = b.title
+            # Try to resolve title for bindings that don't have one yet
+            if title is None and title_resolver is not None:
+                try:
+                    title = title_resolver(b.session_id, b.cwd)
+                    if title is not None:
+                        b.title = title
+                        external_binder._binding_store.save_binding(b)
+                except Exception:
+                    logger.debug("title resolver failed for bound session", extra={"session_id": b.session_id})
             items.append(
                 SessionListItem(
                     session_id=b.session_id,
@@ -128,7 +140,7 @@ def register_list_handler(
                     status_icon="\U0001f517",
                     status_text="已绑定",
                     source="bound",
-                    buttons=[(b.title or _short_cwd(b.cwd), f"sess:select:{b.session_id[:16]}")],
+                    buttons=[(title or _short_cwd(b.cwd), f"sess:select:{b.session_id[:16]}")],
                 )
             )
 
