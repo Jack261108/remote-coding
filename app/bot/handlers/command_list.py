@@ -90,7 +90,7 @@ def register_list_handler(
                     status_icon="\U0001f4e1",
                     status_text=status,
                     source="external",
-                    buttons=[(_short_cwd(ext.cwd), f"sess:select:{ext.session_id[:16]}")],
+                    buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{ext.session_id[:16]}")],
                 )
             )
 
@@ -128,7 +128,7 @@ def register_list_handler(
                     status_icon="\U0001f517",
                     status_text="已绑定",
                     source="bound",
-                    buttons=[(_short_cwd(b.cwd), f"sess:select:{b.session_id[:16]}")],
+                    buttons=[(b.title or _short_cwd(b.cwd), f"sess:select:{b.session_id[:16]}")],
                 )
             )
 

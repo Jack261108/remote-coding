@@ -38,6 +38,7 @@ class ExternalBinding:
     bound_at: datetime
     jsonl_path: str | None
     pid: int | None = None
+    title: str | None = None
     last_activity_at_init: InitVar[datetime | None] = None
     last_activity_at: datetime = field(init=False)
 

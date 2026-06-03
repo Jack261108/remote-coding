@@ -132,6 +132,7 @@ class ExternalBindingStore:
                     bound_at=bound_at,
                     jsonl_path=entry.get("jsonl_path"),
                     pid=entry.get("pid"),
+                    title=entry.get("title"),
                     last_activity_at_init=last_activity_at,
                 )
             return bindings
@@ -150,6 +151,7 @@ class ExternalBindingStore:
                 "last_activity_at": binding.last_activity_at.isoformat(),
                 "jsonl_path": binding.jsonl_path,
                 "pid": binding.pid,
+                "title": binding.title,
             }
         # Atomic write: write to temp file then rename to avoid corruption
         try:
