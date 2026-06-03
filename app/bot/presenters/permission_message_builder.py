@@ -77,7 +77,7 @@ def _sanitize_fenced_value(value: str) -> str:
 
 
 def _build_edit_diff(tool_input: Mapping[str, object]) -> str:
-    """Build a unified diff preview for Edit tool old_string → new_string."""
+    """Build a colorized diff preview for Edit tool old_string → new_string."""
     old_string = tool_input.get("old_string")
     new_string = tool_input.get("new_string")
     if old_string is None or new_string is None:
@@ -87,7 +87,19 @@ def _build_edit_diff(tool_input: Mapping[str, object]) -> str:
     diff_lines = list(difflib.unified_diff(old_lines, new_lines, fromfile="a", tofile="b"))
     if not diff_lines:
         return ""
-    diff_text = "".join(diff_lines)
+    styled: list[str] = []
+    for line in diff_lines:
+        if line.startswith("---") or line.startswith("+++") or line.startswith("@@"):
+            continue
+        if line.startswith("-"):
+            styled.append(f"🔴 {line[1:].rstrip()}")
+        elif line.startswith("+"):
+            styled.append(f"🟢 {line[1:].rstrip()}")
+        else:
+            styled.append(f"   {line.rstrip()}")
+    if not styled:
+        return ""
+    diff_text = "\n".join(styled)
     if len(diff_text) > _DIFF_MAX_CHARS:
         diff_text = diff_text[:_DIFF_MAX_CHARS] + "\n… (truncated)"
     return diff_text

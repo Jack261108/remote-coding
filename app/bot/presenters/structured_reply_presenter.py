@@ -234,6 +234,9 @@ class StructuredReplyPresenter:
             tool_states=snapshot.tool_states,
             tool_question_prompts=tool_question_prompts,
             pending_question_prompts=pending_question_prompts,
+            session_id=snapshot.session_id,
+            session_title=snapshot.session_title,
+            cwd=snapshot.cwd,
         )
         messages.extend(question_updates)
         messages.extend(self._collect_progress_updates(snapshot=snapshot, tool_question_prompts=tool_question_prompts))

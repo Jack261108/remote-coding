@@ -327,6 +327,9 @@ class UserQuestionTracker:
         tool_states: tuple[_ToolStateSnapshot, ...],
         tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
         pending_question_prompts: tuple[UserQuestionPrompt, ...] = (),
+        session_id: str | None = None,
+        session_title: str | None = None,
+        cwd: str | None = None,
     ) -> list[UserQuestionOutput]:
         messages: list[UserQuestionOutput] = []
 
@@ -353,8 +356,11 @@ class UserQuestionTracker:
             if selected_prompt.key not in previous_keys and selected_prompt.key != self._last_question_key:
                 messages.append(
                     UserQuestionOutput(
-                        text=build_user_question_prompt(selected_prompt),
+                        text=build_user_question_prompt(selected_prompt, session_id=session_id, session_title=session_title, cwd=cwd),
                         question=selected_prompt,
+                        session_id=session_id,
+                        session_title=session_title,
+                        cwd=cwd,
                     )
                 )
 

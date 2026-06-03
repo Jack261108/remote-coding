@@ -114,3 +114,6 @@ class FileToolAggregateStatusOutput:
 class UserQuestionOutput:
     text: str
     question: UserQuestionPrompt
+    session_id: str | None = None
+    session_title: str | None = None
+    cwd: str | None = None

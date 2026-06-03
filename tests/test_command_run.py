@@ -1953,7 +1953,8 @@ async def test_run_prompt_and_stream_interactive_reports_user_question_once() ->
                 SimpleNamespace(label="直接删除", description="删除项目级这两条记忆"),
             ),
             multi_select=False,
-        )
+        ),
+        session_id="claude-session-1",
     )
     assert message.answers.count(expected_prompt) == 1
     question_index = message.answers.index(expected_prompt)
@@ -2104,7 +2105,8 @@ async def test_run_prompt_and_stream_interactive_reports_multi_select_user_quest
                     SimpleNamespace(label="保留测试", description="继续保留回归测试"),
                 ),
                 multi_select=True,
-            )
+            ),
+            session_id="claude-session-1",
         )
     )
     reply_markup = message.reply_markups[question_index]
@@ -2202,7 +2204,8 @@ async def test_run_prompt_and_stream_interactive_reports_only_first_question_for
                 SimpleNamespace(label="三个目录全部", description="范围非常大"),
             ),
             multi_select=False,
-        )
+        ),
+        session_id="claude-session-1",
     )
     second_prompt = build_user_question_prompt(
         SimpleNamespace(
@@ -2216,7 +2219,8 @@ async def test_run_prompt_and_stream_interactive_reports_only_first_question_for
                 SimpleNamespace(label="暂不允许", description="先不改代码"),
             ),
             multi_select=False,
-        )
+        ),
+        session_id="claude-session-1",
     )
 
     assert message.answers.count(first_prompt) == 1

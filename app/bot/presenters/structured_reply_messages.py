@@ -19,6 +19,12 @@ from app.domain.user_question_models import UserQuestionPrompt, extract_user_que
 _TASK_LIST_VISIBLE_LIMIT = 20
 
 
+def _code_segment(value: str) -> str:
+    if value == "" or "`" in value or "\n" in value or "\r" in value:
+        return f"```\n{value}\n```"
+    return f"`{value}`"
+
+
 def _format_omitted(omitted: int) -> str:
     return f"...另有 {omitted} 项未显示"
 
@@ -483,24 +489,39 @@ def build_compacting_progress_message() -> str:
     return "执行进度\n正在整理上下文，稍后继续。"
 
 
-def build_user_question_prompt(question: UserQuestionPrompt) -> str:
-    lines = ["需要你选择"]
+_NUMBER_EMOJI = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣")
+
+
+def build_user_question_prompt(
+    question: UserQuestionPrompt,
+    *,
+    session_id: str | None = None,
+    session_title: str | None = None,
+    cwd: str | None = None,
+) -> str:
+    session_label = _code_segment(session_title) if session_title else (session_id[:8] if session_id else "")
+    header = f"❓ [{session_label}] 需要你选择" if session_label else "❓ 需要你选择"
+    lines = [header]
     if question.total_questions > 1:
         lines.append(f"问题: {question.question_index + 1}/{question.total_questions}")
     if question.header:
         lines.append(f"主题: {question.header}")
-    lines.append(f"内容: {_truncate_question_text(question.question)}")
+    lines.append(_truncate_question_text(question.question))
 
     if question.options:
         lines.append("")
-        for index, option in enumerate(question.options, start=1):
-            lines.append(f"{index}. {_truncate_question_text(option.label)}")
+        for index, option in enumerate(question.options):
+            num = _NUMBER_EMOJI[index] if index < len(_NUMBER_EMOJI) else f"{index + 1}."
+            label = _truncate_question_text(option.label)
+            lines.append(f"{num} {label}")
             if option.description:
                 lines.append(f"   {_truncate_question_text(option.description)}")
 
+    if cwd:
+        lines.extend(["", f"📂 {_code_segment(cwd)}"])
     lines.append("")
     if question.multi_select:
-        lines.append("可多选，请先勾选需要的选项，再点击“提交选择”；如果要自己补充说明，也可以直接回复文字。")
+        lines.append("可多选：先勾选选项再点提交选择；也可直接回复文字。")
     else:
-        lines.append("请点击下方按钮；如果要自己补充说明，也可以直接回复文字。")
+        lines.append("请点击下方按钮选择；也可直接回复文字。")
     return "\n".join(lines)

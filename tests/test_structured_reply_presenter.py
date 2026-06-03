@@ -318,7 +318,11 @@ async def test_presenter_reports_user_question_once_without_generic_progress() -
     await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
-    assert first == [UserQuestionOutput(text=build_user_question_prompt(prompt), question=prompt)]
+    assert first == [
+        UserQuestionOutput(
+            text=build_user_question_prompt(prompt, session_id="claude-session-1"), question=prompt, session_id="claude-session-1"
+        )
+    ]
     assert second == []
 
 
@@ -364,7 +368,9 @@ async def test_presenter_reemits_user_question_until_delivery_acknowledged() -> 
         ),
         user_id=1,
     )
-    expected = UserQuestionOutput(text=build_user_question_prompt(prompt), question=prompt)
+    expected = UserQuestionOutput(
+        text=build_user_question_prompt(prompt, session_id="claude-session-1"), question=prompt, session_id="claude-session-1"
+    )
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
@@ -431,7 +437,13 @@ async def test_presenter_reports_only_first_question_when_tool_contains_multiple
     await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
-    assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
+    assert first == [
+        UserQuestionOutput(
+            text=build_user_question_prompt(first_prompt, session_id="claude-session-1"),
+            question=first_prompt,
+            session_id="claude-session-1",
+        )
+    ]
     assert second == []
 
 
@@ -583,7 +595,13 @@ async def test_presenter_reports_pending_ask_user_question_instead_of_permission
     await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
-    assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
+    assert first == [
+        UserQuestionOutput(
+            text=build_user_question_prompt(first_prompt, session_id="claude-session-1"),
+            question=first_prompt,
+            session_id="claude-session-1",
+        )
+    ]
     assert second == []
 
 
@@ -644,7 +662,13 @@ async def test_presenter_reports_waiting_for_approval_ask_user_question_without_
     await presenter.acknowledge_delivery(first[0])
     second = await presenter.poll(task_id="task-1")
 
-    assert first == [UserQuestionOutput(text=build_user_question_prompt(first_prompt), question=first_prompt)]
+    assert first == [
+        UserQuestionOutput(
+            text=build_user_question_prompt(first_prompt, session_id="claude-session-1"),
+            question=first_prompt,
+            session_id="claude-session-1",
+        )
+    ]
     assert second == []
 
 
