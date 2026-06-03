@@ -178,7 +178,7 @@ class PermissionGateway:
                 return await self._handle_unbound_auto_approve(token, user_id)
             if isinstance(preflight, PreflightNotUnbound):
                 return await self._handle_standard(token, action, user_id)
-            return self._response(self._alert_for_preflight_result(preflight))
+            return self._response(self._alert_for_registry_result(preflight))
 
         return await self._handle_standard(token, action, user_id)
 
@@ -292,18 +292,14 @@ class PermissionGateway:
         deny_epoch_before = self._auto_approve_service.deny_epoch(user_id) if action is PermissionAction.AUTO_APPROVE else None
         consume_result = await self._registry.consume(token, user_id, action)
         if not isinstance(consume_result, ConsumeConsumed):
-            return self._response(self._alert_for_consume_result(consume_result))
+            return self._response(self._alert_for_registry_result(consume_result))
 
         dispatch_result = await self._dispatch_with_completion_tracking(consume_result.snapshot, action)
         failure = await self._transition_for_dispatch_failure(token=token, dispatch_result=dispatch_result)
         if failure is not None:
             return self._response(failure[1])
 
-        try:
-            transitioned = await asyncio.shield(self._registry.mark_resolved(token))
-        except asyncio.CancelledError:
-            await self._registry.mark_resolved(token)
-            raise
+        transitioned = await self._shielded_call(self._registry.mark_resolved(token))
         if not transitioned:
             return self._response("会话已结束，按钮已失效")
         if action is PermissionAction.AUTO_APPROVE and consume_result.snapshot.origin is not SessionOrigin.EXTERNAL_UNBOUND:
@@ -324,7 +320,7 @@ class PermissionGateway:
         if isinstance(preflight, PreflightNotUnbound):
             return await self._handle_standard(token, PermissionAction.AUTO_APPROVE, user_id)
         if not isinstance(preflight, PreflightEligible):
-            return self._response(self._alert_for_preflight_result(preflight))
+            return self._response(self._alert_for_registry_result(preflight))
 
         deny_epoch_before = self._auto_approve_service.deny_epoch(user_id)
         slot_result = await self._auto_approve_service.try_claim_slot(session_id=preflight.snapshot.session_id, user_id=user_id)
@@ -350,7 +346,7 @@ class PermissionGateway:
                 )
                 if released:
                     slot_open = False
-                return self._response(self._alert_for_consume_result(consume_result))
+                return self._response(self._alert_for_registry_result(consume_result))
 
             dispatch_result = await self._dispatch_with_completion_tracking(consume_result.snapshot, PermissionAction.AUTO_APPROVE)
             failure = await self._transition_for_dispatch_failure(token=token, dispatch_result=dispatch_result)
@@ -410,7 +406,7 @@ class PermissionGateway:
         attempt_id: str,
         deny_epoch_before: int,
     ) -> tuple[CallbackResponse, bool]:
-        transitioned = await asyncio.shield(self._registry.mark_resolved(token))
+        transitioned = await self._shielded_call(self._registry.mark_resolved(token))
         if not transitioned:
             released = await self._auto_approve_service.release_slot(
                 session_id=snapshot.session_id,
@@ -565,6 +561,18 @@ class PermissionGateway:
             return BackendDispatchSucceeded() if result else BackendDispatchFailed("backend_rejected")
         return BackendDispatchSucceeded() if bool(result) else BackendDispatchFailed("backend_rejected")
 
+    async def _shielded_call(self, coro: Any) -> Any:
+        """Await *coro* inside ``asyncio.shield``; retry on cancellation.
+
+        When the surrounding task is cancelled, ``asyncio.shield`` raises
+        ``CancelledError`` *without* cancelling the inner coroutine.  We must
+        therefore re-await the coroutine directly so that it still completes.
+        """
+        try:
+            return await asyncio.shield(coro)
+        except asyncio.CancelledError:
+            return await coro
+
     async def _transition_for_dispatch_failure(
         self,
         *,
@@ -580,18 +588,14 @@ class PermissionGateway:
         if isinstance(dispatch_result, BackendDispatchSucceeded):
             return None
         if isinstance(dispatch_result, BackendDispatchFailed):
-            try:
-                transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, dispatch_result.reason))
-            except asyncio.CancelledError:
-                await self._registry.mark_dispatch_failed(token, dispatch_result.reason)
-                raise
+            transitioned = await self._shielded_call(
+                self._registry.mark_dispatch_failed(token, dispatch_result.reason),
+            )
             return transitioned, failed_text if transitioned else "会话已结束，按钮已失效"
         # BackendDispatchUnknown
-        try:
-            transitioned = await asyncio.shield(self._registry.mark_dispatch_failed(token, "dispatch_unknown"))
-        except asyncio.CancelledError:
-            await self._registry.mark_dispatch_failed(token, "dispatch_unknown")
-            raise
+        transitioned = await self._shielded_call(
+            self._registry.mark_dispatch_failed(token, "dispatch_unknown"),
+        )
         return transitioned, (
             "审批结果发送状态未知，请检查最近的操作是否已生效；如未生效请重新触发"
             if transitioned
@@ -607,7 +611,7 @@ class PermissionGateway:
         dispatch_result: BackendDispatchResult,
     ) -> str:
         if isinstance(dispatch_result, BackendDispatchSucceeded):
-            transitioned = await asyncio.shield(self._registry.mark_resolved(token))
+            transitioned = await self._shielded_call(self._registry.mark_resolved(token))
             return success_text if transitioned else "会话已结束，按钮已失效"
         failure = await self._transition_for_dispatch_failure(token=token, dispatch_result=dispatch_result, failed_text=failed_text)
         assert failure is not None
@@ -624,29 +628,17 @@ class PermissionGateway:
             return "审批结果发送失败，请重新触发请求"
         return "当前没有待处理的权限请求"
 
-    def _alert_for_consume_result(self, result: object) -> str:
-        if isinstance(result, ConsumeUnauthorized):
+    def _alert_for_registry_result(self, result: object) -> str:
+        """Unified alert message for Consume* and Preflight* result types."""
+        if isinstance(result, (ConsumeUnauthorized, PreflightUnauthorized)):
             return "无权限响应此请求"
-        if isinstance(result, ConsumeAlreadyResponded):
+        if isinstance(result, (ConsumeAlreadyResponded, PreflightAlreadyResponded)):
             return "已响应过"
-        if isinstance(result, ConsumeDispatchFailed):
+        if isinstance(result, (ConsumeDispatchFailed, PreflightDispatchFailed)):
             if result.reason == "dispatch_unknown":
                 return "审批结果发送状态未知，请检查最近的操作是否已生效；如未生效请重新触发"
             return "上次发送审批结果失败，请重新触发请求"
-        if isinstance(result, ConsumeNotFound):
-            return "按钮已过期，请重新触发请求"
-        return "无效的权限响应"
-
-    def _alert_for_preflight_result(self, result: object) -> str:
-        if isinstance(result, PreflightUnauthorized):
-            return "无权限响应此请求"
-        if isinstance(result, PreflightAlreadyResponded):
-            return "已响应过"
-        if isinstance(result, PreflightDispatchFailed):
-            if result.reason == "dispatch_unknown":
-                return "审批结果发送状态未知，请检查最近的操作是否已生效；如未生效请重新触发"
-            return "上次发送审批结果失败，请重新触发请求"
-        if isinstance(result, PreflightNotFound):
+        if isinstance(result, (ConsumeNotFound, PreflightNotFound)):
             return "按钮已过期，请重新触发请求"
         return "无效的权限响应"
 

@@ -132,16 +132,8 @@ class AutoApproveService:
                 return
             self._activate(user_id=user_id, session_id=session_id)
 
-    async def enable(self, session_id: str, *, user_id: int) -> None:
-        """Compatibility alias for activate."""
-        async with self._service_lock:
-            if session_id in self._ended_sessions:
-                logger.warning(
-                    "auto-approve activation ignored for ended session",
-                    extra={"session_id": session_id, "user_id": user_id},
-                )
-                return
-            self._activate(user_id=user_id, session_id=session_id)
+    # Alias: enable == activate
+    enable = activate
 
     async def deactivate(self, session_id: str) -> bool:
         """Compatibility wrapper disabling any active owner for a session."""
@@ -152,14 +144,8 @@ class AutoApproveService:
                 deactivated = self._deactivate(user_id=user_id, session_id=session_id) or deactivated
             return deactivated
 
-    async def disable(self, session_id: str) -> bool:
-        """Compatibility alias for deactivate."""
-        async with self._service_lock:
-            keys = [key for key in self._activations if key[1] == session_id]
-            deactivated = False
-            for user_id, _ in keys:
-                deactivated = self._deactivate(user_id=user_id, session_id=session_id) or deactivated
-            return deactivated
+    # Alias: disable == deactivate
+    disable = deactivate
 
     async def clear_session(self, session_id: str) -> None:
         """Clear state for a session (called on SessionEnd/cleanup)."""

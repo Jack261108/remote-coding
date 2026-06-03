@@ -9,6 +9,16 @@ from __future__ import annotations
 import html
 import re
 
+
+def short_id(id_str: str, length: int = 8) -> str:
+    """Truncate an ID string for display purposes.
+
+    >>> short_id("abc123def456", 8)
+    'abc123de'
+    """
+    return id_str[:length]
+
+
 _FENCED_CODE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+\-]*)[ \t]*\n?(.*?)```", re.DOTALL)
 _LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")

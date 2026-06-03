@@ -4,7 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.domain.permission_models import PermissionPromptInput
-from app.infra.text_formatting import render_markdownish_to_telegram_html
+from app.infra.text_formatting import render_markdownish_to_telegram_html, short_id
 from app.services.message_sender import Button, Keyboard, MessageSender
 from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
@@ -94,9 +94,9 @@ class ExternalSessionPushNotifier:
         reason: str,
     ) -> bool:
         """Notify user that a permission was resolved in the terminal."""
-        short_id = session_id[:8]
+        sid = short_id(session_id)
         reason_text = "已批准" if reason == "terminal_approved" else reason
-        text = f"✅ [{short_id}] 权限已在终端{reason_text}\n工具: {tool_name}"
+        text = f"✅ [{sid}] 权限已在终端{reason_text}\n工具: {tool_name}"
         return await self._send_with_retry(chat_id=user_id, text=text) is not None
 
     async def notify_phase_change(
@@ -109,8 +109,8 @@ class ExternalSessionPushNotifier:
         cwd: str,
     ) -> bool:
         """Send phase change notification. Returns True if delivered."""
-        short_id = session_id[:8]
-        text = f"📊 [{short_id}] {old_phase.value} → {new_phase.value}\n路径: {cwd}"
+        sid = short_id(session_id)
+        text = f"📊 [{sid}] {old_phase.value} → {new_phase.value}\n路径: {cwd}"
         return await self._send_with_retry(chat_id=user_id, text=text) is not None
 
     async def notify_session_end(
@@ -121,8 +121,8 @@ class ExternalSessionPushNotifier:
         cwd: str,
     ) -> bool:
         """Send session ended notification. Returns True if delivered."""
-        short_id = session_id[:8]
-        text = f"🔚 [{short_id}] 会话已结束\n路径: {cwd}"
+        sid = short_id(session_id)
+        text = f"🔚 [{sid}] 会话已结束\n路径: {cwd}"
         return await self._send_with_retry(chat_id=user_id, text=text) is not None
 
     async def notify_user_question(
@@ -142,11 +142,11 @@ class ExternalSessionPushNotifier:
         """
         if not prompts:
             return False
-        short_id = session_id[:8]
+        sid = short_id(session_id)
         # For interactive mode, we only show the first unanswered prompt with buttons
         prompt = prompts[0]
         lines: list[str] = []
-        lines.append(f"❓ [{short_id}] 用户选择")
+        lines.append(f"❓ [{sid}] 用户选择")
         lines.append(f"问题: {prompt.question}")
         if prompt.options:
             lines.append("选项:")
