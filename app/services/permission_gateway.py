@@ -79,6 +79,7 @@ class CallbackResponse:
 @dataclass(frozen=True, slots=True)
 class RegisterForButtonOk:
     keyboard: Keyboard
+    token: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +123,10 @@ class PermissionGateway:
         self._message_sender = message_sender
         self.message_builder = message_builder
 
+    @property
+    def registry(self) -> Any:
+        return self._registry
+
     async def register_for_button(
         self,
         *,
@@ -159,7 +164,7 @@ class PermissionGateway:
             )
             raise
 
-        return RegisterForButtonOk(keyboard=self._build_permission_keyboard(token))
+        return RegisterForButtonOk(keyboard=self._build_permission_keyboard(token), token=token)
 
     async def handle_callback(self, *, data: str, user_id: int) -> CallbackResponse:
         parsed = self._parse_callback_data(data)

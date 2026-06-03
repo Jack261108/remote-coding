@@ -25,6 +25,16 @@ class MessageSender(Protocol):
         *,
         keyboard: Keyboard | None = None,
         parse_mode: str | None = None,
+    ) -> int | None: ...
+
+    async def edit_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        keyboard: Keyboard | None = None,
+        parse_mode: str | None = None,
     ) -> None: ...
 
     async def send_photo(

@@ -61,7 +61,7 @@ class ExternalSessionPushNotifier:
                 "bound permission registration conflict",
                 extra={"tool_use_id": tool_use_id, "session_id": session_id, "user_id": user_id},
             )
-            return await self._send_with_retry(chat_id=user_id, text=result.advisory_text, keyboard=result.keyboard)
+            return await self._send_with_retry(chat_id=user_id, text=result.advisory_text, keyboard=result.keyboard) is not None
         if not isinstance(result, RegisterForButtonOk):
             raise RuntimeError("unexpected permission gateway registration result")
 
@@ -73,7 +73,15 @@ class ExternalSessionPushNotifier:
             session_title=title,
         )
         text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
-        return await self._send_with_retry(chat_id=user_id, text=text, keyboard=result.keyboard, parse_mode="HTML")
+        message_id = await self._send_with_retry(chat_id=user_id, text=text, keyboard=result.keyboard, parse_mode="HTML")
+        if message_id is not None:
+            # Store the message ID in the token record for later editing
+            await gateway.registry.update_telegram_message(
+                token=result.token,
+                chat_id=user_id,
+                message_id=message_id,
+            )
+        return message_id is not None
 
     async def notify_permission_resolved_in_terminal(
         self,
@@ -88,7 +96,7 @@ class ExternalSessionPushNotifier:
         short_id = session_id[:8]
         reason_text = "已批准" if reason == "terminal_approved" else reason
         text = f"✅ [{short_id}] 权限已在终端{reason_text}\n工具: {tool_name}"
-        return await self._send_with_retry(chat_id=user_id, text=text)
+        return await self._send_with_retry(chat_id=user_id, text=text) is not None
 
     async def notify_phase_change(
         self,
@@ -102,7 +110,7 @@ class ExternalSessionPushNotifier:
         """Send phase change notification. Returns True if delivered."""
         short_id = session_id[:8]
         text = f"📊 [{short_id}] {old_phase.value} → {new_phase.value}\n路径: {cwd}"
-        return await self._send_with_retry(chat_id=user_id, text=text)
+        return await self._send_with_retry(chat_id=user_id, text=text) is not None
 
     async def notify_session_end(
         self,
@@ -114,7 +122,7 @@ class ExternalSessionPushNotifier:
         """Send session ended notification. Returns True if delivered."""
         short_id = session_id[:8]
         text = f"🔚 [{short_id}] 会话已结束\n路径: {cwd}"
-        return await self._send_with_retry(chat_id=user_id, text=text)
+        return await self._send_with_retry(chat_id=user_id, text=text) is not None
 
     async def notify_user_question(
         self,
@@ -164,12 +172,12 @@ class ExternalSessionPushNotifier:
                     cb_data = f"ext_uq:{tool_use_id[:max_id_len]}:{i}"
                 buttons.append([Button(text=f"{i + 1}. {option.label}"[:40], callback_data=cb_data)])
             keyboard = Keyboard(rows=buttons)
-            return await self._send_with_retry(chat_id=user_id, text=text, keyboard=keyboard)
+            return await self._send_with_retry(chat_id=user_id, text=text, keyboard=keyboard) is not None
         else:
             lines.append("请在终端中选择")
             lines.append("")
             text = "\n".join(lines).rstrip()
-            return await self._send_with_retry(chat_id=user_id, text=text)
+            return await self._send_with_retry(chat_id=user_id, text=text) is not None
 
     async def notify_info(
         self,
@@ -178,14 +186,16 @@ class ExternalSessionPushNotifier:
         text: str,
     ) -> bool:
         """Send an informational notification (no action buttons). Returns True if delivered."""
-        return await self._send_with_retry(chat_id=user_id, text=text)
+        return await self._send_with_retry(chat_id=user_id, text=text) is not None
 
-    async def _send_with_retry(self, *, chat_id: int, text: str, keyboard: Keyboard | None = None, parse_mode: str | None = None) -> bool:
-        """Send message with retry on failure."""
+    async def _send_with_retry(
+        self, *, chat_id: int, text: str, keyboard: Keyboard | None = None, parse_mode: str | None = None
+    ) -> int | None:
+        """Send message with retry on failure. Returns message_id on success."""
         for attempt in range(1 + self._retry_count):
             try:
-                await self._message_sender.send_message(chat_id=chat_id, text=text, keyboard=keyboard, parse_mode=parse_mode)
-                return True
+                message_id = await self._message_sender.send_message(chat_id=chat_id, text=text, keyboard=keyboard, parse_mode=parse_mode)
+                return message_id
             except Exception:
                 if attempt < self._retry_count:
                     logger.warning(
@@ -198,4 +208,4 @@ class ExternalSessionPushNotifier:
                         attempt + 1,
                         chat_id,
                     )
-        return False
+        return None

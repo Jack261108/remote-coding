@@ -187,7 +187,7 @@ class FakePermissionGateway:
         candidate_user_id: int | None,
     ) -> RegisterForButtonOk:
         self.registrations.append((tool_use_id, session_id, origin, candidate_user_id))
-        return RegisterForButtonOk(keyboard=self.keyboard)
+        return RegisterForButtonOk(keyboard=self.keyboard, token="test-token")
 
 
 @pytest.mark.asyncio

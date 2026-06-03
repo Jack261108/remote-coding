@@ -470,30 +470,33 @@ class HookHandlingMixin(AppContainerBase):
                 payload={"tool_use_id": tool_use_id, "source": "terminal"},
             )
         )
-        # Update permission callback registry
+        # Update permission callback registry and edit Telegram message
         if hasattr(self, "permission_callback_registry"):
+            # Get the record before invalidating to preserve message info
+            record = await self.permission_callback_registry.get_record_by_tool_use_id(session_id, tool_use_id)
             await self.permission_callback_registry.invalidate_pending_for_tool(
                 session_id=session_id,
                 tool_use_id=tool_use_id,
                 reason=reason,
             )
-        # Notify user via Telegram if bound
-        if hasattr(self, "push_notifier") and hasattr(self, "external_binding_store"):
-            binding = self.external_binding_store.get_binding(session_id)
-            if binding is not None:
-                # Get tool name from session state or use default
-                tool_name = "Tool"
-                if hasattr(self, "session_store"):
-                    state = self.session_store.get(session_id)
-                    if state and state.pending_permission:
-                        tool_name = state.pending_permission.tool_name
-                await self.push_notifier.notify_permission_resolved_in_terminal(
-                    user_id=binding.user_id,
-                    session_id=session_id,
-                    tool_name=tool_name,
-                    tool_use_id=tool_use_id,
-                    reason=reason,
-                )
+            # Edit the Telegram message if we have the message info
+            if record and record.telegram_chat_id and record.telegram_message_id:
+                _INSTRUCTION_LINE = "请点击下方按钮选择允许或拒绝。"
+                approval_text = "✅ 已在终端批准"
+                try:
+                    # We need to get the original message text to replace the instruction line
+                    # Since we can't retrieve it, we'll just edit with the approval text
+                    await self.message_sender.edit_message(
+                        chat_id=record.telegram_chat_id,
+                        message_id=record.telegram_message_id,
+                        text=f"{approval_text}\n工具: {tool_use_id[:16]}...",
+                    )
+                except Exception:
+                    logger.warning(
+                        "failed to edit Telegram message for terminal approval",
+                        extra={"session_id": session_id, "tool_use_id": tool_use_id},
+                        exc_info=True,
+                    )
 
     async def _bind_hook_session(self, event: HookEvent) -> None:
         if not event.session_id:

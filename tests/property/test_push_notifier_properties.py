@@ -28,7 +28,7 @@ class TestPhaseTransitionPushNotifications:
     async def test_phase_change_sends_notification_to_bound_user(self):
         """Phase change triggers push notification with session context."""
         message_sender = MagicMock()
-        message_sender.send_message = AsyncMock()
+        message_sender.send_message = AsyncMock(return_value=123)
         binding_store = MagicMock()
 
         notifier = ExternalSessionPushNotifier(
@@ -73,7 +73,7 @@ class TestPhaseTransitionPushNotifications:
 
         for old_phase, new_phase in transitions:
             message_sender = MagicMock()
-            message_sender.send_message = AsyncMock()
+            message_sender.send_message = AsyncMock(return_value=123)
             binding_store = MagicMock()
 
             notifier = ExternalSessionPushNotifier(

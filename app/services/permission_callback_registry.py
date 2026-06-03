@@ -63,6 +63,8 @@ class PermissionCallbackRecord:
     responded_by_user_id: int | None
     responded_at: datetime | None
     dispatch_error_reason: str | None
+    telegram_chat_id: int | None = None
+    telegram_message_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +82,8 @@ class PermissionCallbackRecordSnapshot:
     responded_by_user_id: int | None
     responded_at: datetime | None
     dispatch_error_reason: str | None
+    telegram_chat_id: int | None = None
+    telegram_message_id: int | None = None
 
     @classmethod
     def from_record(cls, record: PermissionCallbackRecord) -> PermissionCallbackRecordSnapshot:
@@ -97,6 +101,8 @@ class PermissionCallbackRecordSnapshot:
             responded_by_user_id=record.responded_by_user_id,
             responded_at=record.responded_at,
             dispatch_error_reason=record.dispatch_error_reason,
+            telegram_chat_id=record.telegram_chat_id,
+            telegram_message_id=record.telegram_message_id,
         )
 
 
@@ -199,6 +205,8 @@ class PermissionCallbackRegistry:
         origin: SessionOrigin,
         authorization_mode: AuthorizationMode,
         authorized_user_ids: frozenset[int],
+        telegram_chat_id: int | None = None,
+        telegram_message_id: int | None = None,
     ) -> str:
         async with self._lock:
             self._evict_stale()
@@ -228,6 +236,8 @@ class PermissionCallbackRegistry:
                     responded_by_user_id=None,
                     responded_at=None,
                     dispatch_error_reason=None,
+                    telegram_chat_id=telegram_chat_id,
+                    telegram_message_id=telegram_message_id,
                 )
                 break
             else:
@@ -361,6 +371,32 @@ class PermissionCallbackRegistry:
                 if token in transitioned_tokens:
                     self._compound_index.pop(compound_key, None)
             return len(transitioned_tokens)
+
+    async def update_telegram_message(self, token: str, chat_id: int, message_id: int) -> bool:
+        """Update the Telegram message ID for a permission token."""
+        async with self._lock:
+            record = self._records.get(token)
+            if record is None:
+                return False
+            record.telegram_chat_id = chat_id
+            record.telegram_message_id = message_id
+            return True
+
+    async def get_record(self, token: str) -> PermissionCallbackRecordSnapshot | None:
+        """Get a permission record by token."""
+        async with self._lock:
+            record = self._records.get(token)
+            if record is None:
+                return None
+            return PermissionCallbackRecordSnapshot.from_record(record)
+
+    async def get_record_by_tool_use_id(self, session_id: str, tool_use_id: str) -> PermissionCallbackRecordSnapshot | None:
+        """Get a permission record by session_id and tool_use_id."""
+        async with self._lock:
+            for record in self._records.values():
+                if record.session_id == session_id and record.tool_use_id == tool_use_id:
+                    return PermissionCallbackRecordSnapshot.from_record(record)
+            return None
 
     async def find_pending_for_user(self, user_id: int, *, sort_desc_by_created_at: bool = True) -> list[PermissionCallbackRecordSnapshot]:
         async with self._lock:

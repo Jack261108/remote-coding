@@ -24,10 +24,29 @@ class AiogramMessageSender:
         *,
         keyboard: Keyboard | None = None,
         parse_mode: str | None = None,
+    ) -> int | None:
+        reply_markup = _to_reply_markup(keyboard) if keyboard else None
+        msg = await self._bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+        return msg.message_id
+
+    async def edit_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        keyboard: Keyboard | None = None,
+        parse_mode: str | None = None,
     ) -> None:
         reply_markup = _to_reply_markup(keyboard) if keyboard else None
-        await self._bot.send_message(
+        await self._bot.edit_message_text(
             chat_id=chat_id,
+            message_id=message_id,
             text=text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,

@@ -61,7 +61,7 @@ class FakePermissionGateway:
         self.keyboard = Keyboard(rows=[[Button(text="Allow", callback_data="perm:tokTest123:allow")]])
 
     async def register_for_button(self, **kwargs):  # noqa: ANN003, ANN202
-        return RegisterForButtonOk(keyboard=self.keyboard)
+        return RegisterForButtonOk(keyboard=self.keyboard, token="test-token")
 
 
 def permission_events(
