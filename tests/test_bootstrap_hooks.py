@@ -59,7 +59,7 @@ async def test_app_container_start_installs_hooks_and_starts_server(tmp_path, mo
     def fake_install():
         seen["install"] += 1
 
-    async def fake_start(handler, permission_failure_handler=None):
+    async def fake_start(handler, permission_failure_handler=None, permission_resolved_handler=None):
         seen["start"] += 1
         assert handler is not None
 
@@ -89,7 +89,7 @@ async def test_app_container_start_skips_install_when_disabled(tmp_path, monkeyp
     def fake_install():
         seen["install"] += 1
 
-    async def fake_start(handler, permission_failure_handler=None):
+    async def fake_start(handler, permission_failure_handler=None, permission_resolved_handler=None):
         seen["start"] += 1
 
     async def fake_stop():
@@ -582,7 +582,7 @@ async def test_sync_claude_session_uses_per_session_lock(tmp_path, monkeypatch: 
 async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    async def fake_start(handler, permission_failure_handler=None):
+    async def fake_start(handler, permission_failure_handler=None, permission_resolved_handler=None):
         return None
 
     async def fake_stop():
@@ -945,7 +945,7 @@ async def test_start_restores_persisted_claude_session_snapshot(tmp_path, monkey
 
     second = AppContainer(settings)
 
-    async def fake_start(handler, permission_failure_handler=None):
+    async def fake_start(handler, permission_failure_handler=None, permission_resolved_handler=None):
         return None
 
     async def fake_stop():
@@ -1022,7 +1022,7 @@ async def test_start_clears_stale_claude_session_binding_when_snapshot_missing(t
 
     second = AppContainer(settings)
 
-    async def fake_start(handler, permission_failure_handler=None):
+    async def fake_start(handler, permission_failure_handler=None, permission_resolved_handler=None):
         return None
 
     async def fake_stop():
@@ -1077,7 +1077,7 @@ async def test_start_clears_stale_claude_session_binding_when_only_empty_termina
 
     second = AppContainer(settings)
 
-    async def fake_start(handler, permission_failure_handler=None):
+    async def fake_start(handler, permission_failure_handler=None, permission_resolved_handler=None):
         return None
 
     async def fake_stop():
@@ -1131,7 +1131,7 @@ async def test_start_keeps_claude_session_binding_when_terminal_state_has_conten
 
     second = AppContainer(settings)
 
-    async def fake_start(handler, permission_failure_handler=None):
+    async def fake_start(handler, permission_failure_handler=None, permission_resolved_handler=None):
         return None
 
     async def fake_stop():
@@ -1291,7 +1291,7 @@ async def test_start_restores_agent_file_watcher_for_existing_subagent_container
     second = AppContainer(settings)
     seen_supervisor_watch: list[tuple[str, str]] = []
 
-    async def fake_start(handler, permission_failure_handler=None):
+    async def fake_start(handler, permission_failure_handler=None, permission_resolved_handler=None):
         return None
 
     async def fake_stop():

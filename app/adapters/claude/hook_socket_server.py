@@ -19,6 +19,7 @@ from app.domain.models import utc_now
 
 HookEventHandler = Callable[[HookEvent], Awaitable[None] | None]
 PermissionFailureHandler = Callable[[str, str], Awaitable[None] | None]
+PermissionResolvedHandler = Callable[[str, str, str], Awaitable[None] | None]  # session_id, tool_use_id, reason
 logger = logging.getLogger(__name__)
 
 
@@ -58,6 +59,7 @@ class HookSocketServer:
         self._server: asyncio.AbstractServer | None = None
         self._event_handler: HookEventHandler | None = None
         self._permission_failure_handler: PermissionFailureHandler | None = None
+        self._permission_resolved_handler: PermissionResolvedHandler | None = None
         self._pending_permissions: dict[str, PendingPermissionRequest] = {}
         self._pending_expiration_tasks: dict[str, asyncio.Task[None]] = {}
         self._tool_use_id_cache: dict[str, list[_CachedToolUseId]] = {}
@@ -67,11 +69,13 @@ class HookSocketServer:
         self,
         on_event: HookEventHandler,
         on_permission_failure: PermissionFailureHandler | None = None,
+        on_permission_resolved: PermissionResolvedHandler | None = None,
     ) -> None:
         if self._server is not None:
             return
         self._event_handler = on_event
         self._permission_failure_handler = on_permission_failure
+        self._permission_resolved_handler = on_permission_resolved
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
         with suppress(FileNotFoundError):
             self._socket_path.unlink()
@@ -194,6 +198,9 @@ class HookSocketServer:
             await self._cache_tool_use_id(event)
         if event.event in {"PostToolUse", "PostToolUseFailure"}:
             await self._remove_cached_tool_use_id(event)
+            # Check if this tool had a pending permission (terminal-side approval)
+            if event.tool_use_id:
+                await self._check_terminal_permission_resolved(event.session_id, event.tool_use_id)
         if event.event == "SessionEnd":
             await self._cleanup_cache(event.session_id)
             await self.cancel_pending_permissions(session_id=event.session_id)
@@ -288,6 +295,23 @@ class HookSocketServer:
         result = self._permission_failure_handler(session_id, tool_use_id)
         if inspect.isawaitable(result):
             await result
+
+    async def _emit_permission_resolved(self, session_id: str, tool_use_id: str, reason: str) -> None:
+        if self._permission_resolved_handler is None:
+            return
+        result = self._permission_resolved_handler(session_id, tool_use_id, reason)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _check_terminal_permission_resolved(self, session_id: str, tool_use_id: str) -> None:
+        """Check if a PostToolUse/PostToolUseFailure indicates terminal-side permission approval."""
+        async with self._lock:
+            pending = self._pending_permissions.pop(tool_use_id, None)
+            if pending is None:
+                return
+            self._cancel_pending_expiration_locked(tool_use_id)
+        # Permission was resolved in terminal (not via Telegram)
+        await self._emit_permission_resolved(session_id, tool_use_id, "terminal_approved")
 
     async def _close_pending_permissions(self, items: list[PendingPermissionRequest], *, emit_failure: bool) -> None:
         for item in items:

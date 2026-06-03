@@ -334,6 +334,34 @@ class PermissionCallbackRegistry:
                     self._compound_index.pop(compound_key, None)
             return len(transitioned_tokens)
 
+    async def invalidate_pending_for_tool(self, session_id: str, tool_use_id: str, reason: str) -> int:
+        """Invalidate pending permission records for a specific tool in a session.
+
+        This is called when a permission is resolved in the terminal (not via Telegram).
+        """
+        async with self._lock:
+            self._evict_stale()
+            transitioned_tokens: set[str] = set()
+            for record in self._records.values():
+                if (
+                    record.session_id == session_id
+                    and record.tool_use_id == tool_use_id
+                    and record.status
+                    in {
+                        CallbackRecordStatus.PENDING,
+                        CallbackRecordStatus.DISPATCH_FAILED,
+                    }
+                ):
+                    record.status = CallbackRecordStatus.RESOLVED
+                    record.decision = PermissionAction.ALLOW
+                    record.dispatch_error_reason = reason
+                    transitioned_tokens.add(record.token)
+
+            for compound_key, token in list(self._compound_index.items()):
+                if token in transitioned_tokens:
+                    self._compound_index.pop(compound_key, None)
+            return len(transitioned_tokens)
+
     async def find_pending_for_user(self, user_id: int, *, sort_desc_by_created_at: bool = True) -> list[PermissionCallbackRecordSnapshot]:
         async with self._lock:
             self._evict_stale()

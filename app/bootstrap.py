@@ -283,7 +283,7 @@ class AppContainer(
             logger.warning("Failed to register bot commands: %s", exc)
         if self.settings.claude_install_hooks:
             self.hook_installer.install()
-        await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure)
+        await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
         await self._restore_session_bindings()
 
         # Initial cleanup passes (before periodic loop starts)

@@ -456,6 +456,45 @@ class HookHandlingMixin(AppContainerBase):
             )
         )
 
+    async def _handle_permission_resolved(self, session_id: str, tool_use_id: str, reason: str) -> None:
+        """Handle permission resolved in terminal (not via Telegram)."""
+        logger.info(
+            "permission resolved in terminal",
+            extra={"session_id": session_id, "tool_use_id": tool_use_id, "reason": reason},
+        )
+        # Dispatch permission approved event to update session state
+        await self._dispatch_session_event(  # type: ignore[attr-defined]
+            SessionEvent(
+                session_id=session_id,
+                type=SessionEventType.PERMISSION_APPROVED,
+                payload={"tool_use_id": tool_use_id, "source": "terminal"},
+            )
+        )
+        # Update permission callback registry
+        if hasattr(self, "permission_callback_registry"):
+            await self.permission_callback_registry.invalidate_pending_for_tool(
+                session_id=session_id,
+                tool_use_id=tool_use_id,
+                reason=reason,
+            )
+        # Notify user via Telegram if bound
+        if hasattr(self, "push_notifier") and hasattr(self, "external_binding_store"):
+            binding = self.external_binding_store.get_binding(session_id)
+            if binding is not None:
+                # Get tool name from session state or use default
+                tool_name = "Tool"
+                if hasattr(self, "session_store"):
+                    state = self.session_store.get(session_id)
+                    if state and state.pending_permission:
+                        tool_name = state.pending_permission.tool_name
+                await self.push_notifier.notify_permission_resolved_in_terminal(
+                    user_id=binding.user_id,
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    tool_use_id=tool_use_id,
+                    reason=reason,
+                )
+
     async def _bind_hook_session(self, event: HookEvent) -> None:
         if not event.session_id:
             return

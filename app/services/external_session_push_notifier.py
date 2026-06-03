@@ -75,6 +75,21 @@ class ExternalSessionPushNotifier:
         text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
         return await self._send_with_retry(chat_id=user_id, text=text, keyboard=result.keyboard, parse_mode="HTML")
 
+    async def notify_permission_resolved_in_terminal(
+        self,
+        *,
+        user_id: int,
+        session_id: str,
+        tool_name: str,
+        tool_use_id: str,
+        reason: str,
+    ) -> bool:
+        """Notify user that a permission was resolved in the terminal."""
+        short_id = session_id[:8]
+        reason_text = "已批准" if reason == "terminal_approved" else reason
+        text = f"✅ [{short_id}] 权限已在终端{reason_text}\n工具: {tool_name}"
+        return await self._send_with_retry(chat_id=user_id, text=text)
+
     async def notify_phase_change(
         self,
         *,
