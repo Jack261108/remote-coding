@@ -103,7 +103,8 @@ async def test_legacy_callback_shapes_reformat_to_the_same_dispatch_path(
 
     response = await gateway.handle_callback(data=data, user_id=USER_ID)
 
-    assert response.alert_text == ("已批准" if action is PermissionAction.ALLOW else "已拒绝")
+    expected = "✅ 用户已批准" if action is PermissionAction.ALLOW else "❌ 用户已拒绝"
+    assert response.edit_message_text == expected
     assert registry.consumes == [(token, USER_ID, action)]
     assert registry.resolved == [token]
 
@@ -115,6 +116,6 @@ async def test_legacy_callback_token_missing_from_new_registry_returns_expired_a
 
     response = await gateway.handle_callback(data="ext_perm:legacy01:allow", user_id=USER_ID)
 
-    assert response.alert_text == "按钮已过期，请重新触发请求"
+    assert response.edit_message_text == "按钮已过期，请重新触发请求"
     assert registry.consumes == [("legacy01", USER_ID, PermissionAction.ALLOW)]
     assert registry.resolved == []

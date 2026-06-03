@@ -206,26 +206,26 @@ async def test_callback_dispatch_table_for_allow_and_deny_is_deterministic(
         if dispatch_label == "succeeded":
             assert registry.resolved == [TOKEN]
             assert registry.dispatch_failed == []
-            expected = "已批准" if action is PermissionAction.ALLOW else "已拒绝"
-            assert response.alert_text == (expected if transition_ok else "会话已结束，按钮已失效")
+            expected = "✅ 用户已批准" if action is PermissionAction.ALLOW else "❌ 用户已拒绝"
+            assert response.edit_message_text == (expected if transition_ok else "⚠️ 会话已结束，按钮已失效")
         elif dispatch_label == "failed":
             assert registry.resolved == []
             assert registry.dispatch_failed == [(TOKEN, "backend_down")]
-            assert response.alert_text == ("上次发送审批结果失败，请重新触发请求" if transition_ok else "会话已结束，按钮已失效")
+            assert response.edit_message_text == ("上次发送审批结果失败，请重新触发请求" if transition_ok else "⚠️ 会话已结束，按钮已失效")
         else:
             assert registry.resolved == []
             assert registry.dispatch_failed == [(TOKEN, "dispatch_unknown")]
-            assert response.alert_text == (
+            assert response.edit_message_text == (
                 "审批结果发送状态未知，请检查最近的操作是否已生效；如未生效请重新触发"
                 if transition_ok
-                else "会话已结束；本次响应结果未知，后端可能已收到，请检查会话输出或重新触发"
+                else "⚠️ 会话已结束；本次响应结果未知，后端可能已收到，请检查会话输出或重新触发"
             )
     else:
         assert dispatch_calls == []
         assert registry.resolved == []
         assert registry.dispatch_failed == []
         assert (
-            response.alert_text
+            response.edit_message_text
             == {
                 "unauthorized": "无权限响应此请求",
                 "already": "已响应过",
@@ -253,7 +253,7 @@ async def test_unbound_auto_approve_claims_slot_and_commits_after_successful_dis
 
     response = await gateway.handle_callback(data=f"perm:{TOKEN}:auto_approve", user_id=USER_ID)
 
-    assert response.alert_text == "已开启自动批准"
+    assert response.edit_message_text == "✅ 用户已开启自动批准"
     assert dispatch_calls == [PermissionAction.AUTO_APPROVE]
     assert registry.resolved == [TOKEN]
     assert registry.dispatch_failed == []
@@ -270,7 +270,7 @@ async def test_unbound_auto_approve_slot_conflict_leaves_record_pending() -> Non
 
     response = await gateway.handle_callback(data=f"perm:{TOKEN}:auto_approve", user_id=USER_ID)
 
-    assert response.alert_text == "已被其他用户激活"
+    assert response.edit_message_text == "已被其他用户激活"
     assert registry.consumes == []
     assert registry.resolved == []
     assert registry.dispatch_failed == []

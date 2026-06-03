@@ -46,7 +46,7 @@ async def test_documented_gap_revoked_user_can_use_already_issued_unbound_button
 
     response = await gateway.handle_callback(data="perm:tok12345:allow", user_id=user_a)
 
-    assert response.alert_text == "已批准"
+    assert response.edit_message_text == "✅ 用户已批准"
     unbound_responder.handle_response.assert_awaited_once_with(
         tool_use_id="tool-gap-1",
         user_id=user_a,

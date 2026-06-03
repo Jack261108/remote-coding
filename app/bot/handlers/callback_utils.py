@@ -6,6 +6,8 @@ import logging
 
 from aiogram.types import CallbackQuery
 
+_INSTRUCTION_LINE = "请点击下方按钮选择允许或拒绝。"
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,16 +20,18 @@ async def apply_callback_response(
     *,
     log_prefix: str = "",
 ) -> None:
-    """应用回调响应：编辑消息、清除键盘、回答回调。"""
-    if callback.message is not None:
-        if edit_text:
-            try:
-                await callback.message.edit_text(edit_text)  # type: ignore[union-attr]
-            except Exception:
-                logger.exception("failed to edit %s callback message", log_prefix)
-        if clear_keyboard:
-            try:
-                await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
-            except Exception:
-                logger.exception("failed to clear %s inline keyboard", log_prefix)
+    """应用回调响应：原地编辑消息（替换提示行+去键盘）、回答回调。"""
+    msg = callback.message
+    if msg is not None and (edit_text or clear_keyboard):
+        try:
+            original = msg.text or ""  # type: ignore[union-attr]
+            if edit_text and _INSTRUCTION_LINE in original:
+                new_text = original.replace(_INSTRUCTION_LINE, edit_text)
+                await msg.edit_text(new_text, reply_markup=None)  # type: ignore[union-attr]
+            elif edit_text:
+                await msg.edit_text(edit_text, reply_markup=None)  # type: ignore[union-attr]
+            elif clear_keyboard:
+                await msg.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
+        except Exception:
+            logger.exception("failed to apply %s callback response", log_prefix)
     await callback.answer(alert_text, show_alert=show_alert)

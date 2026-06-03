@@ -119,19 +119,19 @@ async def test_owned_register_clicks_and_subsequent_permission_auto_approved() -
 
     allow_token = await harness.register(origin=SessionOrigin.OWNED, session_id="owned", tool_use_id="owned-allow", user_id=1)
     allow_response = await harness.gateway.handle_callback(data=f"perm:{allow_token}:allow", user_id=1)
-    assert allow_response.alert_text == "已批准"
+    assert allow_response.edit_message_text == "✅ 用户已批准"
     assert harness.task_service.calls[-1] == (1, "allow", "owned-allow")
     assert harness.status(allow_token) is CallbackRecordStatus.RESOLVED
 
     deny_token = await harness.register(origin=SessionOrigin.OWNED, session_id="owned", tool_use_id="owned-deny", user_id=1)
     deny_response = await harness.gateway.handle_callback(data=f"perm:{deny_token}:deny", user_id=1)
-    assert deny_response.alert_text == "已拒绝"
+    assert deny_response.edit_message_text == "❌ 用户已拒绝"
     assert harness.task_service.calls[-1] == (1, "deny", "owned-deny")
     assert harness.status(deny_token) is CallbackRecordStatus.RESOLVED
 
     auto_token = await harness.register(origin=SessionOrigin.OWNED, session_id="owned", tool_use_id="owned-auto", user_id=1)
     auto_response = await harness.gateway.handle_callback(data=f"perm:{auto_token}:auto_approve", user_id=1)
-    assert auto_response.alert_text == "已开启自动批准"
+    assert auto_response.edit_message_text == "✅ 用户已开启自动批准"
     assert harness.task_service.calls[-1] == (1, "allow", "owned-auto")
     assert harness.aas.is_active(session_id="owned", user_id=1)
 
@@ -153,18 +153,18 @@ async def test_external_bound_register_clicks_and_subsequent_permission_auto_app
 
     allow_token = await harness.register(origin=SessionOrigin.EXTERNAL_BOUND, session_id="bound", tool_use_id="bound-allow", user_id=1)
     allow_response = await harness.gateway.handle_callback(data=f"perm:{allow_token}:allow", user_id=1)
-    assert allow_response.alert_text == "已批准"
+    assert allow_response.edit_message_text == "✅ 用户已批准"
     assert harness.hook_socket_server.calls[-1][0:2] == ("bound-allow", "allow")
     assert harness.status(allow_token) is CallbackRecordStatus.RESOLVED
 
     deny_token = await harness.register(origin=SessionOrigin.EXTERNAL_BOUND, session_id="bound", tool_use_id="bound-deny", user_id=1)
     deny_response = await harness.gateway.handle_callback(data=f"perm:{deny_token}:deny", user_id=1)
-    assert deny_response.alert_text == "已拒绝"
+    assert deny_response.edit_message_text == "❌ 用户已拒绝"
     assert harness.hook_socket_server.calls[-1][0:2] == ("bound-deny", "deny")
 
     auto_token = await harness.register(origin=SessionOrigin.EXTERNAL_BOUND, session_id="bound", tool_use_id="bound-auto", user_id=1)
     auto_response = await harness.gateway.handle_callback(data=f"perm:{auto_token}:auto_approve", user_id=1)
-    assert auto_response.alert_text == "已开启自动批准"
+    assert auto_response.edit_message_text == "✅ 用户已开启自动批准"
     assert harness.hook_socket_server.calls[-1][0:2] == ("bound-auto", "allow")
     assert harness.aas.is_active(session_id="bound", user_id=1)
 
@@ -189,7 +189,7 @@ async def test_external_unbound_first_responder_and_auto_approve_slot_behaviour(
         harness.gateway.handle_callback(data=f"perm:{token}:allow", user_id=1),
         harness.gateway.handle_callback(data=f"perm:{token}:deny", user_id=2),
     )
-    assert sorted([first.alert_text, second.alert_text]) == ["已响应过", "已批准"]
+    assert sorted([first.edit_message_text, second.edit_message_text]) == ["✅ 用户已批准", "已响应过"]
     assert len(harness.unbound_responder.calls) == 1
     assert harness.status(token) is CallbackRecordStatus.RESOLVED
 
@@ -199,18 +199,18 @@ async def test_external_unbound_first_responder_and_auto_approve_slot_behaviour(
         origin=SessionOrigin.EXTERNAL_UNBOUND, session_id="unbound", tool_use_id="unbound-conflict", user_id=None
     )
     conflict = await harness.gateway.handle_callback(data=f"perm:{conflict_token}:auto_approve", user_id=2)
-    assert conflict.alert_text == "已被其他用户激活"
+    assert conflict.edit_message_text == "已被其他用户激活"
     assert harness.status(conflict_token) is CallbackRecordStatus.PENDING
 
     same_user = await harness.gateway.handle_callback(data=f"perm:{conflict_token}:auto_approve", user_id=1)
-    assert same_user.alert_text == "正在处理自动批准"
+    assert same_user.edit_message_text == "正在处理自动批准"
     await harness.aas.release_slot(session_id="unbound", user_id=1, attempt_id=held.attempt_id)
 
     auto_token = await harness.register(
         origin=SessionOrigin.EXTERNAL_UNBOUND, session_id="unbound", tool_use_id="unbound-auto", user_id=None
     )
     auto_response = await harness.gateway.handle_callback(data=f"perm:{auto_token}:auto_approve", user_id=1)
-    assert auto_response.alert_text == "已开启自动批准"
+    assert auto_response.edit_message_text == "✅ 用户已开启自动批准"
     assert harness.aas.is_active(session_id="unbound", user_id=1)
 
     deny_reply = await harness.gateway.handle_deny_command(user_id=1)
@@ -239,7 +239,7 @@ async def test_unbound_active_owner_fallback_auto_approve_resolves_token_and_kee
     token = await harness.register(origin=SessionOrigin.EXTERNAL_UNBOUND, session_id="fallback", tool_use_id="fallback-click", user_id=None)
     response = await harness.gateway.handle_callback(data=f"perm:{token}:auto_approve", user_id=1)
 
-    assert response.alert_text == "已批准"
+    assert response.edit_message_text == "✅ 用户已批准"
     assert harness.unbound_responder.calls[-1] == ("fallback-click", 1, "allow")
     assert harness.status(token) is CallbackRecordStatus.RESOLVED
     assert harness.aas.is_active(session_id="fallback", user_id=1)
@@ -254,7 +254,7 @@ async def test_unbound_allow_all_users_mode_allows_any_telegram_user() -> None:
 
     response = await harness.gateway.handle_callback(data=f"perm:{token}:allow", user_id=999)
 
-    assert response.alert_text == "已批准"
+    assert response.edit_message_text == "✅ 用户已批准"
     assert harness.unbound_responder.calls == [("all-users-tool", 999, "allow")]
     assert harness.status(token) is CallbackRecordStatus.RESOLVED
 
@@ -297,5 +297,5 @@ async def test_process_restart_old_buttons_are_expired() -> None:
 
     response = await restarted.gateway.handle_callback(data=f"perm:{old_token}:allow", user_id=1)
 
-    assert response.alert_text == "按钮已过期，请重新触发请求"
+    assert response.edit_message_text == "按钮已过期，请重新触发请求"
     assert restarted.task_service.calls == []

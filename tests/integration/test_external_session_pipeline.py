@@ -259,7 +259,8 @@ class TestUnboundPermissionBroadcast:
 
         # Step 2: First user responds with "approve" through the gateway callback path
         first_response = await gateway.handle_callback(data="perm:tok12345:allow", user_id=200)
-        assert first_response.alert_text == "已批准"
+        assert first_response.alert_text == ""
+        assert first_response.edit_message_text == "✅ 用户已批准"
 
         # Verify decision forwarded to hook socket
         mock_hook_socket.respond_to_permission.assert_called_once_with(
@@ -271,7 +272,7 @@ class TestUnboundPermissionBroadcast:
 
         # Step 3: Second user tries to respond (too late)
         second_response = await gateway.handle_callback(data="perm:tok12345:deny", user_id=100)
-        assert second_response.alert_text == "已响应过"
+        assert second_response.edit_message_text == "已响应过"
 
         # Verify only one decision forwarded
         mock_hook_socket.respond_to_permission.assert_called_once()

@@ -300,7 +300,7 @@ class PermissionGateway:
             return self._response("会话已结束，按钮已失效")
         if action is PermissionAction.AUTO_APPROVE and consume_result.snapshot.origin is not SessionOrigin.EXTERNAL_UNBOUND:
             if deny_epoch_before is None:
-                return self._response("已批准本次请求")
+                return self._response("已批准本次请求", edit_message_text="✅ 用户已批准")
             return await self._activate_owned_or_bound(
                 token=token,
                 user_id=user_id,
@@ -308,8 +308,8 @@ class PermissionGateway:
                 deny_epoch_before=deny_epoch_before,
             )
         if action is PermissionAction.DENY:
-            return self._response("已拒绝")
-        return self._response("已批准")
+            return self._response("已拒绝", edit_message_text="❌ 用户已拒绝")
+        return self._response("已批准", edit_message_text="✅ 用户已批准")
 
     async def _handle_unbound_auto_approve(self, token: str, user_id: int) -> CallbackResponse:
         preflight = await self._registry.inspect_for_auto_approve_preflight(token, user_id)
@@ -386,9 +386,12 @@ class PermissionGateway:
         del token
         async with self._auto_approve_service.per_user_lock(user_id):
             if self._auto_approve_service.deny_epoch(user_id) != deny_epoch_before:
-                return self._response("已批准本次请求；自动批准已被 /deny 取消")
+                return self._response("已批准本次请求；自动批准已被 /deny 取消", edit_message_text="✅ 用户已批准")
             activated = await self._auto_approve_service.activate_if_session_alive(user_id=user_id, session_id=session_id)
-            return self._response("已开启自动批准" if activated else "会话已结束，按钮已失效")
+            return self._response(
+                "已开启自动批准" if activated else "会话已结束，按钮已失效",
+                edit_message_text="✅ 用户已开启自动批准" if activated else "⚠️ 会话已结束，按钮已失效",
+            )
 
     async def _resolve_and_commit_unbound(
         self,
@@ -414,7 +417,7 @@ class PermissionGateway:
                 user_id=user_id,
                 attempt_id=attempt_id,
             )
-            return self._response("已批准本次请求；自动批准已被 /deny 取消"), not released
+            return self._response("已批准本次请求；自动批准已被 /deny 取消", edit_message_text="✅ 用户已批准"), not released
 
         commit_result = await self._auto_approve_service.commit_slot_if_session_alive(
             session_id=snapshot.session_id,
@@ -422,7 +425,7 @@ class PermissionGateway:
             attempt_id=attempt_id,
         )
         if isinstance(commit_result, CommitSlotSucceeded):
-            return self._response("已开启自动批准"), False
+            return self._response("已开启自动批准", edit_message_text="✅ 用户已开启自动批准"), False
         if isinstance(commit_result, CommitSlotSessionEnded):
             released = await self._auto_approve_service.release_slot(
                 session_id=snapshot.session_id,
@@ -431,8 +434,8 @@ class PermissionGateway:
             )
             return self._response("会话已结束，按钮已失效"), not released
         if isinstance(commit_result, CommitSlotMismatch):
-            return self._response("已批准本次请求；自动批准未开启"), True
-        return self._response("已批准本次请求；自动批准未开启"), True
+            return self._response("已批准本次请求；自动批准未开启", edit_message_text="✅ 用户已批准"), True
+        return self._response("已批准本次请求；自动批准未开启", edit_message_text="✅ 用户已批准"), True
 
     async def _dispatch_with_completion_tracking(
         self,
@@ -673,5 +676,8 @@ class PermissionGateway:
     def _build_advisory_keyboard(self) -> Keyboard:
         return Keyboard(rows=[[Button(text="权限请求处理中", callback_data="perm:conflict:wait")]])
 
-    def _response(self, alert_text: str) -> CallbackResponse:
-        return CallbackResponse(alert_text=alert_text, show_alert=True, edit_message_text="", clear_keyboard=True)
+    def _response(self, alert_text: str, *, edit_message_text: str = "") -> CallbackResponse:
+        text = edit_message_text or alert_text
+        if "会话已结束" in text and not text.startswith("⚠️"):
+            text = f"⚠️ {text}"
+        return CallbackResponse(alert_text="", show_alert=False, edit_message_text=text, clear_keyboard=True)

@@ -172,6 +172,7 @@ def create_router(
             router,
             discovery=external_discovery,
             binder=external_binder,
+            registry_service=registry_service,
         )
 
     if external_discovery is not None and external_binder is not None and structured_session_store is not None:

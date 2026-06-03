@@ -147,3 +147,15 @@ class TerminalSessionInfo:
     owner_user_id: int | None
     attached_user_ids: list[int]
     is_alive: bool
+
+
+@dataclass
+class SessionListItem:
+    """Unified view-model for /list rendering across all session types."""
+
+    session_id: str
+    cwd: str
+    status_icon: str
+    status_text: str
+    source: str  # "tmux" | "external" | "bound"
+    buttons: list[tuple[str, str]]  # [(button_text, callback_data), ...]

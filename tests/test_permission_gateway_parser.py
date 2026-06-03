@@ -94,7 +94,7 @@ async def test_all_callback_shapes_route_through_same_dispatch_table(data: str, 
 
     response = await gateway.handle_callback(data=data, user_id=USER_ID)
 
-    assert response.alert_text == "已批准"
+    assert response.edit_message_text == "✅ 用户已批准"
     assert registry.consumes == [(expected_token, USER_ID, PermissionAction.ALLOW)]
     assert registry.resolved == [expected_token]
 
@@ -116,6 +116,6 @@ async def test_malformed_callback_payload_returns_rejection_alert(data: str) -> 
 
     response = await gateway.handle_callback(data=data, user_id=USER_ID)
 
-    assert response.alert_text == "无效的权限响应"
+    assert response.edit_message_text == "无效的权限响应"
     assert registry.consumes == []
     assert registry.resolved == []

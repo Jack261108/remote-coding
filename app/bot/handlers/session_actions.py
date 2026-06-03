@@ -9,6 +9,7 @@ from app.bot.handlers.user_utils import extract_user_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.session_id_resolver import _resolve_session_id
+from app.services.session_registry import SessionRegistryService
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ def register_session_action_handlers(
     *,
     discovery: ExternalSessionDiscoveryService,
     binder: ExternalSessionBinder,
+    registry_service: SessionRegistryService | None = None,
 ) -> None:
     @router.callback_query(F.data.startswith("sess:select:"))
     async def handle_session_select(callback: CallbackQuery) -> None:
@@ -109,3 +111,34 @@ def register_session_action_handlers(
                 await callback.message.answer(f"🔓 Unbound session {resolved[:12]}...")
         else:
             await callback.answer(f"❌ {result.message}")
+
+    # ── tmux session actions ─────────────────────────────────────────────────
+
+    @router.callback_query(F.data.startswith("sess:attach:"))
+    async def handle_session_attach(callback: CallbackQuery) -> None:
+        if registry_service is None:
+            await callback.answer("功能不可用")
+            return
+        user_id = extract_user_id(callback)
+        terminal_id = (callback.data or "").removeprefix("sess:attach:")
+        if not terminal_id:
+            await callback.answer("Invalid callback data")
+            return
+        ok, text = await registry_service.attach_user(user_id=user_id, terminal_id=terminal_id)
+        await callback.answer(text if ok else f"❌ {text}")
+        if callback.message:
+            await callback.message.answer(text)
+
+    @router.callback_query(F.data.startswith("sess:close:"))
+    async def handle_session_close(callback: CallbackQuery) -> None:
+        if registry_service is None:
+            await callback.answer("功能不可用")
+            return
+        terminal_id = (callback.data or "").removeprefix("sess:close:")
+        if not terminal_id:
+            await callback.answer("Invalid callback data")
+            return
+        ok = await registry_service.close_session(terminal_id)
+        await callback.answer("会话已关闭" if ok else "关闭失败")
+        if callback.message:
+            await callback.message.answer(f"{'✅' if ok else '❌'} 会话 `{terminal_id}` {'已关闭' if ok else '关闭失败'}")

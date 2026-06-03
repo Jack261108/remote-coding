@@ -205,6 +205,13 @@ class SessionRegistryService:
         logger.info("user detached from session", extra={"user_id": user_id, "terminal_id": terminal_id})
         return True, f"已断开会话 {terminal_id}"
 
+    async def close_session(self, terminal_id: str) -> bool:
+        """Kill a tmux session and clean up associated state."""
+        ok = await self._tmux_runner.close_terminal(terminal_id)
+        if ok:
+            logger.info("session closed", extra={"terminal_id": terminal_id})
+        return ok
+
     async def _detach_user_internal(self, user_id: int, current: SessionContext) -> None:
         """Internal detach logic."""
         terminal_id = current.terminal_id
