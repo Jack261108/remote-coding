@@ -481,15 +481,12 @@ class HookHandlingMixin(AppContainerBase):
             )
             # Edit the Telegram message if we have the message info
             if record and record.telegram_chat_id and record.telegram_message_id:
-                _INSTRUCTION_LINE = "请点击下方按钮选择允许或拒绝。"
+                from app.bot.handlers.callback_utils import build_approval_message
+
                 approval_text = "✅ 已在终端批准"
                 try:
-                    # Use stored original message text to replace instruction line (same as Telegram approval)
                     original_text = record.telegram_message_text or ""
-                    if _INSTRUCTION_LINE in original_text:
-                        new_text = original_text.replace(_INSTRUCTION_LINE, approval_text)
-                    else:
-                        new_text = f"{approval_text}\n工具: {tool_use_id[:16]}..."
+                    new_text = build_approval_message(original_text, approval_text)
                     await self.message_sender.edit_message(
                         chat_id=record.telegram_chat_id,
                         message_id=record.telegram_message_id,

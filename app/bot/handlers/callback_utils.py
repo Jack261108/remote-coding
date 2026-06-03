@@ -11,6 +11,16 @@ _INSTRUCTION_LINE = "请点击下方按钮选择允许或拒绝。"
 logger = logging.getLogger(__name__)
 
 
+def build_approval_message(original_text: str, approval_text: str) -> str:
+    """构建审批后的消息文本：替换提示行为审批结果。
+
+    终端批准和 Telegram 审批共用此逻辑，确保消息格式一致。
+    """
+    if _INSTRUCTION_LINE in original_text:
+        return original_text.replace(_INSTRUCTION_LINE, approval_text)
+    return approval_text
+
+
 async def apply_callback_response(
     callback: CallbackQuery,
     edit_text: str | None = None,
@@ -26,7 +36,7 @@ async def apply_callback_response(
         try:
             original = msg.html_text or ""  # type: ignore[union-attr]
             if edit_text and _INSTRUCTION_LINE in original:
-                new_text = original.replace(_INSTRUCTION_LINE, edit_text)
+                new_text = build_approval_message(original, edit_text)
                 logger.info("editing message: replacing instruction line")
                 await msg.edit_text(new_text, parse_mode="HTML", reply_markup=None)  # type: ignore[union-attr]
             elif edit_text:
