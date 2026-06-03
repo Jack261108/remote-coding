@@ -35,6 +35,7 @@ class DummyMessage:
         fail_first_edit: bool = False,
     ) -> None:
         self.text = text
+        self.html_text = text
         self.from_user = SimpleNamespace(id=user_id)
         self.answers: list[str] = []
         self.sent_messages: list[DummyAnswerMessage] = []
@@ -61,6 +62,11 @@ class DummyMessage:
         self.sent_messages.append(sent)
         self.reply_markups.append(reply_markup)
         self.parse_modes.append(parse_mode)
+        return sent
+
+    async def edit_text(self, text: str, parse_mode=None, reply_markup=None) -> DummyAnswerMessage:
+        sent = DummyAnswerMessage(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        self.sent_messages.append(sent)
         return sent
 
     async def edit_reply_markup(self, reply_markup=None) -> None:
