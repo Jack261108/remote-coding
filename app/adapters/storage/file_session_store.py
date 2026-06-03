@@ -22,9 +22,13 @@ class FileSessionStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as fh:
             tmp_path = Path(fh.name)
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
-            fh.flush()
-            os.fsync(fh.fileno())
+            try:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
         tmp_path.replace(path)
 
     def session_dir(self, session_id: str) -> Path:

@@ -128,7 +128,7 @@ def register_list_handler(
             if title is None and title_resolver is not None:
                 try:
                     title = title_resolver(b.session_id, b.cwd)
-                    if title is not None:
+                    if title is not None and external_binder is not None:
                         b.title = title
                         external_binder._binding_store.save_binding(b)
                 except Exception:

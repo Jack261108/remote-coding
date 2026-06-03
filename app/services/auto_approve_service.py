@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +67,14 @@ CommitSlotResult = CommitSlotSucceeded | CommitSlotSessionEnded | CommitSlotMism
 class AutoApproveService:
     """Manages per-session auto-approve state (in-memory only)."""
 
+    # How long to remember ended sessions before pruning (24 hours).
+    _ENDED_SESSION_TTL = timedelta(hours=24)
+
     def __init__(self) -> None:
         self._activations: dict[tuple[int, str], AutoApproveActivation] = {}
         self._slots: dict[str, ActivationSlot] = {}
         self._active_owners: dict[str, int] = {}
-        self._ended_sessions: set[str] = set()
+        self._ended_sessions: dict[str, datetime] = {}  # session_id -> ended_at
         self._user_locks: dict[int, asyncio.Lock] = {}
         self._deny_epoch: dict[int, int] = {}
         self._service_lock = asyncio.Lock()
@@ -91,6 +94,13 @@ class AutoApproveService:
     def is_session_ended(self, session_id: str) -> bool:
         """Check if the session has been tombstoned as ended."""
         return session_id in self._ended_sessions
+
+    def _prune_ended_sessions(self) -> None:
+        """Remove expired entries from _ended_sessions."""
+        cutoff = datetime.now(UTC) - self._ENDED_SESSION_TTL
+        expired = [sid for sid, ended_at in self._ended_sessions.items() if ended_at < cutoff]
+        for sid in expired:
+            del self._ended_sessions[sid]
 
     def is_active(self, session_id: str | None = None, *, user_id: int | None = None) -> bool:
         """Check if auto-approve is active.
@@ -306,7 +316,8 @@ class AutoApproveService:
             self._deactivate(user_id=user_id, session_id=session_id)
 
         self._active_owners.pop(session_id, None)
-        self._ended_sessions.add(session_id)
+        self._ended_sessions[session_id] = datetime.now(UTC)
+        self._prune_ended_sessions()
 
         for user_id in affected_user_ids:
             self._cleanup_user_lock_if_idle_locked(user_id)
@@ -322,6 +333,7 @@ class AutoApproveService:
         if any(slot.holder_user_id == user_id for slot in self._slots.values()):
             return
         self._user_locks.pop(user_id, None)
+        self._deny_epoch.pop(user_id, None)
 
     def _log_slot_commit_mismatch(self, *, session_id: str, user_id: int, attempt_id: str, slot: ActivationSlot | None) -> None:
         logger.warning(

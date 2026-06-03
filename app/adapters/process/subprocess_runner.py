@@ -145,7 +145,7 @@ class SubprocessRunner(BaseRunner):
             ):
                 yield event
         finally:
-            for task in (stdout_task, stderr_task):
+            for task in (stdout_task, stderr_task, wait_task):
                 if not task.done():
                     task.cancel()
             if get_task is not None and not get_task.done():
