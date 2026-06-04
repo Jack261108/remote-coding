@@ -36,7 +36,12 @@ class SessionListRenderResult:
     keyboard: InlineKeyboardMarkup | None
 
 
-def build_session_list_message(items: Sequence[ListSessionView], *, now: datetime) -> SessionListRenderResult:
+def build_session_list_message(
+    items: Sequence[ListSessionView],
+    *,
+    now: datetime,
+    has_invalid_sessions: bool = False,
+) -> SessionListRenderResult:
     now_utc = _ensure_aware_utc(now)
     all_items = list(items)
     if not all_items:
@@ -97,6 +102,9 @@ def build_session_list_message(items: Sequence[ListSessionView], *, now: datetim
     if hidden_count > 0:
         parts.extend(["", "📦 <b>其他</b>", f"还有 {hidden_count} 个旧会话未显示"])
         buttons.append([InlineKeyboardButton(text="查看全部", callback_data="sess:list:all")])
+
+    if has_invalid_sessions:
+        buttons.append([InlineKeyboardButton(text="🧹 清理无效会话", callback_data="sess:cleanup")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
     return SessionListRenderResult(text="\n".join(parts), keyboard=keyboard)

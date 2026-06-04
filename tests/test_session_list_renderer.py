@@ -133,3 +133,29 @@ def test_empty_list_returns_no_active_sessions_message() -> None:
 
     assert result.text == "当前无活跃会话。"
     assert result.keyboard is None
+
+
+def test_cleanup_button_shown_when_has_invalid_sessions() -> None:
+    result = build_session_list_message(
+        [_item("sess-00000001", "Test", 1)],
+        now=NOW,
+        has_invalid_sessions=True,
+    )
+
+    assert result.keyboard is not None
+    last_button = result.keyboard.inline_keyboard[-1][-1]
+    assert last_button.text == "🧹 清理无效会话"
+    assert last_button.callback_data == "sess:cleanup"
+
+
+def test_cleanup_button_hidden_when_no_invalid_sessions() -> None:
+    result = build_session_list_message(
+        [_item("sess-00000001", "Test", 1)],
+        now=NOW,
+        has_invalid_sessions=False,
+    )
+
+    assert result.keyboard is not None
+    # 没有清理按钮
+    all_callbacks = _callbacks(result)
+    assert "sess:cleanup" not in all_callbacks
