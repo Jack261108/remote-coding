@@ -12,6 +12,7 @@ from app.adapters.storage.file_session_context_store import FileSessionContextSt
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.bot.handlers.command_list import register_list_handler
 from app.domain.external_session_models import ExternalBinding
+from app.domain.hook_models import HookEvent
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
@@ -171,6 +172,71 @@ async def test_command_list_renders_recent_bound_summary(tmp_path: Path) -> None
         "sess:select:sess-third-0003",
         "sess:list:all",
     ]
+
+
+@pytest.mark.asyncio
+async def test_command_list_includes_cleanup_when_only_invalid_sessions_remain(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    discovery = ExternalSessionDiscoveryService()
+    discovery.record_event(
+        HookEvent(
+            session_id="dead-unbound-0001",
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+            pid=12345,
+        )
+    )
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    router = Router()
+    register_list_handler(router, registry_service=registry, external_discovery=discovery)
+    handler = router.message.handlers[-1].callback
+    message = _message()
+
+    with patch("app.bot.handlers.command_list.process_is_alive", return_value=False):
+        await handler(message)
+
+    assert message.answer.call_args.args[0] == "当前无活跃会话。"
+    assert _callback_data_from_answer(message) == ["sess:cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_callback_uses_tmux_terminal_id_prefix(tmp_path: Path) -> None:
+    terminal_id = "user_42_123456789abc"
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                terminal_id=terminal_id,
+                workdir="/proj",
+                phase="idle",
+                owner_user_id=42,
+                attached_user_ids=[],
+                is_alive=True,
+                last_activity=datetime(2026, 6, 4, 12, 0, tzinfo=UTC),
+            )
+        ]
+    )
+    router = Router()
+    register_list_handler(router, registry_service=registry)
+    callback_handler = router.callback_query.handlers[0].callback
+
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=42)
+    callback.data = "sess:list:all"
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.answer = AsyncMock()
+
+    await callback_handler(callback)
+
+    callbacks = [
+        button.callback_data or "" for row in callback.message.answer.call_args.kwargs["reply_markup"].inline_keyboard for button in row
+    ]
+    assert f"sess:attach:{terminal_id[:16]}" in callbacks
+    assert f"sess:close:{terminal_id[:16]}" in callbacks
 
 
 @pytest.mark.asyncio

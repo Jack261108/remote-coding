@@ -135,6 +135,25 @@ def test_empty_list_returns_no_active_sessions_message() -> None:
     assert result.keyboard is None
 
 
+def test_empty_invalid_list_still_shows_cleanup_button() -> None:
+    result = build_session_list_message([], now=NOW, has_invalid_sessions=True)
+
+    assert result.text == "当前无活跃会话。"
+    assert result.keyboard is not None
+    assert [button.callback_data for row in result.keyboard.inline_keyboard for button in row] == ["sess:cleanup"]
+
+
+def test_tmux_attention_uses_attach_callback_with_terminal_id_prefix() -> None:
+    terminal_id = "user_42_123456789abc"
+
+    result = build_session_list_message(
+        [_item(terminal_id, None, 1, source=ListSessionSource.TMUX, state="waiting_for_input")],
+        now=NOW,
+    )
+
+    assert f"sess:attach:{terminal_id[:16]}" in _callbacks(result)
+
+
 def test_cleanup_button_shown_when_has_invalid_sessions() -> None:
     result = build_session_list_message(
         [_item("sess-00000001", "Test", 1)],

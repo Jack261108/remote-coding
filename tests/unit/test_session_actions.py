@@ -10,7 +10,9 @@ from aiogram import Router
 from aiogram.types import CallbackQuery, Message, User
 
 from app.bot.handlers.session_actions import _resolve_session_id, register_session_action_handlers
+from app.domain.external_session_models import ExternalBinding
 from app.domain.hook_models import HookEvent
+from app.domain.models import TerminalSessionInfo, utc_now
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
@@ -48,6 +50,29 @@ class TestResolveSessionId:
         resolved, error = _resolve_session_id("nonexistent", discovery, binder)
         assert resolved is None
         assert error == "Session not found"
+
+    def test_resolves_bound_session_from_memory_when_disk_is_missing(
+        self,
+        discovery: ExternalSessionDiscoveryService,
+        binder: ExternalSessionBinder,
+        binding_store: ExternalBindingStore,
+    ) -> None:
+        session_id = "abcdef1234567890full"
+        binding_store.save_binding(
+            ExternalBinding(
+                session_id=session_id,
+                user_id=42,
+                cwd="/home/user/proj",
+                bound_at=utc_now(),
+                jsonl_path=None,
+            )
+        )
+        (binding_store._file_path).unlink()
+
+        resolved, error = _resolve_session_id(session_id[:16], discovery, binder)
+
+        assert resolved == session_id
+        assert error is None
 
 
 class TestSessionSelectHandler:
@@ -94,6 +119,78 @@ class TestSessionSelectHandler:
         binding = binder._binding_store.get_binding(session_id)
         assert binding is not None
         assert binding.user_id == user_id  # bound to user, so "取消绑定" button should show
+
+
+class TestTmuxSessionActionHandler:
+    @pytest.mark.asyncio
+    async def test_attach_resolves_terminal_id_prefix(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        terminal_id = "user_42_123456789abc"
+        registry = AsyncMock()
+        registry.list_active_sessions = AsyncMock(
+            return_value=[
+                TerminalSessionInfo(
+                    terminal_id=terminal_id,
+                    tmux_session_name="tgcli_user_42_123456789abc",
+                    workdir="/home/user/proj",
+                    phase="idle",
+                    owner_user_id=1,
+                    attached_user_ids=[],
+                    is_alive=True,
+                    last_activity=None,
+                )
+            ]
+        )
+        registry.attach_user = AsyncMock(return_value=(True, "已连接"))
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder, registry_service=registry)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:attach:{terminal_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[3].callback(callback)
+
+        registry.attach_user.assert_awaited_once_with(user_id=42, terminal_id=terminal_id)
+
+    @pytest.mark.asyncio
+    async def test_close_resolves_terminal_id_prefix(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        terminal_id = "user_42_123456789abc"
+        registry = AsyncMock()
+        registry.list_active_sessions = AsyncMock(
+            return_value=[
+                TerminalSessionInfo(
+                    terminal_id=terminal_id,
+                    tmux_session_name="tgcli_user_42_123456789abc",
+                    workdir="/home/user/proj",
+                    phase="idle",
+                    owner_user_id=1,
+                    attached_user_ids=[],
+                    is_alive=True,
+                    last_activity=None,
+                )
+            ]
+        )
+        registry.close_session = AsyncMock(return_value=True)
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder, registry_service=registry)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:close:{terminal_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[4].callback(callback)
+
+        registry.close_session.assert_awaited_once_with(terminal_id)
 
 
 class TestSessionBindHandler:

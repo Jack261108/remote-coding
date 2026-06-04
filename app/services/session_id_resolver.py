@@ -23,7 +23,7 @@ def _resolve_session_id(
         if s.session_id == prefix or s.session_id.startswith(prefix):
             candidates.append(s.session_id)
 
-    for b in binder._binding_store.load_all().values():
+    for b in binder._binding_store.list_all():
         if b.session_id == prefix or b.session_id.startswith(prefix):
             if b.session_id not in candidates:
                 candidates.append(b.session_id)

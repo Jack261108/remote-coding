@@ -45,7 +45,10 @@ def build_session_list_message(
     now_utc = _ensure_aware_utc(now)
     all_items = list(items)
     if not all_items:
-        return SessionListRenderResult(text="当前无活跃会话。", keyboard=None)
+        keyboard = None
+        if has_invalid_sessions:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧹 清理无效会话", callback_data="sess:cleanup")]])
+        return SessionListRenderResult(text="当前无活跃会话。", keyboard=keyboard)
 
     recent = sorted(
         (item for item in all_items if item.source == ListSessionSource.BOUND),
@@ -166,8 +169,11 @@ def _attention_button_text(item: ListSessionView) -> str:
 
 
 def _attention_callback_data(item: ListSessionView) -> str:
-    action = "bind" if item.source == ListSessionSource.UNBOUND else "select"
-    return f"sess:{action}:{_sid_prefix(item)}"
+    if item.source == ListSessionSource.UNBOUND:
+        return f"sess:bind:{_sid_prefix(item)}"
+    if item.source == ListSessionSource.TMUX:
+        return f"sess:attach:{_sid_prefix(item)}"
+    return f"sess:select:{_sid_prefix(item)}"
 
 
 def _display_title(item: ListSessionView) -> str:

@@ -15,6 +15,23 @@ from app.services.session_registry import SessionRegistryService
 logger = logging.getLogger(__name__)
 
 
+async def _resolve_terminal_id_prefix(
+    terminal_id_prefix: str,
+    registry_service: SessionRegistryService,
+) -> tuple[str | None, str | None]:
+    prefix = terminal_id_prefix.rstrip(".")
+    candidates = [
+        session.terminal_id
+        for session in await registry_service.list_active_sessions()
+        if session.terminal_id == prefix or session.terminal_id.startswith(prefix)
+    ]
+    if len(candidates) == 1:
+        return candidates[0], None
+    if len(candidates) == 0:
+        return None, "Session not found"
+    return None, f"Ambiguous prefix, {len(candidates)} matches. Be more specific."
+
+
 def register_session_action_handlers(
     router: Router,
     *,
@@ -107,9 +124,13 @@ def register_session_action_handlers(
             await callback.answer("功能不可用")
             return
         user_id = extract_user_id(callback)
-        terminal_id = (callback.data or "").removeprefix("sess:attach:")
-        if not terminal_id:
+        terminal_id_prefix = (callback.data or "").removeprefix("sess:attach:")
+        if not terminal_id_prefix:
             await callback.answer("Invalid callback data")
+            return
+        terminal_id, error = await _resolve_terminal_id_prefix(terminal_id_prefix, registry_service)
+        if error or not terminal_id:
+            await callback.answer(error or "Session not found")
             return
         ok, text = await registry_service.attach_user(user_id=user_id, terminal_id=terminal_id)
         await callback.answer(text if ok else f"❌ {text}")
@@ -121,9 +142,13 @@ def register_session_action_handlers(
         if registry_service is None:
             await callback.answer("功能不可用")
             return
-        terminal_id = (callback.data or "").removeprefix("sess:close:")
-        if not terminal_id:
+        terminal_id_prefix = (callback.data or "").removeprefix("sess:close:")
+        if not terminal_id_prefix:
             await callback.answer("Invalid callback data")
+            return
+        terminal_id, error = await _resolve_terminal_id_prefix(terminal_id_prefix, registry_service)
+        if error or not terminal_id:
+            await callback.answer(error or "Session not found")
             return
         ok = await registry_service.close_session(terminal_id)
         await callback.answer("会话已关闭" if ok else "关闭失败")
