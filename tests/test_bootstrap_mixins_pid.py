@@ -30,8 +30,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.bootstrap import AppContainer
-from app.domain.external_session_models import OwnershipResult, SessionOrigin
+from app.domain.external_session_models import ExternalBinding, OwnershipResult, SessionOrigin
 from app.domain.hook_models import HookEvent
+from app.domain.models import utc_now
+from app.services.external_binding_store import ExternalBindingStore
+from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.session_ownership_resolver import SessionOwnershipResolver
 
 
 class _RecordingBindingStore:
@@ -63,6 +67,52 @@ class _RecordingBindingStore:
         pid: int | None = None,
     ) -> None:
         self.touch_calls.append((session_id, last_activity_at, pid))
+
+
+class _EmptySessionService:
+    async def list_all(self) -> list:
+        return []
+
+
+class _RecordingDiscovery(ExternalSessionDiscoveryService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.recorded: list[str] = []
+        self.removed: list[str] = []
+
+    def record_event(self, event: HookEvent) -> None:
+        self.recorded.append(event.session_id)
+        super().record_event(event)
+
+    def remove_session(self, session_id: str) -> None:
+        self.removed.append(session_id)
+        super().remove_session(session_id)
+
+
+def _make_lifecycle_container(tmp_path, binding_store, discovery, seen):
+    class _Container(AppContainer):
+        def __init__(self) -> None:
+            self.settings = SimpleNamespace(allowed_workdirs=[str(tmp_path)])
+            self.external_binding_store = binding_store
+            self.external_discovery = discovery
+            self.ownership_resolver = SessionOwnershipResolver(
+                session_service=_EmptySessionService(),
+                binding_store=binding_store,
+            )
+
+        async def _dispatch_session_event(self, event) -> None:  # type: ignore[override]
+            seen.append(f"dispatch:{event.session_id}")
+
+        def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
+            seen.append(f"sync:{session_id}")
+
+        async def _run_auto_approve_check(self, *args, **kwargs):
+            return None
+
+        def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
+            return None
+
+    return _Container()
 
 
 def _make_session_end_container(tmp_path, store, reaper, seen):
@@ -113,6 +163,127 @@ def _make_session_end_container(tmp_path, store, reaper, seen):
             seen.append(f"sync:{session_id}")
 
     return _Container()
+
+
+@pytest.mark.asyncio
+async def test_bound_external_session_end_removes_binding_without_rediscovery(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    session_id = "ended-external-bound"
+    binding_store.save_binding(
+        ExternalBinding(
+            session_id=session_id,
+            user_id=1,
+            cwd=str(tmp_path),
+            bound_at=utc_now(),
+            jsonl_path=None,
+            pid=None,
+        )
+    )
+    discovery = _RecordingDiscovery()
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+
+    assert binding_store.get_binding(session_id) is None
+    assert discovery.get(session_id) is None
+    assert discovery.recorded == []
+    assert seen == [f"dispatch:{session_id}", f"sync:{session_id}"]
+
+
+@pytest.mark.asyncio
+async def test_bound_external_ended_status_removes_binding_without_rediscovery(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    session_id = "ended-status-bound"
+    binding_store.save_binding(
+        ExternalBinding(
+            session_id=session_id,
+            user_id=1,
+            cwd=str(tmp_path),
+            bound_at=utc_now(),
+            jsonl_path=None,
+            pid=4242,
+        )
+    )
+    discovery = _RecordingDiscovery()
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="Stop",
+            status="ended",
+            pid=4242,
+        )
+    )
+
+    assert binding_store.get_binding(session_id) is None
+    assert discovery.get(session_id) is None
+    assert discovery.recorded == []
+    assert seen == [f"dispatch:{session_id}", f"sync:{session_id}"]
+
+
+@pytest.mark.asyncio
+async def test_existing_unbound_session_end_removes_discovery_session(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    session_id = "ended-existing-unbound"
+    discovery.record_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="PreToolUse",
+            status="running",
+        )
+    )
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+
+    assert discovery.get(session_id) is None
+    assert discovery.removed == [session_id]
+    assert discovery.recorded == [session_id]
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_unbound_session_end_does_not_create_discovery_session(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    session_id = "ended-unknown-unbound"
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+
+    assert discovery.get(session_id) is None
+    assert discovery.removed == [session_id]
+    assert discovery.recorded == []
+    assert seen == []
 
 
 @pytest.mark.asyncio
