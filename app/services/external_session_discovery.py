@@ -67,9 +67,7 @@ class ExternalSessionDiscoveryService:
         self._sessions.pop(session_id, None)
 
     def list_unbound(self) -> list[UnboundExternalSession]:
-        """Return all currently-active unbound sessions (pruning stale/dead ones first)."""
-        self._prune_dead()
-        self.prune_stale()
+        """Return all currently-active unbound sessions without pruning."""
         return list(self._sessions.values())
 
     def _prune_dead(self) -> None:

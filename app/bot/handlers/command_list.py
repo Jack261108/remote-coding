@@ -251,8 +251,16 @@ def register_list_handler(
                 except Exception:
                     logger.warning("cleanup failed for tmux session", extra={"terminal_id": s.terminal_id})
 
-        # 3. 清理 stale unbound sessions
+        # 3. 清理 stale unbound sessions（pid 已死的）
         if external_discovery is not None:
+            dead_unbound_ids: list[str] = []
+            for ext in external_discovery.list_unbound():
+                if ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid):
+                    dead_unbound_ids.append(ext.session_id)
+            for session_id in dead_unbound_ids:
+                external_discovery.remove_session(session_id)
+                cleaned += 1
+            # 清理基于时间的 stale sessions
             stale_ids = external_discovery.prune_stale()
             cleaned += len(stale_ids)
 
