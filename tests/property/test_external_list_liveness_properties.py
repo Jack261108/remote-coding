@@ -64,13 +64,12 @@ _CALLBACK_PREFIX = "sess:select:"
 
 
 def _rendered_session_id_prefixes(message: _DummyMessage) -> set[str]:
-    """Extract the bound-session callback prefixes from the rendered keyboard.
+    """Extract bound-session select callback prefixes rendered in the summary view.
 
-    Each bound binding renders an inline button with
-    ``callback_data = f"sess:select:{session_id[:16]}"``. ``external_discovery``
-    is ``None`` in this test, so there are no unbound-session buttons to confuse
-    the parse — every ``sess:select:`` button corresponds to a rendered (kept)
-    binding.
+    The new /list summary shows at most three recent bound sessions on the first
+    page. This helper intentionally returns only the visible summary buttons; the
+    full exact visibility partition is covered by the reaper assertions and the
+    ``sess:list:all`` command-level test.
     """
     if not message.reply_markups:
         return set()
@@ -193,11 +192,18 @@ def test_property_8_list_liveness_visibility_partition(
         all_ids = visible_expected | dead_expected
 
         if liveness_enabled:
-            # Rendered set is exactly the alive + unknown bindings; the dead ones
-            # are excluded (Req 9.1, 9.3, 9.4).
-            assert rendered == {sid[:16] for sid in visible_expected}, (
-                f"liveness on: expected rendered={visible_expected!r}, got prefixes={rendered!r} (dead_expected={dead_expected!r})"
+            # Summary rendering shows at most the three newest visible bindings.
+            # It must never show a binding whose pid was classified as dead.
+            visible_prefixes = {sid[:16] for sid in visible_expected}
+            dead_prefixes = {sid[:16] for sid in dead_expected}
+            assert rendered <= visible_prefixes, (
+                f"liveness on: rendered prefixes must be a subset of visible bindings; "
+                f"expected_visible={visible_expected!r}, got prefixes={rendered!r}"
             )
+            assert rendered.isdisjoint(dead_prefixes), (
+                f"liveness on: dead bindings must not be rendered; dead_expected={dead_expected!r}, got prefixes={rendered!r}"
+            )
+            assert len(rendered) == min(3, len(visible_prefixes))
 
             # Each Pid_Known-and-dead binding is reaped exactly once with
             # reason='pid_dead' (Req 9.2); no alive/unknown binding is reaped.
@@ -209,8 +215,12 @@ def test_property_8_list_liveness_visibility_partition(
                 assert reaped_reasons == {"pid_dead"}
             assert reaped_ids.isdisjoint(visible_expected), "no alive/unknown binding may be reaped"
         else:
-            # Liveness disabled: every binding is rendered, none excluded on pid
-            # (Req 10.3), and the probe is never consulted to exclude.
-            assert rendered == {sid[:16] for sid in all_ids}, f"liveness off: expected all rendered={all_ids!r}, got {rendered!r}"
+            # Liveness disabled: pid is ignored and no binding is reaped. The
+            # summary still shows only up to three recent bindings.
+            all_prefixes = {sid[:16] for sid in all_ids}
+            assert rendered <= all_prefixes, (
+                f"liveness off: rendered prefixes must be a subset of all bindings; all_ids={all_ids!r}, got {rendered!r}"
+            )
+            assert len(rendered) == min(3, len(all_prefixes))
             reaper.remove_with_cleanup.assert_not_awaited()
             probe_mock.assert_not_called()
