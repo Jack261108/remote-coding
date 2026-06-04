@@ -48,18 +48,27 @@ class CLIAdapterFactory:
     def available_providers(self) -> list[str]:
         return sorted(self._adapters.keys())
 
+    def _require_tmux(self) -> TmuxRunner | None:
+        """返回可用的 TmuxRunner，tmux 未启用或不可用时返回 None。"""
+        if self._claude_tmux_enabled and self._tmux_runner is not None:
+            return self._tmux_runner
+        return None
+
     async def close_terminal(self, terminal_key: str) -> bool:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False
-        return await self._tmux_runner.close_terminal(terminal_key)
+        return await tmux.close_terminal(terminal_key)
 
     async def ensure_terminal(self, *, terminal_key: str, workdir: str) -> tuple[bool, str]:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
-        return await self._tmux_runner.ensure_terminal(terminal_key=terminal_key, workdir=workdir)
+        return await tmux.ensure_terminal(terminal_key=terminal_key, workdir=workdir)
 
     async def ensure_claude_interactive_session(self, *, terminal_key: str, workdir: str) -> tuple[bool, str]:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
 
         claude_adapter = self._adapters.get("claude_code")
@@ -69,19 +78,22 @@ class CLIAdapterFactory:
         return False, "claude adapter 不可用"
 
     async def ensure_claude_resume_session(self, *, terminal_key: str, workdir: str, session_id: str) -> tuple[bool, str]:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
-        return await self._tmux_runner.ensure_claude_resume_session(terminal_key=terminal_key, workdir=workdir, session_id=session_id)
+        return await tmux.ensure_claude_resume_session(terminal_key=terminal_key, workdir=workdir, session_id=session_id)
 
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
-        return await self._tmux_runner.reveal_terminal(terminal_key)
+        return await tmux.reveal_terminal(terminal_key)
 
     async def send_claude_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
-        return await self._tmux_runner.send_interactive_input(terminal_key=terminal_key, workdir=workdir, text=text)
+        return await tmux.send_interactive_input(terminal_key=terminal_key, workdir=workdir, text=text)
 
     async def select_claude_user_question_option(
         self,
@@ -91,9 +103,10 @@ class CLIAdapterFactory:
         option_index: int,
         submit_after: bool = False,
     ) -> tuple[bool, str]:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
-        return await self._tmux_runner.select_user_question_option(
+        return await tmux.select_user_question_option(
             terminal_key=terminal_key,
             workdir=workdir,
             option_index=option_index,
@@ -109,9 +122,10 @@ class CLIAdapterFactory:
         text: str,
         submit_after: bool = False,
     ) -> tuple[bool, str]:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
-        return await self._tmux_runner.answer_user_question_with_text(
+        return await tmux.answer_user_question_with_text(
             terminal_key=terminal_key,
             workdir=workdir,
             option_count=option_count,
@@ -126,20 +140,23 @@ class CLIAdapterFactory:
         workdir: str,
         final_question: bool,
     ) -> tuple[bool, str]:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
-        return await self._tmux_runner.advance_user_question_after_multi_select(
+        return await tmux.advance_user_question_after_multi_select(
             terminal_key=terminal_key,
             workdir=workdir,
             final_question=final_question,
         )
 
     def get_session_state(self, terminal_key: str) -> SessionState | None:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return None
-        return self._tmux_runner.get_session_state(terminal_key)
+        return tmux.get_session_state(terminal_key)
 
     def get_claude_session_state(self, session_id: str) -> SessionState | None:
-        if not self._claude_tmux_enabled or self._tmux_runner is None:
+        tmux = self._require_tmux()
+        if not tmux:
             return None
-        return self._tmux_runner.get_session_state(session_id)
+        return tmux.get_session_state(session_id)
