@@ -12,6 +12,23 @@ from app.services.external_session_discovery import ExternalSessionDiscoveryServ
 from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind
 from app.services.session_registry import SessionRegistryService
 
+
+def _parse_session_callback(
+    callback: CallbackQuery,
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> tuple[int, str | None, str | None]:
+    """解析 callback data，返回 (user_id, resolved_session_id, error_message)。"""
+    user_id = callback.from_user.id if callback.from_user else 0
+    data = callback.data or ""
+    parts = data.split(":", 2)
+    if len(parts) < 3:
+        return user_id, None, "Invalid callback data"
+    session_id_prefix = parts[2]
+    resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
+    return user_id, resolved, error
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,15 +41,7 @@ def register_session_action_handlers(
 ) -> None:
     @router.callback_query(F.data.startswith("sess:select:"))
     async def handle_session_select(callback: CallbackQuery) -> None:
-        user_id = extract_user_id(callback)
-        data = callback.data or ""
-        parts = data.split(":", 2)
-        if len(parts) < 3:
-            await callback.answer("Invalid callback data")
-            return
-
-        session_id_prefix = parts[2]
-        resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
+        user_id, resolved, error = _parse_session_callback(callback, discovery, binder)
         if error or not resolved:
             await callback.answer(error or "Session not found")
             return
@@ -67,14 +76,12 @@ def register_session_action_handlers(
 
     @router.callback_query(F.data.startswith("sess:bind:"))
     async def handle_session_bind(callback: CallbackQuery) -> None:
-        user_id = extract_user_id(callback)
-        data = callback.data or ""
-        parts = data.split(":", 2)
-        if len(parts) < 3:
-            await callback.answer("Invalid callback data")
+        user_id, resolved, error = _parse_session_callback(callback, discovery, binder)
+        if error or not resolved:
+            await callback.answer(error or "Session not found")
             return
 
-        result = await resolve_and_bind(parts[2], user_id=user_id, discovery=discovery, binder=binder)
+        result = await resolve_and_bind(resolved, user_id=user_id, discovery=discovery, binder=binder)
         if result.success:
             await callback.answer("绑定成功")
             if callback.message:
@@ -84,14 +91,12 @@ def register_session_action_handlers(
 
     @router.callback_query(F.data.startswith("sess:unbind:"))
     async def handle_session_unbind(callback: CallbackQuery) -> None:
-        user_id = extract_user_id(callback)
-        data = callback.data or ""
-        parts = data.split(":", 2)
-        if len(parts) < 3:
-            await callback.answer("Invalid callback data")
+        user_id, resolved, error = _parse_session_callback(callback, discovery, binder)
+        if error or not resolved:
+            await callback.answer(error or "Session not found")
             return
 
-        result = await resolve_and_unbind(parts[2], user_id=user_id, discovery=discovery, binder=binder)
+        result = await resolve_and_unbind(resolved, user_id=user_id, discovery=discovery, binder=binder)
         if result.success:
             await callback.answer("取消绑定成功")
             if callback.message:
