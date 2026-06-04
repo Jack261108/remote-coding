@@ -112,3 +112,12 @@ class ExternalSessionDiscoveryService:
             if elapsed > self._stale_timeout_sec:
                 count += 1
         return count
+
+    def is_session_stale(self, session_id: str) -> bool:
+        """Check if a specific session is stale without removing it."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        now = utc_now()
+        elapsed = (now - session.last_seen).total_seconds()
+        return elapsed > self._stale_timeout_sec

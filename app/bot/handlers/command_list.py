@@ -86,8 +86,8 @@ def register_list_handler(
             if s.attached_user_ids:
                 tags.append(f"+{len(s.attached_user_ids)}人")
             if not s.is_alive:
-                tags.append("已断开")
                 invalid_count += 1
+                continue  # 跳过已断开的 tmux sessions，不显示
             sid = s.terminal_id
             legacy_items.append(
                 SessionListItem(
@@ -115,14 +115,15 @@ def register_list_handler(
 
         external_sessions = []
         if external_discovery is not None:
-            # 计算 stale sessions 数量（基于时间和 pid）
-            stale_count = external_discovery.count_stale()
-            invalid_count += stale_count
             external_sessions = external_discovery.list_unbound()
         for ext in external_sessions:
-            # 检测 stale unbound sessions（pid 已死的）
-            is_stale = ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid)
-            if is_stale:
+            # 检测 stale unbound sessions（pid 已死或基于时间）
+            is_dead_pid = ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid)
+            is_stale_time = (
+                external_discovery.is_session_stale(ext.session_id) if hasattr(external_discovery, "is_session_stale") else False
+            )
+            if is_dead_pid or is_stale_time:
+                invalid_count += 1
                 continue  # 跳过 stale sessions，不显示
             status = ext.title or "未绑定"
             legacy_items.append(
