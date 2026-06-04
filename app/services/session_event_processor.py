@@ -92,9 +92,7 @@ class SessionEventProcessor:
         elif event.type == SessionEventType.CLEAR_DETECTED:
             self._clear_state(state)
         elif event.type == SessionEventType.INTERRUPT_DETECTED:
-            self._interrupt_session_tools(state, event.at)
-            state.interrupted = True
-            self._move_to_next_phase(state, default=SessionPhase.WAITING_FOR_INPUT)
+            self._process_interrupt_detected(state, event)
         elif event.type == SessionEventType.PERMISSION_APPROVED:
             self._process_permission_decision(state, event, approved=True)
         elif event.type == SessionEventType.PERMISSION_DENIED:
@@ -247,7 +245,6 @@ class SessionEventProcessor:
         state.last_tool_name = str(payload["last_tool_name"]) if payload.get("last_tool_name") is not None else state.last_tool_name
         state.history_loaded = True
         state.clear_detected = bool(payload.get("clear_detected", False))
-        state.interrupted = bool(payload.get("interrupt_detected", False))
         if last_offset is not None:
             state.checkpoint.last_offset = last_offset
         state.checkpoint.clear_pending = state.clear_detected
@@ -261,6 +258,11 @@ class SessionEventProcessor:
         state.checkpoint.tool_id_to_name = {tool_id: tool.name for tool_id, tool in state.tool_calls.items()}
 
         self._move_to_next_phase(state, default=SessionPhase.IDLE)
+
+    def _process_interrupt_detected(self, state: SessionState, event: SessionEvent) -> None:
+        self._interrupt_session_tools(state, event.at)
+        state.interrupted = True
+        self._move_to_next_phase(state, default=SessionPhase.WAITING_FOR_INPUT)
 
     def _preserve_hook_only_runtime_state(self, state: SessionState, parsed_tool_calls: dict[str, ToolCallRecord]) -> None:
         for tool_id, existing in state.tool_calls.items():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.adapters.cli.base import BaseCLIAdapter
-from app.adapters.cli.claude_code import ClaudeCodeAdapter, Runner
+from app.adapters.cli.claude_code import ClaudeCodeAdapter
 from app.adapters.cli.codex_cli import CodexCLIAdapter
 from app.adapters.cli.gemini_cli import GeminiCLIAdapter
 from app.adapters.process.subprocess_runner import SubprocessRunner
@@ -27,7 +27,7 @@ class CLIAdapterFactory:
         self._claude_tmux_enabled = settings.claude_tmux_mode and tmux_runner is not None
         self._tmux_runner = tmux_runner
 
-        claude_runner: Runner = tmux_runner if self._claude_tmux_enabled and tmux_runner is not None else runner
+        claude_runner: SubprocessRunner | TmuxRunner = tmux_runner if self._claude_tmux_enabled and tmux_runner is not None else runner
         self._adapters: dict[str, BaseCLIAdapter] = {
             "claude_code": ClaudeCodeAdapter(cli_bin=settings.claude_cli_bin, runner=claude_runner),
             "codex": CodexCLIAdapter(cli_bin=settings.codex_cli_bin, runner=runner),

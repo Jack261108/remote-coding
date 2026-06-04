@@ -3,16 +3,11 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 
 from app.adapters.cli.base import BaseCLIAdapter
-from app.adapters.process.subprocess_runner import SubprocessRunner
 from app.domain.models import CLIEvent, ExecutionTask
 
 
 class GeminiCLIAdapter(BaseCLIAdapter):
     provider = "gemini"
-
-    def __init__(self, cli_bin: str, runner: SubprocessRunner) -> None:
-        self._cli_bin = cli_bin
-        self._runner = runner
 
     async def run(
         self,
@@ -32,6 +27,3 @@ class GeminiCLIAdapter(BaseCLIAdapter):
             interactive=interactive,
         ):
             yield event
-
-    async def cancel(self, task_id: str) -> bool:
-        return await self._runner.cancel(task_id)

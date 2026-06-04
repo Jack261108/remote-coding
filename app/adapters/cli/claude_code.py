@@ -3,19 +3,12 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 
 from app.adapters.cli.base import BaseCLIAdapter
-from app.adapters.process.subprocess_runner import SubprocessRunner
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.domain.models import CLIEvent, ExecutionTask
-
-Runner = SubprocessRunner | TmuxRunner
 
 
 class ClaudeCodeAdapter(BaseCLIAdapter):
     provider = "claude_code"
-
-    def __init__(self, cli_bin: str, runner: Runner) -> None:
-        self._cli_bin = cli_bin
-        self._runner = runner
 
     async def run(
         self,
@@ -47,6 +40,3 @@ class ClaudeCodeAdapter(BaseCLIAdapter):
         if isinstance(self._runner, TmuxRunner):
             return await self._runner.ensure_claude_interactive_session(terminal_key=terminal_key, workdir=workdir)
         return False, "tmux 模式未启用"
-
-    async def cancel(self, task_id: str) -> bool:
-        return await self._runner.cancel(task_id)

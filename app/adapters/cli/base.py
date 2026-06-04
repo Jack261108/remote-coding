@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from app.domain.models import CLIEvent, ExecutionTask
 
 
 class BaseCLIAdapter(ABC):
     provider: str
+
+    def __init__(self, cli_bin: str, runner: Any) -> None:
+        self._cli_bin = cli_bin
+        self._runner = runner
 
     @abstractmethod
     async def run(
@@ -21,6 +26,5 @@ class BaseCLIAdapter(ABC):
         raise NotImplementedError
         yield  # pragma: no cover — makes this an async generator
 
-    @abstractmethod
     async def cancel(self, task_id: str) -> bool:
-        raise NotImplementedError
+        return await self._runner.cancel(task_id)

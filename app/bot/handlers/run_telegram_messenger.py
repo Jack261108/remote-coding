@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from aiogram.enums import ParseMode
 from aiogram.types import Message, ReactionTypeEmoji
@@ -82,3 +83,25 @@ class RunTelegramMessenger:
                 "set_message_reaction failed",
                 extra={"task_id": self._task_id, "user_id": self._user_id, "provider": self._provider},
             )
+
+    async def send_photo(self, photo: Any, caption: str = "") -> Message | None:
+        """Send a photo as a reply to the root message."""
+        try:
+            return await self._root_message.answer_photo(photo, caption=caption)
+        except Exception:
+            logger.exception(
+                "send_photo failed",
+                extra={"task_id": self._task_id, "user_id": self._user_id, "provider": self._provider},
+            )
+            return None
+
+    async def send_document(self, document: Any, caption: str = "") -> Message | None:
+        """Send a document as a reply to the root message."""
+        try:
+            return await self._root_message.answer_document(document, caption=caption)
+        except Exception:
+            logger.exception(
+                "send_document failed",
+                extra={"task_id": self._task_id, "user_id": self._user_id, "provider": self._provider},
+            )
+            return None

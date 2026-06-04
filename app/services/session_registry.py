@@ -37,6 +37,33 @@ class SessionRegistryService:
 
     # ── Helpers ─────────────────────────────────────────────────────────────────
 
+    async def _find_owner_by_terminal(self, terminal_id: str) -> SessionContext | None:
+        """Find the owner SessionContext for a given terminal_id."""
+        all_contexts = await self._session_service.list_all()
+        for ctx in all_contexts:
+            if ctx.terminal_id == terminal_id and ctx.is_owner:
+                return ctx
+        return None
+
+    async def _classify_users_by_terminal(self, terminal_id: str) -> tuple[SessionContext | None, list[int]]:
+        """Return (owner, attached_user_ids) for a given terminal_id.
+
+        ``attached_user_ids`` merges non-owner context user_ids with the
+        owner's own ``attached_user_ids`` list (deduplicated).
+        """
+        all_contexts = await self._session_service.list_all()
+        owner: SessionContext | None = None
+        attached_ids: list[int] = []
+        for ctx in all_contexts:
+            if ctx.terminal_id == terminal_id:
+                if ctx.is_owner:
+                    owner = ctx
+                else:
+                    attached_ids.append(ctx.user_id)
+        if owner and owner.attached_user_ids:
+            attached_ids = list(set(attached_ids) | set(owner.attached_user_ids))
+        return owner, attached_ids
+
     async def _check_session_liveness(self, tmux_name: str, **log_extra: object) -> bool | None:
         """Check if a tmux session is alive. Returns None if unable to determine."""
         try:
@@ -52,17 +79,6 @@ class SessionRegistryService:
         tmux_names = await self._tmux_runner.list_managed_sessions()
         if not tmux_names:
             return []
-
-        # Build lookup: terminal_id -> owner SessionContext
-        all_contexts = await self._session_service.list_all()
-        owner_by_terminal: dict[str, SessionContext] = {}
-        attached_by_terminal: dict[str, list[int]] = {}
-        for ctx in all_contexts:
-            if ctx.terminal_id:
-                if ctx.is_owner:
-                    owner_by_terminal[ctx.terminal_id] = ctx
-                else:
-                    attached_by_terminal.setdefault(ctx.terminal_id, []).append(ctx.user_id)
 
         results: list[TerminalSessionInfo] = []
         for tmux_name in tmux_names:
@@ -80,11 +96,7 @@ class SessionRegistryService:
             workdir = state.workdir if state else "unknown"
             phase = state.phase.value if state else "unknown"
 
-            owner = owner_by_terminal.get(terminal_id)
-            attached = attached_by_terminal.get(terminal_id, [])
-            # Also include owner's attached_user_ids
-            if owner and owner.attached_user_ids:
-                attached = list(set(attached) | set(owner.attached_user_ids))
+            owner, attached = await self._classify_users_by_terminal(terminal_id)
 
             results.append(
                 TerminalSessionInfo(
@@ -113,17 +125,7 @@ class SessionRegistryService:
         workdir = state.workdir if state else "unknown"
         phase = state.phase.value if state else "unknown"
 
-        all_contexts = await self._session_service.list_all()
-        owner: SessionContext | None = None
-        attached_ids: list[int] = []
-        for ctx in all_contexts:
-            if ctx.terminal_id == terminal_id:
-                if ctx.is_owner:
-                    owner = ctx
-                else:
-                    attached_ids.append(ctx.user_id)
-        if owner and owner.attached_user_ids:
-            attached_ids = list(set(attached_ids) | set(owner.attached_user_ids))
+        owner, attached_ids = await self._classify_users_by_terminal(terminal_id)
 
         return TerminalSessionInfo(
             terminal_id=terminal_id,
@@ -156,12 +158,7 @@ class SessionRegistryService:
             await self._detach_user_internal(user_id, current)
 
         # Find the owner of the target session
-        all_contexts = await self._session_service.list_all()
-        owner: SessionContext | None = None
-        for ctx in all_contexts:
-            if ctx.terminal_id == terminal_id and ctx.is_owner:
-                owner = ctx
-                break
+        owner = await self._find_owner_by_terminal(terminal_id)
 
         # Get workdir from SessionState
         state = self._lookup.find_by_terminal_id(terminal_id)
@@ -218,12 +215,10 @@ class SessionRegistryService:
 
         # Remove from owner's attached_user_ids
         if not current.is_owner and terminal_id:
-            all_contexts = await self._session_service.list_all()
-            for ctx in all_contexts:
-                if ctx.terminal_id == terminal_id and ctx.is_owner and user_id in ctx.attached_user_ids:
-                    ctx.attached_user_ids.remove(user_id)
-                    await self._session_service.save_session_context(ctx)
-                    break
+            owner = await self._find_owner_by_terminal(terminal_id)
+            if owner and user_id in owner.attached_user_ids:
+                owner.attached_user_ids.remove(user_id)
+                await self._session_service.save_session_context(owner)
 
         # Reset user's session
         await self._session_service.switch(

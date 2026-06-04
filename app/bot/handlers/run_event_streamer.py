@@ -258,7 +258,7 @@ class RunEventStreamer:
                 short_id = self._start.task.task_id[:8]
                 filename = f"{short_id}.patch"
                 doc = BufferedInputFile(file=patch_bytes, filename=filename)
-                await self._messenger._root_message.answer_document(doc, caption=f"📎 Diff ({diff_result.file_count} files)")
+                await self._messenger.send_document(doc, caption=f"📎 Diff ({diff_result.file_count} files)")
             else:
                 # Send as code-block formatted message
                 diff_msg = f"```diff\n{diff_result.content}\n```"
@@ -279,7 +279,7 @@ class RunEventStreamer:
             export_result = await self._result_exporter.export_markdown(record)
             try:
                 doc = FSInputFile(path=export_result.file_path, filename=export_result.filename)
-                await self._messenger._root_message.answer_document(doc)
+                await self._messenger.send_document(doc)
             finally:
                 # Clean up temp file
                 export_result.file_path.unlink(missing_ok=True)
