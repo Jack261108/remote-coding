@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from html import escape
 from typing import TYPE_CHECKING
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.user_utils import extract_user_id
-from app.domain.models import SessionListItem
+from app.bot.session_list_renderer import ListSessionSource, ListSessionView, build_session_list_message
+from app.domain.models import SessionListItem, utc_now
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.process_liveness import process_is_alive
@@ -23,9 +25,9 @@ logger = logging.getLogger(__name__)
 _PHASE_ICONS = {
     "idle": "⏸",
     "processing": "⚙️",
-    "waiting_for_input": "\U0001f4ac",
-    "waiting_for_approval": "\U0001f510",
-    "compacting": "\U0001f504",
+    "waiting_for_input": "💬",
+    "waiting_for_approval": "🔐",
+    "compacting": "🔄",
     "ended": "⏹️",
 }
 
@@ -34,6 +36,29 @@ def _short_cwd(cwd: str) -> str:
     """Return last 2 path segments as a short display name."""
     parts = cwd.rstrip("/").split("/")
     return "/".join(parts[-2:]) if len(parts) >= 2 else cwd
+
+
+def _html(text: str) -> str:
+    return escape(text, quote=False)
+
+
+def _render_full_list(items: list[SessionListItem]) -> tuple[str, InlineKeyboardMarkup | None]:
+    if not items:
+        return "当前无活跃会话。", None
+
+    parts: list[str] = ["📋 <b>活跃会话</b>\n"]
+    buttons: list[list[InlineKeyboardButton]] = []
+    for item in items:
+        short_cwd = _html(_short_cwd(item.cwd))
+        sid_short = _html(item.session_id[:8])
+        status_text = _html(item.status_text)
+        parts.append(f"{item.status_icon} <b>{short_cwd}</b>")
+        parts.append(f"   <code>{sid_short}</code> · {status_text}")
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data) for btn_text, cb_data in item.buttons])
+        parts.append("")
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    return "\n".join(parts), keyboard
 
 
 def register_list_handler(
@@ -46,14 +71,11 @@ def register_list_handler(
     reaper: ExternalBindingReaper | None = None,
     title_resolver: Callable[[str, str], str | None] | None = None,
 ) -> None:
-    @router.message(Command("list"))
-    async def command_list(message: Message) -> None:
-        user_id = extract_user_id(message)
+    async def collect_items(user_id: int) -> tuple[list[SessionListItem], list[ListSessionView]]:
+        now = utc_now()
+        legacy_items: list[SessionListItem] = []
+        summary_items: list[ListSessionView] = []
 
-        # ── collect all session types ────────────────────────────────────────
-        items: list[SessionListItem] = []
-
-        # 1. tmux sessions
         sessions = await registry_service.list_active_sessions()
         for s in sessions:
             icon = _PHASE_ICONS.get(s.phase, "❓")
@@ -65,7 +87,7 @@ def register_list_handler(
             if not s.is_alive:
                 tags.append("已断开")
             sid = s.terminal_id
-            items.append(
+            legacy_items.append(
                 SessionListItem(
                     session_id=sid,
                     cwd=s.workdir,
@@ -78,30 +100,47 @@ def register_list_handler(
                     ],
                 )
             )
+            summary_items.append(
+                ListSessionView(
+                    session_id=sid,
+                    title=None,
+                    cwd=s.workdir,
+                    source=ListSessionSource.TMUX,
+                    state=s.phase,
+                    activity_at=s.last_activity or now,
+                )
+            )
 
-        # 2. external unbound sessions
         external_sessions = []
         if external_discovery is not None:
             external_sessions = external_discovery.list_unbound()
         for ext in external_sessions:
             status = ext.title or "未绑定"
-            items.append(
+            legacy_items.append(
                 SessionListItem(
                     session_id=ext.session_id,
                     cwd=ext.cwd,
-                    status_icon="\U0001f4e1",
+                    status_icon="📡",
                     status_text=status,
                     source="external",
                     buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{ext.session_id[:16]}")],
                 )
             )
+            summary_items.append(
+                ListSessionView(
+                    session_id=ext.session_id,
+                    title=ext.title,
+                    cwd=ext.cwd,
+                    source=ListSessionSource.UNBOUND,
+                    state="unbound",
+                    activity_at=ext.last_seen,
+                )
+            )
 
-        # 3. bound sessions
         bound_sessions = []
         if external_binder is not None:
             bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
 
-            # Liveness partition: reap dead bindings
             if liveness_enabled and reaper is not None:
                 visible = []
                 dead_ids: list[str] = []
@@ -124,7 +163,6 @@ def register_list_handler(
 
         for b in bound_sessions:
             title = b.title
-            # Try to resolve title for bindings that don't have one yet
             if title is None and title_resolver is not None:
                 try:
                     title = title_resolver(b.session_id, b.cwd)
@@ -133,34 +171,41 @@ def register_list_handler(
                         external_binder._binding_store.save_binding(b)
                 except Exception:
                     logger.debug("title resolver failed for bound session", extra={"session_id": b.session_id})
-            items.append(
+            legacy_items.append(
                 SessionListItem(
                     session_id=b.session_id,
                     cwd=b.cwd,
-                    status_icon="\U0001f517",
+                    status_icon="🔗",
                     status_text="已绑定",
                     source="bound",
                     buttons=[(title or _short_cwd(b.cwd), f"sess:select:{b.session_id[:16]}")],
                 )
             )
+            summary_items.append(
+                ListSessionView(
+                    session_id=b.session_id,
+                    title=title,
+                    cwd=b.cwd,
+                    source=ListSessionSource.BOUND,
+                    state="bound",
+                    activity_at=b.last_activity_at,
+                )
+            )
 
-        # ── render ───────────────────────────────────────────────────────────
-        if not items:
-            await message.answer("当前无活跃会话。")
-            return
+        return legacy_items, summary_items
 
-        parts: list[str] = ["📋 <b>活跃会话</b>\n"]
-        buttons: list[list[InlineKeyboardButton]] = []
-        for item in items:
-            short_cwd = _short_cwd(item.cwd)
-            sid_short = item.session_id[:8]
-            # Header line: icon + short path
-            parts.append(f"{item.status_icon} <b>{short_cwd}</b>")
-            # Detail line: short id + status
-            parts.append(f"   <code>{sid_short}</code> · {item.status_text}")
-            # Buttons
-            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data) for btn_text, cb_data in item.buttons])
-            parts.append("")  # blank line between items
+    @router.message(Command("list"))
+    async def command_list(message: Message) -> None:
+        user_id = extract_user_id(message)
+        _, summary_items = await collect_items(user_id)
+        result = build_session_list_message(summary_items, now=utc_now())
+        await message.answer(result.text, parse_mode="HTML", reply_markup=result.keyboard)
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
-        await message.answer("\n".join(parts), parse_mode="HTML", reply_markup=keyboard)
+    @router.callback_query(F.data == "sess:list:all")
+    async def handle_list_all(callback: CallbackQuery) -> None:
+        user_id = extract_user_id(callback)
+        legacy_items, _ = await collect_items(user_id)
+        text, keyboard = _render_full_list(legacy_items)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)

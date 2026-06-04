@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram import Router
@@ -8,6 +11,10 @@ from aiogram import Router
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.bot.handlers.command_list import register_list_handler
+from app.domain.external_session_models import ExternalBinding
+from app.services.external_binding_store import ExternalBindingStore
+from app.services.external_session_binder import ExternalSessionBinder
+from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.session_lookup_service import SessionLookupService
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
@@ -87,3 +94,120 @@ async def test_list_shows_active_session(tmp_path) -> None:
     assert sessions[0].workdir == "/proj"
     assert sessions[0].owner_user_id == 1
     assert sessions[0].last_activity == activity_at
+
+
+def _message(user_id: int = 42) -> MagicMock:
+    message = MagicMock()
+    message.from_user = SimpleNamespace(id=user_id)
+    message.answer = AsyncMock()
+    return message
+
+
+def _callback_data_from_answer(message: MagicMock) -> list[str]:
+    keyboard = message.answer.call_args.kwargs.get("reply_markup")
+    if keyboard is None:
+        return []
+    return [button.callback_data or "" for row in keyboard.inline_keyboard for button in row]
+
+
+def _save_external_binding(
+    store: ExternalBindingStore,
+    *,
+    session_id: str,
+    user_id: int,
+    title: str,
+    activity_at: datetime,
+) -> None:
+    store.save_binding(
+        ExternalBinding(
+            session_id=session_id,
+            user_id=user_id,
+            cwd="/Users/jack/project/remote-coding",
+            bound_at=activity_at - timedelta(hours=1),
+            jsonl_path=None,
+            title=title,
+            last_activity_at_init=activity_at,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_command_list_renders_recent_bound_summary(tmp_path: Path) -> None:
+    store = ExternalBindingStore(data_dir=tmp_path)
+    user_id = 42
+    now = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    _save_external_binding(store, session_id="sess-newest-0001", user_id=user_id, title="Newest", activity_at=now)
+    _save_external_binding(store, session_id="sess-second-0002", user_id=user_id, title="Second", activity_at=now - timedelta(minutes=2))
+    _save_external_binding(store, session_id="sess-third-0003", user_id=user_id, title="Third", activity_at=now - timedelta(minutes=3))
+    _save_external_binding(store, session_id="sess-hidden-0004", user_id=user_id, title="Hidden", activity_at=now - timedelta(minutes=4))
+
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    binder = ExternalSessionBinder(
+        discovery=ExternalSessionDiscoveryService(),
+        binding_store=store,
+        projects_dir=tmp_path / "projects",
+    )
+    router = Router()
+    register_list_handler(router, registry_service=registry, external_binder=binder)
+    handler = router.message.handlers[-1].callback
+    message = _message(user_id)
+
+    await handler(message)
+
+    text = message.answer.call_args.args[0]
+    assert "📋 <b>会话</b>" in text
+    assert "🚀 <b>最近可继续</b>" in text
+    assert "1. 🔗 Newest" in text
+    assert "2. 🔗 Second" in text
+    assert "3. 🔗 Third" in text
+    assert "Hidden" not in text
+    assert "还有 1 个旧会话未显示" in text
+    assert _callback_data_from_answer(message) == [
+        "sess:select:sess-newest-0001",
+        "sess:select:sess-second-0002",
+        "sess:select:sess-third-0003",
+        "sess:list:all",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_all_callback_renders_full_legacy_list(tmp_path: Path) -> None:
+    store = ExternalBindingStore(data_dir=tmp_path)
+    user_id = 42
+    now = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    _save_external_binding(store, session_id="sess-newest-0001", user_id=user_id, title="Newest", activity_at=now)
+    _save_external_binding(store, session_id="sess-second-0002", user_id=user_id, title="Second", activity_at=now - timedelta(minutes=2))
+    _save_external_binding(store, session_id="sess-third-0003", user_id=user_id, title="Third", activity_at=now - timedelta(minutes=3))
+    _save_external_binding(store, session_id="sess-hidden-0004", user_id=user_id, title="Hidden", activity_at=now - timedelta(minutes=4))
+
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    binder = ExternalSessionBinder(
+        discovery=ExternalSessionDiscoveryService(),
+        binding_store=store,
+        projects_dir=tmp_path / "projects",
+    )
+    router = Router()
+    register_list_handler(router, registry_service=registry, external_binder=binder)
+    callback_handler = router.callback_query.handlers[-1].callback
+
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=user_id)
+    callback.data = "sess:list:all"
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.answer = AsyncMock()
+
+    await callback_handler(callback)
+
+    callback.answer.assert_awaited_once()
+    text = callback.message.answer.call_args.args[0]
+    assert "📋 <b>活跃会话</b>" in text
+    assert "project/remote-coding" in text
+    assert "已绑定" in text
+    assert text.count("🔗") == 4  # all 4 bound sessions shown
+    callbacks = [
+        button.callback_data or "" for row in callback.message.answer.call_args.kwargs["reply_markup"].inline_keyboard for button in row
+    ]
+    assert "sess:select:sess-hidden-0004" in callbacks
