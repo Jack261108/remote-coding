@@ -147,6 +147,7 @@ class TerminalSessionInfo:
     owner_user_id: int | None
     attached_user_ids: list[int]
     is_alive: bool
+    last_activity: datetime | None = None
 
 
 @dataclass

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from aiogram import Router
 
@@ -68,16 +70,20 @@ async def test_list_shows_active_session(tmp_path) -> None:
     ctx = await session_service.get(1)
     ctx.terminal_id = "user_1_abc123"
     await session_service._store.save(ctx)
-    cache.get_or_create(
+    state = cache.get_or_create(
         session_id="s1",
         provider="claude_code",
         workdir="/proj",
         terminal_id="user_1_abc123",
         user_id=1,
     )
+    activity_at = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    state.last_activity = activity_at
+    cache.put(state)
 
     sessions = await registry.list_active_sessions()
     assert len(sessions) == 1
     assert sessions[0].terminal_id == "user_1_abc123"
     assert sessions[0].workdir == "/proj"
     assert sessions[0].owner_user_id == 1
+    assert sessions[0].last_activity == activity_at

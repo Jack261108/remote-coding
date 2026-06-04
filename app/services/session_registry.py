@@ -107,6 +107,7 @@ class SessionRegistryService:
                     owner_user_id=owner.user_id if owner else None,
                     attached_user_ids=attached,
                     is_alive=alive,
+                    last_activity=state.last_activity if state else None,
                 )
             )
 
@@ -135,6 +136,7 @@ class SessionRegistryService:
             owner_user_id=owner.user_id if owner else None,
             attached_user_ids=attached_ids,
             is_alive=alive,
+            last_activity=state.last_activity if state else None,
         )
 
     # ── Attach / Detach ────────────────────────────────────────────────────────
