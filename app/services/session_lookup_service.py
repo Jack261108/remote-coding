@@ -331,7 +331,7 @@ class SessionLookupService:
         )
         if state is None:
             return None
-        if state.phase in {SessionPhase.IDLE, SessionPhase.WAITING_FOR_INPUT, SessionPhase.ENDED}:
+        if state.phase in {SessionPhase.IDLE, SessionPhase.WAITING_FOR_INPUT}:
             state.phase = SessionPhase.PROCESSING
             if self._persist_fn is not None:
                 self._persist_fn(state)

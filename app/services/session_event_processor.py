@@ -47,7 +47,18 @@ class SessionEventProcessor:
         state = self._cache.get(event.session_id)
         if state is None:
             state = self._cache.get_or_create(session_id=event.session_id)
+        was_ended = state.phase == SessionPhase.ENDED
         state.last_activity = event.at
+        if was_ended and event.type in {
+            SessionEventType.SESSION_STARTED,
+            SessionEventType.TURN_STARTED,
+            SessionEventType.PARSER_UPDATED,
+            SessionEventType.TURN_COMPLETED,
+            SessionEventType.CLEAR_DETECTED,
+        }:
+            self._keep_ended_absorbed(state, event)
+            self._persist(state)
+            return state
 
         if event.type == SessionEventType.SESSION_STARTED:
             state.phase = SessionPhase.PROCESSING
@@ -55,6 +66,8 @@ class SessionEventProcessor:
         elif event.type == SessionEventType.TURN_STARTED:
             raw_turn_id = event.payload.get("turn_id")
             if raw_turn_id is None:
+                if was_ended:
+                    self._keep_ended_absorbed(state, event)
                 self._persist(state)
                 return state
             turn = ConversationTurn(turn_id=str(raw_turn_id), role=str(event.payload.get("role", "assistant")))
@@ -84,7 +97,7 @@ class SessionEventProcessor:
             state.current_turn_id = None
         elif event.type == SessionEventType.SESSION_ENDED:
             state.phase = SessionPhase.ENDED
-            state.pending_permission = None
+            state.interrupted = self._interrupt_session_tools(state, event.at) or state.interrupted
         elif event.type == SessionEventType.HOOK_RECEIVED:
             self._process_hook_event(state, event)
         elif event.type in {SessionEventType.FILE_SYNCED, SessionEventType.HISTORY_LOADED}:
@@ -100,6 +113,8 @@ class SessionEventProcessor:
         elif event.type == SessionEventType.PERMISSION_RESPONSE_FAILED:
             self._process_permission_response_failed(state, event)
 
+        if state.phase == SessionPhase.ENDED:
+            self._keep_ended_absorbed(state, event)
         self._persist(state)
         return state
 
@@ -110,6 +125,12 @@ class SessionEventProcessor:
         hook = HookEvent.from_dict(raw)
         state.workdir = hook.cwd or state.workdir
         state.claude_session_id = hook.session_id or state.claude_session_id or state.session_id
+        is_session_end = hook.event == "SessionEnd" or hook.status == "ended"
+        if state.phase == SessionPhase.ENDED:
+            if is_session_end:
+                state.interrupted = self._interrupt_session_tools(state, event.at) or state.interrupted
+            return
+        previous_interrupted = state.interrupted
         state.interrupted = False
 
         if hook.event == "PreToolUse" and hook.tool_use_id:
@@ -187,8 +208,8 @@ class SessionEventProcessor:
             self._interrupt_session_tools(state, event.at)
             state.interrupted = True
             state.phase = SessionPhase.WAITING_FOR_INPUT
-        elif hook.event == "SessionEnd" or hook.status == "ended":
-            state.interrupted = self._interrupt_session_tools(state, event.at)
+        elif is_session_end:
+            state.interrupted = self._interrupt_session_tools(state, event.at) or previous_interrupted
             state.phase = SessionPhase.ENDED
         elif hook.event in {"Stop", "SubagentStop"} or hook.status == "waiting_for_input":
             state.interrupted = self._interrupt_session_tools(state, event.at)
@@ -278,6 +299,8 @@ class SessionEventProcessor:
                     candidate.input = dict(existing.input)
 
     def _process_permission_decision(self, state: SessionState, event: SessionEvent, *, approved: bool) -> None:
+        if state.phase == SessionPhase.ENDED:
+            return
         tool_use_id = str(event.payload.get("tool_use_id", ""))
         if not tool_use_id:
             return
@@ -306,7 +329,15 @@ class SessionEventProcessor:
             state.pending_permission = None
         self._move_to_next_phase(state, default=SessionPhase.WAITING_FOR_INPUT)
 
+    def _keep_ended_absorbed(self, state: SessionState, event: SessionEvent) -> None:
+        state.phase = SessionPhase.ENDED
+        if self._interrupt_session_tools(state, event.at):
+            state.interrupted = True
+
     def _move_to_next_phase(self, state: SessionState, *, default: SessionPhase) -> None:
+        if state.phase == SessionPhase.ENDED:
+            state.pending_permission = None
+            return
         next_pending = None
         has_running_tool = False
         for tool in state.tool_calls.values():
@@ -361,5 +392,16 @@ class SessionEventProcessor:
                 tool.status = ToolStatus.INTERRUPTED
                 tool.completed_at = tool.completed_at or at
                 interrupted = True
+            for subagent_tool in tool.subagent_tools:
+                if subagent_tool.status in {ToolStatus.RUNNING, ToolStatus.WAITING_FOR_APPROVAL}:
+                    subagent_tool.status = ToolStatus.INTERRUPTED
+                    subagent_tool.completed_at = subagent_tool.completed_at or at
+                    interrupted = True
+        for task in state.subagent_state.active_tasks.values():
+            for subagent_tool in task.subagent_tools:
+                if subagent_tool.status in {ToolStatus.RUNNING, ToolStatus.WAITING_FOR_APPROVAL}:
+                    subagent_tool.status = ToolStatus.INTERRUPTED
+                    subagent_tool.completed_at = subagent_tool.completed_at or at
+                    interrupted = True
         state.pending_permission = None
         return interrupted
