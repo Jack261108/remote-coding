@@ -281,11 +281,7 @@ def main() -> int:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(socket_path)
-            client.sendall(json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8"))
-            try:
-                client.shutdown(socket.SHUT_WR)
-            except OSError:
-                pass
+            client.sendall(json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8") + b"\\n")
             while True:
                 chunk = client.recv(65536)
                 if not chunk:

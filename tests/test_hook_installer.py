@@ -82,7 +82,9 @@ def test_hook_script_normalizes_claude_payload(tmp_path) -> None:
                     if not chunk:
                         break
                     chunks.append(chunk)
-                received.append(json.loads(b"".join(chunks).decode("utf-8")))
+                    if b"\n" in chunk:
+                        break
+                received.append(json.loads(b"".join(chunks).split(b"\n", 1)[0].decode("utf-8")))
 
     thread = threading.Thread(target=serve_once)
     thread.start()

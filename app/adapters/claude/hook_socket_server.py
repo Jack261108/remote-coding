@@ -62,6 +62,7 @@ class HookSocketServer:
         self._permission_resolved_handler: PermissionResolvedHandler | None = None
         self._pending_permissions: dict[str, PendingPermissionRequest] = {}
         self._pending_expiration_tasks: dict[str, asyncio.Task[None]] = {}
+        self._pending_disconnect_tasks: dict[str, asyncio.Task[None]] = {}
         self._tool_use_id_cache: dict[str, list[_CachedToolUseId]] = {}
         self._lock = asyncio.Lock()
 
@@ -95,12 +96,14 @@ class HookSocketServer:
         async with self._lock:
             pending = list(self._pending_permissions.values())
             expiration_tasks = list(self._pending_expiration_tasks.values())
+            disconnect_tasks = list(self._pending_disconnect_tasks.values())
             self._pending_permissions.clear()
             self._pending_expiration_tasks.clear()
+            self._pending_disconnect_tasks.clear()
             self._tool_use_id_cache.clear()
-        for task in expiration_tasks:
+        for task in [*expiration_tasks, *disconnect_tasks]:
             task.cancel()
-        for task in expiration_tasks:
+        for task in [*expiration_tasks, *disconnect_tasks]:
             with suppress(asyncio.CancelledError):
                 await task
         await self._close_pending_permissions(pending, emit_failure=False)
@@ -114,6 +117,7 @@ class HookSocketServer:
             pending = self._pending_permissions.pop(tool_use_id, None)
             if pending is not None:
                 self._cancel_pending_expiration_locked(tool_use_id)
+            self._cancel_pending_disconnect_watch_locked(tool_use_id)
         await self._expire_pending_permissions(expired)
         if pending is None:
             return False
@@ -128,6 +132,7 @@ class HookSocketServer:
             if pending is not None:
                 self._pending_permissions.pop(pending.tool_use_id, None)
                 self._cancel_pending_expiration_locked(pending.tool_use_id)
+                self._cancel_pending_disconnect_watch_locked(pending.tool_use_id)
         await self._expire_pending_permissions(expired)
         if pending is None:
             return False
@@ -140,6 +145,7 @@ class HookSocketServer:
             for item in matching:
                 self._pending_permissions.pop(item.tool_use_id, None)
                 self._cancel_pending_expiration_locked(item.tool_use_id)
+                self._cancel_pending_disconnect_watch_locked(item.tool_use_id)
         await self._expire_pending_permissions(expired)
         await self._close_pending_permissions(matching, emit_failure=False)
 
@@ -167,8 +173,18 @@ class HookSocketServer:
             pending = self._pending_permissions.get(tool_use_id)
             return pending.session_id if pending is not None else None
 
+    async def _read_hook_payload(self, reader: asyncio.StreamReader) -> tuple[bytes, bool]:
+        try:
+            raw = await reader.readuntil(b"\n")
+            return raw.rstrip(b"\n"), True
+        except asyncio.IncompleteReadError as exc:
+            return exc.partial, False
+        except asyncio.LimitOverrunError:
+            raw = await reader.read(self._max_message_bytes + 1)
+            return raw, False
+
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        raw = await reader.read(self._max_message_bytes + 1)
+        raw, is_framed = await self._read_hook_payload(reader)
         if not raw:
             await self._close_writer(writer)
             return
@@ -265,6 +281,7 @@ class HookSocketServer:
                     previous = self._pending_permissions.pop(tool_id, None)
                     if previous is not None:
                         self._cancel_pending_expiration_locked(tool_id)
+                        self._cancel_pending_disconnect_watch_locked(tool_id)
                     self._pending_permissions[tool_id] = PendingPermissionRequest(
                         session_id=emit_event.session_id,
                         tool_use_id=tool_id,
@@ -272,6 +289,8 @@ class HookSocketServer:
                         event=emit_event,
                     )
                     self._schedule_pending_expiration_locked(tool_id)
+                    if is_framed:
+                        self._schedule_pending_disconnect_watch_locked(tool_id, reader)
             await self._expire_pending_permissions(expired)
             if over_limit:
                 logger.warning(
@@ -356,6 +375,7 @@ class HookSocketServer:
                 )
                 return
             self._cancel_pending_expiration_locked(tool_use_id)
+            self._cancel_pending_disconnect_watch_locked(tool_use_id)
         # Permission was resolved in terminal (not via Telegram)
         await self._close_writer(pending.writer)
         logger.info(
@@ -395,14 +415,24 @@ class HookSocketServer:
         for item in expired:
             self._pending_permissions.pop(item.tool_use_id, None)
             self._cancel_pending_expiration_locked(item.tool_use_id)
+            self._cancel_pending_disconnect_watch_locked(item.tool_use_id)
         return expired
 
     def _schedule_pending_expiration_locked(self, tool_use_id: str) -> None:
         self._cancel_pending_expiration_locked(tool_use_id)
         self._pending_expiration_tasks[tool_use_id] = asyncio.create_task(self._expire_pending_permission_later(tool_use_id))
 
+    def _schedule_pending_disconnect_watch_locked(self, tool_use_id: str, reader: asyncio.StreamReader) -> None:
+        self._cancel_pending_disconnect_watch_locked(tool_use_id)
+        self._pending_disconnect_tasks[tool_use_id] = asyncio.create_task(self._watch_pending_permission_disconnect(tool_use_id, reader))
+
     def _cancel_pending_expiration_locked(self, tool_use_id: str) -> None:
         task = self._pending_expiration_tasks.pop(tool_use_id, None)
+        if task is not None:
+            task.cancel()
+
+    def _cancel_pending_disconnect_watch_locked(self, tool_use_id: str) -> None:
+        task = self._pending_disconnect_tasks.pop(tool_use_id, None)
         if task is not None:
             task.cancel()
 
@@ -412,8 +442,29 @@ class HookSocketServer:
             async with self._lock:
                 pending = self._pending_permissions.pop(tool_use_id, None)
                 self._pending_expiration_tasks.pop(tool_use_id, None)
+                self._cancel_pending_disconnect_watch_locked(tool_use_id)
             if pending is not None:
                 await self._expire_pending_permissions([pending])
+        except asyncio.CancelledError:
+            raise
+
+    async def _watch_pending_permission_disconnect(self, tool_use_id: str, reader: asyncio.StreamReader) -> None:
+        try:
+            await reader.read()
+            async with self._lock:
+                pending = self._pending_permissions.pop(tool_use_id, None)
+                self._pending_disconnect_tasks.pop(tool_use_id, None)
+                if pending is not None:
+                    self._cancel_pending_expiration_locked(tool_use_id)
+            if pending is None:
+                return
+            logger.info(
+                "pending permission request connection closed before response session_id=%s tool_use_id=%s",
+                pending.session_id,
+                pending.tool_use_id,
+            )
+            await self._close_writer(pending.writer)
+            await self._emit_permission_resolved(pending.session_id, pending.tool_use_id, "terminal_denied")
         except asyncio.CancelledError:
             raise
 
