@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import datetime
 
 from app.domain.external_session_models import UnboundExternalSession
 from app.domain.hook_models import HookEvent
@@ -88,17 +89,17 @@ class ExternalSessionDiscoveryService:
         """Get a specific unbound session by ID."""
         return self._sessions.get(session_id)
 
+    def _is_stale(self, session: UnboundExternalSession, *, now: datetime) -> bool:
+        elapsed = (now - session.last_seen).total_seconds()
+        return elapsed > self._stale_timeout_sec
+
     def prune_stale(self) -> list[str]:
         """Remove sessions whose last_seen exceeds stale_timeout_sec.
 
         Returns the list of removed session IDs.
         """
         now = utc_now()
-        stale_ids: list[str] = []
-        for session_id, session in self._sessions.items():
-            elapsed = (now - session.last_seen).total_seconds()
-            if elapsed > self._stale_timeout_sec:
-                stale_ids.append(session_id)
+        stale_ids = [session_id for session_id, session in self._sessions.items() if self._is_stale(session, now=now)]
         for session_id in stale_ids:
             del self._sessions[session_id]
         return stale_ids
@@ -106,18 +107,11 @@ class ExternalSessionDiscoveryService:
     def count_stale(self) -> int:
         """Count sessions that would be pruned by prune_stale() without removing them."""
         now = utc_now()
-        count = 0
-        for session in self._sessions.values():
-            elapsed = (now - session.last_seen).total_seconds()
-            if elapsed > self._stale_timeout_sec:
-                count += 1
-        return count
+        return sum(1 for session in self._sessions.values() if self._is_stale(session, now=now))
 
     def is_session_stale(self, session_id: str) -> bool:
         """Check if a specific session is stale without removing it."""
         session = self._sessions.get(session_id)
         if session is None:
             return False
-        now = utc_now()
-        elapsed = (now - session.last_seen).total_seconds()
-        return elapsed > self._stale_timeout_sec
+        return self._is_stale(session, now=utc_now())
