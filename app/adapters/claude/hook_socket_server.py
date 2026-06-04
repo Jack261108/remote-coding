@@ -214,8 +214,11 @@ class HookSocketServer:
             # Check if this tool had a pending permission (terminal-side resolution)
             decision = "terminal_approved" if event.event == "PostToolUse" else "terminal_denied"
             tool_use_id = event.tool_use_id
-            if tool_use_id is None and event.event == "PermissionDenied":
-                tool_use_id = await self._find_pending_permission_tool_use_id(event)
+            if event.event == "PermissionDenied":
+                async with self._lock:
+                    has_exact_pending = tool_use_id is not None and tool_use_id in self._pending_permissions
+                if not has_exact_pending:
+                    tool_use_id = await self._find_pending_permission_tool_use_id(event)
             if tool_use_id:
                 logger.info(
                     "terminal permission resolution detected",
