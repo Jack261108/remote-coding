@@ -13,6 +13,7 @@ from app.domain.models import TaskRecord, TaskStatus
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
 from app.services.agent_file_watcher import AgentFileWatcher
 from app.services.interrupt_watcher import InterruptWatcher
+from app.services.permission_callback_registry import AuthorizationMode, SessionOrigin
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
@@ -707,6 +708,38 @@ async def test_session_end_cleans_event_lock_registry(tmp_path) -> None:
     )
 
     assert len(container._session_event_locks) == 0
+
+
+@pytest.mark.asyncio
+async def test_terminal_permission_resolution_edits_telegram_message_once(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    token = await container.permission_callback_registry.register_token(
+        tool_use_id="tool-1",
+        session_id="claude-session-1",
+        origin=SessionOrigin.EXTERNAL_BOUND,
+        authorization_mode=AuthorizationMode.BOUND_USER,
+        authorized_user_ids=frozenset({1}),
+    )
+    original_text = "🔐 请求权限: Bash\n请点击下方按钮选择允许或拒绝。"
+    await container.permission_callback_registry.update_telegram_message(
+        token=token,
+        chat_id=1,
+        message_id=42,
+        message_text=original_text,
+    )
+    edit_message = AsyncMock()
+    monkeypatch.setattr(container.message_sender, "edit_message", edit_message)
+
+    await container._handle_permission_resolved("claude-session-1", "tool-1", "terminal_approved")
+    await container._handle_permission_resolved("claude-session-1", "tool-1", "terminal_approved")
+
+    edit_message.assert_awaited_once()
+    kwargs = edit_message.await_args.kwargs
+    assert kwargs["chat_id"] == 1
+    assert kwargs["message_id"] == 42
+    assert "已在终端批准" in kwargs["text"]
+    assert "请点击下方按钮选择允许或拒绝。" not in kwargs["text"]
+    assert kwargs["parse_mode"] == "HTML"
 
 
 @pytest.mark.asyncio
