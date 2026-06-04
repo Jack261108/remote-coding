@@ -195,7 +195,7 @@ class HookSocketServer:
             return
 
         # Log all received events for debugging
-        logger.debug(
+        logger.info(
             "hook event received",
             extra={
                 "session_id": event.session_id,
