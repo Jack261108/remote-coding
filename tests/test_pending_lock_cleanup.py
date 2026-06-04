@@ -332,7 +332,7 @@ class TestAgentFileWatcherForget:
         # Start a fake task so forget has something to cancel
         watcher._tasks["sess-1"] = asyncio.create_task(asyncio.sleep(100))
 
-        watcher.forget("sess-1")
+        watcher.forget(session_id="sess-1")
 
         # mtime keys for sess-1 removed immediately
         assert "sess-1:tool-1:agent-1" not in watcher._seen_mtimes
@@ -362,7 +362,7 @@ class TestAgentFileWatcherForget:
         task = asyncio.create_task(asyncio.sleep(100))
         watcher._tasks["sess-cancel"] = task
 
-        watcher.forget("sess-cancel")
+        watcher.forget(session_id="sess-cancel")
 
         # Allow cancellation to propagate
         await asyncio.sleep(0)

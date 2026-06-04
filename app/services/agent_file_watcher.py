@@ -44,12 +44,12 @@ class AgentFileWatcher(BaseSessionWatcher):
         self._clear_seen_mtimes_for_session(session_id)
         self._session_locks.pop(session_id, None)
 
-    def forget(self, session_id: str) -> None:
+    def forget(self, *, session_id: str) -> None:
         self._clear_seen_mtimes_for_session(session_id)
         task = self._tasks.get(session_id)
         if task is None or task.done():
             self._session_locks.pop(session_id, None)
-        super().forget(session_id)
+        super().forget(session_id=session_id)
 
     async def stop_all(self) -> None:
         self._seen_mtimes.clear()

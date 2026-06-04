@@ -34,7 +34,7 @@ async def test_forget_clears_all_seen_mtime_keys_for_session() -> None:
     }
     watcher._session_locks["session-1"] = asyncio.Lock()
 
-    watcher.forget("session-1")
+    watcher.forget(session_id="session-1")
 
     assert watcher._seen_mtimes == {"session-2:tool-c:agent-c": 3.0}
     assert "session-1" not in watcher._session_locks
@@ -70,7 +70,7 @@ async def test_forget_defers_lock_cleanup_until_running_watcher_exits() -> None:
 
     # Store task before forget pops it
     task = watcher._tasks["session-1"]
-    watcher.forget("session-1")
+    watcher.forget(session_id="session-1")
 
     assert "session-1:tool-a:agent-a" not in watcher._seen_mtimes
     assert "session-1" in watcher._session_locks

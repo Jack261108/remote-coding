@@ -26,7 +26,7 @@ class BaseSessionWatcher(ABC):
             return
         self._tasks[session_id] = asyncio.create_task(self._watch_session(session_id=session_id, workdir=workdir))
 
-    def forget(self, session_id: str) -> None:
+    def forget(self, *, session_id: str) -> None:
         """移除并取消指定 session 的监听任务。"""
         task = self._tasks.pop(session_id, None)
         if task is not None:
