@@ -194,13 +194,37 @@ class HookSocketServer:
             await self._close_writer(writer)
             return
 
+        # Log all received events for debugging
+        logger.debug(
+            "hook event received",
+            extra={
+                "session_id": event.session_id,
+                "event": event.event,
+                "status": event.status,
+                "tool": event.tool,
+                "tool_use_id": event.tool_use_id,
+                "expects_response": event.expects_response,
+            },
+        )
+
         if event.event == "PreToolUse" and event.tool_use_id:
             await self._cache_tool_use_id(event)
-        if event.event in {"PostToolUse", "PostToolUseFailure"}:
+        if event.event in {"PostToolUse", "PostToolUseFailure", "PermissionDenied"}:
             await self._remove_cached_tool_use_id(event)
-            # Check if this tool had a pending permission (terminal-side approval)
+            # Check if this tool had a pending permission (terminal-side resolution)
             if event.tool_use_id:
-                await self._check_terminal_permission_resolved(event.session_id, event.tool_use_id)
+                decision = "terminal_approved" if event.event == "PostToolUse" else "terminal_denied"
+                logger.info(
+                    "terminal permission resolution detected",
+                    extra={
+                        "session_id": event.session_id,
+                        "tool_use_id": event.tool_use_id,
+                        "event": event.event,
+                        "decision": decision,
+                        "has_pending": event.tool_use_id in self._pending_permissions,
+                    },
+                )
+                await self._check_terminal_permission_resolved(event.session_id, event.tool_use_id, decision)
         if event.event == "SessionEnd":
             await self._cleanup_cache(event.session_id)
             await self.cancel_pending_permissions(session_id=event.session_id)
@@ -303,15 +327,23 @@ class HookSocketServer:
         if inspect.isawaitable(result):
             await result
 
-    async def _check_terminal_permission_resolved(self, session_id: str, tool_use_id: str) -> None:
-        """Check if a PostToolUse/PostToolUseFailure indicates terminal-side permission approval."""
+    async def _check_terminal_permission_resolved(self, session_id: str, tool_use_id: str, decision: str = "terminal_approved") -> None:
+        """Check if a PostToolUse/PostToolUseFailure indicates terminal-side permission resolution."""
         async with self._lock:
             pending = self._pending_permissions.pop(tool_use_id, None)
             if pending is None:
+                logger.debug(
+                    "no pending permission found for terminal resolution",
+                    extra={"session_id": session_id, "tool_use_id": tool_use_id, "decision": decision},
+                )
                 return
             self._cancel_pending_expiration_locked(tool_use_id)
         # Permission was resolved in terminal (not via Telegram)
-        await self._emit_permission_resolved(session_id, tool_use_id, "terminal_approved")
+        logger.info(
+            "terminal permission resolution: emitting resolved event",
+            extra={"session_id": session_id, "tool_use_id": tool_use_id, "decision": decision},
+        )
+        await self._emit_permission_resolved(session_id, tool_use_id, decision)
 
     async def _close_pending_permissions(self, items: list[PendingPermissionRequest], *, emit_failure: bool) -> None:
         for item in items:

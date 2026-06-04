@@ -355,6 +355,7 @@ class PermissionCallbackRegistry:
         async with self._lock:
             self._evict_stale()
             transitioned_tokens: set[str] = set()
+            decision = PermissionAction.ALLOW if reason == "terminal_approved" else PermissionAction.DENY
             for record in self._records.values():
                 if (
                     record.session_id == session_id
@@ -366,7 +367,7 @@ class PermissionCallbackRegistry:
                     }
                 ):
                     record.status = CallbackRecordStatus.RESOLVED
-                    record.decision = PermissionAction.ALLOW
+                    record.decision = decision
                     record.dispatch_error_reason = reason
                     transitioned_tokens.add(record.token)
 

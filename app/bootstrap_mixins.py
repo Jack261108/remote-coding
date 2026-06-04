@@ -455,21 +455,6 @@ class HookHandlingMixin(AppContainerBase):
                 payload={"tool_use_id": tool_use_id},
             )
         )
-
-    async def _handle_permission_resolved(self, session_id: str, tool_use_id: str, reason: str) -> None:
-        """Handle permission resolved in terminal (not via Telegram)."""
-        logger.info(
-            "permission resolved in terminal",
-            extra={"session_id": session_id, "tool_use_id": tool_use_id, "reason": reason},
-        )
-        # Dispatch permission approved event to update session state
-        await self._dispatch_session_event(  # type: ignore[attr-defined]
-            SessionEvent(
-                session_id=session_id,
-                type=SessionEventType.PERMISSION_APPROVED,
-                payload={"tool_use_id": tool_use_id, "source": "terminal"},
-            )
-        )
         # Update permission callback registry and edit Telegram message
         if hasattr(self, "permission_callback_registry"):
             # Get the record before invalidating to preserve message info
@@ -477,13 +462,13 @@ class HookHandlingMixin(AppContainerBase):
             await self.permission_callback_registry.invalidate_pending_for_tool(
                 session_id=session_id,
                 tool_use_id=tool_use_id,
-                reason=reason,
+                reason="permission_response_failed",
             )
             # Edit the Telegram message if we have the message info
             if record and record.telegram_chat_id and record.telegram_message_id:
                 from app.bot.handlers.callback_utils import build_approval_message
 
-                approval_text = "✅ 已在终端批准"
+                approval_text = "⚠️ 响应失败（超时或连接断开）"
                 try:
                     original_text = record.telegram_message_text or ""
                     new_text = build_approval_message(original_text, approval_text)
@@ -493,9 +478,79 @@ class HookHandlingMixin(AppContainerBase):
                         text=new_text,
                         parse_mode="HTML",
                     )
+                    logger.info(
+                        "telegram message updated for permission failure",
+                        extra={"session_id": session_id, "tool_use_id": tool_use_id},
+                    )
                 except Exception:
                     logger.warning(
-                        "failed to edit Telegram message for terminal approval",
+                        "failed to edit Telegram message for permission failure",
+                        extra={"session_id": session_id, "tool_use_id": tool_use_id},
+                        exc_info=True,
+                    )
+
+    async def _handle_permission_resolved(self, session_id: str, tool_use_id: str, reason: str) -> None:
+        """Handle permission resolved in terminal (not via Telegram)."""
+        logger.info(
+            "permission resolved in terminal",
+            extra={"session_id": session_id, "tool_use_id": tool_use_id, "reason": reason},
+        )
+        is_approved = reason == "terminal_approved"
+        # Dispatch permission event to update session state
+        await self._dispatch_session_event(  # type: ignore[attr-defined]
+            SessionEvent(
+                session_id=session_id,
+                type=SessionEventType.PERMISSION_APPROVED if is_approved else SessionEventType.PERMISSION_DENIED,
+                payload={"tool_use_id": tool_use_id, "source": "terminal"},
+            )
+        )
+        # Update permission callback registry and edit Telegram message
+        if hasattr(self, "permission_callback_registry"):
+            # Get the record before invalidating to preserve message info
+            record = await self.permission_callback_registry.get_record_by_tool_use_id(session_id, tool_use_id)
+            if record is None:
+                logger.warning(
+                    "permission record not found for terminal resolution",
+                    extra={"session_id": session_id, "tool_use_id": tool_use_id, "reason": reason},
+                )
+            else:
+                logger.info(
+                    "permission record found for terminal resolution",
+                    extra={
+                        "session_id": session_id,
+                        "tool_use_id": tool_use_id,
+                        "reason": reason,
+                        "has_telegram_message": bool(record.telegram_chat_id and record.telegram_message_id),
+                        "record_status": record.status,
+                        "record_decision": record.decision,
+                    },
+                )
+            await self.permission_callback_registry.invalidate_pending_for_tool(
+                session_id=session_id,
+                tool_use_id=tool_use_id,
+                reason=reason,
+            )
+            # Edit the Telegram message if we have the message info
+            if record and record.telegram_chat_id and record.telegram_message_id:
+                from app.bot.handlers.callback_utils import build_approval_message
+
+                approval_text = "✅ 已在终端批准" if is_approved else "❌ 已在终端拒绝"
+                try:
+                    original_text = record.telegram_message_text or ""
+                    new_text = build_approval_message(original_text, approval_text)
+                    await self.message_sender.edit_message(
+                        chat_id=record.telegram_chat_id,
+                        message_id=record.telegram_message_id,
+                        text=new_text,
+                        parse_mode="HTML",
+                    )
+                    logger.info(
+                        "telegram message updated for terminal resolution",
+                        extra={"session_id": session_id, "tool_use_id": tool_use_id, "approval_text": approval_text},
+                    )
+                except Exception:
+                    logger.warning(
+                        "failed to edit Telegram message for terminal resolution",
                         extra={"session_id": session_id, "tool_use_id": tool_use_id},
                         exc_info=True,
                     )
