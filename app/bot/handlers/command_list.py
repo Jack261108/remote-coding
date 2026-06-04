@@ -120,7 +120,9 @@ def register_list_handler(
             # 检测 stale unbound sessions（pid 已死或基于时间）
             is_dead_pid = ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid)
             is_stale_time = (
-                external_discovery.is_session_stale(ext.session_id) if hasattr(external_discovery, "is_session_stale") else False
+                external_discovery.is_session_stale(ext.session_id)
+                if external_discovery is not None and hasattr(external_discovery, "is_session_stale")
+                else False
             )
             if is_dead_pid or is_stale_time:
                 invalid_count += 1

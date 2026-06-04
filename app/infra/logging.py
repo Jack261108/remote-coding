@@ -24,7 +24,7 @@ def configure_logging() -> None:
     log_level = os.getenv("LOG_LEVEL")
     if log_level is None:
         try:
-            settings = LoggingSettings()
+            settings = LoggingSettings()  # type: ignore[call-arg]
             log_level = settings.log_level
         except Exception:
             log_level = "INFO"

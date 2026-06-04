@@ -24,6 +24,8 @@ from app.services.task_service import TaskService
 if TYPE_CHECKING:
     from aiogram import Bot, Dispatcher
 
+    from app.bot.adapters.message_sender import AiogramMessageSender
+
 
 class AppContainerBase:
     """Declares shared state attributes for AppContainer mixins."""
@@ -50,3 +52,4 @@ class AppContainerBase:
     _session_event_locks: RefCountedLockRegistry
     _background_tasks: BackgroundTaskRegistry
     _started: bool
+    message_sender: AiogramMessageSender

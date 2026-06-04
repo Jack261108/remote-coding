@@ -11,6 +11,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,11 @@ class PeriodicJanitor:
     """Single background task that runs multiple periodic callbacks."""
 
     def __init__(self) -> None:
-        self._jobs: dict[str, tuple[float, Callable[[], Awaitable[None]]]] = {}
+        self._jobs: dict[str, tuple[float, Callable[[], Awaitable[Any]]]] = {}
         self._last_run: dict[str, float] = {}
         self._task: asyncio.Task[None] | None = None
 
-    def register(self, name: str, interval_sec: float, callback: Callable[[], Awaitable[None]]) -> None:
+    def register(self, name: str, interval_sec: float, callback: Callable[[], Awaitable[Any]]) -> None:
         """Register a periodic job.
 
         Args:
