@@ -181,6 +181,64 @@ async def test_hook_socket_server_resolves_permission_tool_use_id_and_replies(tm
 
 
 @pytest.mark.asyncio
+async def test_hook_socket_server_matches_permission_denied_without_tool_use_id_to_pending_request(tmp_path) -> None:
+    delivered = asyncio.Event()
+    resolved = asyncio.Event()
+    resolutions: list[tuple[str, str, str]] = []
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+
+    async def on_event(event: HookEvent) -> None:
+        if event.event == "PermissionRequest":
+            delivered.set()
+
+    async def on_permission_resolved(session_id: str, tool_use_id: str, reason: str) -> None:
+        resolutions.append((session_id, tool_use_id, reason))
+        resolved.set()
+
+    await server.start(on_event, on_permission_resolved=on_permission_resolved)
+    try:
+        reader, writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        assert await server.get_pending_permission(session_id="s1") == ("Bash", "tool-1", {"command": "pwd"})
+
+        denied_reader, denied_writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionDenied",
+                "status": "processing",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+            },
+        )
+        assert await denied_reader.read() == b""
+        denied_writer.close()
+        await denied_writer.wait_closed()
+
+        await asyncio.wait_for(resolved.wait(), timeout=1)
+        assert resolutions == [("s1", "tool-1", "terminal_denied")]
+        assert await server.get_pending_permission(session_id="s1") is None
+        assert await reader.read() == b""
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_hook_socket_server_relaxed_matches_permission_tool_use_id_when_input_differs(tmp_path) -> None:
     seen: list[HookEvent] = []
     delivered = asyncio.Event()

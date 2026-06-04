@@ -212,19 +212,22 @@ class HookSocketServer:
         if event.event in {"PostToolUse", "PostToolUseFailure", "PermissionDenied"}:
             await self._remove_cached_tool_use_id(event)
             # Check if this tool had a pending permission (terminal-side resolution)
-            if event.tool_use_id:
-                decision = "terminal_approved" if event.event == "PostToolUse" else "terminal_denied"
+            decision = "terminal_approved" if event.event == "PostToolUse" else "terminal_denied"
+            tool_use_id = event.tool_use_id
+            if tool_use_id is None and event.event == "PermissionDenied":
+                tool_use_id = await self._find_pending_permission_tool_use_id(event)
+            if tool_use_id:
                 logger.info(
                     "terminal permission resolution detected",
                     extra={
                         "session_id": event.session_id,
-                        "tool_use_id": event.tool_use_id,
+                        "tool_use_id": tool_use_id,
                         "event": event.event,
                         "decision": decision,
-                        "has_pending": event.tool_use_id in self._pending_permissions,
+                        "has_pending": tool_use_id in self._pending_permissions,
                     },
                 )
-                await self._check_terminal_permission_resolved(event.session_id, event.tool_use_id, decision)
+                await self._check_terminal_permission_resolved(event.session_id, tool_use_id, decision)
         if event.event == "SessionEnd":
             await self._cleanup_cache(event.session_id)
             await self.cancel_pending_permissions(session_id=event.session_id)
@@ -328,7 +331,7 @@ class HookSocketServer:
             await result
 
     async def _check_terminal_permission_resolved(self, session_id: str, tool_use_id: str, decision: str = "terminal_approved") -> None:
-        """Check if a PostToolUse/PostToolUseFailure indicates terminal-side permission resolution."""
+        """Check if a terminal-side event indicates permission resolution."""
         async with self._lock:
             pending = self._pending_permissions.pop(tool_use_id, None)
             if pending is None:
@@ -339,6 +342,7 @@ class HookSocketServer:
                 return
             self._cancel_pending_expiration_locked(tool_use_id)
         # Permission was resolved in terminal (not via Telegram)
+        await self._close_writer(pending.writer)
         logger.info(
             "terminal permission resolution: emitting resolved event",
             extra={"session_id": session_id, "tool_use_id": tool_use_id, "decision": decision},
@@ -462,6 +466,18 @@ class HookSocketServer:
                 },
             )
             return cached.tool_use_id or None
+
+    async def _find_pending_permission_tool_use_id(self, event: HookEvent) -> str | None:
+        async with self._lock:
+            candidates = [item for item in self._pending_permissions.values() if item.session_id == event.session_id]
+            if not candidates:
+                return None
+            tool_matches = [item for item in candidates if item.event.tool == event.tool]
+            candidates = tool_matches or candidates
+            input_matches = [item for item in candidates if self._tool_inputs_relaxed_match(event.tool_input, item.event.tool_input)]
+            candidates = input_matches or candidates
+            latest = max(candidates, key=lambda item: item.received_at)
+            return latest.tool_use_id
 
     async def _cleanup_cache(self, session_id: str) -> None:
         async with self._lock:
