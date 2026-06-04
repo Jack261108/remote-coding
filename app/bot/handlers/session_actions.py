@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.handlers.user_utils import extract_user_id
-from app.infra.text_formatting import short_id
+from app.infra.text_formatting import format_external_session_bound_message, format_external_session_unbound_message, short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind
@@ -85,7 +85,7 @@ def register_session_action_handlers(
         if result.success:
             await callback.answer("绑定成功")
             if callback.message:
-                await callback.message.answer(f"🔗 Bound session {short_id(result.session_id or '', 12)}...\n{result.message}")
+                await callback.message.answer(format_external_session_bound_message(result.session_id, result.message))
         else:
             await callback.answer(f"❌ {result.message}")
 
@@ -100,7 +100,7 @@ def register_session_action_handlers(
         if result.success:
             await callback.answer("取消绑定成功")
             if callback.message:
-                await callback.message.answer(f"🔓 Unbound session {short_id(result.session_id or '', 12)}...")
+                await callback.message.answer(format_external_session_unbound_message(result.session_id))
         else:
             await callback.answer(f"❌ {result.message}")
 

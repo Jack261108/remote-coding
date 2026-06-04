@@ -8,7 +8,7 @@ from aiogram.types import Message
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.domain.models import utc_now
-from app.infra.text_formatting import short_id
+from app.infra.text_formatting import format_external_session_bound_message, format_external_session_unbound_message, short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind
@@ -113,7 +113,7 @@ async def _handle_bind(
 
     result = await resolve_and_bind(session_id, user_id=user_id, discovery=discovery, binder=binder)
     if result.success:
-        await message.answer(f"🔗 Bound session {short_id(result.session_id or '', 12)}...\n{result.message}")
+        await message.answer(format_external_session_bound_message(result.session_id, result.message))
     else:
         await message.answer(f"❌ {result.message}")
 
@@ -132,7 +132,7 @@ async def _handle_unbind(
 
     result = await resolve_and_unbind(session_id, user_id=user_id, discovery=discovery, binder=binder)
     if result.success:
-        await message.answer(f"🔓 Unbound session {short_id(result.session_id or '', 12)}...")
+        await message.answer(format_external_session_unbound_message(result.session_id))
     else:
         await message.answer(f"❌ {result.message}")
 

@@ -19,6 +19,14 @@ def short_id(id_str: str, length: int = 8) -> str:
     return id_str[:length]
 
 
+def format_external_session_bound_message(session_id: str | None, message: str) -> str:
+    return f"🔗 Bound session {short_id(session_id or '', 12)}...\n{message}"
+
+
+def format_external_session_unbound_message(session_id: str | None) -> str:
+    return f"🔓 Unbound session {short_id(session_id or '', 12)}..."
+
+
 _FENCED_CODE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+\-]*)[ \t]*\n?(.*?)```", re.DOTALL)
 _LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
