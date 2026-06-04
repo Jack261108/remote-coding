@@ -12,6 +12,7 @@ from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter, normalize_stream_text
 from app.domain.models import EventType
+from app.infra.text_formatting import short_id
 from app.services.diff_generator import DiffGeneratorService
 from app.services.result_exporter import ResultExporterService
 from app.services.task_service import TaskService
@@ -44,20 +45,20 @@ async def _load_status_summary(task_service: TaskService, task_id: str, user_id:
 
 
 def _build_created_message(*, task_id: str, provider: str, session_id: str) -> str:
-    short_id = task_id[:8]
-    return f"⏳ 处理中… [{short_id}]"
+    display_task_id = short_id(task_id)
+    return f"⏳ 处理中… [{display_task_id}]"
 
 
 def _build_success_message(*, task_id: str, exit_code: int | None, duration: str, truncated: bool) -> str:
-    short_id = task_id[:8]
-    parts = [f"✅ 完成 [{short_id}] {duration}"]
+    display_task_id = short_id(task_id)
+    parts = [f"✅ 完成 [{display_task_id}] {duration}"]
     if truncated:
         parts.append("（输出已截断）")
     return " ".join(parts)
 
 
 def _build_error_message(*, event_type: EventType, task_id: str, error_text: str, duration: str, truncated: bool) -> str:
-    short_id = task_id[:8]
+    display_task_id = short_id(task_id)
     icon_map = {
         EventType.FAILED: "❌",
         EventType.TIMEOUT: "⏰",
@@ -70,7 +71,7 @@ def _build_error_message(*, event_type: EventType, task_id: str, error_text: str
     }
     icon = icon_map.get(event_type, "❌")
     label = label_map.get(event_type, "错误")
-    parts = [f"{icon} {label} [{short_id}] {duration}"]
+    parts = [f"{icon} {label} [{display_task_id}] {duration}"]
     if error_text and error_text != "-":
         parts.append(f"\n{error_text}")
     if truncated:
@@ -198,7 +199,7 @@ class RunEventStreamer:
         await self._cancel_interactive_pump(timeout_sec=cancel_timeout_sec)
 
     async def _spin(self) -> None:
-        short_id = self._start.task.task_id[:8]
+        display_task_id = short_id(self._start.task.task_id)
         frame_idx = 0
         try:
             # Skip animation for short tasks: wait before the first frame.
@@ -206,7 +207,7 @@ class RunEventStreamer:
             while True:
                 frame = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
                 frame_idx += 1
-                text = f"{frame} 处理中… [{short_id}]"
+                text = f"{frame} 处理中… [{display_task_id}]"
                 await self._messenger.edit_message_safely(self._lifecycle_message, text)
                 await asyncio.sleep(_SPINNER_INTERVAL_SEC)
         except asyncio.CancelledError:
@@ -255,8 +256,7 @@ class RunEventStreamer:
             if diff_result.is_patch_file:
                 # Send as .patch file attachment
                 patch_bytes = diff_result.content.encode("utf-8")
-                short_id = self._start.task.task_id[:8]
-                filename = f"{short_id}.patch"
+                filename = f"{short_id(self._start.task.task_id)}.patch"
                 doc = BufferedInputFile(file=patch_bytes, filename=filename)
                 await self._messenger.send_document(doc, caption=f"📎 Diff ({diff_result.file_count} files)")
             else:
