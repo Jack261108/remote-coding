@@ -90,7 +90,7 @@ class SessionSupervisor:
 
                     # Interrupt detection (PROCESSING, WAITING_FOR_APPROVAL)
                     if state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
-                        self._maybe_detect_interrupt(state)
+                        await self._maybe_detect_interrupt(state)
 
                     # Agent file sync (any phase with subagent containers)
                     if self._has_subagent_files(state):
@@ -113,7 +113,7 @@ class SessionSupervisor:
 
     # ── Interrupt detection ───────────────────────────────────────────────────
 
-    def _maybe_detect_interrupt(self, state: SessionState) -> None:
+    async def _maybe_detect_interrupt(self, state: SessionState) -> None:
         if state.interrupted:
             return
         claude_session_id = state.claude_session_id or state.session_id
@@ -122,9 +122,7 @@ class SessionSupervisor:
         snapshot = self._claude_jsonl_parser.parse_incremental(session_id=claude_session_id, cwd=state.workdir)
         if not snapshot.interrupt_detected:
             return
-        # Dispatch interrupt event synchronously (loop.run_until_complete not needed,
-        # _on_dispatch_event is called via create_task in the caller)
-        self._session_store.process(
+        await self._on_dispatch_event(
             SessionEvent(
                 session_id=claude_session_id,
                 type=SessionEventType.INTERRUPT_DETECTED,

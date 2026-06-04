@@ -17,6 +17,53 @@ class UserSessionContextService:
         digest = hashlib.sha1(workdir.encode("utf-8")).hexdigest()[:12]
         return f"user_{user_id}_{digest}"
 
+    async def _update_or_create_session(
+        self,
+        *,
+        user_id: int,
+        provider: str,
+        workdir: str,
+        terminal_mode: bool,
+        claude_chat_active: bool | None = None,
+        existing: SessionContext | None = None,
+        previous_workdir: str | None = None,
+        previous_provider: str | None = None,
+        rebuild_terminal_id: bool = True,
+    ) -> SessionContext:
+        """Shared logic for creating or updating a session context."""
+        if existing is None:
+            session = SessionContext(
+                user_id=user_id,
+                session_id=str(uuid.uuid4()),
+                provider=provider,
+                workdir=workdir,
+                terminal_mode=terminal_mode,
+                terminal_id=self._build_terminal_id(user_id=user_id, workdir=workdir) if terminal_mode else None,
+                claude_chat_active=claude_chat_active or False,
+                claude_session_id=None,
+            )
+            await self._store.save(session)
+            return session
+
+        existing.provider = provider
+        existing.workdir = workdir
+        existing.terminal_mode = terminal_mode
+
+        if rebuild_terminal_id:
+            existing.terminal_id = self._build_terminal_id(user_id=user_id, workdir=workdir) if terminal_mode else None
+
+        if claude_chat_active is not None:
+            existing.claude_chat_active = claude_chat_active
+
+        workdir_changed = previous_workdir is not None and workdir != previous_workdir
+        provider_changed = previous_provider is not None and provider != previous_provider
+        if provider != "claude_code" or workdir_changed or provider_changed:
+            existing.claude_session_id = None
+
+        existing.updated_at = utc_now()
+        await self._store.save(existing)
+        return existing
+
     async def get_or_create(
         self,
         *,
@@ -36,34 +83,24 @@ class UserSessionContextService:
                 or (claude_chat_active is not None and current.claude_chat_active != claude_chat_active)
             )
             if needs_update:
-                workdir_changed = current.workdir != workdir
-                current.provider = provider
-                current.workdir = workdir
-                current.terminal_mode = terminal_mode
-                if terminal_mode:
-                    current.terminal_id = self._build_terminal_id(user_id=user_id, workdir=workdir)
-                else:
-                    current.terminal_id = None
-                if claude_chat_active is not None:
-                    current.claude_chat_active = claude_chat_active
-                if provider != "claude_code" or workdir_changed:
-                    current.claude_session_id = None
-                current.updated_at = utc_now()
-                await self._store.save(current)
+                return await self._update_or_create_session(
+                    user_id=user_id,
+                    provider=provider,
+                    workdir=workdir,
+                    terminal_mode=terminal_mode,
+                    claude_chat_active=claude_chat_active,
+                    existing=current,
+                    previous_workdir=current.workdir,
+                )
             return current
 
-        session = SessionContext(
+        return await self._update_or_create_session(
             user_id=user_id,
-            session_id=str(uuid.uuid4()),
             provider=provider,
             workdir=workdir,
             terminal_mode=terminal_mode,
-            terminal_id=self._build_terminal_id(user_id=user_id, workdir=workdir) if terminal_mode else None,
-            claude_chat_active=claude_chat_active or False,
-            claude_session_id=None,
+            claude_chat_active=claude_chat_active,
         )
-        await self._store.save(session)
-        return session
 
     async def switch(
         self,
@@ -77,43 +114,41 @@ class UserSessionContextService:
         current = await self._store.get(user_id)
         if current is None:
             tm = bool(terminal_mode)
-            resolved_workdir = workdir or "."
-            session = SessionContext(
+            return await self._update_or_create_session(
                 user_id=user_id,
-                session_id=str(uuid.uuid4()),
                 provider=provider or "claude_code",
-                workdir=resolved_workdir,
+                workdir=workdir or ".",
                 terminal_mode=tm,
-                terminal_id=self._build_terminal_id(user_id=user_id, workdir=resolved_workdir) if tm else None,
-                claude_chat_active=claude_chat_active or False,
-                claude_session_id=None,
+                claude_chat_active=claude_chat_active,
             )
-            await self._store.save(session)
-            return session
 
         previous_workdir = current.workdir
         previous_provider = current.provider
-        if provider is not None:
-            current.provider = provider
-        if workdir is not None:
-            current.workdir = workdir
-        if terminal_mode is not None:
-            current.terminal_mode = terminal_mode
-        if current.terminal_mode:
-            if terminal_mode is not None or (workdir is not None and current.workdir != previous_workdir):
-                current.terminal_id = self._build_terminal_id(user_id=user_id, workdir=current.workdir)
-            elif not current.terminal_id:
-                current.terminal_id = self._build_terminal_id(user_id=user_id, workdir=current.workdir)
-        else:
-            current.terminal_id = None
-        if claude_chat_active is not None:
-            current.claude_chat_active = claude_chat_active
-        if current.provider != "claude_code" or current.workdir != previous_workdir or current.provider != previous_provider:
-            current.claude_session_id = None
-        current.updated_at = utc_now()
 
-        await self._store.save(current)
-        return current
+        resolved_provider = provider if provider is not None else current.provider
+        resolved_workdir = workdir if workdir is not None else current.workdir
+        resolved_terminal_mode = terminal_mode if terminal_mode is not None else current.terminal_mode
+
+        rebuild_terminal_id = False
+        if resolved_terminal_mode:
+            if terminal_mode is not None or (workdir is not None and resolved_workdir != previous_workdir):
+                rebuild_terminal_id = True
+            elif not current.terminal_id:
+                rebuild_terminal_id = True
+        else:
+            rebuild_terminal_id = True
+
+        return await self._update_or_create_session(
+            user_id=user_id,
+            provider=resolved_provider,
+            workdir=resolved_workdir,
+            terminal_mode=resolved_terminal_mode,
+            claude_chat_active=claude_chat_active,
+            existing=current,
+            previous_workdir=previous_workdir,
+            previous_provider=previous_provider,
+            rebuild_terminal_id=rebuild_terminal_id,
+        )
 
     async def get(self, user_id: int) -> SessionContext | None:
         return await self._store.get(user_id)

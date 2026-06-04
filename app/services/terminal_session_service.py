@@ -66,7 +66,13 @@ class TerminalSessionService:
         self._clear_user_questions(user_id)
         return True, "终端已关闭"
 
-    async def open_claude_chat_session(self, user_id: int, *, workdir: str | None = None) -> tuple[bool, str]:
+    async def _prepare_claude_session(self, user_id: int, workdir: str | None) -> tuple[SessionContext, str, bool] | str:
+        """公共准备逻辑：清理旧会话、解析 workdir、创建新会话。
+
+        Returns:
+            成功: (session, selected_workdir, had_old_terminal)
+            失败: 错误信息字符串
+        """
         session = await self._session_service.get(user_id)
         had_old_terminal = bool(session and session.terminal_mode and session.terminal_id)
         self._clear_user_questions(user_id)
@@ -75,7 +81,7 @@ class TerminalSessionService:
         if had_old_terminal:
             closed, text = await self.close_terminal(user_id)
             if not closed and text != "终端不存在或关闭失败":
-                return False, f"旧终端关闭失败: {text}"
+                return f"旧终端关闭失败: {text}"
 
         workdir_source = workdir or (session.workdir if session else self._settings.default_workdir)
         selected_workdir = str(Path(workdir_source).resolve())
@@ -84,7 +90,7 @@ class TerminalSessionService:
         if not self._is_workdir_allowed(selected_workdir):
             raise ValueError("workdir 不在 ALLOWED_WORKDIRS 白名单内")
         if not Path(selected_workdir).is_dir():
-            return False, f"workdir 不存在或不是目录: {selected_workdir}"
+            return f"workdir 不存在或不是目录: {selected_workdir}"
 
         updated_session = await self._session_service.switch(
             user_id=user_id,
@@ -95,11 +101,20 @@ class TerminalSessionService:
         )
 
         if not updated_session.terminal_id:
-            return False, "会话创建失败: terminal_id 为空"
+            return "会话创建失败: terminal_id 为空"
+
+        return updated_session, selected_workdir, had_old_terminal
+
+    async def open_claude_chat_session(self, user_id: int, *, workdir: str | None = None) -> tuple[bool, str]:
+        result = await self._prepare_claude_session(user_id, workdir)
+        if isinstance(result, str):
+            return False, result
+        session, selected_workdir, had_old_terminal = result
+        assert session.terminal_id
 
         ensure_result = await self.ensure_and_reveal_terminal(
-            terminal_id=updated_session.terminal_id,
-            workdir=updated_session.workdir,
+            terminal_id=session.terminal_id,
+            workdir=session.workdir,
             reveal=True,
             interactive=True,
         )
@@ -118,40 +133,16 @@ class TerminalSessionService:
         return True, message
 
     async def open_claude_resume_session(self, user_id: int, session_id: str, *, workdir: str | None = None) -> tuple[bool, str]:
-        session = await self._session_service.get(user_id)
-        had_old_terminal = bool(session and session.terminal_mode and session.terminal_id)
-        self._clear_user_questions(user_id)
-        if session is not None:
-            await self._session_service.clear_claude_session(user_id=user_id)
-        if had_old_terminal:
-            closed, text = await self.close_terminal(user_id)
-            if not closed and text != "终端不存在或关闭失败":
-                return False, f"旧终端关闭失败: {text}"
-
-        workdir_source = workdir or (session.workdir if session else self._settings.default_workdir)
-        selected_workdir = str(Path(workdir_source).resolve())
-        if workdir is None and not Path(selected_workdir).is_dir():
-            selected_workdir = str(Path(self._settings.default_workdir).resolve())
-        if not self._is_workdir_allowed(selected_workdir):
-            raise ValueError("workdir 不在 ALLOWED_WORKDIRS 白名单内")
-        if not Path(selected_workdir).is_dir():
-            return False, f"workdir 不存在或不是目录: {selected_workdir}"
-
-        updated_session = await self._session_service.switch(
-            user_id=user_id,
-            provider="claude_code",
-            workdir=selected_workdir,
-            terminal_mode=True,
-            claude_chat_active=True,
-        )
-
-        if not updated_session.terminal_id:
-            return False, "会话创建失败: terminal_id 为空"
+        result = await self._prepare_claude_session(user_id, workdir)
+        if isinstance(result, str):
+            return False, result
+        session, selected_workdir, had_old_terminal = result
+        assert session.terminal_id
 
         # Use the resume-specific ensure method
         ensured, err = await self._cli_factory.ensure_claude_resume_session(
-            terminal_key=updated_session.terminal_id,
-            workdir=updated_session.workdir,
+            terminal_key=session.terminal_id,
+            workdir=session.workdir,
             session_id=session_id,
         )
         if not ensured:
@@ -159,7 +150,7 @@ class TerminalSessionService:
             return False, err
 
         # Reveal the terminal
-        revealed, reveal_text = await self._cli_factory.reveal_terminal(updated_session.terminal_id)
+        revealed, reveal_text = await self._cli_factory.reveal_terminal(session.terminal_id)
 
         # Bind the claude_session_id to the resumed session
         await self._session_service.bind_claude_session(
