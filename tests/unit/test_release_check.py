@@ -37,11 +37,11 @@ class TestNormalizeTag:
 class TestReadPyprojectVersion:
     def test_returns_current_version(self) -> None:
         version = read_pyproject_version()
-        assert version == "0.1.2"
+        assert version == "1.0.1"
 
     def test_custom_path(self) -> None:
         version = read_pyproject_version("pyproject.toml")
-        assert version == "0.1.2"
+        assert version == "1.0.1"
 
 
 class TestVersionsMatch:
