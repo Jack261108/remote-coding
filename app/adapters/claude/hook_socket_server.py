@@ -196,15 +196,14 @@ class HookSocketServer:
 
         # Log all received events for debugging
         logger.info(
-            "hook event received",
-            extra={
-                "session_id": event.session_id,
-                "event": event.event,
-                "status": event.status,
-                "tool": event.tool,
-                "tool_use_id": event.tool_use_id,
-                "expects_response": event.expects_response,
-            },
+            "hook event received session_id=%s event=%s status=%s tool=%s tool_use_id=%s expects_response=%s tool_input=%s",
+            event.session_id,
+            event.event,
+            event.status,
+            event.tool,
+            event.tool_use_id,
+            event.expects_response,
+            event.tool_input,
         )
 
         if event.event == "PreToolUse" and event.tool_use_id:
@@ -221,14 +220,15 @@ class HookSocketServer:
                     tool_use_id = await self._find_pending_permission_tool_use_id(event)
             if tool_use_id:
                 logger.info(
-                    "terminal permission resolution detected",
-                    extra={
-                        "session_id": event.session_id,
-                        "tool_use_id": tool_use_id,
-                        "event": event.event,
-                        "decision": decision,
-                        "has_pending": tool_use_id in self._pending_permissions,
-                    },
+                    "terminal permission resolution detected session_id=%s event=%s decision=%s resolved_tool_use_id=%s original_tool_use_id=%s has_pending=%s tool=%s tool_input=%s",
+                    event.session_id,
+                    event.event,
+                    decision,
+                    tool_use_id,
+                    event.tool_use_id,
+                    tool_use_id in self._pending_permissions,
+                    event.tool,
+                    event.tool_input,
                 )
                 await self._check_terminal_permission_resolved(event.session_id, tool_use_id, decision)
         if event.event == "SessionEnd":
@@ -338,17 +338,31 @@ class HookSocketServer:
         async with self._lock:
             pending = self._pending_permissions.pop(tool_use_id, None)
             if pending is None:
+                pending_summaries = [
+                    {
+                        "session_id": item.session_id,
+                        "tool_use_id": item.tool_use_id,
+                        "tool": item.event.tool,
+                        "tool_input": item.event.tool_input,
+                    }
+                    for item in self._pending_permissions.values()
+                ]
                 logger.debug(
-                    "no pending permission found for terminal resolution",
-                    extra={"session_id": session_id, "tool_use_id": tool_use_id, "decision": decision},
+                    "no pending permission found for terminal resolution session_id=%s tool_use_id=%s decision=%s pending=%s",
+                    session_id,
+                    tool_use_id,
+                    decision,
+                    pending_summaries,
                 )
                 return
             self._cancel_pending_expiration_locked(tool_use_id)
         # Permission was resolved in terminal (not via Telegram)
         await self._close_writer(pending.writer)
         logger.info(
-            "terminal permission resolution: emitting resolved event",
-            extra={"session_id": session_id, "tool_use_id": tool_use_id, "decision": decision},
+            "terminal permission resolution: emitting resolved event session_id=%s tool_use_id=%s decision=%s",
+            session_id,
+            tool_use_id,
+            decision,
         )
         await self._emit_permission_resolved(session_id, tool_use_id, decision)
 
