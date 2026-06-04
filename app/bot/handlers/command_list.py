@@ -71,10 +71,11 @@ def register_list_handler(
     reaper: ExternalBindingReaper | None = None,
     title_resolver: Callable[[str, str], str | None] | None = None,
 ) -> None:
-    async def collect_items(user_id: int) -> tuple[list[SessionListItem], list[ListSessionView]]:
+    async def collect_items(user_id: int) -> tuple[list[SessionListItem], list[ListSessionView], int]:
         now = utc_now()
         legacy_items: list[SessionListItem] = []
         summary_items: list[ListSessionView] = []
+        invalid_count = 0
 
         sessions = await registry_service.list_active_sessions()
         for s in sessions:
@@ -86,6 +87,7 @@ def register_list_handler(
                 tags.append(f"+{len(s.attached_user_ids)}人")
             if not s.is_alive:
                 tags.append("已断开")
+                invalid_count += 1
             sid = s.terminal_id
             legacy_items.append(
                 SessionListItem(
@@ -148,6 +150,7 @@ def register_list_handler(
                     pid = binding.pid
                     if pid is not None and pid > 0 and not process_is_alive(pid):
                         dead_ids.append(binding.session_id)
+                        invalid_count += 1
                         continue
                     visible.append(binding)
                 bound_sessions = visible
@@ -192,20 +195,68 @@ def register_list_handler(
                 )
             )
 
-        return legacy_items, summary_items
+        return legacy_items, summary_items, invalid_count
 
     @router.message(Command("list"))
     async def command_list(message: Message) -> None:
         user_id = extract_user_id(message)
-        _, summary_items = await collect_items(user_id)
-        result = build_session_list_message(summary_items, now=utc_now())
+        _, summary_items, invalid_count = await collect_items(user_id)
+        result = build_session_list_message(
+            summary_items,
+            now=utc_now(),
+            has_invalid_sessions=invalid_count > 0,
+        )
         await message.answer(result.text, parse_mode="HTML", reply_markup=result.keyboard)
 
     @router.callback_query(F.data == "sess:list:all")
     async def handle_list_all(callback: CallbackQuery) -> None:
         user_id = extract_user_id(callback)
-        legacy_items, _ = await collect_items(user_id)
+        legacy_items, _, _ = await collect_items(user_id)
         text, keyboard = _render_full_list(legacy_items)
         await callback.answer()
         if callback.message:
             await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+    @router.callback_query(F.data == "sess:cleanup")
+    async def handle_cleanup(callback: CallbackQuery) -> None:
+        user_id = extract_user_id(callback)
+        cleaned = 0
+
+        # 1. 清理 dead pid binding
+        if external_binder is not None and liveness_enabled and reaper is not None:
+            bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
+            for binding in bound_sessions:
+                pid = binding.pid
+                if pid is not None and pid > 0 and not process_is_alive(pid):
+                    try:
+                        if await reaper.remove_with_cleanup(binding.session_id, reason="pid_dead"):
+                            cleaned += 1
+                    except Exception:
+                        logger.warning("cleanup failed for binding", extra={"session_id": binding.session_id})
+
+        # 2. 清理 dead tmux session
+        sessions = await registry_service.list_active_sessions()
+        for s in sessions:
+            if not s.is_alive:
+                try:
+                    if await registry_service.close_session(s.terminal_id):
+                        cleaned += 1
+                except Exception:
+                    logger.warning("cleanup failed for tmux session", extra={"terminal_id": s.terminal_id})
+
+        # 3. 清理 stale unbound sessions
+        if external_discovery is not None:
+            stale_ids = external_discovery.prune_stale()
+            cleaned += len(stale_ids)
+
+        await callback.answer(f"已清理 {cleaned} 个无效会话")
+
+        # 刷新摘要视图
+        if callback.message:
+            _, summary_items, invalid_count = await collect_items(user_id)
+            result = build_session_list_message(
+                summary_items,
+                now=utc_now(),
+                has_invalid_sessions=invalid_count > 0,
+            )
+            await callback.message.answer(result.text, parse_mode="HTML", reply_markup=result.keyboard)

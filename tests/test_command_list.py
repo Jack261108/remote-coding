@@ -117,6 +117,7 @@ def _save_external_binding(
     user_id: int,
     title: str,
     activity_at: datetime,
+    pid: int | None = None,
 ) -> None:
     store.save_binding(
         ExternalBinding(
@@ -127,6 +128,7 @@ def _save_external_binding(
             jsonl_path=None,
             title=title,
             last_activity_at_init=activity_at,
+            pid=pid,
         )
     )
 
@@ -190,7 +192,14 @@ async def test_list_all_callback_renders_full_legacy_list(tmp_path: Path) -> Non
     )
     router = Router()
     register_list_handler(router, registry_service=registry, external_binder=binder)
-    callback_handler = router.callback_query.handlers[-1].callback
+    # 找到 sess:list:all callback handler
+    callback_handler = None
+    for handler in router.callback_query.handlers:
+        if hasattr(handler, "filter") and handler.filter is not None:
+            # 通过 data 匹配找到正确的 handler
+            pass
+    # 直接使用第二个 callback handler（list:all 是第一个）
+    callback_handler = router.callback_query.handlers[0].callback
 
     callback = MagicMock()
     callback.from_user = SimpleNamespace(id=user_id)
@@ -211,3 +220,56 @@ async def test_list_all_callback_renders_full_legacy_list(tmp_path: Path) -> Non
         button.callback_data or "" for row in callback.message.answer.call_args.kwargs["reply_markup"].inline_keyboard for button in row
     ]
     assert "sess:select:sess-hidden-0004" in callbacks
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removes_dead_sessions_and_refreshes(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    # 创建 dead pid binding（需要设置 pid）
+    store = ExternalBindingStore(data_dir=tmp_path)
+    user_id = 42
+    now = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    _save_external_binding(store, session_id="sess-dead-00001", user_id=user_id, title="Dead", activity_at=now, pid=12345)
+
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    binder = ExternalSessionBinder(
+        discovery=ExternalSessionDiscoveryService(),
+        binding_store=store,
+        projects_dir=tmp_path / "projects",
+    )
+    reaper = AsyncMock()
+    reaper.remove_with_cleanup = AsyncMock(return_value=True)
+
+    router = Router()
+    register_list_handler(
+        router,
+        registry_service=registry,
+        external_binder=binder,
+        liveness_enabled=True,
+        reaper=reaper,
+    )
+    # cleanup 是最后一个 callback handler
+    callback_handler = router.callback_query.handlers[-1].callback
+
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=user_id)
+    callback.data = "sess:cleanup"
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.answer = AsyncMock()
+
+    with patch("app.bot.handlers.command_list.process_is_alive", return_value=False):
+        await callback_handler(callback)
+
+    # 验证 reaper 被调用（cleanup + collect_items 刷新时各一次）
+    assert reaper.remove_with_cleanup.await_count >= 1
+    reaper.remove_with_cleanup.assert_any_await("sess-dead-00001", reason="pid_dead")
+
+    # 验证 toast 提示
+    callback.answer.assert_awaited_once()
+
+    # 验证刷新消息（清理后可能无活跃会话）
+    text = callback.message.answer.call_args.args[0]
+    assert "会话" in text  # 刷新后的摘要或无会话提示
