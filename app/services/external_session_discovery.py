@@ -104,3 +104,13 @@ class ExternalSessionDiscoveryService:
         for session_id in stale_ids:
             del self._sessions[session_id]
         return stale_ids
+
+    def count_stale(self) -> int:
+        """Count sessions that would be pruned by prune_stale() without removing them."""
+        now = utc_now()
+        count = 0
+        for session in self._sessions.values():
+            elapsed = (now - session.last_seen).total_seconds()
+            if elapsed > self._stale_timeout_sec:
+                count += 1
+        return count

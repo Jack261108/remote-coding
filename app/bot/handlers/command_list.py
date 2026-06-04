@@ -115,8 +115,15 @@ def register_list_handler(
 
         external_sessions = []
         if external_discovery is not None:
+            # 计算 stale sessions 数量（基于时间和 pid）
+            stale_count = external_discovery.count_stale()
+            invalid_count += stale_count
             external_sessions = external_discovery.list_unbound()
         for ext in external_sessions:
+            # 检测 stale unbound sessions（pid 已死的）
+            is_stale = ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid)
+            if is_stale:
+                continue  # 跳过 stale sessions，不显示
             status = ext.title or "未绑定"
             legacy_items.append(
                 SessionListItem(
