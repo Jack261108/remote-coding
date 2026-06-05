@@ -724,3 +724,79 @@ async def test_session_service_switch_rebuilds_terminal_id_when_workdir_changes(
 
     assert second.workdir == new_workdir
     assert first_terminal_id != second.terminal_id
+
+
+@pytest.mark.asyncio
+async def test_session_service_clear_terminal_group_resets_owner_and_attached_contexts(tmp_path) -> None:
+    from app.adapters.storage.file_session_context_store import FileSessionContextStore
+    from app.services.session_service import SessionService
+
+    service = SessionService(FileSessionContextStore(FileSessionStore(str(tmp_path))))
+    owner = await service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    owner.terminal_id = "user_1_abc123"
+    owner.claude_session_id = "claude-owner"
+    owner.attached_user_ids = [2]
+    await service.save_session_context(owner)
+
+    attached = await service.switch(
+        user_id=2,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    attached.terminal_id = "user_1_abc123"
+    attached.claude_session_id = "claude-attached"
+    attached.is_owner = False
+    await service.save_session_context(attached)
+
+    other = await service.switch(
+        user_id=3,
+        provider="claude_code",
+        workdir="/other",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    other.terminal_id = "user_3_other"
+    other.claude_session_id = "claude-other"
+    other.attached_user_ids = [4]
+    await service.save_session_context(other)
+
+    assert await service.lookup_by_claude_session_id("claude-owner") is not None
+    assert await service.lookup_by_claude_session_id("claude-attached") is not None
+
+    affected = await service.clear_terminal_group("user_1_abc123")
+
+    assert set(affected) == {1, 2}
+    owner = await service.get(1)
+    attached = await service.get(2)
+    other = await service.get(3)
+    assert owner is not None
+    assert owner.terminal_mode is False
+    assert owner.terminal_id is None
+    assert owner.claude_chat_active is False
+    assert owner.claude_session_id is None
+    assert owner.attached_user_ids == []
+    assert owner.is_owner is True
+    assert attached is not None
+    assert attached.terminal_mode is False
+    assert attached.terminal_id is None
+    assert attached.claude_chat_active is False
+    assert attached.claude_session_id is None
+    assert attached.attached_user_ids == []
+    assert attached.is_owner is True
+    assert other is not None
+    assert other.terminal_mode is True
+    assert other.terminal_id == "user_3_other"
+    assert other.claude_chat_active is True
+    assert other.claude_session_id == "claude-other"
+    assert other.attached_user_ids == [4]
+    assert await service.lookup_by_claude_session_id("claude-owner") is None
+    assert await service.lookup_by_claude_session_id("claude-attached") is None
+    assert await service.lookup_by_claude_session_id("claude-other") is not None

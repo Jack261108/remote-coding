@@ -184,6 +184,7 @@ class AppContainer(
             structured_session_store=self.structured_session_store,
             hook_socket_server=self.hook_socket_server,
             context_builder=self.context_builder,
+            auto_approve_service=self.auto_approve_service,
         )
         self.session_registry = SessionRegistryService(
             session_service=self.session_service,

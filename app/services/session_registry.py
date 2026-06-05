@@ -64,6 +64,9 @@ class SessionRegistryService:
             attached_ids = list(set(attached_ids) | set(owner.attached_user_ids))
         return owner, attached_ids
 
+    def _terminal_lock(self, terminal_id: str) -> asyncio.Lock:
+        return self._session_service.terminal_group_lock(terminal_id)
+
     async def _check_session_liveness(self, tmux_name: str, **log_extra: object) -> bool | None:
         """Check if a tmux session is alive. Returns None if unable to determine."""
         try:
@@ -150,48 +153,61 @@ class SessionRegistryService:
         if not alive:
             return False, f"会话 {terminal_id} 不存在或已关闭"
 
-        # Check if user is already attached to this session
         current = await self._session_service.get(user_id)
-        if current and current.terminal_id == terminal_id and current.claude_chat_active:
+        previous_terminal_id = current.terminal_id if current and current.terminal_id != terminal_id else None
+        if previous_terminal_id is not None:
+            async with self._terminal_lock(previous_terminal_id):
+                current = await self._session_service.get(user_id)
+                if current and current.terminal_id == previous_terminal_id:
+                    await self._detach_user_internal(user_id, current)
+
+        async with self._terminal_lock(terminal_id):
+            alive = await self._check_session_liveness(tmux_name, terminal_id=terminal_id, user_id=user_id)
+            if alive is None:
+                return False, f"无法判断会话 {terminal_id} 状态，请稍后重试"
+            if not alive:
+                return False, f"会话 {terminal_id} 不存在或已关闭"
+
+            # Check if user is already attached to this session
+            current = await self._session_service.get(user_id)
+            if current and current.terminal_id == terminal_id and current.claude_chat_active:
+                return True, f"已连接到会话 {terminal_id}"
+            if current and current.terminal_id and current.terminal_id != terminal_id:
+                return False, "当前会话状态已变化，请重试"
+
+            # Find the owner of the target session
+            owner = await self._find_owner_by_terminal(terminal_id)
+
+            # Get workdir from SessionState
+            state = self._lookup.find_by_terminal_id(terminal_id)
+            workdir = state.workdir if state else (owner.workdir if owner else ".")
+
+            # Update user's SessionContext
+            await self._session_service.switch(
+                user_id=user_id,
+                provider="claude_code",
+                workdir=workdir,
+                terminal_mode=True,
+                claude_chat_active=True,
+            )
+            # Override terminal_id to point to the target session (switch() builds from user_id+workdir)
+            updated = await self._session_service.get(user_id)
+            if updated and updated.terminal_id != terminal_id:
+                updated.terminal_id = terminal_id
+                updated.is_owner = False
+                # We need to save through the store directly since SessionService builds terminal_id deterministically
+                await self._session_service.save_session_context(updated)
+
+            # Add user to owner's attached_user_ids
+            if owner and user_id not in owner.attached_user_ids:
+                owner.attached_user_ids.append(user_id)
+                await self._session_service.save_session_context(owner)
+
+            logger.info(
+                "user attached to session",
+                extra={"user_id": user_id, "terminal_id": terminal_id, "owner": owner.user_id if owner else None},
+            )
             return True, f"已连接到会话 {terminal_id}"
-
-        # Detach from previous session if attached to a different one
-        if current and current.terminal_id and current.terminal_id != terminal_id:
-            await self._detach_user_internal(user_id, current)
-
-        # Find the owner of the target session
-        owner = await self._find_owner_by_terminal(terminal_id)
-
-        # Get workdir from SessionState
-        state = self._lookup.find_by_terminal_id(terminal_id)
-        workdir = state.workdir if state else (owner.workdir if owner else ".")
-
-        # Update user's SessionContext
-        await self._session_service.switch(
-            user_id=user_id,
-            provider="claude_code",
-            workdir=workdir,
-            terminal_mode=True,
-            claude_chat_active=True,
-        )
-        # Override terminal_id to point to the target session (switch() builds from user_id+workdir)
-        updated = await self._session_service.get(user_id)
-        if updated and updated.terminal_id != terminal_id:
-            updated.terminal_id = terminal_id
-            updated.is_owner = False
-            # We need to save through the store directly since SessionService builds terminal_id deterministically
-            await self._session_service.save_session_context(updated)
-
-        # Add user to owner's attached_user_ids
-        if owner and user_id not in owner.attached_user_ids:
-            owner.attached_user_ids.append(user_id)
-            await self._session_service.save_session_context(owner)
-
-        logger.info(
-            "user attached to session",
-            extra={"user_id": user_id, "terminal_id": terminal_id, "owner": owner.user_id if owner else None},
-        )
-        return True, f"已连接到会话 {terminal_id}"
 
     async def detach_user(self, *, user_id: int) -> tuple[bool, str]:
         """Detach the user from their currently attached session."""
@@ -200,16 +216,29 @@ class SessionRegistryService:
             return False, "当前未连接到任何会话"
 
         terminal_id = current.terminal_id
-        await self._detach_user_internal(user_id, current)
+        async with self._terminal_lock(terminal_id):
+            current = await self._session_service.get(user_id)
+            if not current or not current.terminal_id:
+                return False, "当前未连接到任何会话"
+            if current.terminal_id != terminal_id:
+                return False, "当前会话状态已变化，请重试"
+            await self._detach_user_internal(user_id, current)
         logger.info("user detached from session", extra={"user_id": user_id, "terminal_id": terminal_id})
         return True, f"已断开会话 {terminal_id}"
 
     async def close_session(self, terminal_id: str) -> bool:
         """Kill a tmux session and clean up associated state."""
-        ok = await self._tmux_runner.close_terminal(terminal_id)
-        if ok:
-            logger.info("session closed", extra={"terminal_id": terminal_id})
-        return ok
+        async with self._terminal_lock(terminal_id):
+            ok = await self._tmux_runner.close_terminal(terminal_id)
+            if ok:
+                contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == terminal_id]
+                claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})
+                if self._auto_approve_service is not None:
+                    for session_id in claude_session_ids:
+                        await self._auto_approve_service.clear_session(session_id)
+                await self._session_service.clear_terminal_group(terminal_id)
+                logger.info("session closed", extra={"terminal_id": terminal_id})
+            return ok
 
     async def _detach_user_internal(self, user_id: int, current: SessionContext) -> None:
         """Internal detach logic."""
@@ -337,21 +366,23 @@ class SessionRegistryService:
         if not stale:
             return
 
-        for ctx in stale:
-            logger.info(
-                "health check: cleaning stale binding",
-                extra={"user_id": ctx.user_id, "terminal_id": ctx.terminal_id},
-            )
-            # Clear auto-approve state for the stale session
-            if self._auto_approve_service is not None and ctx.claude_session_id:
-                await self._auto_approve_service.clear_session(ctx.claude_session_id)
-            ctx.claude_session_id = None
-            if not ctx.is_owner:
-                # Non-owner: fully detach
-                ctx.terminal_mode = False
-                ctx.claude_chat_active = False
-                ctx.terminal_id = None
-            else:
-                # Owner: keep terminal_id for potential recreation, but clear session
-                pass
-            await self._session_service.save_session_context(ctx)
+        stale_terminal_ids = sorted({ctx.terminal_id for ctx in stale if ctx.terminal_id})
+
+        for terminal_id in stale_terminal_ids:
+            async with self._terminal_lock(terminal_id):
+                tmux_name = self._tmux_runner.build_session_name(terminal_id)
+                alive = await self._check_session_liveness(tmux_name, terminal_id=terminal_id)
+                if alive is None or alive:
+                    continue
+
+                contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == terminal_id]
+                claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})
+                if self._auto_approve_service is not None:
+                    for session_id in claude_session_ids:
+                        await self._auto_approve_service.clear_session(session_id)
+
+                logger.info(
+                    "health check: cleaning stale binding",
+                    extra={"terminal_id": terminal_id},
+                )
+                await self._session_service.clear_terminal_group(terminal_id)

@@ -23,6 +23,7 @@ from app.domain.models import (
 )
 from app.domain.session_models import SessionState, is_claude_session_id
 from app.domain.user_question_models import UserQuestionPrompt
+from app.services.auto_approve_service import AutoApproveService
 from app.services.permission_service import PermissionService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
@@ -58,6 +59,7 @@ class TaskService:
         structured_session_store: SessionStore | None = None,
         hook_socket_server: HookSocketServer | None = None,
         context_builder: ContextBuilderService | None = None,
+        auto_approve_service: AutoApproveService | None = None,
     ) -> None:
         self._settings = settings
         self._task_store = task_store
@@ -88,11 +90,13 @@ class TaskService:
             lock_cleanup_interval_sec=settings.lock_cleanup_interval_sec,
             lock_cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
+        self._auto_approve_service = auto_approve_service
         self._terminal_session_service = TerminalSessionService(
             settings=settings,
             session_service=session_service,
             cli_factory=cli_factory,
             clear_user_questions=self._user_question_service.clear_user,
+            auto_approve_service=auto_approve_service,
         )
 
     def _task_lifecycle_lock(self, task_id: str) -> asyncio.Lock:

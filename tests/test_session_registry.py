@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -21,6 +22,7 @@ class FakeTmuxRunner:
     def __init__(self) -> None:
         self._alive_sessions: set[str] = set()
         self._session_name_prefix = "tgcli_"
+        self.closed_terminal_keys: list[str] = []
 
     def build_session_name(self, terminal_key: str) -> str:
         return f"tgcli_{terminal_key}"[:64]
@@ -31,8 +33,24 @@ class FakeTmuxRunner:
     async def list_managed_sessions(self) -> list[str]:
         return sorted(s for s in self._alive_sessions if s.startswith("tgcli_"))
 
+    async def close_terminal(self, terminal_key: str) -> bool:
+        self.closed_terminal_keys.append(terminal_key)
+        session_name = self.build_session_name(terminal_key)
+        if session_name not in self._alive_sessions:
+            return False
+        self._alive_sessions.remove(session_name)
+        return True
 
-def _make_registry(tmp_path, *, alive_sessions: set[str] | None = None):
+
+class RecordingAutoApproveService:
+    def __init__(self) -> None:
+        self.cleared_session_ids: list[str] = []
+
+    async def clear_session(self, session_id: str) -> None:
+        self.cleared_session_ids.append(session_id)
+
+
+def _make_registry(tmp_path, *, alive_sessions: set[str] | None = None, auto_approve_service=None):
     file_store = FileSessionStore(str(tmp_path))
     ctx_store = FileSessionContextStore(file_store)
     session_service = SessionService(store=ctx_store)
@@ -47,8 +65,54 @@ def _make_registry(tmp_path, *, alive_sessions: set[str] | None = None):
         lookup=lookup,
         tmux_runner=tmux,
         repository=repository,
+        auto_approve_service=auto_approve_service,
     )
     return registry, session_service, cache, tmux
+
+
+async def _seed_terminal_group(session_service: SessionService, terminal_id: str = "user_1_abc123") -> None:
+    owner = await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    owner.terminal_id = terminal_id
+    owner.claude_session_id = "claude-owner"
+    owner.attached_user_ids = [2]
+    await session_service.save_session_context(owner)
+
+    attached = await session_service.switch(
+        user_id=2,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    attached.terminal_id = terminal_id
+    attached.claude_session_id = "claude-attached"
+    attached.is_owner = False
+    await session_service.save_session_context(attached)
+
+
+async def _assert_terminal_group_cleared(session_service: SessionService) -> None:
+    owner = await session_service.get(1)
+    attached = await session_service.get(2)
+    assert owner is not None
+    assert owner.terminal_mode is False
+    assert owner.terminal_id is None
+    assert owner.claude_chat_active is False
+    assert owner.claude_session_id is None
+    assert owner.attached_user_ids == []
+    assert owner.is_owner is True
+    assert attached is not None
+    assert attached.terminal_mode is False
+    assert attached.terminal_id is None
+    assert attached.claude_chat_active is False
+    assert attached.claude_session_id is None
+    assert attached.attached_user_ids == []
+    assert attached.is_owner is True
 
 
 # ── list_active_sessions ──────────────────────────────────────────────────────
@@ -411,3 +475,260 @@ async def test_get_session_info_returns_info_when_alive(tmp_path) -> None:
     assert result.workdir == "/proj"
     assert result.owner_user_id == 1
     assert result.is_alive is True
+
+
+# ── close_session / health cleanup ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_close_session_cleans_owner_and_attached_contexts_after_success(tmp_path) -> None:
+    registry, session_service, _, tmux = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
+    await _seed_terminal_group(session_service)
+
+    ok = await registry.close_session("user_1_abc123")
+
+    assert ok is True
+    assert tmux.closed_terminal_keys == ["user_1_abc123"]
+    assert "tgcli_user_1_abc123" not in tmux._alive_sessions
+    await _assert_terminal_group_cleared(session_service)
+
+
+@pytest.mark.asyncio
+async def test_close_session_keeps_contexts_when_tmux_close_fails(tmp_path) -> None:
+    registry, session_service, _, tmux = _make_registry(tmp_path, alive_sessions=set())
+    await _seed_terminal_group(session_service)
+
+    ok = await registry.close_session("user_1_abc123")
+
+    assert ok is False
+    assert tmux.closed_terminal_keys == ["user_1_abc123"]
+    owner = await session_service.get(1)
+    attached = await session_service.get(2)
+    assert owner is not None
+    assert owner.terminal_id == "user_1_abc123"
+    assert owner.terminal_mode is True
+    assert owner.claude_chat_active is True
+    assert owner.claude_session_id == "claude-owner"
+    assert owner.attached_user_ids == [2]
+    assert attached is not None
+    assert attached.terminal_id == "user_1_abc123"
+    assert attached.terminal_mode is True
+    assert attached.claude_chat_active is True
+    assert attached.claude_session_id == "claude-attached"
+    assert attached.is_owner is False
+
+
+@pytest.mark.asyncio
+async def test_close_session_serializes_against_concurrent_attach(tmp_path) -> None:
+    registry, session_service, _, _ = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_abc123"})
+    await _seed_terminal_group(session_service)
+    attach_ready = asyncio.Event()
+    allow_attach = asyncio.Event()
+    original_switch = session_service.switch
+
+    async def delayed_switch(*args, **kwargs):
+        if kwargs.get("user_id") == 3:
+            attach_ready.set()
+            await allow_attach.wait()
+        return await original_switch(*args, **kwargs)
+
+    session_service.switch = delayed_switch  # type: ignore[method-assign]
+
+    attach_task = asyncio.create_task(registry.attach_user(user_id=3, terminal_id="user_1_abc123"))
+    await asyncio.wait_for(attach_ready.wait(), timeout=1)
+    close_task = asyncio.create_task(registry.close_session("user_1_abc123"))
+    await asyncio.sleep(0)
+    allow_attach.set()
+
+    attach_ok, _ = await attach_task
+    close_ok = await close_task
+
+    assert attach_ok is True
+    assert close_ok is True
+    await _assert_terminal_group_cleared(session_service)
+    attached_late = await session_service.get(3)
+    assert attached_late is not None
+    assert attached_late.terminal_mode is False
+    assert attached_late.terminal_id is None
+    assert attached_late.claude_chat_active is False
+    assert attached_late.claude_session_id is None
+    assert attached_late.is_owner is True
+
+
+@pytest.mark.asyncio
+async def test_detach_user_does_not_restore_closed_owner(tmp_path) -> None:
+    registry, session_service, _, _ = _make_registry(tmp_path, alive_sessions={"tgcli_user_1_old"})
+    await _seed_terminal_group(session_service, terminal_id="user_1_old")
+    close_ready = asyncio.Event()
+    allow_old_owner_save = asyncio.Event()
+    original_save = session_service.save_session_context
+
+    async def delayed_save(session):
+        if session.user_id == 1 and session.terminal_id == "user_1_old" and session.attached_user_ids == []:
+            close_ready.set()
+            await allow_old_owner_save.wait()
+        await original_save(session)
+
+    session_service.save_session_context = delayed_save  # type: ignore[method-assign]
+
+    detach_task = asyncio.create_task(registry.detach_user(user_id=2))
+    await asyncio.wait_for(close_ready.wait(), timeout=1)
+    close_task = asyncio.create_task(registry.close_session("user_1_old"))
+    await asyncio.sleep(0)
+    assert close_task.done() is False
+    allow_old_owner_save.set()
+
+    detach_ok, _ = await detach_task
+    close_ok = await close_task
+
+    assert detach_ok is True
+    assert close_ok is True
+    old_owner = await session_service.get(1)
+    detached_user = await session_service.get(2)
+    assert old_owner is not None
+    assert old_owner.terminal_mode is False
+    assert old_owner.terminal_id is None
+    assert old_owner.claude_chat_active is False
+    assert old_owner.claude_session_id is None
+    assert old_owner.attached_user_ids == []
+    assert detached_user is not None
+    assert detached_user.terminal_mode is False
+    assert detached_user.terminal_id is None
+    assert detached_user.claude_chat_active is False
+
+
+@pytest.mark.asyncio
+async def test_attach_to_new_terminal_does_not_restore_closed_previous_owner(tmp_path) -> None:
+    registry, session_service, _, _ = _make_registry(
+        tmp_path,
+        alive_sessions={"tgcli_user_1_old", "tgcli_user_3_new"},
+    )
+    await _seed_terminal_group(session_service, terminal_id="user_1_old")
+    close_ready = asyncio.Event()
+    allow_old_owner_save = asyncio.Event()
+    original_save = session_service.save_session_context
+
+    async def delayed_save(session):
+        if session.user_id == 1 and session.terminal_id == "user_1_old" and session.attached_user_ids == []:
+            close_ready.set()
+            await allow_old_owner_save.wait()
+        await original_save(session)
+
+    session_service.save_session_context = delayed_save  # type: ignore[method-assign]
+
+    attach_task = asyncio.create_task(registry.attach_user(user_id=2, terminal_id="user_3_new"))
+    await asyncio.wait_for(close_ready.wait(), timeout=1)
+    close_task = asyncio.create_task(registry.close_session("user_1_old"))
+    await asyncio.sleep(0)
+    assert close_task.done() is False
+    allow_old_owner_save.set()
+
+    attach_ok, _ = await attach_task
+    close_ok = await close_task
+
+    assert attach_ok is True
+    assert close_ok is True
+    old_owner = await session_service.get(1)
+    moved_user = await session_service.get(2)
+    assert old_owner is not None
+    assert old_owner.terminal_mode is False
+    assert old_owner.terminal_id is None
+    assert old_owner.claude_chat_active is False
+    assert old_owner.claude_session_id is None
+    assert old_owner.attached_user_ids == []
+    assert moved_user is not None
+    assert moved_user.terminal_id == "user_3_new"
+    assert moved_user.claude_chat_active is True
+
+
+@pytest.mark.asyncio
+async def test_close_session_clears_claude_session_bound_during_tmux_close(tmp_path) -> None:
+    auto_approve = RecordingAutoApproveService()
+    registry, session_service, _, tmux = _make_registry(
+        tmp_path,
+        alive_sessions={"tgcli_user_1_abc123"},
+        auto_approve_service=auto_approve,
+    )
+    await _seed_terminal_group(session_service)
+
+    async def close_and_bind(terminal_key: str) -> bool:
+        owner = await session_service.get(1)
+        assert owner is not None
+        owner.claude_session_id = "claude-bound-during-close"
+        await session_service.save_session_context(owner)
+        tmux._alive_sessions.discard(tmux.build_session_name(terminal_key))
+        return True
+
+    tmux.close_terminal = close_and_bind
+
+    ok = await registry.close_session("user_1_abc123")
+
+    assert ok is True
+    assert "claude-bound-during-close" in auto_approve.cleared_session_ids
+    await _assert_terminal_group_cleared(session_service)
+
+
+@pytest.mark.asyncio
+async def test_health_check_skips_cleanup_when_terminal_revives_before_clear(tmp_path) -> None:
+    registry, session_service, _, tmux = _make_registry(tmp_path, alive_sessions=set())
+    await _seed_terminal_group(session_service)
+    calls = 0
+
+    async def flapping_session_exists(session_name: str) -> bool:
+        nonlocal calls
+        if session_name == "tgcli_user_1_abc123":
+            calls += 1
+            return calls > 1
+        return await FakeTmuxRunner.session_exists(tmux, session_name)
+
+    tmux.session_exists = flapping_session_exists
+
+    await registry._run_health_check()
+
+    owner = await session_service.get(1)
+    attached = await session_service.get(2)
+    assert owner is not None
+    assert owner.terminal_mode is True
+    assert owner.terminal_id == "user_1_abc123"
+    assert owner.claude_chat_active is True
+    assert owner.claude_session_id == "claude-owner"
+    assert owner.attached_user_ids == [2]
+    assert attached is not None
+    assert attached.terminal_mode is True
+    assert attached.terminal_id == "user_1_abc123"
+    assert attached.claude_chat_active is True
+    assert attached.claude_session_id == "claude-attached"
+    assert attached.is_owner is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_cleans_dead_terminal_group_owner_and_attached_contexts(tmp_path) -> None:
+    auto_approve = RecordingAutoApproveService()
+    registry, session_service, _, _ = _make_registry(
+        tmp_path,
+        alive_sessions={"tgcli_user_3_other"},
+        auto_approve_service=auto_approve,
+    )
+    await _seed_terminal_group(session_service)
+    other = await session_service.switch(
+        user_id=3,
+        provider="claude_code",
+        workdir="/other",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    other.terminal_id = "user_3_other"
+    other.claude_session_id = "claude-other"
+    await session_service.save_session_context(other)
+
+    await registry._run_health_check()
+
+    await _assert_terminal_group_cleared(session_service)
+    assert set(auto_approve.cleared_session_ids) == {"claude-owner", "claude-attached"}
+    other = await session_service.get(3)
+    assert other is not None
+    assert other.terminal_mode is True
+    assert other.terminal_id == "user_3_other"
+    assert other.claude_chat_active is True
+    assert other.claude_session_id == "claude-other"
+    assert other.is_owner is True

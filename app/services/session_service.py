@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 
@@ -12,6 +13,14 @@ class UserSessionContextService:
 
     def __init__(self, store: SessionContextStore) -> None:
         self._store = store
+        self._terminal_locks: dict[str, asyncio.Lock] = {}
+
+    def terminal_group_lock(self, terminal_id: str) -> asyncio.Lock:
+        lock = self._terminal_locks.get(terminal_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._terminal_locks[terminal_id] = lock
+        return lock
 
     def _build_terminal_id(self, *, user_id: int, workdir: str) -> str:
         digest = hashlib.sha1(workdir.encode("utf-8")).hexdigest()[:12]
@@ -163,6 +172,22 @@ class UserSessionContextService:
 
     async def list_all(self) -> list[SessionContext]:
         return await self._store.list_all()
+
+    async def clear_terminal_group(self, terminal_id: str) -> list[int]:
+        affected_user_ids: list[int] = []
+        for ctx in await self.list_all():
+            if ctx.terminal_id != terminal_id:
+                continue
+            ctx.terminal_mode = False
+            ctx.terminal_id = None
+            ctx.claude_chat_active = False
+            ctx.claude_session_id = None
+            ctx.attached_user_ids = []
+            ctx.is_owner = True
+            ctx.updated_at = utc_now()
+            await self.save_session_context(ctx)
+            affected_user_ids.append(ctx.user_id)
+        return sorted(affected_user_ids)
 
     async def bind_claude_session(self, *, user_id: int, claude_session_id: str, workdir: str | None = None) -> SessionContext | None:
         current = await self._store.get(user_id)
