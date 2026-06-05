@@ -237,10 +237,18 @@ class AppContainer(
             retry_count=settings.push_notification_retry_count,
         )
 
+        # External user question state for PTY injection
+        from app.services.external_user_question_state import ExternalUserQuestionState
+
+        self.external_uq_state = ExternalUserQuestionState()
+
         self.external_binding_reaper = ExternalBindingReaper(
             binding_store=self.external_binding_store,
             auto_approve_service=self.auto_approve_service,
             hook_socket_server=self.hook_socket_server,
+            permission_callback_registry=self.permission_callback_registry,
+            external_uq_state=self.external_uq_state,
+            external_discovery=self.external_discovery,
         )
 
         self.external_binding_cleanup_service = ExternalBindingCleanupService(
@@ -251,11 +259,6 @@ class AppContainer(
             ttl=timedelta(hours=settings.external_binding_idle_ttl_hours),
             interval_sec=settings.session_health_check_interval_sec,
         )
-
-        # External user question state for PTY injection
-        from app.services.external_user_question_state import ExternalUserQuestionState
-
-        self.external_uq_state = ExternalUserQuestionState()
 
         self._jsonl_sync_locks = RefCountedLockRegistry(
             ttl_sec=settings.session_lock_ttl_sec,

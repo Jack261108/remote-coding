@@ -305,6 +305,56 @@ async def test_external_user_question_callback_still_uses_existing_handler(monke
 
 
 @pytest.mark.asyncio
+async def test_external_user_question_callback_rejects_invalidated_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    injected: list[str] = []
+
+    async def fake_inject(pane_id: str, *, option_index: int, submit_after: bool, tmux_bin: str = "tmux") -> tuple[bool, str]:
+        injected.append(pane_id)
+        return True, ""
+
+    monkeypatch.setattr("app.adapters.process.pty_injector.inject_option_selection", fake_inject)
+
+    hook_socket_server = SimpleNamespace(respond_to_permission=AsyncMock(return_value=True))
+    external_uq_state = ExternalUserQuestionState()
+    external_uq_state.store(
+        PendingExternalUserQuestion(
+            tool_use_id="tool-question",
+            session_id="external-session",
+            user_id=1,
+            pid=123,
+            pane_id="%1",
+            prompts=(
+                UserQuestionPrompt(
+                    tool_use_id="tool-question",
+                    question_index=0,
+                    total_questions=1,
+                    question="Pick one",
+                    options=(UserQuestionOption(label="A"),),
+                ),
+            ),
+        )
+    )
+    assert external_uq_state.invalidate_session("external-session") == 1
+
+    router = DummyRouter()
+    register_external_permission_handler(
+        router,
+        hook_socket_server=hook_socket_server,
+        unbound_permission_handler=SimpleNamespace(),
+        permission_gateway=SimpleNamespace(handle_callback=AsyncMock()),
+        external_uq_state=external_uq_state,
+    )
+
+    callback = DummyCallbackQuery("ext_uq:tool-question:0", user_id=1, message=DummyMessage("Question"))
+
+    await router.callback_handlers[1](callback)
+
+    assert callback.answers == [("Question expired or already answered", True)]
+    assert injected == []
+    hook_socket_server.respond_to_permission.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_user_question_callback_handler_records_choice_and_prompts_next_question(tmp_path) -> None:
     tmux_runner = TmuxRunner(data_dir=str(tmp_path))
     factory = StubFactory(StubAdapter(events=[]))

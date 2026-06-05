@@ -74,6 +74,17 @@ class _EmptySessionService:
         return []
 
 
+class _TmuxOwnedSessionService:
+    async def list_all(self) -> list:
+        return [
+            SimpleNamespace(
+                user_id=1,
+                claude_session_id="owned-ended-session",
+                terminal_id="terminal-1",
+            )
+        ]
+
+
 class _RecordingDiscovery(ExternalSessionDiscoveryService):
     def __init__(self) -> None:
         super().__init__()
@@ -89,16 +100,41 @@ class _RecordingDiscovery(ExternalSessionDiscoveryService):
         super().remove_session(session_id)
 
 
-def _make_lifecycle_container(tmp_path, binding_store, discovery, seen):
+class _RecordingUnboundPermissionHandler:
+    def __init__(self) -> None:
+        self.handled: list[str] = []
+        self.invalidated: list[str] = []
+
+    async def handle_unbound_permission(self, event: HookEvent) -> None:
+        self.handled.append(event.session_id)
+
+    async def invalidate_session(self, session_id: str) -> int:
+        self.invalidated.append(session_id)
+        return 0
+
+
+class _RecordingExternalUserQuestionState:
+    def __init__(self) -> None:
+        self.invalidated: list[str] = []
+
+    def invalidate_session(self, session_id: str) -> int:
+        self.invalidated.append(session_id)
+        return 0
+
+
+def _make_lifecycle_container(tmp_path, binding_store, discovery, seen, session_service=None):
     class _Container(AppContainer):
         def __init__(self) -> None:
             self.settings = SimpleNamespace(allowed_workdirs=[str(tmp_path)])
             self.external_binding_store = binding_store
             self.external_discovery = discovery
             self.ownership_resolver = SessionOwnershipResolver(
-                session_service=_EmptySessionService(),
+                session_service=session_service or _EmptySessionService(),
                 binding_store=binding_store,
             )
+
+        async def _bind_hook_session(self, event: HookEvent) -> None:
+            seen.append(f"bind:{event.session_id}")
 
         async def _dispatch_session_event(self, event) -> None:  # type: ignore[override]
             seen.append(f"dispatch:{event.session_id}")
@@ -199,6 +235,50 @@ async def test_bound_external_session_end_removes_binding_without_rediscovery(tm
 
 
 @pytest.mark.asyncio
+async def test_late_hook_after_bound_external_session_end_is_not_rediscovered(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    session_id = "late-ended-bound"
+    binding_store.save_binding(
+        ExternalBinding(
+            session_id=session_id,
+            user_id=1,
+            cwd=str(tmp_path),
+            bound_at=utc_now(),
+            jsonl_path=None,
+            pid=None,
+        )
+    )
+    discovery = _RecordingDiscovery()
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="PreToolUse",
+            status="running_tool",
+            tool="Bash",
+            tool_input={"command": "pwd"},
+            tool_use_id="tool-late",
+        )
+    )
+
+    assert binding_store.get_binding(session_id) is None
+    assert discovery.get(session_id) is None
+    assert discovery.recorded == []
+    assert seen == [f"dispatch:{session_id}", f"sync:{session_id}"]
+
+
+@pytest.mark.asyncio
 async def test_bound_external_ended_status_removes_binding_without_rediscovery(tmp_path) -> None:
     seen: list[str] = []
     binding_store = ExternalBindingStore(data_dir=tmp_path)
@@ -282,6 +362,155 @@ async def test_unknown_unbound_session_end_does_not_create_discovery_session(tmp
 
     assert discovery.get(session_id) is None
     assert discovery.removed == [session_id]
+    assert discovery.recorded == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_late_unbound_hook_after_session_end_is_not_rediscovered(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    session_id = "late-ended-unbound"
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="PreToolUse",
+            status="running_tool",
+            tool="Bash",
+            tool_input={"command": "pwd"},
+            tool_use_id="tool-late",
+        )
+    )
+
+    assert discovery.get(session_id) is None
+    assert discovery.recorded == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_late_unbound_permission_after_session_end_is_not_notified(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    session_id = "late-ended-permission"
+    unbound_permissions = _RecordingUnboundPermissionHandler()
+    hook_socket_server = AsyncMock()
+    hook_socket_server.cancel_pending_permissions = AsyncMock()
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+    container.unbound_permission_handler = unbound_permissions
+    container.hook_socket_server = hook_socket_server
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="PermissionRequest",
+            status="waiting_for_approval",
+            tool="Bash",
+            tool_input={"command": "pwd"},
+            tool_use_id="tool-late",
+        )
+    )
+
+    assert discovery.get(session_id) is None
+    assert discovery.recorded == []
+    assert unbound_permissions.handled == []
+    hook_socket_server.cancel_pending_permissions.assert_awaited_once_with(session_id=session_id)
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_tmux_owned_late_hook_after_external_tombstone_still_dispatches(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    session_id = "owned-ended-session"
+    discovery.mark_session_ended(session_id)
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen, session_service=_TmuxOwnedSessionService())
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="PreToolUse",
+            status="running_tool",
+            tool="Bash",
+            tool_input={"command": "pwd"},
+            tool_use_id="tool-owned",
+        )
+    )
+
+    assert seen == [f"bind:{session_id}", f"dispatch:{session_id}", f"sync:{session_id}"]
+
+
+@pytest.mark.asyncio
+async def test_external_session_end_invalidates_user_question_state(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    external_uq_state = _RecordingExternalUserQuestionState()
+    session_id = "ended-uq-state"
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+    container.external_uq_state = external_uq_state
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+
+    assert external_uq_state.invalidated == [session_id]
+
+
+@pytest.mark.asyncio
+async def test_session_end_then_status_ended_remains_closed(tmp_path) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    session_id = "status-ended-tombstone"
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="Stop",
+            status="ended",
+        )
+    )
+
+    assert discovery.get(session_id) is None
     assert discovery.recorded == []
     assert seen == []
 

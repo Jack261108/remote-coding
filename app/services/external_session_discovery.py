@@ -23,6 +23,7 @@ class ExternalSessionDiscoveryService:
         self._stale_timeout_sec = stale_timeout_sec
         self._title_resolver = title_resolver
         self._sessions: dict[str, UnboundExternalSession] = {}
+        self._ended_session_ids: set[str] = set()
 
     def record_event(self, event: HookEvent) -> None:
         """Record a hook event from an unbound session.
@@ -30,6 +31,8 @@ class ExternalSessionDiscoveryService:
         Creates a new entry if session_id not yet tracked, otherwise updates
         last_seen and increments event_count.
         """
+        if event.session_id in self._ended_session_ids:
+            return
         now = utc_now()
         existing = self._sessions.get(event.session_id)
         if existing is None:
@@ -65,6 +68,15 @@ class ExternalSessionDiscoveryService:
     def remove_session(self, session_id: str) -> None:
         """Remove a session from unbound tracking."""
         self._sessions.pop(session_id, None)
+
+    def mark_session_ended(self, session_id: str) -> None:
+        """Remember an ended external session so late hooks cannot rediscover it."""
+        self.remove_session(session_id)
+        self._ended_session_ids.add(session_id)
+
+    def is_session_ended(self, session_id: str) -> bool:
+        """Return whether an external session has been marked ended/reaped."""
+        return session_id in self._ended_session_ids
 
     def list_unbound(self) -> list[UnboundExternalSession]:
         """Return all currently-active unbound sessions without pruning."""

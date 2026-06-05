@@ -14,7 +14,7 @@ removable binding first.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.domain.models import utc_now
 from app.services.auto_approve_service import AutoApproveService
@@ -37,10 +37,16 @@ class ExternalBindingReaper:
         binding_store: ExternalBindingStore,
         auto_approve_service: AutoApproveService,
         hook_socket_server: HookSocketServer,
+        permission_callback_registry: Any | None = None,
+        external_uq_state: Any | None = None,
+        external_discovery: Any | None = None,
     ) -> None:
         self._binding_store = binding_store
         self._auto_approve_service = auto_approve_service
         self._hook_socket_server = hook_socket_server
+        self._permission_callback_registry = permission_callback_registry
+        self._external_uq_state = external_uq_state
+        self._external_discovery = external_discovery
 
     async def remove_with_cleanup(self, session_id: str, *, reason: str) -> bool:
         """Atomically remove a binding and unwind its associated state.
@@ -72,6 +78,13 @@ class ExternalBindingReaper:
             return False
 
         self._binding_store.remove_binding(session_id)
+        if reason == "pid_dead":
+            if self._permission_callback_registry is not None:
+                await self._permission_callback_registry.invalidate_session(session_id)
+            if self._external_uq_state is not None:
+                self._external_uq_state.invalidate_session(session_id)
+            if self._external_discovery is not None:
+                self._external_discovery.mark_session_ended(session_id)
         await self._auto_approve_service.clear_session(session_id)
         await self._hook_socket_server.cancel_pending_permissions(session_id=session_id)
 

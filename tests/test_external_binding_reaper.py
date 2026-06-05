@@ -94,6 +94,53 @@ async def test_remove_with_cleanup_calls_collaborators_in_canonical_order() -> N
 # --- Re-read guard (Req 6.6, 9.2) -------------------------------------------
 
 
+async def test_remove_with_cleanup_invalidates_optional_lifecycle_state() -> None:
+    binding_store = Mock()
+    binding_store.get_binding = Mock(return_value=_make_binding("sess-lifecycle"))
+    binding_store.remove_binding = Mock()
+
+    manager = Mock()
+    manager.attach_mock(AsyncMock(return_value=1), "invalidate_session")
+    manager.attach_mock(Mock(return_value=1), "invalidate_user_questions")
+    manager.attach_mock(Mock(), "mark_session_ended")
+    manager.attach_mock(AsyncMock(), "clear_session")
+    manager.attach_mock(AsyncMock(), "cancel_pending_permissions")
+
+    auto_approve_service = Mock()
+    auto_approve_service.clear_session = manager.clear_session
+    hook_socket_server = Mock()
+    hook_socket_server.cancel_pending_permissions = manager.cancel_pending_permissions
+    permission_callback_registry = Mock()
+    permission_callback_registry.invalidate_session = manager.invalidate_session
+    external_uq_state = Mock()
+    external_uq_state.invalidate_session = manager.invalidate_user_questions
+    external_discovery = Mock()
+    external_discovery.mark_session_ended = manager.mark_session_ended
+
+    reaper = ExternalBindingReaper(
+        binding_store=binding_store,
+        auto_approve_service=auto_approve_service,
+        hook_socket_server=hook_socket_server,
+        permission_callback_registry=permission_callback_registry,
+        external_uq_state=external_uq_state,
+        external_discovery=external_discovery,
+    )
+
+    result = await reaper.remove_with_cleanup("sess-lifecycle", reason="pid_dead")
+
+    assert result is True
+    permission_callback_registry.invalidate_session.assert_awaited_once_with("sess-lifecycle")
+    external_uq_state.invalidate_session.assert_called_once_with("sess-lifecycle")
+    external_discovery.mark_session_ended.assert_called_once_with("sess-lifecycle")
+    assert [call[0] for call in manager.mock_calls] == [
+        "invalidate_session",
+        "invalidate_user_questions",
+        "mark_session_ended",
+        "clear_session",
+        "cancel_pending_permissions",
+    ]
+
+
 async def test_remove_with_cleanup_skips_when_binding_already_absent() -> None:
     """**Validates: Requirements 6.6, 9.2**
 
@@ -124,6 +171,72 @@ async def test_remove_with_cleanup_skips_when_binding_already_absent() -> None:
     binding_store.remove_binding.assert_not_called()
     auto_approve_service.clear_session.assert_not_awaited()
     hook_socket_server.cancel_pending_permissions.assert_not_awaited()
+
+
+async def test_remove_with_cleanup_does_not_tombstone_or_invalidate_idle_ttl_removal() -> None:
+    binding_store = Mock()
+    binding_store.get_binding = Mock(return_value=_make_binding("sess-idle"))
+    binding_store.remove_binding = Mock()
+
+    auto_approve_service = Mock()
+    auto_approve_service.clear_session = AsyncMock()
+    hook_socket_server = Mock()
+    hook_socket_server.cancel_pending_permissions = AsyncMock()
+    permission_callback_registry = Mock()
+    permission_callback_registry.invalidate_session = AsyncMock(return_value=1)
+    external_uq_state = Mock()
+    external_uq_state.invalidate_session = Mock(return_value=1)
+    external_discovery = Mock()
+    external_discovery.mark_session_ended = Mock()
+
+    reaper = ExternalBindingReaper(
+        binding_store=binding_store,
+        auto_approve_service=auto_approve_service,
+        hook_socket_server=hook_socket_server,
+        permission_callback_registry=permission_callback_registry,
+        external_uq_state=external_uq_state,
+        external_discovery=external_discovery,
+    )
+
+    result = await reaper.remove_with_cleanup("sess-idle", reason="idle_ttl_expired")
+
+    assert result is True
+    permission_callback_registry.invalidate_session.assert_not_awaited()
+    external_uq_state.invalidate_session.assert_not_called()
+    external_discovery.mark_session_ended.assert_not_called()
+
+
+async def test_remove_with_cleanup_skips_optional_cleanup_when_binding_already_absent() -> None:
+    binding_store = Mock()
+    binding_store.get_binding = Mock(return_value=None)
+    binding_store.remove_binding = Mock()
+
+    auto_approve_service = Mock()
+    auto_approve_service.clear_session = AsyncMock()
+    hook_socket_server = Mock()
+    hook_socket_server.cancel_pending_permissions = AsyncMock()
+    permission_callback_registry = Mock()
+    permission_callback_registry.invalidate_session = AsyncMock(return_value=1)
+    external_uq_state = Mock()
+    external_uq_state.invalidate_session = Mock(return_value=1)
+    external_discovery = Mock()
+    external_discovery.mark_session_ended = Mock()
+
+    reaper = ExternalBindingReaper(
+        binding_store=binding_store,
+        auto_approve_service=auto_approve_service,
+        hook_socket_server=hook_socket_server,
+        permission_callback_registry=permission_callback_registry,
+        external_uq_state=external_uq_state,
+        external_discovery=external_discovery,
+    )
+
+    result = await reaper.remove_with_cleanup("absent-session", reason="pid_dead")
+
+    assert result is False
+    permission_callback_registry.invalidate_session.assert_not_awaited()
+    external_uq_state.invalidate_session.assert_not_called()
+    external_discovery.mark_session_ended.assert_not_called()
 
 
 if __name__ == "__main__":  # pragma: no cover

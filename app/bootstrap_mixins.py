@@ -173,9 +173,27 @@ class HookHandlingMixin(AppContainerBase):
             # event still follows the external-bound pipeline it belonged to.
             ownership = await self.ownership_resolver.resolve(event.session_id)
 
+            if not is_session_end and ownership.origin == ExternalSessionOrigin.EXTERNAL and hasattr(self, "external_discovery"):
+                is_ended = getattr(self.external_discovery, "is_session_ended", None)
+                if callable(is_ended) and is_ended(event.session_id):
+                    if event.expects_response and hasattr(self, "hook_socket_server"):
+                        await self.hook_socket_server.cancel_pending_permissions(session_id=event.session_id)
+                    return None
+
             # Remove external binding on session end so /list doesn't show stale entries.
-            if is_session_end and hasattr(self, "external_binding_store"):
-                self.external_binding_store.remove_binding(event.session_id)
+            if is_session_end and ownership.origin == ExternalSessionOrigin.EXTERNAL:
+                if hasattr(self, "external_discovery"):
+                    marker = getattr(self.external_discovery, "mark_session_ended", None)
+                    if callable(marker):
+                        marker(event.session_id)
+                    else:
+                        self.external_discovery.remove_session(event.session_id)
+                if hasattr(self, "external_uq_state"):
+                    invalidator = getattr(self.external_uq_state, "invalidate_session", None)
+                    if callable(invalidator):
+                        invalidator(event.session_id)
+                if hasattr(self, "external_binding_store"):
+                    self.external_binding_store.remove_binding(event.session_id)
             logger.info(
                 "hook event ownership resolved",
                 extra={
@@ -319,7 +337,6 @@ class HookHandlingMixin(AppContainerBase):
             async def _external_discovery() -> None:
                 if hasattr(self, "external_discovery"):
                     if _is_session_end_event(event):
-                        self.external_discovery.remove_session(event.session_id)
                         return
                     self.external_discovery.record_event(event)
 

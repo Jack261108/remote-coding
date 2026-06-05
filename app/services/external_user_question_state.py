@@ -54,6 +54,13 @@ class ExternalUserQuestionState:
     def remove(self, tool_use_id: str) -> PendingExternalUserQuestion | None:
         return self._pending.pop(tool_use_id, None)
 
+    def invalidate_session(self, session_id: str) -> int:
+        """Remove all pending user questions for an ended external session."""
+        keys = [key for key, pending in self._pending.items() if pending.session_id == session_id]
+        for key in keys:
+            self._pending.pop(key, None)
+        return len(keys)
+
     def _prune_stale(self) -> None:
         now = utc_now()
         stale_keys = [key for key, pending in self._pending.items() if (now - pending.created_at).total_seconds() > self._ttl_sec]
