@@ -240,6 +240,54 @@ async def test_list_all_callback_uses_tmux_terminal_id_prefix(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_list_all_callback_uses_unique_tmux_terminal_id_prefixes_for_same_user(tmp_path: Path) -> None:
+    terminal_ids = [
+        "user_1234567890_aaaaaaaaaaaa",
+        "user_1234567890_bbbbbbbbbbbb",
+    ]
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                terminal_id=terminal_id,
+                workdir=f"/proj/{index}",
+                phase="idle",
+                owner_user_id=1234567890,
+                attached_user_ids=[],
+                is_alive=True,
+                last_activity=datetime(2026, 6, 4, 12, 0, tzinfo=UTC),
+            )
+            for index, terminal_id in enumerate(terminal_ids, start=1)
+        ]
+    )
+    router = Router()
+    register_list_handler(router, registry_service=registry)
+    callback_handler = router.callback_query.handlers[0].callback
+
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=1234567890)
+    callback.data = "sess:list:all"
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.answer = AsyncMock()
+
+    await callback_handler(callback)
+
+    callbacks = [
+        button.callback_data or "" for row in callback.message.answer.call_args.kwargs["reply_markup"].inline_keyboard for button in row
+    ]
+    attach_suffixes = [callback.removeprefix("sess:attach:") for callback in callbacks if callback.startswith("sess:attach:")]
+    close_suffixes = [callback.removeprefix("sess:close:") for callback in callbacks if callback.startswith("sess:close:")]
+
+    assert len(attach_suffixes) == 2
+    assert len(set(attach_suffixes)) == 2
+    assert len(close_suffixes) == 2
+    assert len(set(close_suffixes)) == 2
+    for suffix in attach_suffixes + close_suffixes:
+        assert sum(terminal_id.startswith(suffix) for terminal_id in terminal_ids) == 1
+
+
+@pytest.mark.asyncio
 async def test_list_all_callback_renders_full_legacy_list(tmp_path: Path) -> None:
     store = ExternalBindingStore(data_dir=tmp_path)
     user_id = 42

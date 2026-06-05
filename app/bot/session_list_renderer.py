@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from app.services.session_id_resolver import unique_prefixes
 
 _RECENT_LIMIT = 3
 _SID_PREFIX_LEN = 16
@@ -61,6 +63,10 @@ def build_session_list_message(
         (item for item in all_items if item.session_id not in recent_ids and _needs_attention(item)),
         key=lambda item: (_attention_priority(item), -_activity_timestamp(item.activity_at)),
     )
+    tmux_prefixes = unique_prefixes(
+        (item.session_id for item in all_items if item.source == ListSessionSource.TMUX),
+        min_length=_SID_PREFIX_LEN,
+    )
     attention_ids = {item.session_id for item in attention}
     hidden_count = sum(1 for item in all_items if item.session_id not in recent_ids and item.session_id not in attention_ids)
 
@@ -97,7 +103,7 @@ def build_session_list_message(
                 [
                     InlineKeyboardButton(
                         text=_attention_button_text(item),
-                        callback_data=_attention_callback_data(item),
+                        callback_data=_attention_callback_data(item, tmux_prefixes=tmux_prefixes),
                     )
                 ]
             )
@@ -168,11 +174,11 @@ def _attention_button_text(item: ListSessionView) -> str:
     return f"查看 {sid}"
 
 
-def _attention_callback_data(item: ListSessionView) -> str:
+def _attention_callback_data(item: ListSessionView, *, tmux_prefixes: Mapping[str, str] | None = None) -> str:
     if item.source == ListSessionSource.UNBOUND:
         return f"sess:bind:{_sid_prefix(item)}"
     if item.source == ListSessionSource.TMUX:
-        return f"sess:attach:{_sid_prefix(item)}"
+        return f"sess:attach:{(tmux_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
     return f"sess:select:{_sid_prefix(item)}"
 
 

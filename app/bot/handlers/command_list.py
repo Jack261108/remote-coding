@@ -15,6 +15,7 @@ from app.domain.models import SessionListItem, utc_now
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.process_liveness import process_is_alive
+from app.services.session_id_resolver import unique_prefixes
 from app.services.session_registry import SessionRegistryService
 
 if TYPE_CHECKING:
@@ -78,6 +79,7 @@ def register_list_handler(
         invalid_count = 0
 
         sessions = await registry_service.list_active_sessions()
+        tmux_prefixes = unique_prefixes((s.terminal_id for s in sessions if s.is_alive), min_length=16)
         for s in sessions:
             icon = _PHASE_ICONS.get(s.phase, "❓")
             tags: list[str] = [s.phase]
@@ -89,6 +91,7 @@ def register_list_handler(
                 invalid_count += 1
                 continue  # 跳过已断开的 tmux sessions，不显示
             sid = s.terminal_id
+            sid_prefix = tmux_prefixes[sid]
             legacy_items.append(
                 SessionListItem(
                     session_id=sid,
@@ -97,8 +100,8 @@ def register_list_handler(
                     status_text=" · ".join(tags),
                     source="tmux",
                     buttons=[
-                        ("🔗 绑定", f"sess:attach:{sid[:16]}"),
-                        ("❌ 关闭", f"sess:close:{sid[:16]}"),
+                        ("🔗 绑定", f"sess:attach:{sid_prefix}"),
+                        ("❌ 关闭", f"sess:close:{sid_prefix}"),
                     ],
                 )
             )

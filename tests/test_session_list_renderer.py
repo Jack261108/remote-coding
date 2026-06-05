@@ -154,6 +154,46 @@ def test_tmux_attention_uses_attach_callback_with_terminal_id_prefix() -> None:
     assert f"sess:attach:{terminal_id[:16]}" in _callbacks(result)
 
 
+def test_tmux_attention_uses_unique_attach_callback_prefixes_for_same_user() -> None:
+    terminal_ids = [
+        "user_1234567890_aaaaaaaaaaaa",
+        "user_1234567890_bbbbbbbbbbbb",
+    ]
+
+    result = build_session_list_message(
+        [
+            _item(terminal_id, None, index, source=ListSessionSource.TMUX, state="waiting_for_input")
+            for index, terminal_id in enumerate(terminal_ids, start=1)
+        ],
+        now=NOW,
+    )
+
+    suffixes = [callback.removeprefix("sess:attach:") for callback in _callbacks(result) if callback.startswith("sess:attach:")]
+    assert len(suffixes) == 2
+    assert len(set(suffixes)) == 2
+    for suffix in suffixes:
+        assert sum(terminal_id.startswith(suffix) for terminal_id in terminal_ids) == 1
+
+
+def test_tmux_attention_prefix_is_unique_against_hidden_tmux_sessions() -> None:
+    terminal_ids = [
+        "user_1234567890_aaaaaaaaaaaa",
+        "user_1234567890_bbbbbbbbbbbb",
+    ]
+
+    result = build_session_list_message(
+        [
+            _item(terminal_ids[0], None, 1, source=ListSessionSource.TMUX, state="waiting_for_input"),
+            _item(terminal_ids[1], None, 2, source=ListSessionSource.TMUX, state="idle"),
+        ],
+        now=NOW,
+    )
+
+    suffixes = [callback.removeprefix("sess:attach:") for callback in _callbacks(result) if callback.startswith("sess:attach:")]
+    assert len(suffixes) == 1
+    assert sum(terminal_id.startswith(suffixes[0]) for terminal_id in terminal_ids) == 1
+
+
 def test_cleanup_button_shown_when_has_invalid_sessions() -> None:
     result = build_session_list_message(
         [_item("sess-00000001", "Test", 1)],

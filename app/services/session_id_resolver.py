@@ -1,9 +1,67 @@
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+
+_HASH_TOKEN_PREFIX = "h."
+
+
+def unique_prefixes(ids: Iterable[str], *, min_length: int = 16, max_length: int = 52) -> dict[str, str]:
+    """Return compact callback tokens that resolve uniquely among IDs."""
+    candidates = list(dict.fromkeys(ids))
+    result: dict[str, str] = {}
+    for candidate in candidates:
+        start = min(min_length, len(candidate))
+        found: str | None = None
+        for length in range(start, len(candidate) + 1):
+            prefix = candidate[:length]
+            if len(prefix) > max_length:
+                break
+            if prefix == candidate and any(other != candidate and other.startswith(prefix) for other in candidates):
+                if len(prefix) + 1 <= max_length:
+                    found = f"{prefix}."
+                break
+            if _is_tmux_user_wide_prefix(prefix):
+                continue
+            if not any(other != candidate and other.startswith(prefix) for other in candidates):
+                found = prefix
+                break
+        if found is None:
+            found = _hash_token(candidate)
+        result[candidate] = found
+    return result
+
+
+def resolve_unique_prefix(prefix: str, candidates: Iterable[str]) -> tuple[str | None, str | None]:
+    """Resolve a callback token against candidates without silently widening stale prefixes."""
+    token = prefix.rstrip(".")
+    candidate_list = list(dict.fromkeys(candidates))
+    if prefix.endswith("."):
+        matches = [candidate for candidate in candidate_list if candidate == token]
+    elif prefix.startswith(_HASH_TOKEN_PREFIX):
+        matches = [candidate for candidate in candidate_list if _hash_token(candidate) == prefix]
+    elif _is_tmux_user_wide_prefix(prefix):
+        matches = []
+    else:
+        matches = [candidate for candidate in candidate_list if candidate == prefix or candidate.startswith(prefix)]
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) == 0:
+        return None, "Session not found"
+    return None, f"Ambiguous prefix, {len(matches)} matches. Be more specific."
+
+
+def _hash_token(value: str) -> str:
+    return f"{_HASH_TOKEN_PREFIX}{hashlib.sha1(value.encode()).hexdigest()[:16]}"
+
+
+def _is_tmux_user_wide_prefix(prefix: str) -> bool:
+    parts = prefix.split("_")
+    return len(parts) == 3 and parts[0] == "user" and parts[1].isdigit() and parts[2] == ""
 
 
 def _resolve_session_id(

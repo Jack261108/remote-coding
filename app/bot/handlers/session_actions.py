@@ -9,7 +9,7 @@ from app.bot.handlers.user_utils import extract_user_id
 from app.infra.text_formatting import short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind
+from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind, resolve_unique_prefix
 from app.services.session_registry import SessionRegistryService
 
 logger = logging.getLogger(__name__)
@@ -19,17 +19,8 @@ async def _resolve_terminal_id_prefix(
     terminal_id_prefix: str,
     registry_service: SessionRegistryService,
 ) -> tuple[str | None, str | None]:
-    prefix = terminal_id_prefix.rstrip(".")
-    candidates = [
-        session.terminal_id
-        for session in await registry_service.list_active_sessions()
-        if session.terminal_id == prefix or session.terminal_id.startswith(prefix)
-    ]
-    if len(candidates) == 1:
-        return candidates[0], None
-    if len(candidates) == 0:
-        return None, "Session not found"
-    return None, f"Ambiguous prefix, {len(candidates)} matches. Be more specific."
+    candidates = [session.terminal_id for session in await registry_service.list_active_sessions() if session.is_alive]
+    return resolve_unique_prefix(terminal_id_prefix, candidates)
 
 
 def register_session_action_handlers(
