@@ -9,14 +9,14 @@ import pytest
 from aiogram import Router
 from aiogram.types import CallbackQuery, Message, User
 
-from app.bot.handlers.session_actions import _resolve_session_id, _resolve_terminal_id_prefix, register_session_action_handlers
+from app.bot.handlers.session_actions import _resolve_terminal_id_prefix, register_session_action_handlers
 from app.domain.external_session_models import ExternalBinding
 from app.domain.hook_models import HookEvent
 from app.domain.models import TerminalSessionInfo, utc_now
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import unique_prefixes
+from app.services.session_id_resolver import _resolve_session_id, unique_prefixes
 
 
 @pytest.fixture
@@ -160,10 +160,23 @@ class TestSessionSelectHandler:
         result = await binder.bind(user_id=user_id, session_id=session_id)
         assert result.success
 
-        # Now check binding state
-        binding = binder._binding_store.get_binding(session_id)
-        assert binding is not None
-        assert binding.user_id == user_id  # bound to user, so "取消绑定" button should show
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = user_id
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with()
+        callback.message.answer.assert_awaited_once()
+        keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
+        callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        assert callbacks == [f"sess:unbind:{session_id[:16]}"]
 
     @pytest.mark.asyncio
     async def test_select_active_unbound_callback_still_renders_bind_button(
@@ -188,6 +201,30 @@ class TestSessionSelectHandler:
         keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
         callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
         assert callbacks == [f"sess:bind:{session_id[:16]}"]
+
+    @pytest.mark.asyncio
+    async def test_select_old_unbound_callback_after_other_user_bound_does_not_render_bind_button(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        session_id = "stale-catalog-session-0001"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+        bind_result = await binder.bind(user_id=99, session_id=session_id)
+        assert bind_result.success
+
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with("Session is not available to bind")
+        callback.message.answer.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_select_stale_unbound_callback_does_not_render_bind_button(

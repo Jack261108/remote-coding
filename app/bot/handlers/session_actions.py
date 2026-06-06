@@ -9,13 +9,8 @@ from app.bot.handlers.user_utils import extract_user_id
 from app.infra.text_formatting import short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import (
-    _resolve_session_id,
-    resolve_and_bind,
-    resolve_and_unbind,
-    resolve_unique_prefix,
-    unavailable_unbound_session_message,
-)
+from app.services.session_action_validator import validate_external_session_select
+from app.services.session_id_resolver import resolve_and_bind, resolve_and_unbind, resolve_unique_prefix
 from app.services.session_registry import SessionRegistryService
 
 logger = logging.getLogger(__name__)
@@ -46,33 +41,20 @@ def register_session_action_handlers(
             return
 
         session_id_prefix = parts[2]
-        resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
-        if error or not resolved:
-            await callback.answer(error or "Session not found")
+        validation = validate_external_session_select(
+            session_id_prefix,
+            user_id=user_id,
+            discovery=discovery,
+            binder=binder,
+        )
+        if validation.denial_message or not validation.session_id or not validation.action:
+            await callback.answer(validation.denial_message or "Session not found")
             return
-        unavailable = unavailable_unbound_session_message(resolved, discovery)
-        if unavailable is not None:
-            await callback.answer(unavailable)
-            return
 
-        # Determine binding state for this user
-        binding = binder._binding_store.get_binding(resolved)
-        is_bound_to_user = binding is not None and binding.user_id == user_id
+        detail_text = f"📂 Session: {short_id(validation.session_id, 12)}...\n  cwd: {validation.cwd}"
 
-        # Build detail message
-        # Try to get cwd from discovery or binding
-        cwd = ""
-        unbound_session = discovery.get(resolved)
-        if unbound_session:
-            cwd = unbound_session.cwd
-        elif binding:
-            cwd = binding.cwd
-
-        detail_text = f"📂 Session: {short_id(resolved, 12)}...\n  cwd: {cwd}"
-
-        # Build action buttons conditionally
-        sid_prefix = short_id(resolved, 16)
-        if is_bound_to_user:
+        sid_prefix = short_id(validation.session_id, 16)
+        if validation.action == "unbind":
             buttons = [[InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{sid_prefix}")]]
         else:
             buttons = [[InlineKeyboardButton(text="绑定", callback_data=f"sess:bind:{sid_prefix}")]]
