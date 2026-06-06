@@ -9,7 +9,13 @@ from app.bot.handlers.user_utils import extract_user_id
 from app.infra.text_formatting import short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind, resolve_unique_prefix
+from app.services.session_id_resolver import (
+    _resolve_session_id,
+    resolve_and_bind,
+    resolve_and_unbind,
+    resolve_unique_prefix,
+    unavailable_unbound_session_message,
+)
 from app.services.session_registry import SessionRegistryService
 
 logger = logging.getLogger(__name__)
@@ -43,6 +49,10 @@ def register_session_action_handlers(
         resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
         if error or not resolved:
             await callback.answer(error or "Session not found")
+            return
+        unavailable = unavailable_unbound_session_message(resolved, discovery)
+        if unavailable is not None:
+            await callback.answer(unavailable)
             return
 
         # Determine binding state for this user

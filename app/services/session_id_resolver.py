@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.process_liveness import process_is_alive
 
 _HASH_TOKEN_PREFIX = "h."
 
@@ -64,6 +65,18 @@ def _is_tmux_user_wide_prefix(prefix: str) -> bool:
     return len(parts) == 3 and parts[0] == "user" and parts[1].isdigit() and parts[2] == ""
 
 
+def unavailable_unbound_session_message(session_id: str, discovery: ExternalSessionDiscoveryService) -> str | None:
+    """Return an unavailable message when an unbound session is stale or dead."""
+    unbound = discovery.get(session_id)
+    if unbound is None:
+        return None
+    if discovery.is_session_stale(session_id):
+        return "Session is no longer available"
+    if unbound.pid is not None and unbound.pid > 0 and not process_is_alive(unbound.pid):
+        return "Session is no longer available"
+    return None
+
+
 def _resolve_session_id(
     session_id_prefix: str,
     discovery: ExternalSessionDiscoveryService,
@@ -76,16 +89,26 @@ def _resolve_session_id(
     """
     prefix = session_id_prefix.rstrip(".")
     candidates: list[str] = []
+    unavailable_unbound_candidates: list[str] = []
 
     for s in discovery.list_unbound():
         if s.session_id == prefix or s.session_id.startswith(prefix):
-            candidates.append(s.session_id)
+            if unavailable_unbound_session_message(s.session_id, discovery) is None:
+                candidates.append(s.session_id)
+            else:
+                unavailable_unbound_candidates.append(s.session_id)
+
+    exact_unavailable = [session_id for session_id in unavailable_unbound_candidates if session_id == prefix]
+    if len(exact_unavailable) == 1:
+        return exact_unavailable[0], None
 
     for b in binder._binding_store.list_all():
         if b.session_id == prefix or b.session_id.startswith(prefix):
             if b.session_id not in candidates:
                 candidates.append(b.session_id)
 
+    if len(candidates) == 0 and len(unavailable_unbound_candidates) == 1:
+        return unavailable_unbound_candidates[0], None
     if len(candidates) == 1:
         return candidates[0], None
     if len(candidates) == 0:
@@ -115,6 +138,12 @@ async def resolve_and_bind(
     resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
     if error or not resolved:
         return BindResult(success=False, message=error or "Session not found")
+
+    unavailable = unavailable_unbound_session_message(resolved, discovery)
+    if unavailable is not None:
+        return BindResult(success=False, message=unavailable)
+    if discovery.get(resolved) is None and binder._binding_store.get_binding(resolved) is not None:
+        return BindResult(success=False, message="Session is not available to bind")
 
     result = await binder.bind(user_id=user_id, session_id=resolved)
     if result.success:

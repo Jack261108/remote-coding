@@ -165,6 +165,77 @@ class TestSessionSelectHandler:
         assert binding is not None
         assert binding.user_id == user_id  # bound to user, so "取消绑定" button should show
 
+    @pytest.mark.asyncio
+    async def test_select_active_unbound_callback_still_renders_bind_button(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        session_id = "active-unbound-session-0001"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with()
+        callback.message.answer.assert_awaited_once()
+        keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
+        callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        assert callbacks == [f"sess:bind:{session_id[:16]}"]
+
+    @pytest.mark.asyncio
+    async def test_select_stale_unbound_callback_does_not_render_bind_button(
+        self,
+        discovery: ExternalSessionDiscoveryService,
+        binder: ExternalSessionBinder,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_id = "stale-unbound-session-0001"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+        monkeypatch.setattr(discovery, "is_session_stale", lambda _: True)
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with("Session is no longer available")
+        callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_select_dead_pid_unbound_callback_does_not_render_bind_button(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session_id = "dead-pid-unbound-session-0001"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running", pid=12345))
+        monkeypatch.setattr("app.services.session_id_resolver.process_is_alive", lambda _: False)
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with("Session is no longer available")
+        callback.message.answer.assert_not_awaited()
+
 
 class TestTmuxSessionActionHandler:
     @pytest.mark.asyncio
