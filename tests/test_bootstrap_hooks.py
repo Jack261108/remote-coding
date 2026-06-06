@@ -110,6 +110,91 @@ async def test_app_container_start_skips_install_when_disabled(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_prune_unbound_external_sessions_reuses_discovery_pruners(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    def fake_prune_dead() -> None:
+        calls.append("unbound_dead")
+
+    def fake_prune_stale() -> list[str]:
+        calls.append("unbound_stale")
+        return ["stale-unbound"]
+
+    monkeypatch.setattr(container.external_discovery, "_prune_dead", fake_prune_dead)
+    monkeypatch.setattr(container.external_discovery, "prune_stale", fake_prune_stale)
+
+    try:
+        await container._prune_unbound_external_sessions()
+    finally:
+        await container.bot.session.close()
+
+    assert calls == ["unbound_dead", "unbound_stale"]
+
+
+@pytest.mark.asyncio
+async def test_prune_unbound_external_sessions_prunes_stale_when_dead_prune_fails(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    def fake_prune_dead() -> None:
+        calls.append("unbound_dead")
+        raise OverflowError("bad pid")
+
+    def fake_prune_stale() -> list[str]:
+        calls.append("unbound_stale")
+        return ["stale-unbound"]
+
+    monkeypatch.setattr(container.external_discovery, "_prune_dead", fake_prune_dead)
+    monkeypatch.setattr(container.external_discovery, "prune_stale", fake_prune_stale)
+
+    try:
+        await container._prune_unbound_external_sessions()
+    finally:
+        await container.bot.session.close()
+
+    assert calls == ["unbound_dead", "unbound_stale"]
+
+
+@pytest.mark.asyncio
+async def test_start_registers_unbound_cleanup_without_replacing_existing_lifecycle_jobs(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    async def fake_unbound_cleanup() -> None:
+        calls.append("unbound")
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.external_binding_cleanup_service, "_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.session_registry, "_run_health_check", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_prune_unbound_external_sessions", fake_unbound_cleanup)
+    monkeypatch.setattr(container._janitor, "start", AsyncMock(return_value=None))
+
+    await container.start()
+    try:
+        jobs = container._janitor._jobs
+        assert "upload_queue_cleanup" in jobs
+        assert "upload_file_cleanup" in jobs
+        assert "periodic_recheck" in jobs
+        assert "external_binding_cleanup" in jobs
+        assert "session_health_check" in jobs
+        assert "external_discovery_cleanup" in jobs
+        assert "session_lifecycle_reconcile" not in jobs
+
+        interval, callback = jobs["external_discovery_cleanup"]
+        assert interval == container.settings.session_health_check_interval_sec
+        await callback()
+        assert calls == ["unbound"]
+    finally:
+        await container.stop()
+
+
+@pytest.mark.asyncio
 async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     use_legacy_hook_binding_path(container)

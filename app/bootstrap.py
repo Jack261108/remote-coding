@@ -275,6 +275,14 @@ class AppContainer(
         self._janitor = PeriodicJanitor()
         self._started = False
 
+    async def _prune_unbound_external_sessions(self) -> None:
+        """Prune in-memory unbound external session discovery entries."""
+        try:
+            self.external_discovery._prune_dead()
+        except Exception:
+            logger.exception("external discovery dead-prune failed")
+        self.external_discovery.prune_stale()
+
     async def start(self) -> None:
         if self._started:
             return
@@ -309,6 +317,11 @@ class AppContainer(
             "external_binding_cleanup",
             self.settings.session_health_check_interval_sec,
             self.external_binding_cleanup_service._cleanup,
+        )
+        self._janitor.register(
+            "external_discovery_cleanup",
+            self.settings.session_health_check_interval_sec,
+            self._prune_unbound_external_sessions,
         )
         self._janitor.register(
             "session_health_check",

@@ -50,7 +50,7 @@ class ExternalSessionDiscoveryService:
             existing.last_seen = now
             existing.event_count += 1
             existing.cwd = event.cwd
-            if event.pid is not None:
+            if event.pid is not None and event.pid > 0:
                 existing.pid = event.pid
             if existing.title is None:
                 existing.title = self._resolve_title(event.session_id, event.cwd)
@@ -86,7 +86,14 @@ class ExternalSessionDiscoveryService:
         """Remove sessions whose pid is no longer running."""
         dead_ids: list[str] = []
         for session_id, session in self._sessions.items():
-            if session.pid is not None and not self._is_pid_alive(session.pid):
+            if session.pid is None or session.pid <= 0:
+                continue
+            try:
+                is_alive = self._is_pid_alive(session.pid)
+            except Exception:
+                logger.exception("failed to check external session pid", extra={"session_id": session_id, "pid": session.pid})
+                continue
+            if not is_alive:
                 dead_ids.append(session_id)
         for session_id in dead_ids:
             del self._sessions[session_id]
