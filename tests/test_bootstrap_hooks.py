@@ -23,7 +23,7 @@ async def wait_for_jsonl_sync_idle(container: AppContainer, session_id: str) -> 
     await asyncio.sleep(0.2 + debounce + 0.1)
 
 
-def make_settings(tmp_path, *, install_hooks: bool = True) -> Settings:
+def make_settings(tmp_path, *, install_hooks: bool = True, tmux_mode: bool = False) -> Settings:
     return Settings.model_validate(
         {
             "TG_BOT_TOKEN": "123456:TESTTOKEN",
@@ -31,7 +31,7 @@ def make_settings(tmp_path, *, install_hooks: bool = True) -> Settings:
             "DEFAULT_PROVIDER": "claude_code",
             "DEFAULT_TIMEOUT_SEC": 10,
             "MAX_CONCURRENT_TASKS": 1,
-            "CLAUDE_TMUX_MODE": False,
+            "CLAUDE_TMUX_MODE": tmux_mode,
             "TMUX_DATA_DIR": str(tmp_path),
             "CLAUDE_CLI_BIN": "claude",
             "CLAUDE_INSTALL_HOOKS": install_hooks,
@@ -154,6 +154,94 @@ async def test_prune_unbound_external_sessions_prunes_stale_when_dead_prune_fail
         await container.bot.session.close()
 
     assert calls == ["unbound_dead", "unbound_stale"]
+
+
+@pytest.mark.asyncio
+async def test_start_runs_tmux_health_check_before_restore(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    calls: list[str] = []
+
+    async def fake_health_check() -> None:
+        calls.append("health")
+
+    async def fake_restore() -> None:
+        calls.append("restore")
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.session_registry, "_run_health_check", fake_health_check)
+    monkeypatch.setattr(container, "_restore_session_bindings", fake_restore)
+    monkeypatch.setattr(container.external_binding_cleanup_service, "_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor, "stop", AsyncMock(return_value=None))
+
+    await container.start()
+    try:
+        assert calls == ["health", "restore"]
+    finally:
+        await container.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_clears_dead_tmux_binding_before_restoring_watchers(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = make_settings(tmp_path, install_hooks=False, tmux_mode=True)
+    first = AppContainer(settings)
+    session = await first.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await first.session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="claude-session-dead",
+        workdir=str(tmp_path),
+    )
+    state = first.structured_session_store.get_or_create(
+        session_id="claude-session-dead",
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id=session.terminal_id,
+        user_id=1,
+        claude_session_id="claude-session-dead",
+    )
+    state.phase = SessionPhase.PROCESSING
+    state.turns = [ConversationTurn(turn_id="a1", role="assistant", text="\n恢复中\n", is_complete=True)]
+    first.structured_session_store._persist(state)
+    await first.bot.session.close()
+
+    second = AppContainer(settings)
+    watched: list[tuple[str, str]] = []
+
+    def fake_watch(*, session_id: str, workdir: str) -> None:
+        watched.append((session_id, workdir))
+
+    monkeypatch.setattr(second.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(second.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(second.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(second.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(second.tmux_runner, "session_exists", AsyncMock(return_value=False))
+    monkeypatch.setattr(second.session_supervisor, "watch", fake_watch)
+    monkeypatch.setattr(second.external_binding_cleanup_service, "_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(second.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(second._janitor, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(second._janitor, "stop", AsyncMock(return_value=None))
+
+    await second.start()
+    try:
+        restored_session = await second.session_service.get(1)
+        assert restored_session is not None
+        assert restored_session.terminal_mode is False
+        assert restored_session.terminal_id is None
+        assert restored_session.claude_chat_active is False
+        assert restored_session.claude_session_id is None
+        assert watched == []
+    finally:
+        await second.stop()
 
 
 @pytest.mark.asyncio

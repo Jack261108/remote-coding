@@ -296,6 +296,8 @@ class AppContainer(
         if self.settings.claude_install_hooks:
             self.hook_installer.install()
         await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
+        if self.settings.claude_tmux_mode:
+            await self.session_registry.reconcile_terminal_lifecycle()
         await self._restore_session_bindings()
 
         # Initial cleanup passes (before periodic loop starts)
@@ -326,7 +328,7 @@ class AppContainer(
         self._janitor.register(
             "session_health_check",
             self.settings.session_health_check_interval_sec,
-            self.session_registry._run_health_check,
+            self.session_registry.reconcile_terminal_lifecycle,
         )
         self._janitor.register(
             "periodic_recheck",

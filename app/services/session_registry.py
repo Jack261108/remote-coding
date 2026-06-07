@@ -320,6 +320,10 @@ class SessionRegistryService:
 
     # ── Health check ───────────────────────────────────────────────────────────
 
+    async def reconcile_terminal_lifecycle(self) -> None:
+        """Run one tmux terminal lifecycle reconciliation pass."""
+        await self._run_health_check()
+
     async def start_health_check(self) -> None:
         """Start the periodic health check background task."""
         if self._health_check_task is not None and not self._health_check_task.done():
