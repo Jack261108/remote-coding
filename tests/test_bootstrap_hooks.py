@@ -11,7 +11,10 @@ from app.config.settings import Settings
 from app.domain.hook_models import HookEvent
 from app.domain.models import TaskRecord, TaskStatus
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
+from app.domain.user_question_models import UserQuestionPrompt
 from app.services.agent_file_watcher import AgentFileWatcher
+from app.services.auto_approve_service import ActivationSlot
+from app.services.external_user_question_state import PendingExternalUserQuestion
 from app.services.interrupt_watcher import InterruptWatcher
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
@@ -48,6 +51,27 @@ def make_settings(tmp_path, *, install_hooks: bool = True, tmux_mode: bool = Fal
 
 def use_legacy_hook_binding_path(container: AppContainer) -> None:
     delattr(container, "ownership_resolver")
+
+
+@pytest.mark.asyncio
+async def test_wire_passes_dead_unbound_cleanup_to_list_router(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    captured: dict[str, object] = {}
+
+    def fake_create_router(**kwargs):
+        captured.update(kwargs)
+        return Router()
+
+    from aiogram import Router
+
+    monkeypatch.setattr("app.bootstrap.create_router", fake_create_router)
+
+    try:
+        container.wire()
+    finally:
+        await container.bot.session.close()
+
+    assert captured["dead_unbound_cleanup"] == container._cleanup_dead_unbound_external_session
 
 
 @pytest.mark.asyncio
@@ -114,14 +138,15 @@ async def test_prune_unbound_external_sessions_reuses_discovery_pruners(tmp_path
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     calls: list[str] = []
 
-    def fake_prune_dead() -> None:
+    def fake_prune_dead() -> list[str]:
         calls.append("unbound_dead")
+        return []
 
     def fake_prune_stale() -> list[str]:
         calls.append("unbound_stale")
         return ["stale-unbound"]
 
-    monkeypatch.setattr(container.external_discovery, "_prune_dead", fake_prune_dead)
+    monkeypatch.setattr(container.external_discovery, "prune_dead", fake_prune_dead)
     monkeypatch.setattr(container.external_discovery, "prune_stale", fake_prune_stale)
 
     try:
@@ -133,11 +158,238 @@ async def test_prune_unbound_external_sessions_reuses_discovery_pruners(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_prune_unbound_external_sessions_invalidates_dead_pruned_permission_state(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    def fake_prune_dead() -> list[str]:
+        calls.append("unbound_dead")
+        return ["dead-unbound"]
+
+    def fake_prune_stale() -> list[str]:
+        calls.append("unbound_stale")
+        return []
+
+    async def fake_registry_invalidate(session_id: str) -> int:
+        calls.append(f"registry:{session_id}")
+        return 1
+
+    async def fake_unbound_invalidate(session_id: str) -> int:
+        calls.append(f"unbound:{session_id}")
+        return 1
+
+    async def fake_cancel_pending_permissions(*, session_id: str) -> None:
+        calls.append(f"hook:{session_id}")
+
+    monkeypatch.setattr(container.external_discovery, "prune_dead", fake_prune_dead)
+    monkeypatch.setattr(container.external_discovery, "prune_stale", fake_prune_stale)
+    monkeypatch.setattr(container.permission_callback_registry, "invalidate_session", fake_registry_invalidate)
+    monkeypatch.setattr(container.unbound_permission_handler, "invalidate_session", fake_unbound_invalidate)
+    monkeypatch.setattr(container.hook_socket_server, "cancel_pending_permissions", fake_cancel_pending_permissions)
+
+    try:
+        await container._prune_unbound_external_sessions()
+    finally:
+        await container.bot.session.close()
+
+    assert calls == [
+        "unbound_dead",
+        "registry:dead-unbound",
+        "unbound:dead-unbound",
+        "hook:dead-unbound",
+        "unbound_stale",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dead_unbound_cleanup_clears_auto_approve_state(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    active_session_id = "dead-active"
+    slotted_session_id = "dead-slotted"
+
+    await container.auto_approve_service.activate_if_session_alive(user_id=42, session_id=active_session_id)
+    container.auto_approve_service._slots[slotted_session_id] = ActivationSlot(
+        session_id=slotted_session_id,
+        holder_user_id=43,
+        attempt_id="attempt-1",
+    )
+
+    try:
+        await container._cleanup_dead_unbound_external_session(active_session_id)
+        await container._cleanup_dead_unbound_external_session(slotted_session_id)
+    finally:
+        await container.bot.session.close()
+
+    assert container.auto_approve_service.get_active_user_for_session(active_session_id) is None
+    assert active_session_id not in container.auto_approve_service._slots
+    assert container.auto_approve_service.is_session_ended(active_session_id) is True
+    assert slotted_session_id not in container.auto_approve_service._slots
+    assert container.auto_approve_service.is_session_ended(slotted_session_id) is True
+
+
+@pytest.mark.asyncio
+async def test_dead_unbound_cleanup_clears_external_user_question_state(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session_id = "dead-uq"
+    tool_use_id = "tool-uq"
+    container.external_uq_state.store(
+        PendingExternalUserQuestion(
+            tool_use_id=tool_use_id,
+            session_id=session_id,
+            user_id=42,
+            pid=12345,
+            prompts=(
+                UserQuestionPrompt(
+                    tool_use_id=tool_use_id,
+                    question_index=0,
+                    total_questions=1,
+                    question="Continue?",
+                ),
+            ),
+            pane_id="%1",
+        )
+    )
+
+    try:
+        await container._cleanup_dead_unbound_external_session(session_id)
+    finally:
+        await container.bot.session.close()
+
+    assert container.external_uq_state.get(tool_use_id) is None
+
+
+@pytest.mark.asyncio
+async def test_dead_unbound_cleanup_failure_is_retained_for_retry_when_called_directly(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session_id = "dead-direct"
+
+    async def failing_registry_invalidate(session_id_arg: str) -> int:
+        assert session_id_arg == session_id
+        raise RuntimeError("registry failure")
+
+    monkeypatch.setattr(container.permission_callback_registry, "invalidate_session", failing_registry_invalidate)
+
+    try:
+        success = await container._cleanup_dead_unbound_external_session(session_id)
+    finally:
+        await container.bot.session.close()
+
+    assert success is False
+    assert session_id in container._pending_dead_unbound_cleanup_ids
+
+
+@pytest.mark.asyncio
+async def test_prune_unbound_external_sessions_continues_cleanup_when_one_step_fails(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    def fake_prune_dead() -> list[str]:
+        calls.append("unbound_dead")
+        return ["dead-a", "dead-b"]
+
+    def fake_prune_stale() -> list[str]:
+        calls.append("unbound_stale")
+        return []
+
+    async def fake_registry_invalidate(session_id: str) -> int:
+        calls.append(f"registry:{session_id}")
+        if session_id == "dead-a":
+            raise RuntimeError("registry failure")
+        return 1
+
+    async def fake_unbound_invalidate(session_id: str) -> int:
+        calls.append(f"unbound:{session_id}")
+        return 1
+
+    async def fake_cancel_pending_permissions(*, session_id: str) -> None:
+        calls.append(f"hook:{session_id}")
+
+    monkeypatch.setattr(container.external_discovery, "prune_dead", fake_prune_dead)
+    monkeypatch.setattr(container.external_discovery, "prune_stale", fake_prune_stale)
+    monkeypatch.setattr(container.permission_callback_registry, "invalidate_session", fake_registry_invalidate)
+    monkeypatch.setattr(container.unbound_permission_handler, "invalidate_session", fake_unbound_invalidate)
+    monkeypatch.setattr(container.hook_socket_server, "cancel_pending_permissions", fake_cancel_pending_permissions)
+
+    try:
+        await container._prune_unbound_external_sessions()
+    finally:
+        await container.bot.session.close()
+
+    assert calls == [
+        "unbound_dead",
+        "registry:dead-a",
+        "unbound:dead-a",
+        "hook:dead-a",
+        "registry:dead-b",
+        "unbound:dead-b",
+        "hook:dead-b",
+        "unbound_stale",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prune_unbound_external_sessions_retries_failed_cleanup_next_pass(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+    prune_results = [["dead-a"], []]
+
+    def fake_prune_dead() -> list[str]:
+        calls.append("unbound_dead")
+        return prune_results.pop(0)
+
+    def fake_prune_stale() -> list[str]:
+        calls.append("unbound_stale")
+        return []
+
+    registry_failures_remaining = 1
+
+    async def fake_registry_invalidate(session_id: str) -> int:
+        nonlocal registry_failures_remaining
+        calls.append(f"registry:{session_id}")
+        if registry_failures_remaining:
+            registry_failures_remaining -= 1
+            raise RuntimeError("registry failure")
+        return 1
+
+    async def fake_unbound_invalidate(session_id: str) -> int:
+        calls.append(f"unbound:{session_id}")
+        return 1
+
+    async def fake_cancel_pending_permissions(*, session_id: str) -> None:
+        calls.append(f"hook:{session_id}")
+
+    monkeypatch.setattr(container.external_discovery, "prune_dead", fake_prune_dead)
+    monkeypatch.setattr(container.external_discovery, "prune_stale", fake_prune_stale)
+    monkeypatch.setattr(container.permission_callback_registry, "invalidate_session", fake_registry_invalidate)
+    monkeypatch.setattr(container.unbound_permission_handler, "invalidate_session", fake_unbound_invalidate)
+    monkeypatch.setattr(container.hook_socket_server, "cancel_pending_permissions", fake_cancel_pending_permissions)
+
+    try:
+        await container._prune_unbound_external_sessions()
+        await container._prune_unbound_external_sessions()
+    finally:
+        await container.bot.session.close()
+
+    assert calls == [
+        "unbound_dead",
+        "registry:dead-a",
+        "unbound:dead-a",
+        "hook:dead-a",
+        "unbound_stale",
+        "unbound_dead",
+        "registry:dead-a",
+        "unbound:dead-a",
+        "hook:dead-a",
+        "unbound_stale",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prune_unbound_external_sessions_prunes_stale_when_dead_prune_fails(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     calls: list[str] = []
 
-    def fake_prune_dead() -> None:
+    def fake_prune_dead() -> list[str]:
         calls.append("unbound_dead")
         raise OverflowError("bad pid")
 
@@ -145,7 +397,7 @@ async def test_prune_unbound_external_sessions_prunes_stale_when_dead_prune_fail
         calls.append("unbound_stale")
         return ["stale-unbound"]
 
-    monkeypatch.setattr(container.external_discovery, "_prune_dead", fake_prune_dead)
+    monkeypatch.setattr(container.external_discovery, "prune_dead", fake_prune_dead)
     monkeypatch.setattr(container.external_discovery, "prune_stale", fake_prune_stale)
 
     try:

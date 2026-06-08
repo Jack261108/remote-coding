@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -9,6 +10,8 @@ from app.services.external_session_discovery import ExternalSessionDiscoveryServ
 from app.services.process_liveness import process_is_alive
 
 _HASH_TOKEN_PREFIX = "h."
+
+logger = logging.getLogger(__name__)
 
 
 def unique_prefixes(ids: Iterable[str], *, min_length: int = 16, max_length: int = 52) -> dict[str, str]:
@@ -72,8 +75,16 @@ def unavailable_unbound_session_message(session_id: str, discovery: ExternalSess
         return None
     if discovery.is_session_stale(session_id):
         return "Session is no longer available"
-    if unbound.pid is not None and unbound.pid > 0 and not process_is_alive(unbound.pid):
-        return "Session is no longer available"
+    if unbound.pid is not None and unbound.pid > 0:
+        try:
+            if not process_is_alive(unbound.pid):
+                return "Session is no longer available"
+        except Exception:
+            logger.warning(
+                "failed to check unbound external session pid during session resolution",
+                extra={"session_id": session_id, "pid": unbound.pid},
+                exc_info=True,
+            )
     return None
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from html import escape
 from typing import TYPE_CHECKING
 
@@ -43,6 +43,20 @@ def _html(text: str) -> str:
     return escape(text, quote=False)
 
 
+def _is_dead_pid(pid: int | None, *, session_id: str, source: str) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        return not process_is_alive(pid)
+    except Exception:
+        logger.warning(
+            "failed to check external session pid during /list",
+            extra={"session_id": session_id, "pid": pid, "source": source},
+            exc_info=True,
+        )
+        return False
+
+
 def _render_full_list(items: list[SessionListItem]) -> tuple[str, InlineKeyboardMarkup | None]:
     if not items:
         return "当前无活跃会话。", None
@@ -71,6 +85,7 @@ def register_list_handler(
     liveness_enabled: bool = False,
     reaper: ExternalBindingReaper | None = None,
     title_resolver: Callable[[str, str], str | None] | None = None,
+    dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
 ) -> None:
     async def collect_items(user_id: int) -> tuple[list[SessionListItem], list[ListSessionView], int]:
         now = utc_now()
@@ -121,7 +136,7 @@ def register_list_handler(
             external_sessions = external_discovery.list_unbound()
         for ext in external_sessions:
             # 检测 stale unbound sessions（pid 已死或基于时间）
-            is_dead_pid = ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid)
+            is_dead_pid = _is_dead_pid(ext.pid, session_id=ext.session_id, source="unbound")
             is_stale_time = (
                 external_discovery.is_session_stale(ext.session_id)
                 if external_discovery is not None and hasattr(external_discovery, "is_session_stale")
@@ -160,8 +175,7 @@ def register_list_handler(
                 visible = []
                 dead_ids: list[str] = []
                 for binding in bound_sessions:
-                    pid = binding.pid
-                    if pid is not None and pid > 0 and not process_is_alive(pid):
+                    if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
                         dead_ids.append(binding.session_id)
                         invalid_count += 1
                         continue
@@ -239,8 +253,7 @@ def register_list_handler(
         if external_binder is not None and liveness_enabled and reaper is not None:
             bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
             for binding in bound_sessions:
-                pid = binding.pid
-                if pid is not None and pid > 0 and not process_is_alive(pid):
+                if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
                     try:
                         if await reaper.remove_with_cleanup(binding.session_id, reason="pid_dead"):
                             cleaned += 1
@@ -259,12 +272,13 @@ def register_list_handler(
 
         # 3. 清理 stale unbound sessions（pid 已死的）
         if external_discovery is not None:
-            dead_unbound_ids: list[str] = []
-            for ext in external_discovery.list_unbound():
-                if ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid):
-                    dead_unbound_ids.append(ext.session_id)
+            dead_unbound_ids = external_discovery.prune_dead()
             for session_id in dead_unbound_ids:
-                external_discovery.remove_session(session_id)
+                if dead_unbound_cleanup is not None:
+                    try:
+                        await dead_unbound_cleanup(session_id)
+                    except Exception:
+                        logger.warning("cleanup failed for unbound session", extra={"session_id": session_id}, exc_info=True)
                 cleaned += 1
             # 清理基于时间的 stale sessions
             stale_ids = external_discovery.prune_stale()

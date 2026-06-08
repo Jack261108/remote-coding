@@ -180,3 +180,40 @@ def test_prune_stale_removes_foreign_owned_session_when_last_seen_old() -> None:
 
     assert session_id in removed
     assert service.get(session_id) is None
+
+
+def test_prune_dead_marks_session_ended_so_late_hook_is_not_rediscovered() -> None:
+    """Dead-pruned sessions are terminal; late hook events must not rediscover them."""
+    service = ExternalSessionDiscoveryService()
+    session_id = "dead-unbound"
+
+    service.record_event(_make_hook_event(session_id, pid=4242))
+    assert service.get(session_id) is not None
+
+    with patch("app.services.external_session_discovery.process_is_alive", return_value=False):
+        removed = service.prune_dead()
+
+    assert removed == [session_id]
+    assert service.get(session_id) is None
+    assert service.is_session_ended(session_id) is True
+
+    service.record_event(_make_hook_event(session_id, pid=9999))
+    assert service.get(session_id) is None
+
+
+def test_prune_stale_does_not_tombstone_and_allows_late_rediscovery() -> None:
+    """Stale pruning is cache-only eviction; late hook events may rediscover it."""
+    service = ExternalSessionDiscoveryService(stale_timeout_sec=600)
+    session_id = "stale-unbound"
+
+    service.record_event(_make_hook_event(session_id, pid=4242))
+    service._sessions[session_id].last_seen = utc_now() - timedelta(seconds=service._stale_timeout_sec + 10)
+
+    removed = service.prune_stale()
+
+    assert session_id in removed
+    assert service.get(session_id) is None
+    assert service.is_session_ended(session_id) is False
+
+    service.record_event(_make_hook_event(session_id, pid=9999))
+    assert service.get(session_id) is not None

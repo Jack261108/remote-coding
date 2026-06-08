@@ -82,6 +82,21 @@ async def test_resolve_and_bind_rejects_dead_pid_unbound_without_calling_binder_
 
 
 @pytest.mark.asyncio
+async def test_resolve_and_bind_bad_pid_unbound_does_not_crash_or_mark_unavailable(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    session_id = "bad-pid-unbound-session-0001"
+    _record_unbound(discovery, session_id, pid=2**100)
+
+    with patch("app.services.session_id_resolver.process_is_alive", side_effect=OverflowError("bad pid")):
+        result = await resolve_and_bind(session_id[:16], user_id=42, discovery=discovery, binder=binder)
+
+    assert result.success is True
+    assert result.session_id == session_id
+
+
+@pytest.mark.asyncio
 async def test_resolve_and_bind_bound_session_prefix_is_not_available_to_bind(
     binding_store: ExternalBindingStore,
     binder: ExternalSessionBinder,

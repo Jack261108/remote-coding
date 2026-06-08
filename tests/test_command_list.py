@@ -387,3 +387,277 @@ async def test_cleanup_removes_dead_sessions_and_refreshes(tmp_path: Path) -> No
     # 验证刷新消息（清理后可能无活跃会话）
     text = callback.message.answer.call_args.args[0]
     assert "会话" in text  # 刷新后的摘要或无会话提示
+
+
+@pytest.mark.asyncio
+async def test_command_list_bound_bad_pid_does_not_fail(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    store = ExternalBindingStore(data_dir=tmp_path)
+    user_id = 42
+    now = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    _save_external_binding(store, session_id="bound-bad-pid", user_id=user_id, title="BadPid", activity_at=now, pid=2**100)
+
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    binder = ExternalSessionBinder(
+        discovery=ExternalSessionDiscoveryService(),
+        binding_store=store,
+        projects_dir=tmp_path / "projects",
+    )
+    reaper = AsyncMock()
+    reaper.remove_with_cleanup = AsyncMock(return_value=True)
+
+    router = Router()
+    register_list_handler(
+        router,
+        registry_service=registry,
+        external_binder=binder,
+        liveness_enabled=True,
+        reaper=reaper,
+    )
+    handler = router.message.handlers[-1].callback
+    message = _message(user_id)
+
+    with patch("app.bot.handlers.command_list.process_is_alive", side_effect=OverflowError("bad pid")):
+        await handler(message)
+
+    text = message.answer.call_args.args[0]
+    assert "BadPid" in text
+    reaper.remove_with_cleanup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_bound_bad_pid_does_not_fail_or_reap(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    store = ExternalBindingStore(data_dir=tmp_path)
+    user_id = 42
+    now = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    _save_external_binding(store, session_id="bound-bad-pid-cleanup", user_id=user_id, title="BadPid", activity_at=now, pid=2**100)
+
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    binder = ExternalSessionBinder(
+        discovery=ExternalSessionDiscoveryService(),
+        binding_store=store,
+        projects_dir=tmp_path / "projects",
+    )
+    reaper = AsyncMock()
+    reaper.remove_with_cleanup = AsyncMock(return_value=True)
+
+    router = Router()
+    register_list_handler(
+        router,
+        registry_service=registry,
+        external_binder=binder,
+        liveness_enabled=True,
+        reaper=reaper,
+    )
+    callback_handler = router.callback_query.handlers[-1].callback
+
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=user_id)
+    callback.data = "sess:cleanup"
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.answer = AsyncMock()
+
+    with patch("app.bot.handlers.command_list.process_is_alive", side_effect=OverflowError("bad pid")):
+        await callback_handler(callback)
+
+    reaper.remove_with_cleanup.assert_not_awaited()
+    callback.answer.assert_awaited_once_with("已清理 0 个无效会话")
+    callback.message.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_dead_unbound_session_tombstones_and_runs_pending_cleanup(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    session_id = "dead-unbound-0001"
+    discovery = ExternalSessionDiscoveryService()
+    discovery.record_event(
+        HookEvent(
+            session_id=session_id,
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+            pid=12345,
+        )
+    )
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    cleanup_calls: list[str] = []
+
+    async def cleanup_dead_unbound_session(dead_session_id: str) -> None:
+        cleanup_calls.append(dead_session_id)
+
+    router = Router()
+    register_list_handler(
+        router,
+        registry_service=registry,
+        external_discovery=discovery,
+        dead_unbound_cleanup=cleanup_dead_unbound_session,
+    )
+    callback_handler = router.callback_query.handlers[-1].callback
+
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=42)
+    callback.data = "sess:cleanup"
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.answer = AsyncMock()
+
+    with patch("app.services.external_session_discovery.process_is_alive", return_value=False):
+        await callback_handler(callback)
+
+    assert cleanup_calls == [session_id]
+    assert discovery.get(session_id) is None
+    assert discovery.is_session_ended(session_id) is True
+
+    discovery.record_event(
+        HookEvent(
+            session_id=session_id,
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+            pid=99999,
+        )
+    )
+    assert discovery.get(session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_dead_unbound_session_uses_discovery_prune_dead_so_bad_pid_does_not_block(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    bad_session_id = "bad-pid-unbound"
+    dead_session_id = "dead-unbound-0002"
+    discovery = ExternalSessionDiscoveryService()
+    discovery.record_event(
+        HookEvent(
+            session_id=bad_session_id,
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+            pid=2**100,
+        )
+    )
+    discovery.record_event(
+        HookEvent(
+            session_id=dead_session_id,
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+            pid=12345,
+        )
+    )
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    cleanup_calls: list[str] = []
+
+    async def cleanup_dead_unbound_session(dead_session_id_arg: str) -> None:
+        cleanup_calls.append(dead_session_id_arg)
+
+    router = Router()
+    register_list_handler(
+        router,
+        registry_service=registry,
+        external_discovery=discovery,
+        dead_unbound_cleanup=cleanup_dead_unbound_session,
+    )
+    callback_handler = router.callback_query.handlers[-1].callback
+
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=42)
+    callback.data = "sess:cleanup"
+    callback.answer = AsyncMock()
+    callback.message = None
+
+    def fake_discovery_liveness(pid: int) -> bool:
+        if pid == 2**100:
+            raise OverflowError("bad pid")
+        return False
+
+    with (
+        patch("app.bot.handlers.command_list.process_is_alive", side_effect=AssertionError("use discovery prune_dead")),
+        patch("app.services.external_session_discovery.process_is_alive", side_effect=fake_discovery_liveness),
+    ):
+        await callback_handler(callback)
+
+    assert cleanup_calls == [dead_session_id]
+    assert discovery.get(bad_session_id) is not None
+    assert discovery.get(dead_session_id) is None
+    assert discovery.is_session_ended(dead_session_id) is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_refresh_does_not_fail_when_bad_pid_remains_after_prune_dead(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    bad_session_id = "bad-pid-unbound-refresh"
+    dead_session_id = "dead-unbound-refresh"
+    discovery = ExternalSessionDiscoveryService()
+    discovery.record_event(
+        HookEvent(
+            session_id=bad_session_id,
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+            pid=2**100,
+        )
+    )
+    discovery.record_event(
+        HookEvent(
+            session_id=dead_session_id,
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+            pid=12345,
+        )
+    )
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    cleanup_calls: list[str] = []
+
+    async def cleanup_dead_unbound_session(dead_session_id_arg: str) -> None:
+        cleanup_calls.append(dead_session_id_arg)
+
+    router = Router()
+    register_list_handler(
+        router,
+        registry_service=registry,
+        external_discovery=discovery,
+        dead_unbound_cleanup=cleanup_dead_unbound_session,
+    )
+    callback_handler = router.callback_query.handlers[-1].callback
+
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=42)
+    callback.data = "sess:cleanup"
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.answer = AsyncMock()
+
+    def fake_discovery_liveness(pid: int) -> bool:
+        if pid == 2**100:
+            raise OverflowError("bad pid")
+        return False
+
+    def fake_list_liveness(pid: int) -> bool:
+        if pid == 2**100:
+            raise OverflowError("bad pid")
+        return False
+
+    with (
+        patch("app.services.external_session_discovery.process_is_alive", side_effect=fake_discovery_liveness),
+        patch("app.bot.handlers.command_list.process_is_alive", side_effect=fake_list_liveness),
+    ):
+        await callback_handler(callback)
+
+    assert cleanup_calls == [dead_session_id]
+    callback.answer.assert_awaited_once_with("已清理 1 个无效会话")
+    callback.message.answer.assert_awaited_once()
+    assert discovery.get(bad_session_id) is not None
+    assert discovery.get(dead_session_id) is None

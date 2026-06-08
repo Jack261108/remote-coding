@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -273,14 +274,46 @@ class AppContainer(
         )
         self._background_tasks = BackgroundTaskRegistry(label="bootstrap")
         self._janitor = PeriodicJanitor()
+        self._pending_dead_unbound_cleanup_ids: set[str] = set()
         self._started = False
+
+    async def _cleanup_dead_unbound_external_session(self, session_id: str) -> bool:
+        """Invalidate pending state for a dead-pruned unbound external session."""
+
+        async def invalidate_external_uq_state() -> int:
+            return self.external_uq_state.invalidate_session(session_id)
+
+        cleanup_steps: tuple[tuple[str, Callable[[], Awaitable[object]]], ...] = (
+            ("auto approve service", lambda: self.auto_approve_service.clear_session(session_id)),
+            ("permission callback registry", lambda: self.permission_callback_registry.invalidate_session(session_id)),
+            ("unbound permission handler", lambda: self.unbound_permission_handler.invalidate_session(session_id)),
+            ("external user question state", invalidate_external_uq_state),
+            ("hook pending permissions", lambda: self.hook_socket_server.cancel_pending_permissions(session_id=session_id)),
+        )
+        success = True
+        for label, cleanup in cleanup_steps:
+            try:
+                await cleanup()
+            except Exception:
+                success = False
+                logger.exception("dead unbound external session cleanup failed", extra={"session_id": session_id, "step": label})
+        if success:
+            self._pending_dead_unbound_cleanup_ids.discard(session_id)
+        else:
+            self._pending_dead_unbound_cleanup_ids.add(session_id)
+        return success
 
     async def _prune_unbound_external_sessions(self) -> None:
         """Prune in-memory unbound external session discovery entries."""
+        dead_ids: list[str] = []
         try:
-            self.external_discovery._prune_dead()
+            dead_ids = self.external_discovery.prune_dead()
         except Exception:
             logger.exception("external discovery dead-prune failed")
+        self._pending_dead_unbound_cleanup_ids.update(dead_ids)
+        for session_id in sorted(self._pending_dead_unbound_cleanup_ids):
+            if await self._cleanup_dead_unbound_external_session(session_id):
+                self._pending_dead_unbound_cleanup_ids.discard(session_id)
         self.external_discovery.prune_stale()
 
     async def start(self) -> None:
@@ -387,5 +420,6 @@ class AppContainer(
             liveness_enabled=self.settings.external_binding_pid_liveness_enabled,
             external_binding_reaper=self.external_binding_reaper,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
+            dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
         )
         self.dispatcher.include_router(router)

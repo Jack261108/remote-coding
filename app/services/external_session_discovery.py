@@ -82,8 +82,8 @@ class ExternalSessionDiscoveryService:
         """Return all currently-active unbound sessions without pruning."""
         return list(self._sessions.values())
 
-    def _prune_dead(self) -> None:
-        """Remove sessions whose pid is no longer running."""
+    def prune_dead(self) -> list[str]:
+        """Remove ended sessions whose pid is no longer running."""
         dead_ids: list[str] = []
         for session_id, session in self._sessions.items():
             if session.pid is None or session.pid <= 0:
@@ -96,7 +96,12 @@ class ExternalSessionDiscoveryService:
             if not is_alive:
                 dead_ids.append(session_id)
         for session_id in dead_ids:
-            del self._sessions[session_id]
+            self.mark_session_ended(session_id)
+        return dead_ids
+
+    def _prune_dead(self) -> None:
+        """Remove sessions whose pid is no longer running."""
+        self.prune_dead()
 
     @staticmethod
     def _is_pid_alive(pid: int) -> bool:
