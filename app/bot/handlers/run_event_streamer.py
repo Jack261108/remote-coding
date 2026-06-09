@@ -150,9 +150,16 @@ class RunEventStreamer:
         if task.cancelled():
             return
         try:
-            task.exception()
+            exc = task.exception()
         except Exception:
             logger.exception("background task raised an exception", extra={"task_name": task.get_name()})
+            return
+        if exc is not None:
+            logger.warning(
+                "background task raised an exception",
+                extra={"task_name": task.get_name()},
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     def _forget_abandoned_interactive_pump(self, task: asyncio.Task) -> None:
         _ABANDONED_INTERACTIVE_PUMP_TASKS.discard(task)
@@ -307,11 +314,15 @@ class RunEventStreamer:
                         continue
                     if self._start.interactive:
                         continue
-                    logger.info(
-                        "[task %s][%s] %s",
-                        self._start.task.task_id,
-                        event.type.value,
-                        event.content.rstrip("\n"),
+                    logger.debug(
+                        "task stream output event",
+                        extra={
+                            "task_id": self._start.task.task_id,
+                            "user_id": self._user_id,
+                            "provider": self._start.task.provider,
+                            "event_type": event.type.value,
+                            "content_chars": len(event.content),
+                        },
                     )
                     prefix = "" if event.type == EventType.STDOUT else "[stderr] "
                     await self._dispatcher.push_text(f"{prefix}{event.content}")

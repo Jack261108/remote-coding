@@ -31,6 +31,17 @@ class _CachedToolUseId:
     cached_at: datetime
 
 
+def _summarize_tool_input(tool_input: dict[str, Any] | None) -> dict[str, Any] | None:
+    if tool_input is None:
+        return None
+    summary: dict[str, Any] = {"key_count": len(tool_input)}
+    try:
+        summary["approx_bytes"] = len(json.dumps(tool_input, ensure_ascii=False, sort_keys=True))
+    except (TypeError, ValueError):
+        pass
+    return summary
+
+
 class HookSocketServer:
     def __init__(
         self,
@@ -185,20 +196,57 @@ class HookSocketServer:
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         raw, is_framed = await self._read_hook_payload(reader)
+        raw_size = len(raw)
         if not raw:
             await self._close_writer(writer)
             return
-        if len(raw) > self._max_message_bytes:
-            logger.warning("hook message rejected: too large", extra={"max_message_bytes": self._max_message_bytes})
+        if raw_size > self._max_message_bytes:
+            logger.warning(
+                "hook message rejected: too large",
+                extra={"max_message_bytes": self._max_message_bytes, "raw_size": raw_size, "is_framed": is_framed},
+            )
             await self._close_writer(writer)
             return
 
         try:
-            payload = json.loads(raw.decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("hook payload 必须为对象")
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            logger.warning(
+                "hook payload rejected",
+                extra={"reason": "utf8_decode_failed", "error_type": type(exc).__name__, "raw_size": raw_size, "is_framed": is_framed},
+            )
+            await self._close_writer(writer)
+            return
+
+        try:
+            payload = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "hook payload rejected",
+                extra={"reason": "json_decode_failed", "error_type": type(exc).__name__, "raw_size": raw_size, "is_framed": is_framed},
+            )
+            await self._close_writer(writer)
+            return
+        if not isinstance(payload, dict):
+            logger.warning(
+                "hook payload rejected",
+                extra={"reason": "non_object_payload", "error_type": type(payload).__name__, "raw_size": raw_size, "is_framed": is_framed},
+            )
+            await self._close_writer(writer)
+            return
+        try:
             event = HookEvent.from_dict(payload)
-        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, ValueError):
+        except (KeyError, ValueError) as exc:
+            logger.warning(
+                "hook payload rejected",
+                extra={
+                    "reason": "validation_failed",
+                    "error_type": type(exc).__name__,
+                    "raw_size": raw_size,
+                    "is_framed": is_framed,
+                    "payload_key_count": len(payload),
+                },
+            )
             await self._close_writer(writer)
             return
 
@@ -210,16 +258,17 @@ class HookSocketServer:
             await self._close_writer(writer)
             return
 
-        # Log all received events for debugging
         logger.info(
-            "hook event received session_id=%s event=%s status=%s tool=%s tool_use_id=%s expects_response=%s tool_input=%s",
-            event.session_id,
-            event.event,
-            event.status,
-            event.tool,
-            event.tool_use_id,
-            event.expects_response,
-            event.tool_input,
+            "hook event received",
+            extra={
+                "session_id": event.session_id,
+                "event": event.event,
+                "status": event.status,
+                "tool": event.tool,
+                "tool_use_id": event.tool_use_id,
+                "expects_response": event.expects_response,
+                "tool_input_summary": _summarize_tool_input(event.tool_input),
+            },
         )
 
         if event.event == "PreToolUse" and event.tool_use_id:
@@ -236,15 +285,17 @@ class HookSocketServer:
                     tool_use_id = await self._find_pending_permission_tool_use_id(event)
             if tool_use_id:
                 logger.info(
-                    "terminal permission resolution detected session_id=%s event=%s decision=%s resolved_tool_use_id=%s original_tool_use_id=%s has_pending=%s tool=%s tool_input=%s",
-                    event.session_id,
-                    event.event,
-                    decision,
-                    tool_use_id,
-                    event.tool_use_id,
-                    tool_use_id in self._pending_permissions,
-                    event.tool,
-                    event.tool_input,
+                    "terminal permission resolution detected",
+                    extra={
+                        "session_id": event.session_id,
+                        "event": event.event,
+                        "decision": decision,
+                        "resolved_tool_use_id": tool_use_id,
+                        "original_tool_use_id": event.tool_use_id,
+                        "has_pending": tool_use_id in self._pending_permissions,
+                        "tool": event.tool,
+                        "tool_input_summary": _summarize_tool_input(event.tool_input),
+                    },
                 )
                 await self._check_terminal_permission_resolved(event.session_id, tool_use_id, decision)
         if event.event == "SessionEnd":
@@ -265,7 +316,7 @@ class HookSocketServer:
                     extra={
                         "session_id": event.session_id,
                         "tool": event.tool,
-                        "tool_input": event.tool_input,
+                        "tool_input_summary": _summarize_tool_input(event.tool_input),
                         "synthetic_tool_use_id": fallback_tool_use_id,
                     },
                 )
@@ -362,7 +413,7 @@ class HookSocketServer:
                         "session_id": item.session_id,
                         "tool_use_id": item.tool_use_id,
                         "tool": item.event.tool,
-                        "tool_input": item.event.tool_input,
+                        "tool_input_summary": _summarize_tool_input(item.event.tool_input),
                     }
                     for item in self._pending_permissions.values()
                 ]
@@ -530,7 +581,7 @@ class HookSocketServer:
                     "session_id": event.session_id,
                     "tool": event.tool,
                     "tool_use_id": cached.tool_use_id,
-                    "tool_input": event.tool_input,
+                    "tool_input_summary": _summarize_tool_input(event.tool_input),
                 },
             )
             return cached.tool_use_id or None

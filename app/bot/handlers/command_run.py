@@ -368,7 +368,7 @@ async def run_prompt_and_stream(
                 return
             exc = done.exception()
             if exc is not None:
-                logger.error("error notification task failed", exc_info=exc)
+                logger.error("error notification task failed", exc_info=(type(exc), exc, exc.__traceback__))
 
         notify_task.add_done_callback(_log_notify_error)
 

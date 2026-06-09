@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from pathlib import Path
 
@@ -806,10 +807,12 @@ async def test_hook_socket_server_sets_socket_permissions(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_hook_socket_server_rejects_invalid_hook_payloads(tmp_path) -> None:
+async def test_hook_socket_server_rejects_invalid_hook_payloads(tmp_path, caplog) -> None:
     seen: list[HookEvent] = []
     socket_path = _socket_path()
     server = HookSocketServer(str(socket_path))
+    secret = "SECRET_TOKEN_DO_NOT_LOG"
+    caplog.set_level(logging.WARNING, logger="app.adapters.claude.hook_socket_server")
 
     async def on_event(event: HookEvent) -> None:
         seen.append(event)
@@ -820,7 +823,14 @@ async def test_hook_socket_server_rejects_invalid_hook_payloads(tmp_path) -> Non
         {"session_id": "s1", "cwd": "relative/path", "event": "SessionStart", "status": "starting"},
         {"session_id": "s1", "cwd": "/tmp/project", "event": "Unknown", "status": "starting"},
         {"session_id": "s1", "cwd": "/tmp/project", "event": "SessionStart", "status": "unknown"},
-        {"session_id": "s1", "cwd": "/tmp/project", "event": "SessionStart", "status": "starting", "pid": "123"},
+        {
+            "session_id": "s1",
+            "cwd": "/tmp/project",
+            "event": "SessionStart",
+            "status": "starting",
+            "pid": "123",
+            "tool_input": {"command": secret},
+        },
     ]
     try:
         for payload in invalid_payloads:
@@ -831,29 +841,126 @@ async def test_hook_socket_server_rejects_invalid_hook_payloads(tmp_path) -> Non
     finally:
         await server.stop()
 
+    records = [record for record in caplog.records if record.message == "hook payload rejected"]
+    assert len(records) == len(invalid_payloads)
+    assert {record.reason for record in records} == {"validation_failed"}
+    assert all(record.error_type in {"KeyError", "ValueError"} for record in records)
+    assert all(record.raw_size > 0 for record in records)
+    assert all(record.is_framed is False for record in records)
+    assert all(record.payload_key_count > 0 for record in records)
+    assert all(not hasattr(record, "payload_keys") for record in records)
+    assert secret not in caplog.text
+    assert not any(secret in str(record.__dict__) for record in records)
     assert seen == []
 
 
 @pytest.mark.asyncio
-async def test_hook_socket_server_rejects_oversized_message(tmp_path) -> None:
+async def test_hook_socket_server_logs_malformed_payload_rejections_without_raw_payload(tmp_path, caplog) -> None:
     seen: list[HookEvent] = []
     socket_path = _socket_path()
-    server = HookSocketServer(str(socket_path), max_message_bytes=32)
+    server = HookSocketServer(str(socket_path))
+    secret = "SECRET_TOKEN_DO_NOT_LOG"
+    caplog.set_level(logging.WARNING, logger="app.adapters.claude.hook_socket_server")
 
     async def on_event(event: HookEvent) -> None:
         seen.append(event)
 
     await server.start(on_event)
     try:
-        reader, writer = await _send_raw(
-            socket_path, b'{"session_id":"s1","cwd":"/tmp/project","event":"SessionStart","status":"starting"}'
+        for raw in [b"\xff", f'{{"command":"{secret}"'.encode(), b"[]"]:
+            reader, writer = await _send_raw(socket_path, raw)
+            assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+            writer.close()
+            await writer.wait_closed()
+    finally:
+        await server.stop()
+
+    records = [record for record in caplog.records if record.message == "hook payload rejected"]
+    assert [record.reason for record in records] == [
+        "utf8_decode_failed",
+        "json_decode_failed",
+        "non_object_payload",
+    ]
+    assert all(record.raw_size > 0 for record in records)
+    assert all(record.is_framed is False for record in records)
+    assert secret not in caplog.text
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_does_not_log_raw_tool_input_at_info(tmp_path, caplog) -> None:
+    seen: list[HookEvent] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+    secret = "SECRET_TOKEN_DO_NOT_LOG"
+    secret_key = "SECRET_KEY_DO_NOT_LOG"
+    caplog.set_level(logging.INFO, logger="app.adapters.claude.hook_socket_server")
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+        delivered.set()
+
+    await server.start(on_event)
+    try:
+        reader, writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": secret, secret_key: "/tmp/example"},
+                "tool_use_id": "tool-1",
+            },
         )
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        assert await reader.read() == b""
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+    records = [record for record in caplog.records if record.message == "hook event received"]
+    assert records
+    assert records[0].tool_input_summary == {
+        "approx_bytes": len(json.dumps({"command": secret, secret_key: "/tmp/example"}, ensure_ascii=False, sort_keys=True)),
+        "key_count": 2,
+    }
+    assert secret not in caplog.text
+    assert secret_key not in caplog.text
+    assert not any(secret in str(record.__dict__) or secret_key in str(record.__dict__) for record in records)
+    assert seen[0].tool_input == {"command": secret, secret_key: "/tmp/example"}
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_rejects_oversized_message(tmp_path, caplog) -> None:
+    seen: list[HookEvent] = []
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path), max_message_bytes=32)
+    secret = "SECRET_TOKEN_DO_NOT_LOG"
+    caplog.set_level(logging.WARNING, logger="app.adapters.claude.hook_socket_server")
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+
+    payload = f'{{"session_id":"s1","cwd":"/tmp/project","event":"SessionStart","status":"starting","command":"{secret}"}}'.encode()
+    await server.start(on_event)
+    try:
+        reader, writer = await _send_raw(socket_path, payload)
         assert await asyncio.wait_for(reader.read(), timeout=1) == b""
         writer.close()
         await writer.wait_closed()
     finally:
         await server.stop()
 
+    records = [record for record in caplog.records if record.message == "hook message rejected: too large"]
+    assert records
+    assert records[0].max_message_bytes == 32
+    assert records[0].raw_size == len(payload)
+    assert records[0].is_framed is False
+    assert secret not in caplog.text
     assert seen == []
 
 

@@ -54,4 +54,4 @@ class BackgroundTaskRegistry:
             return
         exc = task.exception()
         if exc is not None:
-            logger.warning("%s task failed", self._label, exc_info=exc)
+            logger.warning("%s task failed", self._label, exc_info=(type(exc), exc, exc.__traceback__))
