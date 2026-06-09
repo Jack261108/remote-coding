@@ -247,7 +247,7 @@ async def test_remove_with_cleanup_skips_when_binding_already_absent() -> None:
     hook_socket_server.cancel_pending_permissions.assert_not_awaited()
 
 
-async def test_remove_with_cleanup_does_not_tombstone_or_invalidate_idle_ttl_removal() -> None:
+async def test_remove_with_cleanup_marks_idle_ttl_binding_unavailable_without_pid_dead_cleanup() -> None:
     binding_store = Mock()
     binding_store.get_binding = Mock(return_value=_make_binding("sess-idle"))
     binding_store.remove_binding = Mock()
@@ -261,6 +261,7 @@ async def test_remove_with_cleanup_does_not_tombstone_or_invalidate_idle_ttl_rem
     external_uq_state = Mock()
     external_uq_state.invalidate_session = Mock(return_value=1)
     external_discovery = Mock()
+    external_discovery.mark_session_unavailable = Mock()
     external_discovery.mark_session_ended = Mock()
 
     reaper = ExternalBindingReaper(
@@ -277,6 +278,7 @@ async def test_remove_with_cleanup_does_not_tombstone_or_invalidate_idle_ttl_rem
     assert result is True
     permission_callback_registry.invalidate_session.assert_not_awaited()
     external_uq_state.invalidate_session.assert_not_called()
+    external_discovery.mark_session_unavailable.assert_called_once_with("sess-idle")
     external_discovery.mark_session_ended.assert_not_called()
 
 

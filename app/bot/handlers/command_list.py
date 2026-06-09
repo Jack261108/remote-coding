@@ -87,7 +87,7 @@ def register_list_handler(
     title_resolver: Callable[[str, str], str | None] | None = None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
 ) -> None:
-    async def collect_items(user_id: int) -> tuple[list[SessionListItem], list[ListSessionView], int]:
+    async def collect_items(user_id: int) -> tuple[list[SessionListItem], list[ListSessionView], int, list[str]]:
         now = utc_now()
         legacy_items: list[SessionListItem] = []
         summary_items: list[ListSessionView] = []
@@ -134,6 +134,12 @@ def register_list_handler(
         external_sessions = []
         if external_discovery is not None:
             external_sessions = external_discovery.list_unbound()
+        external_token_ids = [ext.session_id for ext in external_sessions]
+        if external_binder is not None:
+            external_token_ids.extend(binding.session_id for binding in external_binder._binding_store.list_all())
+        if external_discovery is not None:
+            external_token_ids.extend(external_discovery.unavailable_session_ids())
+        external_prefixes = unique_prefixes(external_token_ids, min_length=16, max_length=52)
         for ext in external_sessions:
             # 检测 stale unbound sessions（pid 已死或基于时间）
             is_dead_pid = _is_dead_pid(ext.pid, session_id=ext.session_id, source="unbound")
@@ -153,7 +159,7 @@ def register_list_handler(
                     status_icon="📡",
                     status_text=status,
                     source="external",
-                    buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{ext.session_id[:16]}")],
+                    buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{external_prefixes[ext.session_id]}")],
                 )
             )
             summary_items.append(
@@ -208,7 +214,7 @@ def register_list_handler(
                     status_icon="🔗",
                     status_text="已绑定",
                     source="bound",
-                    buttons=[(title or _short_cwd(b.cwd), f"sess:select:{b.session_id[:16]}")],
+                    buttons=[(title or _short_cwd(b.cwd), f"sess:select:{external_prefixes[b.session_id]}")],
                 )
             )
             summary_items.append(
@@ -222,23 +228,24 @@ def register_list_handler(
                 )
             )
 
-        return legacy_items, summary_items, invalid_count
+        return legacy_items, summary_items, invalid_count, external_token_ids
 
     @router.message(Command("list"))
     async def command_list(message: Message) -> None:
         user_id = extract_user_id(message)
-        _, summary_items, invalid_count = await collect_items(user_id)
+        _, summary_items, invalid_count, external_token_ids = await collect_items(user_id)
         result = build_session_list_message(
             summary_items,
             now=utc_now(),
             has_invalid_sessions=invalid_count > 0,
+            external_token_ids=external_token_ids,
         )
         await message.answer(result.text, parse_mode="HTML", reply_markup=result.keyboard)
 
     @router.callback_query(F.data == "sess:list:all")
     async def handle_list_all(callback: CallbackQuery) -> None:
         user_id = extract_user_id(callback)
-        legacy_items, _, _ = await collect_items(user_id)
+        legacy_items, _, _, _ = await collect_items(user_id)
         text, keyboard = _render_full_list(legacy_items)
         await callback.answer()
         if callback.message:
@@ -288,10 +295,11 @@ def register_list_handler(
 
         # 刷新摘要视图
         if callback.message:
-            _, summary_items, invalid_count = await collect_items(user_id)
+            _, summary_items, invalid_count, external_token_ids = await collect_items(user_id)
             result = build_session_list_message(
                 summary_items,
                 now=utc_now(),
                 has_invalid_sessions=invalid_count > 0,
+                external_token_ids=external_token_ids,
             )
             await callback.message.answer(result.text, parse_mode="HTML", reply_markup=result.keyboard)

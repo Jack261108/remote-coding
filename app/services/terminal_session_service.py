@@ -76,9 +76,13 @@ class TerminalSessionService:
                 if current.terminal_id != terminal_id:
                     continue
 
-                closed = await self._cli_factory.close_terminal(terminal_id)
+                close_result = await self._cli_factory.close_terminal(terminal_id)
+                if isinstance(close_result, tuple):
+                    closed, close_text = close_result
+                else:
+                    closed, close_text = close_result, "终端不存在"
                 if not closed:
-                    return False, "终端不存在或关闭失败"
+                    return False, close_text
 
                 contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == terminal_id]
                 claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})
@@ -100,12 +104,24 @@ class TerminalSessionService:
         session = await self._session_service.get(user_id)
         had_old_terminal = bool(session and session.terminal_mode and session.terminal_id)
         self._clear_user_questions(user_id)
-        if session is not None:
-            await self._session_service.clear_claude_session(user_id=user_id)
         if had_old_terminal:
             closed, text = await self.close_terminal(user_id)
-            if not closed and text != "终端不存在或关闭失败":
-                return f"旧终端关闭失败: {text}"
+            if not closed:
+                if text != "终端不存在":
+                    return f"旧终端关闭失败: {text}"
+                if session is not None and session.terminal_id:
+                    terminal_id = session.terminal_id
+                    contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == terminal_id]
+                    if self._auto_approve_service is not None:
+                        for session_id in sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id}):
+                            await self._auto_approve_service.clear_session(session_id)
+                    affected_user_ids = await self._session_service.clear_terminal_group(terminal_id)
+                    for affected_user_id in affected_user_ids:
+                        self._clear_user_questions(affected_user_id)
+                else:
+                    await self._session_service.clear_claude_session(user_id=user_id)
+        elif session is not None:
+            await self._session_service.clear_claude_session(user_id=user_id)
 
         workdir_source = workdir or (session.workdir if session else self._settings.default_workdir)
         selected_workdir = str(Path(workdir_source).resolve())

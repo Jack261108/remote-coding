@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -12,7 +13,7 @@ from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import resolve_and_bind
+from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, unique_prefixes
 
 
 @pytest.fixture
@@ -44,6 +45,224 @@ def _record_unbound(discovery: ExternalSessionDiscoveryService, session_id: str,
             pid=pid,
         )
     )
+
+
+def test_resolve_session_id_accepts_hash_token_for_long_common_prefix(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    session_ids = ["x" * 52 + "a", "x" * 52 + "b"]
+    for session_id in session_ids:
+        _record_unbound(discovery, session_id)
+    token = unique_prefixes(session_ids)[session_ids[0]]
+    assert token.startswith("~")
+
+    resolved, error = _resolve_session_id(token, discovery, binder)
+
+    assert resolved == session_ids[0]
+    assert error is None
+
+
+def test_unique_prefixes_hashes_dot_ending_session_token() -> None:
+    tokens = unique_prefixes(["abc."])
+
+    assert tokens["abc."].startswith("~")
+
+
+def test_unique_prefixes_avoids_legacy_h_dot_hash_token_shape() -> None:
+    token_shaped_session_id = "h." + "a" * 16
+
+    tokens = unique_prefixes([token_shaped_session_id], min_length=len(token_shaped_session_id))
+
+    assert tokens[token_shaped_session_id].startswith("~")
+
+
+def test_resolve_session_id_accepts_tilde_prefixed_session_token(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    session_id = "~abcdefghijklmnop"
+    _record_unbound(discovery, session_id)
+    token = unique_prefixes([session_id])[session_id]
+
+    resolved, error = _resolve_session_id(token, discovery, binder)
+
+    assert resolved == session_id
+    assert error is None
+
+
+def test_unique_prefixes_avoids_tilde_hash_token_shape(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    session_id = "~" + "a" * 16
+    _record_unbound(discovery, session_id)
+    token = unique_prefixes([session_id], min_length=len(session_id))[session_id]
+
+    assert token != session_id
+    resolved, error = _resolve_session_id(token, discovery, binder)
+
+    assert resolved == session_id
+    assert error is None
+
+
+def test_resolve_session_id_accepts_exact_token_without_trailing_dot_collision(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    session_ids = ["abc", "abc.", "abcdef"]
+    for session_id in session_ids:
+        _record_unbound(discovery, session_id)
+    tokens = unique_prefixes(session_ids)
+    assert tokens["abc"] != "abc."
+    assert len(set(tokens.values())) == len(tokens)
+
+    resolved_short, short_error = _resolve_session_id(tokens["abc"], discovery, binder)
+    resolved_dot, dot_error = _resolve_session_id(tokens["abc."], discovery, binder)
+
+    assert resolved_short == "abc"
+    assert short_error is None
+    assert resolved_dot == "abc."
+    assert dot_error is None
+
+
+def test_resolve_session_id_treats_h_dot_prefix_as_normal_session_id(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    session_id = "h.abcdefghijklmnop"
+    _record_unbound(discovery, session_id)
+    token = unique_prefixes([session_id])[session_id]
+    assert token.startswith("h.")
+
+    resolved, error = _resolve_session_id(token, discovery, binder)
+
+    assert resolved == session_id
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_bind_hash_token_for_unavailable_session_reports_unavailable(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    session_ids = ["y" * 52 + "a", "y" * 52 + "b"]
+    token = unique_prefixes(session_ids)[session_ids[0]]
+    assert token.startswith("~")
+    discovery.mark_session_unavailable(session_ids[0])
+    binder.bind = AsyncMock(return_value=SimpleNamespace(success=True, conversation_available=False, message="should not bind"))
+
+    result = await resolve_and_bind(token, user_id=42, discovery=discovery, binder=binder)
+
+    assert result.success is False
+    assert result.message == "Session is no longer available"
+    binder.bind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_bind_legacy_trailing_dot_live_token_binds_original_session(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    _record_unbound(discovery, "abc")
+    _record_unbound(discovery, "abc.")
+    binder.bind = AsyncMock(return_value=SimpleNamespace(success=True, conversation_available=False, message="bound"))
+
+    result = await resolve_and_bind("abc.", user_id=42, discovery=discovery, binder=binder)
+
+    assert result.success is True
+    assert result.session_id == "abc"
+    binder.bind.assert_awaited_once_with(user_id=42, session_id="abc")
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_bind_legacy_h_dot_hash_live_token_binds_original_session(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    old_session_id = "legacy-live-long-session-" + "x" * 60
+    old_token = f"h.{hashlib.sha1(old_session_id.encode()).hexdigest()[:16]}"
+    _record_unbound(discovery, old_session_id)
+    _record_unbound(discovery, old_token)
+    binder.bind = AsyncMock(return_value=SimpleNamespace(success=True, conversation_available=False, message="bound"))
+
+    result = await resolve_and_bind(old_token, user_id=42, discovery=discovery, binder=binder)
+
+    assert result.success is True
+    assert result.session_id == old_session_id
+    binder.bind.assert_awaited_once_with(user_id=42, session_id=old_session_id)
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_bind_legacy_trailing_dot_unavailable_token_does_not_bind_live_session(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    discovery.mark_session_unavailable("abc")
+    _record_unbound(discovery, "abc.")
+    binder.bind = AsyncMock(return_value=SimpleNamespace(success=True, conversation_available=False, message="should not bind"))
+
+    result = await resolve_and_bind("abc.", user_id=42, discovery=discovery, binder=binder)
+
+    assert result.success is False
+    assert result.message == "Session is no longer available"
+    binder.bind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_bind_legacy_h_dot_hash_unavailable_token_does_not_bind_live_session(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    old_session_id = "legacy-long-session-" + "x" * 60
+    old_token = f"h.{hashlib.sha1(old_session_id.encode()).hexdigest()[:16]}"
+    discovery.mark_session_unavailable(old_session_id)
+    _record_unbound(discovery, old_token)
+    binder.bind = AsyncMock(return_value=SimpleNamespace(success=True, conversation_available=False, message="should not bind"))
+
+    result = await resolve_and_bind(old_token, user_id=42, discovery=discovery, binder=binder)
+
+    assert result.success is False
+    assert result.message == "Session is no longer available"
+    binder.bind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_bind_unavailable_prefix_does_not_bind_new_exact_live_session(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    old_session_id = "abcdefghijklmnop-old"
+    live_session_id = "abcdefghijklmnop"
+    discovery.mark_session_unavailable(old_session_id)
+    _record_unbound(discovery, live_session_id)
+    binder.bind = AsyncMock(return_value=SimpleNamespace(success=True, conversation_available=False, message="should not bind"))
+
+    result = await resolve_and_bind(live_session_id, user_id=42, discovery=discovery, binder=binder)
+
+    assert result.success is False
+    assert result.message == "Session is no longer available"
+    binder.bind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_bind_stale_collision_does_not_bind_live_session_from_old_prefix(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_id = "shared-prefix-old"
+    live_id = "shared-prefix-live"
+    _record_unbound(discovery, stale_id)
+    _record_unbound(discovery, live_id)
+    monkeypatch.setattr(discovery, "is_session_stale", lambda session_id: session_id == stale_id)
+    binder.bind = AsyncMock(return_value=SimpleNamespace(success=True, conversation_available=False, message="should not bind"))
+
+    result = await resolve_and_bind("shared-prefix-", user_id=42, discovery=discovery, binder=binder)
+
+    assert result.success is False
+    assert result.message == "Session is no longer available"
+    binder.bind.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -137,7 +356,7 @@ async def test_resolve_and_bind_active_unbound_preserves_conversation_status_mes
 
 
 @pytest.mark.asyncio
-async def test_resolve_and_bind_ignores_stale_unbound_collision_for_live_unbound(
+async def test_resolve_and_bind_accepts_live_unique_prefix_despite_stale_unbound(
     discovery: ExternalSessionDiscoveryService,
     binder: ExternalSessionBinder,
     monkeypatch: pytest.MonkeyPatch,
@@ -147,8 +366,9 @@ async def test_resolve_and_bind_ignores_stale_unbound_collision_for_live_unbound
     _record_unbound(discovery, stale_id)
     _record_unbound(discovery, live_id)
     monkeypatch.setattr(discovery, "is_session_stale", lambda session_id: session_id == stale_id)
+    token = unique_prefixes([stale_id, live_id])[live_id]
 
-    result = await resolve_and_bind(live_id[:16], user_id=42, discovery=discovery, binder=binder)
+    result = await resolve_and_bind(token, user_id=42, discovery=discovery, binder=binder)
 
     assert result.success is True
     assert result.session_id == live_id

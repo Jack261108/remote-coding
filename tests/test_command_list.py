@@ -11,6 +11,7 @@ from aiogram import Router
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.bot.handlers.command_list import register_list_handler
+from app.bot.handlers.session_actions import register_session_action_handlers
 from app.domain.external_session_models import ExternalBinding
 from app.domain.hook_models import HookEvent
 from app.services.external_binding_store import ExternalBindingStore
@@ -111,6 +112,15 @@ def _callback_data_from_answer(message: MagicMock) -> list[str]:
     return [button.callback_data or "" for row in keyboard.inline_keyboard for button in row]
 
 
+async def _dispatch_callback(router: Router, callback: MagicMock) -> None:
+    for handler in router.callback_query.handlers:
+        matched, data = await handler.check(callback)
+        if matched:
+            await handler.callback(callback, **data)
+            return
+    raise AssertionError(f"no callback handler matched {callback.data!r}")
+
+
 def _save_external_binding(
     store: ExternalBindingStore,
     *,
@@ -132,6 +142,350 @@ def _save_external_binding(
             pid=pid,
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_external_unbound_list_callback_selects_then_binds_without_session_not_found(tmp_path: Path) -> None:
+    session_id = "external-list-lifecycle-0001"
+    cwd = "/Users/jack/project/remote-coding"
+    user_id = 42
+    discovery = ExternalSessionDiscoveryService()
+    discovery.record_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=cwd,
+            event="PreToolUse",
+            status="running",
+            pid=12345,
+        )
+    )
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    sync_callback = AsyncMock()
+    binder = ExternalSessionBinder(
+        discovery=discovery,
+        binding_store=binding_store,
+        projects_dir=tmp_path / "projects",
+        sync_callback=sync_callback,
+    )
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    router = Router()
+    register_list_handler(router, registry_service=registry, external_discovery=discovery, external_binder=binder)
+    register_session_action_handlers(router, discovery=discovery, binder=binder, registry_service=registry)
+
+    from unittest.mock import patch
+
+    list_message = _message(user_id)
+    with patch("app.bot.handlers.command_list.process_is_alive", return_value=True):
+        await router.message.handlers[-1].callback(list_message)
+
+    callbacks = _callback_data_from_answer(list_message)
+    select_callbacks = [callback for callback in callbacks if callback.startswith("sess:select:")]
+    assert select_callbacks == [f"sess:select:{session_id[:16]}"]
+    select_callback_data = select_callbacks[0]
+
+    select_callback = MagicMock()
+    select_callback.from_user = SimpleNamespace(id=user_id)
+    select_callback.data = select_callback_data
+    select_callback.answer = AsyncMock()
+    select_callback.message = MagicMock()
+    select_callback.message.answer = AsyncMock()
+
+    with patch("app.services.session_id_resolver.process_is_alive", return_value=True):
+        await _dispatch_callback(router, select_callback)
+
+    select_callback.answer.assert_awaited_once_with()
+    bind_callbacks = _callback_data_from_answer(select_callback.message)
+    bind_callback_data = next(callback for callback in bind_callbacks if callback.startswith("sess:bind:"))
+
+    bind_callback = MagicMock()
+    bind_callback.from_user = SimpleNamespace(id=user_id)
+    bind_callback.data = bind_callback_data
+    bind_callback.answer = AsyncMock()
+    bind_callback.message = MagicMock()
+    bind_callback.message.answer = AsyncMock()
+
+    with patch("app.services.session_id_resolver.process_is_alive", return_value=True):
+        await _dispatch_callback(router, bind_callback)
+
+    bind_callback.answer.assert_awaited_once_with("绑定成功")
+    binding = binding_store.get_binding(session_id)
+    assert binding is not None
+    assert binding.user_id == user_id
+    assert binding.cwd == cwd
+    assert binding.pid == 12345
+    assert discovery.get(session_id) is None
+    sync_callback.assert_awaited_once_with(session_id, cwd)
+
+    await _dispatch_callback(router, bind_callback)
+
+    repeated_answer = bind_callback.answer.await_args_list[-1].args[0]
+    assert repeated_answer != "❌ Session not found"
+    assert repeated_answer == "❌ Session is not available to bind"
+
+
+@pytest.mark.asyncio
+async def test_bound_external_list_callback_avoids_other_users_bound_prefix_collision(tmp_path: Path) -> None:
+    user_session_id = "bound-collision-user-42"
+    other_session_id = "bound-collision-user-07"
+    shared_prefix = user_session_id[:16]
+    assert shared_prefix == other_session_id[:16]
+    store = ExternalBindingStore(data_dir=tmp_path)
+    now = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    _save_external_binding(store, session_id=user_session_id, user_id=42, title="Mine", activity_at=now)
+    _save_external_binding(store, session_id=other_session_id, user_id=7, title="Other", activity_at=now)
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    binder = ExternalSessionBinder(
+        discovery=ExternalSessionDiscoveryService(),
+        binding_store=store,
+        projects_dir=tmp_path / "projects",
+    )
+    router = Router()
+    register_list_handler(router, registry_service=registry, external_binder=binder)
+    register_session_action_handlers(router, discovery=binder._discovery, binder=binder, registry_service=registry)
+
+    message = _message(42)
+    await router.message.handlers[-1].callback(message)
+
+    select_callback_data = next(callback for callback in _callback_data_from_answer(message) if callback.startswith("sess:select:"))
+    assert select_callback_data != f"sess:select:{shared_prefix}"
+    callback = MagicMock()
+    callback.from_user = SimpleNamespace(id=42)
+    callback.data = select_callback_data
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.answer = AsyncMock()
+
+    await _dispatch_callback(router, callback)
+
+    callback.answer.assert_awaited_once_with()
+    callbacks = _callback_data_from_answer(callback.message)
+    assert callbacks
+    assert callbacks[0].startswith("sess:unbind:")
+
+
+@pytest.mark.asyncio
+async def test_external_list_callbacks_fit_telegram_limit_for_long_session_ids(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    session_id = "external-long-session-id-" + ("x" * 80)
+    discovery = ExternalSessionDiscoveryService()
+    discovery.record_event(
+        HookEvent(
+            session_id=session_id,
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+        )
+    )
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    binder = ExternalSessionBinder(
+        discovery=discovery,
+        binding_store=binding_store,
+        projects_dir=tmp_path / "projects",
+    )
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    router = Router()
+    register_list_handler(router, registry_service=registry, external_discovery=discovery, external_binder=binder)
+    register_session_action_handlers(router, discovery=discovery, binder=binder, registry_service=registry)
+
+    list_message = _message()
+    with patch("app.bot.handlers.command_list.process_is_alive", return_value=True):
+        await router.message.handlers[-1].callback(list_message)
+
+    list_callbacks = _callback_data_from_answer(list_message)
+    assert list_callbacks
+    assert all(len(callback.encode()) <= 64 for callback in list_callbacks)
+
+    select_callback = MagicMock()
+    select_callback.from_user = SimpleNamespace(id=42)
+    select_callback.data = next(callback for callback in list_callbacks if callback.startswith("sess:select:"))
+    select_callback.answer = AsyncMock()
+    select_callback.message = MagicMock()
+    select_callback.message.answer = AsyncMock()
+    await _dispatch_callback(router, select_callback)
+
+    bind_callbacks = _callback_data_from_answer(select_callback.message)
+    assert bind_callbacks
+    assert all(len(callback.encode()) <= 64 for callback in bind_callbacks)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_old_callback_prefix_does_not_bind_new_live_session_with_same_prefix(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    old_session_id = "external-collide-old"
+    live_session_id = "external-collide-live"
+    old_prefix = old_session_id[:16]
+    assert old_prefix == live_session_id[:16]
+    discovery = ExternalSessionDiscoveryService()
+    discovery.record_event(
+        HookEvent(
+            session_id=old_session_id,
+            cwd="/Users/jack/project/remote-coding/old",
+            event="PreToolUse",
+            status="running",
+        )
+    )
+    discovery.mark_session_unavailable(old_session_id)
+    discovery.record_event(
+        HookEvent(
+            session_id=live_session_id,
+            cwd="/Users/jack/project/remote-coding/live",
+            event="PreToolUse",
+            status="running",
+        )
+    )
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    binder = ExternalSessionBinder(
+        discovery=discovery,
+        binding_store=binding_store,
+        projects_dir=tmp_path / "projects",
+    )
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    router = Router()
+    register_list_handler(router, registry_service=registry, external_discovery=discovery, external_binder=binder)
+    register_session_action_handlers(router, discovery=discovery, binder=binder, registry_service=registry)
+
+    list_message = _message()
+    with patch("app.bot.handlers.command_list.process_is_alive", return_value=True):
+        await router.message.handlers[-1].callback(list_message)
+
+    live_select_callback_data = next(
+        callback for callback in _callback_data_from_answer(list_message) if callback.startswith("sess:select:")
+    )
+    assert live_select_callback_data != f"sess:select:{old_prefix}"
+
+    old_select_callback = MagicMock()
+    old_select_callback.from_user = SimpleNamespace(id=42)
+    old_select_callback.data = f"sess:select:{old_prefix}"
+    old_select_callback.answer = AsyncMock()
+    old_select_callback.message = MagicMock()
+    old_select_callback.message.answer = AsyncMock()
+    await _dispatch_callback(router, old_select_callback)
+
+    old_select_callback.answer.assert_awaited_once_with("Session is no longer available")
+    old_select_callback.message.answer.assert_not_awaited()
+
+    old_bind_callback = MagicMock()
+    old_bind_callback.from_user = SimpleNamespace(id=42)
+    old_bind_callback.data = f"sess:bind:{old_prefix}"
+    old_bind_callback.answer = AsyncMock()
+    old_bind_callback.message = MagicMock()
+    old_bind_callback.message.answer = AsyncMock()
+    await _dispatch_callback(router, old_bind_callback)
+
+    old_bind_callback.answer.assert_awaited_once_with("❌ Session is no longer available")
+    old_bind_callback.message.answer.assert_not_awaited()
+    assert binding_store.get_binding(live_session_id) is None
+    assert discovery.get(live_session_id) is not None
+
+    live_select_callback = MagicMock()
+    live_select_callback.from_user = SimpleNamespace(id=42)
+    live_select_callback.data = live_select_callback_data
+    live_select_callback.answer = AsyncMock()
+    live_select_callback.message = MagicMock()
+    live_select_callback.message.answer = AsyncMock()
+    await _dispatch_callback(router, live_select_callback)
+
+    live_select_callback.answer.assert_awaited_once_with()
+    live_bind_callback_data = next(
+        callback for callback in _callback_data_from_answer(live_select_callback.message) if callback.startswith("sess:bind:")
+    )
+    assert live_bind_callback_data != f"sess:bind:{old_prefix}"
+
+
+@pytest.mark.asyncio
+async def test_dead_unbound_cleanup_refresh_removes_callback_and_old_click_is_not_session_not_found(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    session_id = "external-dead-cleanup-0001"
+    discovery = ExternalSessionDiscoveryService()
+    discovery.record_event(
+        HookEvent(
+            session_id=session_id,
+            cwd="/Users/jack/project/remote-coding",
+            event="PreToolUse",
+            status="running",
+            pid=12345,
+        )
+    )
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    binder = ExternalSessionBinder(
+        discovery=discovery,
+        binding_store=binding_store,
+        projects_dir=tmp_path / "projects",
+    )
+    registry = AsyncMock()
+    registry.list_active_sessions = AsyncMock(return_value=[])
+    router = Router()
+    register_list_handler(router, registry_service=registry, external_discovery=discovery, external_binder=binder)
+    register_session_action_handlers(router, discovery=discovery, binder=binder, registry_service=registry)
+
+    list_message = _message()
+    with patch("app.bot.handlers.command_list.process_is_alive", return_value=True):
+        await router.message.handlers[-1].callback(list_message)
+    stale_select_callback_data = next(
+        callback for callback in _callback_data_from_answer(list_message) if callback.startswith("sess:select:")
+    )
+
+    stale_select_callback = MagicMock()
+    stale_select_callback.from_user = SimpleNamespace(id=42)
+    stale_select_callback.data = stale_select_callback_data
+    stale_select_callback.answer = AsyncMock()
+    stale_select_callback.message = MagicMock()
+    stale_select_callback.message.answer = AsyncMock()
+    with patch("app.services.session_id_resolver.process_is_alive", return_value=True):
+        await _dispatch_callback(router, stale_select_callback)
+    stale_bind_callback_data = next(
+        callback for callback in _callback_data_from_answer(stale_select_callback.message) if callback.startswith("sess:bind:")
+    )
+
+    cleanup_callback = MagicMock()
+    cleanup_callback.from_user = SimpleNamespace(id=42)
+    cleanup_callback.data = "sess:cleanup"
+    cleanup_callback.answer = AsyncMock()
+    cleanup_callback.message = MagicMock()
+    cleanup_callback.message.answer = AsyncMock()
+
+    with patch("app.services.external_session_discovery.process_is_alive", return_value=False):
+        await _dispatch_callback(router, cleanup_callback)
+
+    cleanup_callback.answer.assert_awaited_once_with("已清理 1 个无效会话")
+    refreshed_callbacks = _callback_data_from_answer(cleanup_callback.message)
+    assert stale_select_callback_data not in refreshed_callbacks
+    assert discovery.is_session_ended(session_id) is True
+
+    old_select_callback = MagicMock()
+    old_select_callback.from_user = SimpleNamespace(id=42)
+    old_select_callback.data = stale_select_callback_data
+    old_select_callback.answer = AsyncMock()
+    old_select_callback.message = MagicMock()
+    old_select_callback.message.answer = AsyncMock()
+
+    await _dispatch_callback(router, old_select_callback)
+
+    old_answer = old_select_callback.answer.await_args.args[0]
+    assert old_answer != "Session not found"
+    assert old_answer == "Session is no longer available"
+    old_select_callback.message.answer.assert_not_awaited()
+
+    old_bind_callback = MagicMock()
+    old_bind_callback.from_user = SimpleNamespace(id=42)
+    old_bind_callback.data = stale_bind_callback_data
+    old_bind_callback.answer = AsyncMock()
+    old_bind_callback.message = MagicMock()
+    old_bind_callback.message.answer = AsyncMock()
+
+    await _dispatch_callback(router, old_bind_callback)
+
+    old_bind_answer = old_bind_callback.answer.await_args.args[0]
+    assert old_bind_answer != "❌ Session not found"
+    assert old_bind_answer == "❌ Session is no longer available"
+    old_bind_callback.message.answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio

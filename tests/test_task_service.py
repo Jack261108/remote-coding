@@ -380,9 +380,9 @@ async def test_open_claude_chat_session_rebuilds_when_previous_terminal_is_missi
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)
 
-    async def missing_close_terminal(terminal_key: str) -> bool:
+    async def missing_close_terminal(terminal_key: str) -> tuple[bool, str]:
         factory._closed_terminal_key = terminal_key
-        return False
+        return False, "终端不存在"
 
     factory.close_terminal = missing_close_terminal
     session_service = make_file_backed_session_service(tmp_path)

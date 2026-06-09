@@ -212,6 +212,87 @@ async def test_open_claude_chat_session_creates_terminal_without_previous_sessio
 
 
 @pytest.mark.asyncio
+async def test_open_claude_chat_session_rebuild_clears_auto_approve_when_old_terminal_missing(tmp_path: Path) -> None:
+    auto_approve = RecordingAutoApproveService()
+    service, session_service, factory, _ = make_terminal_service(tmp_path)
+    service._auto_approve_service = auto_approve
+    await _seed_terminal_group(session_service)
+
+    async def missing_terminal(terminal_key: str) -> tuple[bool, str]:
+        factory._closed_terminal_key = terminal_key
+        return False, "终端不存在"
+
+    factory.close_terminal = missing_terminal
+
+    opened, text = await service.open_claude_chat_session(1)
+
+    assert opened is True
+    assert text.startswith("Claude 会话已重建")
+    assert factory._closed_terminal_key == "user_1_abc123"
+    assert set(auto_approve.cleared_session_ids) == {"claude-owner", "claude-attached"}
+    attached = await session_service.get(2)
+    assert attached is not None
+    assert attached.terminal_mode is False
+    assert attached.terminal_id is None
+    assert attached.claude_chat_active is False
+    assert attached.claude_session_id is None
+    assert attached.attached_user_ids == []
+    assert attached.is_owner is True
+
+
+@pytest.mark.asyncio
+async def test_open_claude_chat_session_rebuild_keeps_group_when_old_terminal_close_fails(tmp_path: Path) -> None:
+    auto_approve = RecordingAutoApproveService()
+    service, session_service, factory, cleared_users = make_terminal_service(tmp_path)
+    service._auto_approve_service = auto_approve
+    await _seed_terminal_group(session_service)
+
+    async def failed_close_terminal(terminal_key: str) -> tuple[bool, str]:
+        factory._closed_terminal_key = terminal_key
+        return False, "关闭失败"
+
+    factory.close_terminal = failed_close_terminal
+
+    opened, text = await service.open_claude_chat_session(1)
+
+    assert opened is False
+    assert text == "旧终端关闭失败: 关闭失败"
+    assert factory._closed_terminal_key == "user_1_abc123"
+    assert auto_approve.cleared_session_ids == []
+    assert cleared_users == [1]
+    owner = await session_service.get(1)
+    attached = await session_service.get(2)
+    assert owner is not None
+    assert owner.terminal_id == "user_1_abc123"
+    assert owner.terminal_mode is True
+    assert owner.claude_chat_active is True
+    assert owner.claude_session_id == "claude-owner"
+    assert owner.attached_user_ids == [2]
+    assert attached is not None
+    assert attached.terminal_id == "user_1_abc123"
+    assert attached.terminal_mode is True
+    assert attached.claude_chat_active is True
+    assert attached.claude_session_id == "claude-attached"
+    assert attached.is_owner is False
+
+
+@pytest.mark.asyncio
+async def test_open_claude_chat_session_rebuild_clears_old_terminal_auto_approve(tmp_path: Path) -> None:
+    auto_approve = RecordingAutoApproveService()
+    service, session_service, factory, cleared_users = make_terminal_service(tmp_path)
+    service._auto_approve_service = auto_approve
+    await _seed_terminal_group(session_service)
+
+    opened, text = await service.open_claude_chat_session(1)
+
+    assert opened is True
+    assert text.startswith("Claude 会话已重建")
+    assert factory._closed_terminal_key == "user_1_abc123"
+    assert set(auto_approve.cleared_session_ids) == {"claude-owner", "claude-attached"}
+    assert 1 in cleared_users
+
+
+@pytest.mark.asyncio
 async def test_open_claude_chat_session_rejects_explicit_workdir_outside_allowlist(tmp_path: Path) -> None:
     service, _, factory, cleared_users = make_terminal_service(tmp_path)
     outside = tmp_path.parent / "outside"
@@ -303,16 +384,16 @@ async def test_close_terminal_keeps_attached_group_when_tmux_close_fails(tmp_pat
     service, session_service, factory, cleared_users = make_terminal_service(tmp_path)
     await _seed_terminal_group(session_service)
 
-    async def failed_close_terminal(terminal_key: str) -> bool:
+    async def failed_close_terminal(terminal_key: str) -> tuple[bool, str]:
         factory._closed_terminal_key = terminal_key
-        return False
+        return False, "终端关闭失败"
 
     factory.close_terminal = failed_close_terminal
 
     closed, text = await service.close_terminal(1)
 
     assert closed is False
-    assert text == "终端不存在或关闭失败"
+    assert text == "终端关闭失败"
     assert factory._closed_terminal_key == "user_1_abc123"
     assert cleared_users == []
     owner = await session_service.get(1)

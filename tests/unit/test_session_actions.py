@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -57,10 +58,10 @@ class TestUniquePrefixes:
 
         assert prefixes["user_1234567890_aaaaaaaaaaaa"] == "user_1234567890_a"
 
-    def test_short_id_that_is_another_id_prefix_uses_full_id_with_sentinel(self) -> None:
+    def test_short_id_that_is_another_id_prefix_uses_hash_token(self) -> None:
         prefixes = unique_prefixes(["abc", "abcdef"])
 
-        assert prefixes["abc"] == "abc."
+        assert prefixes["abc"].startswith("~")
         assert prefixes["abcdef"] == "abcdef"
 
     def test_max_length_caps_unrepresentable_common_prefix(self) -> None:
@@ -72,14 +73,14 @@ class TestUniquePrefixes:
         assert len(prefixes[first]) <= 52
         assert len(prefixes[second]) <= 52
 
-    def test_full_id_sentinel_respects_max_length(self) -> None:
+    def test_hash_token_respects_max_length(self) -> None:
         shorter = "x" * 52
         longer = f"{shorter}a"
 
         prefixes = unique_prefixes([shorter, longer], max_length=52)
 
         assert len(prefixes[shorter]) <= 52
-        assert prefixes[shorter].startswith("h.")
+        assert prefixes[shorter].startswith("~")
 
 
 class TestResolveSessionId:
@@ -227,6 +228,102 @@ class TestSessionSelectHandler:
         callback.message.answer.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_select_ended_unbound_callback_does_not_answer_session_not_found(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        session_id = "ended-unbound-session-0001"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running", pid=12345))
+        discovery.mark_session_ended(session_id)
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with("Session is no longer available")
+        callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_select_ambiguous_live_prefix_is_not_overridden_by_ended_prefix(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        shared_prefix = "ambiguous-live-"
+        discovery.record_event(HookEvent(session_id=f"{shared_prefix}one", cwd="/home/user/one", event="PreToolUse", status="running"))
+        discovery.record_event(HookEvent(session_id=f"{shared_prefix}two", cwd="/home/user/two", event="PreToolUse", status="running"))
+        ended_id = f"{shared_prefix}old"
+        discovery.record_event(HookEvent(session_id=ended_id, cwd="/home/user/old", event="PreToolUse", status="running"))
+        discovery.mark_session_ended(ended_id)
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{shared_prefix}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with("Ambiguous prefix, 2 matches. Be more specific.")
+        callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_select_pruned_stale_unbound_callback_does_not_answer_session_not_found(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        session_id = "pruned-stale-unbound-session-0001"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+        discovery._sessions[session_id].last_seen = utc_now() - timedelta(seconds=discovery._stale_timeout_sec + 1)
+        assert discovery.prune_stale() == [session_id]
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with("Session is no longer available")
+        callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_select_stale_pruned_session_can_be_rediscovered_and_bound(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        session_id = "rediscovered-stale-session-0001"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+        discovery._sessions[session_id].last_seen = utc_now() - timedelta(seconds=discovery._stale_timeout_sec + 1)
+        assert discovery.prune_stale() == [session_id]
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:select:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[0].callback(callback)
+
+        callback.answer.assert_awaited_once_with()
+        keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
+        callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        assert callbacks == [f"sess:bind:{session_id[:16]}"]
+
+    @pytest.mark.asyncio
     async def test_select_stale_unbound_callback_does_not_render_bind_button(
         self,
         discovery: ExternalSessionDiscoveryService,
@@ -296,7 +393,7 @@ class TestTmuxSessionActionHandler:
         assert error == "Session not found"
 
     @pytest.mark.asyncio
-    async def test_resolve_terminal_id_prefix_accepts_full_id_with_sentinel_when_it_is_another_id_prefix(self) -> None:
+    async def test_resolve_terminal_id_prefix_accepts_hash_token_when_id_is_another_id_prefix(self) -> None:
         registry = AsyncMock()
         registry.list_active_sessions = AsyncMock(
             return_value=[
@@ -305,7 +402,7 @@ class TestTmuxSessionActionHandler:
             ]
         )
 
-        resolved, error = await _resolve_terminal_id_prefix("abc.", registry)
+        resolved, error = await _resolve_terminal_id_prefix(unique_prefixes(["abc", "abcdef"])["abc"], registry)
 
         assert resolved == "abc"
         assert error is None
@@ -452,6 +549,33 @@ class TestSessionBindHandler:
 
 
 class TestSessionUnbindHandler:
+    @pytest.mark.asyncio
+    async def test_old_unbind_callback_does_not_unbind_new_same_prefix_session(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        old_session_id = "unbind-collision-old"
+        new_session_id = "unbind-collision-new"
+        old_prefix = old_session_id[:16]
+        assert old_prefix == new_session_id[:16]
+        discovery.mark_session_unavailable(old_session_id)
+        discovery.record_event(HookEvent(session_id=new_session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+        bind_result = await binder.bind(user_id=42, session_id=new_session_id)
+        assert bind_result.success is True
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:unbind:{old_prefix}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await router.callback_query.handlers[2].callback(callback)
+
+        callback.answer.assert_awaited_once_with("❌ Session is no longer available")
+        assert binder._binding_store.get_binding(new_session_id) is not None
+
     @pytest.mark.asyncio
     async def test_unbind_delegates_to_binder(self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder) -> None:
         session_id = "abcdef1234567890full"

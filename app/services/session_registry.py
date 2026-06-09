@@ -229,7 +229,8 @@ class SessionRegistryService:
     async def close_session(self, terminal_id: str) -> bool:
         """Kill a tmux session and clean up associated state."""
         async with self._terminal_lock(terminal_id):
-            ok = await self._tmux_runner.close_terminal(terminal_id)
+            close_result = await self._tmux_runner.close_terminal(terminal_id)
+            ok = close_result[0] if isinstance(close_result, tuple) else close_result
             if ok:
                 contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == terminal_id]
                 claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})

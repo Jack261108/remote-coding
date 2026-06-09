@@ -55,7 +55,8 @@ class ExternalBindingReaper:
           2. Drop the binding from the store first so any concurrent observer
              (e.g. a `/list` render or a racing ``SessionEnd``) immediately
              sees it gone.
-          3. For ``pid_dead`` removals, tombstone discovery before any awaited cleanup.
+          3. Tombstone discovery before any awaited cleanup: ``pid_dead`` as
+             ended, ``idle_ttl_expired`` as unavailable.
           4. Clear pending permission, user-question, auto-approve, and hook state.
           5. Emit one INFO log including the reason and a fixed set of
              context fields. ``pid`` is always present in the log payload —
@@ -98,6 +99,11 @@ class ExternalBindingReaper:
                 )
             if self._external_uq_state is not None:
                 run_sync_cleanup("external user question state", lambda: self._external_uq_state.invalidate_session(session_id))
+        elif reason == "idle_ttl_expired" and self._external_discovery is not None:
+            run_sync_cleanup(
+                "external discovery unavailable tombstone",
+                lambda: self._external_discovery.mark_session_unavailable(session_id),
+            )
         await run_async_cleanup("auto approve service", lambda: self._auto_approve_service.clear_session(session_id))
         await run_async_cleanup(
             "hook pending permissions",

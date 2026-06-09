@@ -54,10 +54,10 @@ class CLIAdapterFactory:
             return self._tmux_runner
         return None
 
-    async def close_terminal(self, terminal_key: str) -> bool:
+    async def close_terminal(self, terminal_key: str) -> tuple[bool, str]:
         tmux = self._require_tmux()
         if not tmux:
-            return False
+            return False, "CLAUDE_TMUX_MODE 未开启或 tmux 未配置"
         return await tmux.close_terminal(terminal_key)
 
     async def ensure_terminal(self, *, terminal_key: str, workdir: str) -> tuple[bool, str]:

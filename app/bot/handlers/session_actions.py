@@ -53,11 +53,11 @@ def register_session_action_handlers(
 
         detail_text = f"📂 Session: {short_id(validation.session_id, 12)}...\n  cwd: {validation.cwd}"
 
-        sid_prefix = short_id(validation.session_id, 16)
+        callback_token = validation.callback_token
         if validation.action == "unbind":
-            buttons = [[InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{sid_prefix}")]]
+            buttons = [[InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")]]
         else:
-            buttons = [[InlineKeyboardButton(text="绑定", callback_data=f"sess:bind:{sid_prefix}")]]
+            buttons = [[InlineKeyboardButton(text="绑定", callback_data=f"sess:bind:{callback_token}")]]
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 

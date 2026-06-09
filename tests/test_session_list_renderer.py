@@ -91,7 +91,7 @@ def test_unbound_session_stays_in_attention_even_when_newer_than_bound() -> None
     assert "⚠️ <b>需要处理</b>" in result.text
     assert "📡 可绑定新会话" in result.text
     assert "project/new-app" in result.text
-    assert "sess:bind:unbound-session-" in _callbacks(result)
+    assert "sess:select:unbound-session-" in _callbacks(result)
 
 
 def test_attention_items_sort_by_priority_before_activity_time() -> None:
