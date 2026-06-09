@@ -1,3 +1,8 @@
+"""RefCountedLockRegistry - async lock registry with TTL-based cleanup.
+
+Canonical location for this generic async utility.
+"""
+
 from __future__ import annotations
 
 import asyncio
