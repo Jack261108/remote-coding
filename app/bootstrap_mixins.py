@@ -558,13 +558,14 @@ class HookHandlingMixin(AppContainerBase):
                     record.telegram_chat_id,
                     record.telegram_message_id,
                 )
-            await self.permission_callback_registry.invalidate_pending_for_tool(
+            transitioned_count = await self.permission_callback_registry.invalidate_pending_for_tool(
                 session_id=session_id,
                 tool_use_id=tool_use_id,
                 reason=reason,
             )
-            # Edit the Telegram message if we have the message info
-            if record and record.telegram_chat_id and record.telegram_message_id:
+            # Edit the Telegram message only when this resolution actually transitioned
+            # the callback record. Late duplicate terminal events should not rewrite it.
+            if transitioned_count > 0 and record and record.telegram_chat_id and record.telegram_message_id:
                 from app.bot.handlers.callback_utils import build_approval_message
 
                 approval_text = "✅ 已在终端批准" if is_approved else "❌ 已在终端拒绝"

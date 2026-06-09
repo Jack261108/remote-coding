@@ -42,6 +42,15 @@ def _summarize_tool_input(tool_input: dict[str, Any] | None) -> dict[str, Any] |
     return summary
 
 
+@dataclass(slots=True)
+class _DisconnectedPermission:
+    session_id: str
+    tool_use_id: str
+    event: HookEvent
+    received_at: datetime
+    disconnected_at: datetime
+
+
 class HookSocketServer:
     def __init__(
         self,
@@ -52,6 +61,7 @@ class HookSocketServer:
         pending_permission_ttl_sec: int = 600,
         max_pending_permissions: int = 64,
         max_tool_use_id_cache_entries: int = 256,
+        permission_disconnect_grace_sec: float = 0.75,
     ) -> None:
         if max_message_bytes <= 0:
             raise ValueError("max_message_bytes 必须大于 0")
@@ -61,12 +71,15 @@ class HookSocketServer:
             raise ValueError("max_pending_permissions 必须大于 0")
         if max_tool_use_id_cache_entries <= 0:
             raise ValueError("max_tool_use_id_cache_entries 必须大于 0")
+        if permission_disconnect_grace_sec <= 0:
+            raise ValueError("permission_disconnect_grace_sec 必须大于 0")
         self._socket_path = Path(socket_path)
         self._allowed_workdirs = list(allowed_workdirs) if allowed_workdirs is not None else None
         self._max_message_bytes = max_message_bytes
         self._pending_permission_ttl_sec = pending_permission_ttl_sec
         self._max_pending_permissions = max_pending_permissions
         self._max_tool_use_id_cache_entries = max_tool_use_id_cache_entries
+        self._permission_disconnect_grace_sec = permission_disconnect_grace_sec
         self._server: asyncio.AbstractServer | None = None
         self._event_handler: HookEventHandler | None = None
         self._permission_failure_handler: PermissionFailureHandler | None = None
@@ -74,6 +87,8 @@ class HookSocketServer:
         self._pending_permissions: dict[str, PendingPermissionRequest] = {}
         self._pending_expiration_tasks: dict[str, asyncio.Task[None]] = {}
         self._pending_disconnect_tasks: dict[str, asyncio.Task[None]] = {}
+        self._disconnected_permissions: dict[str, _DisconnectedPermission] = {}
+        self._disconnect_grace_tasks: dict[str, asyncio.Task[None]] = {}
         self._tool_use_id_cache: dict[str, list[_CachedToolUseId]] = {}
         self._lock = asyncio.Lock()
 
@@ -108,13 +123,16 @@ class HookSocketServer:
             pending = list(self._pending_permissions.values())
             expiration_tasks = list(self._pending_expiration_tasks.values())
             disconnect_tasks = list(self._pending_disconnect_tasks.values())
+            grace_tasks = list(self._disconnect_grace_tasks.values())
             self._pending_permissions.clear()
             self._pending_expiration_tasks.clear()
             self._pending_disconnect_tasks.clear()
+            self._disconnected_permissions.clear()
+            self._disconnect_grace_tasks.clear()
             self._tool_use_id_cache.clear()
-        for task in [*expiration_tasks, *disconnect_tasks]:
+        for task in [*expiration_tasks, *disconnect_tasks, *grace_tasks]:
             task.cancel()
-        for task in [*expiration_tasks, *disconnect_tasks]:
+        for task in [*expiration_tasks, *disconnect_tasks, *grace_tasks]:
             with suppress(asyncio.CancelledError):
                 await task
         await self._close_pending_permissions(pending, emit_failure=False)
@@ -153,10 +171,16 @@ class HookSocketServer:
         async with self._lock:
             expired = self._pop_expired_pending_permissions_locked()
             matching = [item for item in self._pending_permissions.values() if item.session_id == session_id]
+            disconnected_ids = [
+                tool_use_id for tool_use_id, item in self._disconnected_permissions.items() if item.session_id == session_id
+            ]
             for item in matching:
                 self._pending_permissions.pop(item.tool_use_id, None)
                 self._cancel_pending_expiration_locked(item.tool_use_id)
                 self._cancel_pending_disconnect_watch_locked(item.tool_use_id)
+            for tool_use_id in disconnected_ids:
+                self._disconnected_permissions.pop(tool_use_id, None)
+                self._cancel_disconnect_grace_locked(tool_use_id)
         await self._expire_pending_permissions(expired)
         await self._close_pending_permissions(matching, emit_failure=False)
 
@@ -275,29 +299,31 @@ class HookSocketServer:
             await self._cache_tool_use_id(event)
         if event.event in {"PostToolUse", "PostToolUseFailure", "PermissionDenied"}:
             await self._remove_cached_tool_use_id(event)
-            # Check if this tool had a pending permission (terminal-side resolution)
-            decision = "terminal_approved" if event.event == "PostToolUse" else "terminal_denied"
-            tool_use_id = event.tool_use_id
-            if decision == "terminal_denied":
-                async with self._lock:
-                    has_exact_pending = tool_use_id is not None and tool_use_id in self._pending_permissions
-                if not has_exact_pending:
-                    tool_use_id = await self._find_pending_permission_tool_use_id(event)
-            if tool_use_id:
-                logger.info(
-                    "terminal permission resolution detected",
-                    extra={
-                        "session_id": event.session_id,
-                        "event": event.event,
-                        "decision": decision,
-                        "resolved_tool_use_id": tool_use_id,
-                        "original_tool_use_id": event.tool_use_id,
-                        "has_pending": tool_use_id in self._pending_permissions,
-                        "tool": event.tool,
-                        "tool_input_summary": _summarize_tool_input(event.tool_input),
-                    },
-                )
-                await self._check_terminal_permission_resolved(event.session_id, tool_use_id, decision)
+            if event.event in {"PostToolUse", "PermissionDenied"}:
+                # Check if this tool had a pending permission (terminal-side resolution).
+                # PostToolUseFailure is not a permission decision: the user may have
+                # allowed the tool and the tool itself failed afterwards.
+                decision = "terminal_approved" if event.event == "PostToolUse" else "terminal_denied"
+                tool_use_id = event.tool_use_id
+                if not await self._has_resolvable_permission(tool_use_id):
+                    tool_use_id = await self._find_terminal_permission_tool_use_id(
+                        event,
+                        allow_latest_fallback=decision == "terminal_denied",
+                    )
+                if tool_use_id:
+                    logger.info(
+                        "terminal permission resolution detected",
+                        extra={
+                            "session_id": event.session_id,
+                            "event": event.event,
+                            "decision": decision,
+                            "resolved_tool_use_id": tool_use_id,
+                            "original_tool_use_id": event.tool_use_id,
+                            "tool": event.tool,
+                            "tool_input_summary": _summarize_tool_input(event.tool_input),
+                        },
+                    )
+                    await self._check_terminal_permission_resolved(event.session_id, tool_use_id, decision)
         if event.event == "SessionEnd":
             await self._cleanup_cache(event.session_id)
             await self.cancel_pending_permissions(session_id=event.session_id)
@@ -333,6 +359,8 @@ class HookSocketServer:
                     if previous is not None:
                         self._cancel_pending_expiration_locked(tool_id)
                         self._cancel_pending_disconnect_watch_locked(tool_id)
+                    self._disconnected_permissions.pop(tool_id, None)
+                    self._cancel_disconnect_grace_locked(tool_id)
                     self._pending_permissions[tool_id] = PendingPermissionRequest(
                         session_id=emit_event.session_id,
                         tool_use_id=tool_id,
@@ -403,11 +431,25 @@ class HookSocketServer:
         if inspect.isawaitable(result):
             await result
 
+    async def _has_resolvable_permission(self, tool_use_id: str | None) -> bool:
+        if tool_use_id is None:
+            return False
+        async with self._lock:
+            return tool_use_id in self._pending_permissions or tool_use_id in self._disconnected_permissions
+
     async def _check_terminal_permission_resolved(self, session_id: str, tool_use_id: str, decision: str = "terminal_approved") -> None:
         """Check if a terminal-side event indicates permission resolution."""
         async with self._lock:
             pending = self._pending_permissions.pop(tool_use_id, None)
-            if pending is None:
+            disconnected = None
+            if pending is not None:
+                self._cancel_pending_expiration_locked(tool_use_id)
+                self._cancel_pending_disconnect_watch_locked(tool_use_id)
+            else:
+                disconnected = self._disconnected_permissions.pop(tool_use_id, None)
+                if disconnected is not None:
+                    self._cancel_disconnect_grace_locked(tool_use_id)
+            if pending is None and disconnected is None:
                 pending_summaries = [
                     {
                         "session_id": item.session_id,
@@ -417,25 +459,37 @@ class HookSocketServer:
                     }
                     for item in self._pending_permissions.values()
                 ]
+                disconnected_summaries = [
+                    {
+                        "session_id": item.session_id,
+                        "tool_use_id": item.tool_use_id,
+                        "tool": item.event.tool,
+                        "tool_input": item.event.tool_input,
+                    }
+                    for item in self._disconnected_permissions.values()
+                ]
                 logger.debug(
-                    "no pending permission found for terminal resolution session_id=%s tool_use_id=%s decision=%s pending=%s",
+                    "no pending permission found for terminal resolution session_id=%s tool_use_id=%s decision=%s pending=%s disconnected=%s",
                     session_id,
                     tool_use_id,
                     decision,
                     pending_summaries,
+                    disconnected_summaries,
                 )
                 return
-            self._cancel_pending_expiration_locked(tool_use_id)
-            self._cancel_pending_disconnect_watch_locked(tool_use_id)
-        # Permission was resolved in terminal (not via Telegram)
-        await self._close_writer(pending.writer)
+        if pending is not None:
+            await self._close_writer(pending.writer)
+            emit_session_id = pending.session_id
+        else:
+            assert disconnected is not None
+            emit_session_id = disconnected.session_id
         logger.info(
             "terminal permission resolution: emitting resolved event session_id=%s tool_use_id=%s decision=%s",
-            session_id,
+            emit_session_id,
             tool_use_id,
             decision,
         )
-        await self._emit_permission_resolved(session_id, tool_use_id, decision)
+        await self._emit_permission_resolved(emit_session_id, tool_use_id, decision)
 
     async def _close_pending_permissions(self, items: list[PendingPermissionRequest], *, emit_failure: bool) -> None:
         for item in items:
@@ -487,6 +541,15 @@ class HookSocketServer:
         if task is not None:
             task.cancel()
 
+    def _schedule_disconnect_grace_locked(self, tool_use_id: str) -> None:
+        self._cancel_disconnect_grace_locked(tool_use_id)
+        self._disconnect_grace_tasks[tool_use_id] = asyncio.create_task(self._resolve_disconnected_permission_later(tool_use_id))
+
+    def _cancel_disconnect_grace_locked(self, tool_use_id: str) -> None:
+        task = self._disconnect_grace_tasks.pop(tool_use_id, None)
+        if task is not None:
+            task.cancel()
+
     async def _expire_pending_permission_later(self, tool_use_id: str) -> None:
         try:
             await asyncio.sleep(self._pending_permission_ttl_sec)
@@ -499,6 +562,23 @@ class HookSocketServer:
         except asyncio.CancelledError:
             raise
 
+    async def _resolve_disconnected_permission_later(self, tool_use_id: str) -> None:
+        try:
+            await asyncio.sleep(self._permission_disconnect_grace_sec)
+            async with self._lock:
+                disconnected = self._disconnected_permissions.pop(tool_use_id, None)
+                self._disconnect_grace_tasks.pop(tool_use_id, None)
+            if disconnected is None:
+                return
+            logger.info(
+                "permission disconnect grace expired, marking denied session_id=%s tool_use_id=%s",
+                disconnected.session_id,
+                disconnected.tool_use_id,
+            )
+            await self._emit_permission_resolved(disconnected.session_id, disconnected.tool_use_id, "terminal_denied")
+        except asyncio.CancelledError:
+            raise
+
     async def _watch_pending_permission_disconnect(self, tool_use_id: str, reader: asyncio.StreamReader) -> None:
         try:
             await reader.read()
@@ -507,6 +587,14 @@ class HookSocketServer:
                 self._pending_disconnect_tasks.pop(tool_use_id, None)
                 if pending is not None:
                     self._cancel_pending_expiration_locked(tool_use_id)
+                    self._disconnected_permissions[tool_use_id] = _DisconnectedPermission(
+                        session_id=pending.session_id,
+                        tool_use_id=pending.tool_use_id,
+                        event=pending.event,
+                        received_at=pending.received_at,
+                        disconnected_at=utc_now(),
+                    )
+                    self._schedule_disconnect_grace_locked(tool_use_id)
             if pending is None:
                 return
             logger.info(
@@ -515,7 +603,6 @@ class HookSocketServer:
                 pending.tool_use_id,
             )
             await self._close_writer(pending.writer)
-            await self._emit_permission_resolved(pending.session_id, pending.tool_use_id, "terminal_denied")
         except asyncio.CancelledError:
             raise
 
@@ -586,17 +673,25 @@ class HookSocketServer:
             )
             return cached.tool_use_id or None
 
-    async def _find_pending_permission_tool_use_id(self, event: HookEvent) -> str | None:
+    async def _find_terminal_permission_tool_use_id(self, event: HookEvent, *, allow_latest_fallback: bool) -> str | None:
         async with self._lock:
-            candidates = [item for item in self._pending_permissions.values() if item.session_id == event.session_id]
+            candidates: list[PendingPermissionRequest | _DisconnectedPermission] = [
+                item for item in self._pending_permissions.values() if item.session_id == event.session_id
+            ]
+            candidates.extend(item for item in self._disconnected_permissions.values() if item.session_id == event.session_id)
             if not candidates:
                 return None
             tool_matches = [item for item in candidates if item.event.tool == event.tool]
-            candidates = tool_matches or candidates
-            input_matches = [item for item in candidates if self._tool_inputs_relaxed_match(event.tool_input, item.event.tool_input)]
-            candidates = input_matches or candidates
-            latest = max(candidates, key=lambda item: item.received_at)
-            return latest.tool_use_id
+            input_candidates = tool_matches or candidates
+            input_matches = [item for item in input_candidates if self._tool_inputs_relaxed_match(event.tool_input, item.event.tool_input)]
+            if input_matches:
+                latest = max(input_matches, key=lambda item: item.received_at)
+                return latest.tool_use_id
+            if allow_latest_fallback:
+                latest_candidates = tool_matches or candidates
+                latest = max(latest_candidates, key=lambda item: item.received_at)
+                return latest.tool_use_id
+            return None
 
     async def _cleanup_cache(self, session_id: str) -> None:
         async with self._lock:
