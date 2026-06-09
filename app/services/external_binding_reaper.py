@@ -1,20 +1,17 @@
 """Shared removal-and-cleanup collaborator for external bindings.
 
 This module owns the canonical sequence used to remove an
-``ExternalBinding`` and unwind its associated session state. The exact
-ordering — drop the binding from the store first, then clear the
-auto-approve state, then cancel any straggling pending permissions, then
-emit one INFO log — is invoked by BOTH the periodic cleanup loop in
-``ExternalBindingCleanupService`` AND the proactive `/list` render (per
-Requirements 6.4 and 9.2). Centralizing it here guarantees the order lives
-in exactly one place and is identical regardless of which path observes a
-removable binding first.
+``ExternalBinding`` and unwind its associated session state. The sequence is
+invoked by BOTH the periodic cleanup loop in ``ExternalBindingCleanupService``
+AND the proactive `/list` render (per Requirements 6.4 and 9.2).
+Centralizing it here guarantees the order lives in exactly one place and is
+identical regardless of which path observes a removable binding first.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.domain.models import utc_now
 from app.services.auto_approve_service import AutoApproveService
@@ -37,10 +34,16 @@ class ExternalBindingReaper:
         binding_store: ExternalBindingStore,
         auto_approve_service: AutoApproveService,
         hook_socket_server: HookSocketServer,
+        permission_callback_registry: Any | None = None,
+        external_uq_state: Any | None = None,
+        external_discovery: Any | None = None,
     ) -> None:
         self._binding_store = binding_store
         self._auto_approve_service = auto_approve_service
         self._hook_socket_server = hook_socket_server
+        self._permission_callback_registry = permission_callback_registry
+        self._external_uq_state = external_uq_state
+        self._external_discovery = external_discovery
 
     async def remove_with_cleanup(self, session_id: str, *, reason: str) -> bool:
         """Atomically remove a binding and unwind its associated state.
@@ -52,8 +55,9 @@ class ExternalBindingReaper:
           2. Drop the binding from the store first so any concurrent observer
              (e.g. a `/list` render or a racing ``SessionEnd``) immediately
              sees it gone.
-          3. Clear the auto-approve state for the session.
-          4. Cancel any straggling pending permissions for the session.
+          3. Tombstone discovery before any awaited cleanup: ``pid_dead`` as
+             ended, ``idle_ttl_expired`` as unavailable.
+          4. Clear pending permission, user-question, auto-approve, and hook state.
           5. Emit one INFO log including the reason and a fixed set of
              context fields. ``pid`` is always present in the log payload —
              rendered as an explicit ``None`` (JSON ``null``) when unknown,
@@ -72,8 +76,39 @@ class ExternalBindingReaper:
             return False
 
         self._binding_store.remove_binding(session_id)
-        await self._auto_approve_service.clear_session(session_id)
-        await self._hook_socket_server.cancel_pending_permissions(session_id=session_id)
+
+        async def run_async_cleanup(label: str, cleanup: Any) -> None:
+            try:
+                await cleanup()
+            except Exception:
+                logger.exception("external binding cleanup step failed", extra={"session_id": session_id, "step": label})
+
+        def run_sync_cleanup(label: str, cleanup: Any) -> None:
+            try:
+                cleanup()
+            except Exception:
+                logger.exception("external binding cleanup step failed", extra={"session_id": session_id, "step": label})
+
+        if reason == "pid_dead":
+            if self._external_discovery is not None:
+                run_sync_cleanup("external discovery tombstone", lambda: self._external_discovery.mark_session_ended(session_id))
+            if self._permission_callback_registry is not None:
+                await run_async_cleanup(
+                    "permission callback registry",
+                    lambda: self._permission_callback_registry.invalidate_session(session_id),
+                )
+            if self._external_uq_state is not None:
+                run_sync_cleanup("external user question state", lambda: self._external_uq_state.invalidate_session(session_id))
+        elif reason == "idle_ttl_expired" and self._external_discovery is not None:
+            run_sync_cleanup(
+                "external discovery unavailable tombstone",
+                lambda: self._external_discovery.mark_session_unavailable(session_id),
+            )
+        await run_async_cleanup("auto approve service", lambda: self._auto_approve_service.clear_session(session_id))
+        await run_async_cleanup(
+            "hook pending permissions",
+            lambda: self._hook_socket_server.cancel_pending_permissions(session_id=session_id),
+        )
 
         idle_hours = (utc_now() - current.last_activity_at).total_seconds() / 3600
         logger.info(

@@ -24,6 +24,8 @@ class ExternalSessionDiscoveryService:
         self._stale_timeout_sec = stale_timeout_sec
         self._title_resolver = title_resolver
         self._sessions: dict[str, UnboundExternalSession] = {}
+        self._ended_session_ids: set[str] = set()
+        self._unavailable_session_ids: set[str] = set()
 
     def record_event(self, event: HookEvent) -> None:
         """Record a hook event from an unbound session.
@@ -31,9 +33,12 @@ class ExternalSessionDiscoveryService:
         Creates a new entry if session_id not yet tracked, otherwise updates
         last_seen and increments event_count.
         """
+        if event.session_id in self._ended_session_ids:
+            return
         now = utc_now()
         existing = self._sessions.get(event.session_id)
         if existing is None:
+            self._unavailable_session_ids.discard(event.session_id)
             title = self._resolve_title(event.session_id, event.cwd)
             self._sessions[event.session_id] = UnboundExternalSession(
                 session_id=event.session_id,
@@ -48,7 +53,7 @@ class ExternalSessionDiscoveryService:
             existing.last_seen = now
             existing.event_count += 1
             existing.cwd = event.cwd
-            if event.pid is not None:
+            if event.pid is not None and event.pid > 0:
                 existing.pid = event.pid
             if existing.title is None:
                 existing.title = self._resolve_title(event.session_id, event.cwd)
@@ -67,18 +72,57 @@ class ExternalSessionDiscoveryService:
         """Remove a session from unbound tracking."""
         self._sessions.pop(session_id, None)
 
+    def mark_session_ended(self, session_id: str) -> None:
+        """Remember an ended external session so late hooks cannot rediscover it."""
+        self.remove_session(session_id)
+        self._ended_session_ids.add(session_id)
+
+    def is_session_ended(self, session_id: str) -> bool:
+        """Return whether an external session has been marked ended/reaped."""
+        return session_id in self._ended_session_ids
+
+    def mark_session_unavailable(self, session_id: str) -> None:
+        """Remember a removed external session so old callbacks can report it as unavailable."""
+        self.remove_session(session_id)
+        self._unavailable_session_ids.add(session_id)
+
+    def unavailable_session_ids(self) -> set[str]:
+        """Return IDs removed from discovery but still relevant for old callbacks."""
+        return set(self._ended_session_ids | self._unavailable_session_ids)
+
+    def is_session_unavailable(self, session_id: str) -> bool:
+        """Return whether a full session ID is unavailable for old callbacks."""
+        return session_id in self._ended_session_ids or session_id in self._unavailable_session_ids
+
+    def has_unavailable_session_prefix(self, session_id_prefix: str) -> bool:
+        """Return whether a callback prefix points at an unavailable external session."""
+        prefix = session_id_prefix
+        return any(session_id == prefix or session_id.startswith(prefix) for session_id in self.unavailable_session_ids())
+
     def list_unbound(self) -> list[UnboundExternalSession]:
         """Return all currently-active unbound sessions without pruning."""
         return list(self._sessions.values())
 
-    def _prune_dead(self) -> None:
-        """Remove sessions whose pid is no longer running."""
+    def prune_dead(self) -> list[str]:
+        """Remove ended sessions whose pid is no longer running."""
         dead_ids: list[str] = []
         for session_id, session in self._sessions.items():
-            if session.pid is not None and not self._is_pid_alive(session.pid):
+            if session.pid is None or session.pid <= 0:
+                continue
+            try:
+                is_alive = self._is_pid_alive(session.pid)
+            except Exception:
+                logger.exception("failed to check external session pid", extra={"session_id": session_id, "pid": session.pid})
+                continue
+            if not is_alive:
                 dead_ids.append(session_id)
         for session_id in dead_ids:
-            del self._sessions[session_id]
+            self.mark_session_ended(session_id)
+        return dead_ids
+
+    def _prune_dead(self) -> None:
+        """Remove sessions whose pid is no longer running."""
+        self.prune_dead()
 
     @staticmethod
     def _is_pid_alive(pid: int) -> bool:
@@ -101,7 +145,7 @@ class ExternalSessionDiscoveryService:
         now = utc_now()
         stale_ids = [session_id for session_id, session in self._sessions.items() if self._is_stale(session, now=now)]
         for session_id in stale_ids:
-            del self._sessions[session_id]
+            self.mark_session_unavailable(session_id)
         return stale_ids
 
     def count_stale(self) -> int:

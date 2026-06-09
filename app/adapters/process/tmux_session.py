@@ -9,6 +9,25 @@ from app.infra.user_question_constants import USER_QUESTION_TUI_FALLBACK_ERROR
 
 logger = logging.getLogger(__name__)
 
+_RECOVERABLE_TMUX_SESSION_ERRORS = (
+    "no server running",
+    "can't find session",
+    "can't find pane",
+    "no such session",
+    "session not found",
+    "no such file or directory",
+)
+
+
+class TmuxSessionCheckError(RuntimeError):
+    pass
+
+
+def is_recoverable_tmux_session_error(error_text: str) -> bool:
+    normalized = error_text.lower()
+    return any(marker in normalized for marker in _RECOVERABLE_TMUX_SESSION_ERRORS)
+
+
 _TMUX_TERMINAL_DEFAULTS: dict[str, str] = {
     "TERM": "xterm-256color",
     "COLORTERM": "truecolor",
@@ -256,8 +275,18 @@ class TmuxSessionMixin:
         errors, etc.) so callers can distinguish "does not exist" from
         "cannot determine".
         """
-        code, _, _ = await self._run_tmux("has-session", "-t", session_name)
-        return code == 0
+        try:
+            code, _, err_text = await self._run_tmux("has-session", "-t", session_name)
+        except FileNotFoundError as exc:
+            raise TmuxSessionCheckError(f"找不到 tmux 可执行文件 ({self._tmux_bin})") from exc
+        except Exception as exc:
+            raise TmuxSessionCheckError(str(exc) or exc.__class__.__name__) from exc
+        if code == 0:
+            return True
+        err = err_text.strip() or "unknown error"
+        if is_recoverable_tmux_session_error(err):
+            return False
+        raise TmuxSessionCheckError(err)
 
     async def list_managed_sessions(self) -> list[str]:
         """List all tmux sessions with the tgcli_ prefix."""

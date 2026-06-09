@@ -76,6 +76,55 @@ def test_is_pid_alive_delegates_to_shared_probe() -> None:
         assert ExternalSessionDiscoveryService._is_pid_alive(pid) is sentinel
 
 
+def test_prune_dead_retains_pid_zero_unknown_session() -> None:
+    """A pid=0 session is RETAINED because pid must be positive to prove liveness."""
+    service = ExternalSessionDiscoveryService()
+    session_id = "pid-zero-session"
+
+    service.record_event(_make_hook_event(session_id, pid=0))
+    assert service.get(session_id) is not None
+
+    with patch("app.services.external_session_discovery.process_is_alive", return_value=False) as probe:
+        service._prune_dead()
+
+    probe.assert_not_called()
+    assert service.get(session_id) is not None
+
+
+def test_record_event_does_not_overwrite_positive_pid_with_zero() -> None:
+    """A pid=0 refresh keeps the last known positive pid for dead pruning."""
+    service = ExternalSessionDiscoveryService()
+    session_id = "pid-refresh-session"
+
+    service.record_event(_make_hook_event(session_id, pid=4242))
+    service.record_event(_make_hook_event(session_id, pid=0))
+
+    session = service.get(session_id)
+    assert session is not None
+    assert session.pid == 4242
+
+
+def test_prune_dead_removes_confirmed_dead_sessions_even_when_later_probe_fails() -> None:
+    """A bad pid probe does not keep earlier confirmed-dead sessions around."""
+    service = ExternalSessionDiscoveryService()
+    dead_id = "dead-before-bad-pid"
+    bad_id = "bad-pid-session"
+
+    service.record_event(_make_hook_event(dead_id, pid=4242))
+    service.record_event(_make_hook_event(bad_id, pid=2**100))
+
+    def fake_process_is_alive(pid: int) -> bool:
+        if pid == 4242:
+            return False
+        raise OverflowError("bad pid")
+
+    with patch("app.services.external_session_discovery.process_is_alive", side_effect=fake_process_is_alive):
+        service._prune_dead()
+
+    assert service.get(dead_id) is None
+    assert service.get(bad_id) is not None
+
+
 def test_prune_dead_retains_permission_error_session() -> None:
     """A ``PermissionError``-owning session is RETAINED by ``_prune_dead``.
 
@@ -131,3 +180,40 @@ def test_prune_stale_removes_foreign_owned_session_when_last_seen_old() -> None:
 
     assert session_id in removed
     assert service.get(session_id) is None
+
+
+def test_prune_dead_marks_session_ended_so_late_hook_is_not_rediscovered() -> None:
+    """Dead-pruned sessions are terminal; late hook events must not rediscover them."""
+    service = ExternalSessionDiscoveryService()
+    session_id = "dead-unbound"
+
+    service.record_event(_make_hook_event(session_id, pid=4242))
+    assert service.get(session_id) is not None
+
+    with patch("app.services.external_session_discovery.process_is_alive", return_value=False):
+        removed = service.prune_dead()
+
+    assert removed == [session_id]
+    assert service.get(session_id) is None
+    assert service.is_session_ended(session_id) is True
+
+    service.record_event(_make_hook_event(session_id, pid=9999))
+    assert service.get(session_id) is None
+
+
+def test_prune_stale_does_not_tombstone_and_allows_late_rediscovery() -> None:
+    """Stale pruning is cache-only eviction; late hook events may rediscover it."""
+    service = ExternalSessionDiscoveryService(stale_timeout_sec=600)
+    session_id = "stale-unbound"
+
+    service.record_event(_make_hook_event(session_id, pid=4242))
+    service._sessions[session_id].last_seen = utc_now() - timedelta(seconds=service._stale_timeout_sec + 10)
+
+    removed = service.prune_stale()
+
+    assert session_id in removed
+    assert service.get(session_id) is None
+    assert service.is_session_ended(session_id) is False
+
+    service.record_event(_make_hook_event(session_id, pid=9999))
+    assert service.get(session_id) is not None

@@ -334,6 +334,340 @@ def test_session_store_file_synced_replaces_old_state_and_interrupts_on_end(tmp_
     assert state.tool_calls["tool-2"].status == ToolStatus.INTERRUPTED
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        SessionEvent(session_id="claude-session-ended", type=SessionEventType.SESSION_STARTED),
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.TURN_STARTED,
+            payload={"turn_id": "late-turn", "role": "assistant"},
+        ),
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.TURN_COMPLETED,
+            payload={"turn_id": "late-turn"},
+        ),
+        SessionEvent(session_id="claude-session-ended", type=SessionEventType.CLEAR_DETECTED),
+    ],
+)
+def test_session_store_ended_session_ignores_late_state_events(tmp_path, event: SessionEvent) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-ended", workdir="/tmp/project")
+    state.phase = SessionPhase.ENDED
+    store._persist(state)
+
+    state = store.process(event)
+
+    assert state.phase == SessionPhase.ENDED
+    assert state.current_turn_id is None
+    assert state.turns == []
+
+
+@pytest.mark.parametrize("event_type", [SessionEventType.FILE_SYNCED, SessionEventType.HISTORY_LOADED])
+def test_session_store_ended_session_stays_ended_when_snapshot_syncs(tmp_path, event_type: SessionEventType) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-ended", workdir="/tmp/project")
+    state.phase = SessionPhase.ENDED
+    store._persist(state)
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=event_type,
+            payload={
+                "turns": [
+                    {
+                        "turn_id": "a-late",
+                        "role": "assistant",
+                        "text": "\n结束后的最终同步\n",
+                        "source": "jsonl",
+                        "is_complete": True,
+                        "started_at": "2026-04-16T10:00:03+00:00",
+                        "ended_at": "2026-04-16T10:00:03+00:00",
+                    }
+                ],
+                "tool_calls": {},
+                "last_reply": "结束后的最终同步",
+                "last_reply_role": "assistant",
+                "last_offset": 18,
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.ENDED
+    assert state.history_loaded is True
+    assert state.last_reply == "结束后的最终同步"
+
+
+@pytest.mark.parametrize(
+    "hook_payload",
+    [
+        {
+            "session_id": "claude-session-ended",
+            "cwd": "/tmp/project",
+            "event": "PreToolUse",
+            "status": "running_tool",
+            "tool": "Bash",
+            "tool_input": {"command": "pwd"},
+            "tool_use_id": "tool-late",
+        },
+        {
+            "session_id": "claude-session-ended",
+            "cwd": "/tmp/project",
+            "event": "PermissionRequest",
+            "status": "waiting_for_approval",
+            "tool": "Bash",
+            "tool_input": {"command": "pwd"},
+            "tool_use_id": "tool-late",
+        },
+    ],
+)
+def test_session_store_ended_session_ignores_late_active_hooks(tmp_path, hook_payload: dict) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(session_id="claude-session-ended", workdir="/tmp/project")
+    state.phase = SessionPhase.ENDED
+    store._persist(state)
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload=hook_payload,
+        )
+    )
+
+    assert state.phase == SessionPhase.ENDED
+    assert state.pending_permission is None
+    assert "tool-late" not in state.tool_calls
+
+
+@pytest.mark.parametrize("decision_type", [SessionEventType.PERMISSION_APPROVED, SessionEventType.PERMISSION_DENIED])
+def test_session_store_ended_session_ignores_late_permission_decision(tmp_path, decision_type: SessionEventType) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+    )
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "SessionEnd",
+                "status": "ended",
+            },
+        )
+    )
+    assert state.phase == SessionPhase.ENDED
+    assert state.tool_calls["tool-1"].status == ToolStatus.INTERRUPTED
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=decision_type,
+            payload={"tool_use_id": "tool-1"},
+        )
+    )
+
+    assert state.phase == SessionPhase.ENDED
+    assert state.interrupted is True
+    assert state.pending_permission is None
+    assert state.tool_calls["tool-1"].status == ToolStatus.INTERRUPTED
+
+
+def test_session_store_session_ended_event_interrupts_active_tool(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+    )
+
+    state = store.process(SessionEvent(session_id="claude-session-ended", type=SessionEventType.SESSION_ENDED))
+
+    assert state.phase == SessionPhase.ENDED
+    assert state.pending_permission is None
+    assert state.tool_calls["tool-1"].status == ToolStatus.INTERRUPTED
+
+
+def test_session_store_hook_session_end_preserves_existing_interrupt_flag(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+    )
+    state = store.process(SessionEvent(session_id="claude-session-ended", type=SessionEventType.INTERRUPT_DETECTED))
+    assert state.interrupted is True
+    assert state.tool_calls["tool-1"].status == ToolStatus.INTERRUPTED
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "SessionEnd",
+                "status": "ended",
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.ENDED
+    assert state.interrupted is True
+    assert state.tool_calls["tool-1"].status == ToolStatus.INTERRUPTED
+
+
+@pytest.mark.parametrize(
+    "end_event",
+    [
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "SessionEnd",
+                "status": "ended",
+            },
+        ),
+        SessionEvent(session_id="claude-session-ended", type=SessionEventType.SESSION_ENDED),
+    ],
+)
+def test_session_store_session_end_interrupts_active_subagent_tools(tmp_path, end_event: SessionEvent) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Task",
+                "tool_input": {"description": "do thing"},
+                "tool_use_id": "task-1",
+            },
+        )
+    )
+    store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Read",
+                "tool_input": {"file_path": "/tmp/a.py"},
+                "tool_use_id": "sub-1",
+            },
+        )
+    )
+
+    state = store.process(end_event)
+
+    assert state.phase == SessionPhase.ENDED
+    assert state.tool_calls["task-1"].status == ToolStatus.INTERRUPTED
+    assert state.tool_calls["task-1"].subagent_tools[0].status == ToolStatus.INTERRUPTED
+    assert state.subagent_state.active_tasks["task-1"].subagent_tools[0].status == ToolStatus.INTERRUPTED
+
+
+@pytest.mark.parametrize("tool_status", ["running", "waiting_for_approval"])
+def test_session_store_ended_session_interrupts_active_tools_from_late_snapshot(tmp_path, tool_status: str) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "PreToolUse",
+                "status": "running_tool",
+                "tool": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            },
+        )
+    )
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.HOOK_RECEIVED,
+            payload={
+                "session_id": "claude-session-ended",
+                "cwd": "/tmp/project",
+                "event": "SessionEnd",
+                "status": "ended",
+            },
+        )
+    )
+    assert state.phase == SessionPhase.ENDED
+    assert state.tool_calls["tool-1"].status == ToolStatus.INTERRUPTED
+
+    state = store.process(
+        SessionEvent(
+            session_id="claude-session-ended",
+            type=SessionEventType.FILE_SYNCED,
+            payload={
+                "turns": [],
+                "tool_calls": {
+                    "tool-1": {
+                        "tool_use_id": "tool-1",
+                        "name": "Bash",
+                        "input": {"command": "pwd"},
+                        "status": tool_status,
+                        "started_at": "2026-04-16T10:00:01+00:00",
+                    }
+                },
+                "last_offset": 18,
+            },
+        )
+    )
+
+    assert state.phase == SessionPhase.ENDED
+    assert state.pending_permission is None
+    assert state.tool_calls["tool-1"].status == ToolStatus.INTERRUPTED
+
+
 def test_session_store_file_synced_promotes_complete_turn_without_waiting_hook(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     state = store.get_or_create(session_id="claude-session-1", workdir="/tmp/project", terminal_id="user_1_36d00faeb25f")

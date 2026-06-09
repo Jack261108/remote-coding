@@ -1654,6 +1654,78 @@ async def test_run_task_does_not_terminate_persistent_session_when_watch_raises(
 
 
 @pytest.mark.asyncio
+async def test_reveal_terminal_reports_session_check_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        if args and args[0] == "has-session":
+            return 1, "", "permission denied"
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    opened, text = await runner.reveal_terminal("user_1")
+
+    assert opened is False
+    assert text == "终端状态检查失败: permission denied"
+
+
+@pytest.mark.asyncio
+async def test_close_terminal_treats_missing_tmux_socket_as_missing_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        calls.append(args)
+        if args and args[0] == "has-session":
+            return 1, "", "error connecting to /private/tmp/tmux-501/default (No such file or directory)"
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    closed, text = await runner.close_terminal("user_1")
+
+    assert closed is False
+    assert text == "终端不存在"
+    assert not any(args and args[0] == "kill-session" for args in calls)
+
+
+@pytest.mark.asyncio
+async def test_close_terminal_reports_session_check_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        calls.append(args)
+        if args and args[0] == "has-session":
+            return 1, "", "permission denied"
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    closed, text = await runner.close_terminal("user_1")
+
+    assert closed is False
+    assert text == "终端状态检查失败: permission denied"
+    assert not any(args and args[0] == "kill-session" for args in calls)
+
+
+@pytest.mark.asyncio
+async def test_close_terminal_reports_tmux_binary_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0, tmux_bin="missing-tmux")
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        raise FileNotFoundError("missing-tmux")
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+
+    closed, text = await runner.close_terminal("user_1")
+
+    assert closed is False
+    assert text == "终端状态检查失败: 找不到 tmux 可执行文件 (missing-tmux)"
+
+
+@pytest.mark.asyncio
 async def test_terminate_session_succeeds_when_session_is_already_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = TmuxRunner(cancel_grace_sec=0)
     calls: list[tuple[str, ...]] = []

@@ -80,9 +80,9 @@ class StubFactory:
     def available_providers(self) -> list[str]:
         return ["claude_code", "codex", "gemini"]
 
-    async def close_terminal(self, terminal_key: str) -> bool:
+    async def close_terminal(self, terminal_key: str) -> tuple[bool, str]:
         self._closed_terminal_key = terminal_key
-        return True
+        return True, ""
 
     async def ensure_terminal(self, *, terminal_key: str, workdir: str) -> tuple[bool, str]:
         self._ensured_terminal_key = terminal_key

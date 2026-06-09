@@ -9,27 +9,27 @@ from app.bot.handlers.user_utils import extract_user_id
 from app.infra.text_formatting import format_external_session_bound_message, format_external_session_unbound_message, short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind
+from app.services.session_action_validator import validate_external_session_select
+from app.services.session_id_resolver import resolve_and_bind, resolve_and_unbind, resolve_unique_prefix
 from app.services.session_registry import SessionRegistryService
 
+logger = logging.getLogger(__name__)
 
-def _parse_session_callback(
-    callback: CallbackQuery,
-    discovery: ExternalSessionDiscoveryService,
-    binder: ExternalSessionBinder,
-) -> tuple[int, str | None, str | None]:
-    """解析 callback data，返回 (user_id, resolved_session_id, error_message)。"""
-    user_id = callback.from_user.id if callback.from_user else 0
+
+async def _resolve_terminal_id_prefix(
+    terminal_id_prefix: str,
+    registry_service: SessionRegistryService,
+) -> tuple[str | None, str | None]:
+    candidates = [session.terminal_id for session in await registry_service.list_active_sessions() if session.is_alive]
+    return resolve_unique_prefix(terminal_id_prefix, candidates)
+
+
+def _session_callback_token(callback: CallbackQuery) -> str | None:
     data = callback.data or ""
     parts = data.split(":", 2)
     if len(parts) < 3:
-        return user_id, None, "Invalid callback data"
-    session_id_prefix = parts[2]
-    resolved, error = _resolve_session_id(session_id_prefix, discovery, binder)
-    return user_id, resolved, error
-
-
-logger = logging.getLogger(__name__)
+        return None
+    return parts[2]
 
 
 def register_session_action_handlers(
@@ -41,32 +41,29 @@ def register_session_action_handlers(
 ) -> None:
     @router.callback_query(F.data.startswith("sess:select:"))
     async def handle_session_select(callback: CallbackQuery) -> None:
-        user_id, resolved, error = _parse_session_callback(callback, discovery, binder)
-        if error or not resolved:
-            await callback.answer(error or "Session not found")
+        user_id = extract_user_id(callback)
+        session_id_prefix = _session_callback_token(callback)
+        if not session_id_prefix:
+            await callback.answer("Invalid callback data")
             return
 
-        # Determine binding state for this user
-        binding = binder._binding_store.get_binding(resolved)
-        is_bound_to_user = binding is not None and binding.user_id == user_id
+        validation = validate_external_session_select(
+            session_id_prefix,
+            user_id=user_id,
+            discovery=discovery,
+            binder=binder,
+        )
+        if validation.denial_message or not validation.session_id or not validation.action:
+            await callback.answer(validation.denial_message or "Session not found")
+            return
 
-        # Build detail message
-        # Try to get cwd from discovery or binding
-        cwd = ""
-        unbound_session = discovery.get(resolved)
-        if unbound_session:
-            cwd = unbound_session.cwd
-        elif binding:
-            cwd = binding.cwd
+        detail_text = f"📂 Session: {short_id(validation.session_id, 12)}...\n  cwd: {validation.cwd}"
 
-        detail_text = f"📂 Session: {short_id(resolved, 12)}...\n  cwd: {cwd}"
-
-        # Build action buttons conditionally
-        sid_prefix = short_id(resolved, 16)
-        if is_bound_to_user:
-            buttons = [[InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{sid_prefix}")]]
+        callback_token = validation.callback_token
+        if validation.action == "unbind":
+            buttons = [[InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")]]
         else:
-            buttons = [[InlineKeyboardButton(text="绑定", callback_data=f"sess:bind:{sid_prefix}")]]
+            buttons = [[InlineKeyboardButton(text="绑定", callback_data=f"sess:bind:{callback_token}")]]
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -76,12 +73,13 @@ def register_session_action_handlers(
 
     @router.callback_query(F.data.startswith("sess:bind:"))
     async def handle_session_bind(callback: CallbackQuery) -> None:
-        user_id, resolved, error = _parse_session_callback(callback, discovery, binder)
-        if error or not resolved:
-            await callback.answer(error or "Session not found")
+        user_id = extract_user_id(callback)
+        session_id_prefix = _session_callback_token(callback)
+        if not session_id_prefix:
+            await callback.answer("Invalid callback data")
             return
 
-        result = await resolve_and_bind(resolved, user_id=user_id, discovery=discovery, binder=binder)
+        result = await resolve_and_bind(session_id_prefix, user_id=user_id, discovery=discovery, binder=binder)
         if result.success:
             await callback.answer("绑定成功")
             if callback.message:
@@ -91,12 +89,13 @@ def register_session_action_handlers(
 
     @router.callback_query(F.data.startswith("sess:unbind:"))
     async def handle_session_unbind(callback: CallbackQuery) -> None:
-        user_id, resolved, error = _parse_session_callback(callback, discovery, binder)
-        if error or not resolved:
-            await callback.answer(error or "Session not found")
+        user_id = extract_user_id(callback)
+        session_id_prefix = _session_callback_token(callback)
+        if not session_id_prefix:
+            await callback.answer("Invalid callback data")
             return
 
-        result = await resolve_and_unbind(resolved, user_id=user_id, discovery=discovery, binder=binder)
+        result = await resolve_and_unbind(session_id_prefix, user_id=user_id, discovery=discovery, binder=binder)
         if result.success:
             await callback.answer("取消绑定成功")
             if callback.message:
@@ -112,9 +111,13 @@ def register_session_action_handlers(
             await callback.answer("功能不可用")
             return
         user_id = extract_user_id(callback)
-        terminal_id = (callback.data or "").removeprefix("sess:attach:")
-        if not terminal_id:
+        terminal_id_prefix = (callback.data or "").removeprefix("sess:attach:")
+        if not terminal_id_prefix:
             await callback.answer("Invalid callback data")
+            return
+        terminal_id, error = await _resolve_terminal_id_prefix(terminal_id_prefix, registry_service)
+        if error or not terminal_id:
+            await callback.answer(error or "Session not found")
             return
         ok, text = await registry_service.attach_user(user_id=user_id, terminal_id=terminal_id)
         await callback.answer(text if ok else f"❌ {text}")
@@ -126,9 +129,13 @@ def register_session_action_handlers(
         if registry_service is None:
             await callback.answer("功能不可用")
             return
-        terminal_id = (callback.data or "").removeprefix("sess:close:")
-        if not terminal_id:
+        terminal_id_prefix = (callback.data or "").removeprefix("sess:close:")
+        if not terminal_id_prefix:
             await callback.answer("Invalid callback data")
+            return
+        terminal_id, error = await _resolve_terminal_id_prefix(terminal_id_prefix, registry_service)
+        if error or not terminal_id:
+            await callback.answer(error or "Session not found")
             return
         ok = await registry_service.close_session(terminal_id)
         await callback.answer("会话已关闭" if ok else "关闭失败")

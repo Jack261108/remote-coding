@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_session_end_event(event: HookEvent) -> bool:
+    return event.event == "SessionEnd" or event.status == "ended"
+
+
 class _StageShortCircuit(Exception):
     """Raised by a pipeline stage to terminate the rest of the stage list.
 
@@ -138,8 +142,10 @@ class HookHandlingMixin(AppContainerBase):
                 )
                 return None
 
+            is_session_end = _is_session_end_event(event)
+
             # Clear unified permission state on session end before removing bindings.
-            if event.event == "SessionEnd":
+            if is_session_end:
                 if hasattr(self, "auto_approve_service"):
                     await self.auto_approve_service.deactivate_all_for_session(event.session_id)
                     await self.auto_approve_service.release_all_slots_for_session(event.session_id)
@@ -148,12 +154,10 @@ class HookHandlingMixin(AppContainerBase):
                 if hasattr(self, "unbound_permission_handler"):
                     await self.unbound_permission_handler.invalidate_session(event.session_id)
 
-            # Remove external binding on session end so /list doesn't show stale entries
-            if event.event == "SessionEnd" and hasattr(self, "external_binding_store"):
-                self.external_binding_store.remove_binding(event.session_id)
-
             # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior
             if not hasattr(self, "ownership_resolver"):
+                if is_session_end and hasattr(self, "external_binding_store"):
+                    self.external_binding_store.remove_binding(event.session_id)
                 await self._bind_hook_session(event)
                 await self._dispatch_session_event(  # type: ignore[attr-defined]
                     SessionEvent(
@@ -165,8 +169,31 @@ class HookHandlingMixin(AppContainerBase):
                 self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
                 return None
 
-            # Resolve ownership
+            # Resolve ownership before removing a SessionEnd binding so the ended
+            # event still follows the external-bound pipeline it belonged to.
             ownership = await self.ownership_resolver.resolve(event.session_id)
+
+            if not is_session_end and ownership.origin == ExternalSessionOrigin.EXTERNAL and hasattr(self, "external_discovery"):
+                is_ended = getattr(self.external_discovery, "is_session_ended", None)
+                if callable(is_ended) and is_ended(event.session_id):
+                    if event.expects_response and hasattr(self, "hook_socket_server"):
+                        await self.hook_socket_server.cancel_pending_permissions(session_id=event.session_id)
+                    return None
+
+            # Remove external binding on session end so /list doesn't show stale entries.
+            if is_session_end and ownership.origin == ExternalSessionOrigin.EXTERNAL:
+                if hasattr(self, "external_discovery"):
+                    marker = getattr(self.external_discovery, "mark_session_ended", None)
+                    if callable(marker):
+                        marker(event.session_id)
+                    else:
+                        self.external_discovery.remove_session(event.session_id)
+                if hasattr(self, "external_uq_state"):
+                    invalidator = getattr(self.external_uq_state, "invalidate_session", None)
+                    if callable(invalidator):
+                        invalidator(event.session_id)
+                if hasattr(self, "external_binding_store"):
+                    self.external_binding_store.remove_binding(event.session_id)
             logger.info(
                 "hook event ownership resolved",
                 extra={
@@ -184,7 +211,7 @@ class HookHandlingMixin(AppContainerBase):
             if (
                 ownership.origin == ExternalSessionOrigin.EXTERNAL
                 and ownership.ownership_state == "bound"
-                and event.event != "SessionEnd"
+                and not is_session_end
                 and hasattr(self, "external_binding_store")
                 and self.external_binding_store.get_binding(event.session_id) is not None
             ):
@@ -309,6 +336,8 @@ class HookHandlingMixin(AppContainerBase):
             # External discovery record
             async def _external_discovery() -> None:
                 if hasattr(self, "external_discovery"):
+                    if _is_session_end_event(event):
+                        return
                     self.external_discovery.record_event(event)
 
             stages.append(("external_discovery", _external_discovery()))

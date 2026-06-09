@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from app.services.session_id_resolver import unique_prefixes
 
 _RECENT_LIMIT = 3
 _SID_PREFIX_LEN = 16
@@ -41,11 +43,15 @@ def build_session_list_message(
     *,
     now: datetime,
     has_invalid_sessions: bool = False,
+    external_token_ids: Sequence[str] = (),
 ) -> SessionListRenderResult:
     now_utc = _ensure_aware_utc(now)
     all_items = list(items)
     if not all_items:
-        return SessionListRenderResult(text="当前无活跃会话。", keyboard=None)
+        keyboard = None
+        if has_invalid_sessions:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🧹 清理无效会话", callback_data="sess:cleanup")]])
+        return SessionListRenderResult(text="当前无活跃会话。", keyboard=keyboard)
 
     recent = sorted(
         (item for item in all_items if item.source == ListSessionSource.BOUND),
@@ -57,6 +63,18 @@ def build_session_list_message(
     attention = sorted(
         (item for item in all_items if item.session_id not in recent_ids and _needs_attention(item)),
         key=lambda item: (_attention_priority(item), -_activity_timestamp(item.activity_at)),
+    )
+    tmux_prefixes = unique_prefixes(
+        (item.session_id for item in all_items if item.source == ListSessionSource.TMUX),
+        min_length=_SID_PREFIX_LEN,
+    )
+    external_ids = list(external_token_ids) or [
+        item.session_id for item in all_items if item.source in {ListSessionSource.BOUND, ListSessionSource.UNBOUND}
+    ]
+    external_prefixes = unique_prefixes(
+        external_ids,
+        min_length=_SID_PREFIX_LEN,
+        max_length=52,
     )
     attention_ids = {item.session_id for item in attention}
     hidden_count = sum(1 for item in all_items if item.session_id not in recent_ids and item.session_id not in attention_ids)
@@ -76,7 +94,7 @@ def build_session_list_message(
             recent_buttons.append(
                 InlineKeyboardButton(
                     text=f"{index} 继续",
-                    callback_data=f"sess:select:{_sid_prefix(item)}",
+                    callback_data=f"sess:select:{external_prefixes[item.session_id]}",
                 )
             )
         buttons.append(recent_buttons)
@@ -94,7 +112,7 @@ def build_session_list_message(
                 [
                     InlineKeyboardButton(
                         text=_attention_button_text(item),
-                        callback_data=_attention_callback_data(item),
+                        callback_data=_attention_callback_data(item, tmux_prefixes=tmux_prefixes, external_prefixes=external_prefixes),
                     )
                 ]
             )
@@ -165,9 +183,17 @@ def _attention_button_text(item: ListSessionView) -> str:
     return f"查看 {sid}"
 
 
-def _attention_callback_data(item: ListSessionView) -> str:
-    action = "bind" if item.source == ListSessionSource.UNBOUND else "select"
-    return f"sess:{action}:{_sid_prefix(item)}"
+def _attention_callback_data(
+    item: ListSessionView,
+    *,
+    tmux_prefixes: Mapping[str, str] | None = None,
+    external_prefixes: Mapping[str, str] | None = None,
+) -> str:
+    if item.source == ListSessionSource.UNBOUND:
+        return f"sess:select:{(external_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
+    if item.source == ListSessionSource.TMUX:
+        return f"sess:attach:{(tmux_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
+    return f"sess:select:{(external_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
 
 
 def _display_title(item: ListSessionView) -> str:

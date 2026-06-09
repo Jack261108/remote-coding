@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from html import escape
 from typing import TYPE_CHECKING
 
@@ -15,6 +15,7 @@ from app.domain.models import SessionListItem, utc_now
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.process_liveness import process_is_alive
+from app.services.session_id_resolver import unique_prefixes
 from app.services.session_registry import SessionRegistryService
 
 if TYPE_CHECKING:
@@ -40,6 +41,20 @@ def _short_cwd(cwd: str) -> str:
 
 def _html(text: str) -> str:
     return escape(text, quote=False)
+
+
+def _is_dead_pid(pid: int | None, *, session_id: str, source: str) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        return not process_is_alive(pid)
+    except Exception:
+        logger.warning(
+            "failed to check external session pid during /list",
+            extra={"session_id": session_id, "pid": pid, "source": source},
+            exc_info=True,
+        )
+        return False
 
 
 def _render_full_list(items: list[SessionListItem]) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -70,14 +85,16 @@ def register_list_handler(
     liveness_enabled: bool = False,
     reaper: ExternalBindingReaper | None = None,
     title_resolver: Callable[[str, str], str | None] | None = None,
+    dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
 ) -> None:
-    async def collect_items(user_id: int) -> tuple[list[SessionListItem], list[ListSessionView], int]:
+    async def collect_items(user_id: int) -> tuple[list[SessionListItem], list[ListSessionView], int, list[str]]:
         now = utc_now()
         legacy_items: list[SessionListItem] = []
         summary_items: list[ListSessionView] = []
         invalid_count = 0
 
         sessions = await registry_service.list_active_sessions()
+        tmux_prefixes = unique_prefixes((s.terminal_id for s in sessions if s.is_alive), min_length=16)
         for s in sessions:
             icon = _PHASE_ICONS.get(s.phase, "❓")
             tags: list[str] = [s.phase]
@@ -89,6 +106,7 @@ def register_list_handler(
                 invalid_count += 1
                 continue  # 跳过已断开的 tmux sessions，不显示
             sid = s.terminal_id
+            sid_prefix = tmux_prefixes[sid]
             legacy_items.append(
                 SessionListItem(
                     session_id=sid,
@@ -97,8 +115,8 @@ def register_list_handler(
                     status_text=" · ".join(tags),
                     source="tmux",
                     buttons=[
-                        ("🔗 绑定", f"sess:attach:{sid[:16]}"),
-                        ("❌ 关闭", f"sess:close:{sid[:16]}"),
+                        ("🔗 绑定", f"sess:attach:{sid_prefix}"),
+                        ("❌ 关闭", f"sess:close:{sid_prefix}"),
                     ],
                 )
             )
@@ -116,9 +134,15 @@ def register_list_handler(
         external_sessions = []
         if external_discovery is not None:
             external_sessions = external_discovery.list_unbound()
+        external_token_ids = [ext.session_id for ext in external_sessions]
+        if external_binder is not None:
+            external_token_ids.extend(binding.session_id for binding in external_binder._binding_store.list_all())
+        if external_discovery is not None:
+            external_token_ids.extend(external_discovery.unavailable_session_ids())
+        external_prefixes = unique_prefixes(external_token_ids, min_length=16, max_length=52)
         for ext in external_sessions:
             # 检测 stale unbound sessions（pid 已死或基于时间）
-            is_dead_pid = ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid)
+            is_dead_pid = _is_dead_pid(ext.pid, session_id=ext.session_id, source="unbound")
             is_stale_time = (
                 external_discovery.is_session_stale(ext.session_id)
                 if external_discovery is not None and hasattr(external_discovery, "is_session_stale")
@@ -135,7 +159,7 @@ def register_list_handler(
                     status_icon="📡",
                     status_text=status,
                     source="external",
-                    buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{ext.session_id[:16]}")],
+                    buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{external_prefixes[ext.session_id]}")],
                 )
             )
             summary_items.append(
@@ -157,8 +181,7 @@ def register_list_handler(
                 visible = []
                 dead_ids: list[str] = []
                 for binding in bound_sessions:
-                    pid = binding.pid
-                    if pid is not None and pid > 0 and not process_is_alive(pid):
+                    if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
                         dead_ids.append(binding.session_id)
                         invalid_count += 1
                         continue
@@ -191,7 +214,7 @@ def register_list_handler(
                     status_icon="🔗",
                     status_text="已绑定",
                     source="bound",
-                    buttons=[(title or _short_cwd(b.cwd), f"sess:select:{b.session_id[:16]}")],
+                    buttons=[(title or _short_cwd(b.cwd), f"sess:select:{external_prefixes[b.session_id]}")],
                 )
             )
             summary_items.append(
@@ -205,23 +228,24 @@ def register_list_handler(
                 )
             )
 
-        return legacy_items, summary_items, invalid_count
+        return legacy_items, summary_items, invalid_count, external_token_ids
 
     @router.message(Command("list"))
     async def command_list(message: Message) -> None:
         user_id = extract_user_id(message)
-        _, summary_items, invalid_count = await collect_items(user_id)
+        _, summary_items, invalid_count, external_token_ids = await collect_items(user_id)
         result = build_session_list_message(
             summary_items,
             now=utc_now(),
             has_invalid_sessions=invalid_count > 0,
+            external_token_ids=external_token_ids,
         )
         await message.answer(result.text, parse_mode="HTML", reply_markup=result.keyboard)
 
     @router.callback_query(F.data == "sess:list:all")
     async def handle_list_all(callback: CallbackQuery) -> None:
         user_id = extract_user_id(callback)
-        legacy_items, _, _ = await collect_items(user_id)
+        legacy_items, _, _, _ = await collect_items(user_id)
         text, keyboard = _render_full_list(legacy_items)
         await callback.answer()
         if callback.message:
@@ -236,8 +260,7 @@ def register_list_handler(
         if external_binder is not None and liveness_enabled and reaper is not None:
             bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
             for binding in bound_sessions:
-                pid = binding.pid
-                if pid is not None and pid > 0 and not process_is_alive(pid):
+                if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
                     try:
                         if await reaper.remove_with_cleanup(binding.session_id, reason="pid_dead"):
                             cleaned += 1
@@ -256,12 +279,13 @@ def register_list_handler(
 
         # 3. 清理 stale unbound sessions（pid 已死的）
         if external_discovery is not None:
-            dead_unbound_ids: list[str] = []
-            for ext in external_discovery.list_unbound():
-                if ext.pid is not None and ext.pid > 0 and not process_is_alive(ext.pid):
-                    dead_unbound_ids.append(ext.session_id)
+            dead_unbound_ids = external_discovery.prune_dead()
             for session_id in dead_unbound_ids:
-                external_discovery.remove_session(session_id)
+                if dead_unbound_cleanup is not None:
+                    try:
+                        await dead_unbound_cleanup(session_id)
+                    except Exception:
+                        logger.warning("cleanup failed for unbound session", extra={"session_id": session_id}, exc_info=True)
                 cleaned += 1
             # 清理基于时间的 stale sessions
             stale_ids = external_discovery.prune_stale()
@@ -271,10 +295,11 @@ def register_list_handler(
 
         # 刷新摘要视图
         if callback.message:
-            _, summary_items, invalid_count = await collect_items(user_id)
+            _, summary_items, invalid_count, external_token_ids = await collect_items(user_id)
             result = build_session_list_message(
                 summary_items,
                 now=utc_now(),
                 has_invalid_sessions=invalid_count > 0,
+                external_token_ids=external_token_ids,
             )
             await callback.message.answer(result.text, parse_mode="HTML", reply_markup=result.keyboard)

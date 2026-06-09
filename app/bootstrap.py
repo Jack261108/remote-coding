@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -184,6 +185,7 @@ class AppContainer(
             structured_session_store=self.structured_session_store,
             hook_socket_server=self.hook_socket_server,
             context_builder=self.context_builder,
+            auto_approve_service=self.auto_approve_service,
         )
         self.session_registry = SessionRegistryService(
             session_service=self.session_service,
@@ -237,10 +239,18 @@ class AppContainer(
             retry_count=settings.push_notification_retry_count,
         )
 
+        # External user question state for PTY injection
+        from app.services.external_user_question_state import ExternalUserQuestionState
+
+        self.external_uq_state = ExternalUserQuestionState()
+
         self.external_binding_reaper = ExternalBindingReaper(
             binding_store=self.external_binding_store,
             auto_approve_service=self.auto_approve_service,
             hook_socket_server=self.hook_socket_server,
+            permission_callback_registry=self.permission_callback_registry,
+            external_uq_state=self.external_uq_state,
+            external_discovery=self.external_discovery,
         )
 
         self.external_binding_cleanup_service = ExternalBindingCleanupService(
@@ -251,11 +261,6 @@ class AppContainer(
             ttl=timedelta(hours=settings.external_binding_idle_ttl_hours),
             interval_sec=settings.session_health_check_interval_sec,
         )
-
-        # External user question state for PTY injection
-        from app.services.external_user_question_state import ExternalUserQuestionState
-
-        self.external_uq_state = ExternalUserQuestionState()
 
         self._jsonl_sync_locks = RefCountedLockRegistry(
             ttl_sec=settings.session_lock_ttl_sec,
@@ -269,7 +274,47 @@ class AppContainer(
         )
         self._background_tasks = BackgroundTaskRegistry(label="bootstrap")
         self._janitor = PeriodicJanitor()
+        self._pending_dead_unbound_cleanup_ids: set[str] = set()
         self._started = False
+
+    async def _cleanup_dead_unbound_external_session(self, session_id: str) -> bool:
+        """Invalidate pending state for a dead-pruned unbound external session."""
+
+        async def invalidate_external_uq_state() -> int:
+            return self.external_uq_state.invalidate_session(session_id)
+
+        cleanup_steps: tuple[tuple[str, Callable[[], Awaitable[object]]], ...] = (
+            ("auto approve service", lambda: self.auto_approve_service.clear_session(session_id)),
+            ("permission callback registry", lambda: self.permission_callback_registry.invalidate_session(session_id)),
+            ("unbound permission handler", lambda: self.unbound_permission_handler.invalidate_session(session_id)),
+            ("external user question state", invalidate_external_uq_state),
+            ("hook pending permissions", lambda: self.hook_socket_server.cancel_pending_permissions(session_id=session_id)),
+        )
+        success = True
+        for label, cleanup in cleanup_steps:
+            try:
+                await cleanup()
+            except Exception:
+                success = False
+                logger.exception("dead unbound external session cleanup failed", extra={"session_id": session_id, "step": label})
+        if success:
+            self._pending_dead_unbound_cleanup_ids.discard(session_id)
+        else:
+            self._pending_dead_unbound_cleanup_ids.add(session_id)
+        return success
+
+    async def _prune_unbound_external_sessions(self) -> None:
+        """Prune in-memory unbound external session discovery entries."""
+        dead_ids: list[str] = []
+        try:
+            dead_ids = self.external_discovery.prune_dead()
+        except Exception:
+            logger.exception("external discovery dead-prune failed")
+        self._pending_dead_unbound_cleanup_ids.update(dead_ids)
+        for session_id in sorted(self._pending_dead_unbound_cleanup_ids):
+            if await self._cleanup_dead_unbound_external_session(session_id):
+                self._pending_dead_unbound_cleanup_ids.discard(session_id)
+        self.external_discovery.prune_stale()
 
     async def start(self) -> None:
         if self._started:
@@ -284,6 +329,8 @@ class AppContainer(
         if self.settings.claude_install_hooks:
             self.hook_installer.install()
         await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
+        if self.settings.claude_tmux_mode:
+            await self.session_registry.reconcile_terminal_lifecycle()
         await self._restore_session_bindings()
 
         # Initial cleanup passes (before periodic loop starts)
@@ -307,9 +354,14 @@ class AppContainer(
             self.external_binding_cleanup_service._cleanup,
         )
         self._janitor.register(
+            "external_discovery_cleanup",
+            self.settings.session_health_check_interval_sec,
+            self._prune_unbound_external_sessions,
+        )
+        self._janitor.register(
             "session_health_check",
             self.settings.session_health_check_interval_sec,
-            self.session_registry._run_health_check,
+            self.session_registry.reconcile_terminal_lifecycle,
         )
         self._janitor.register(
             "periodic_recheck",
@@ -368,5 +420,6 @@ class AppContainer(
             liveness_enabled=self.settings.external_binding_pid_liveness_enabled,
             external_binding_reaper=self.external_binding_reaper,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
+            dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
         )
         self.dispatcher.include_router(router)

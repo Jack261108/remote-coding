@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.adapters.process.tmux_commands import TmuxCommandMixin
 from app.adapters.process.tmux_log import TmuxLogMixin
-from app.adapters.process.tmux_session import TmuxSessionMixin
+from app.adapters.process.tmux_session import TmuxSessionCheckError, TmuxSessionMixin, is_recoverable_tmux_session_error
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
 from app.domain.protocols import SessionStoreProtocol
@@ -29,19 +29,6 @@ from app.infra.lock_registry import RefCountedLockRegistry
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
 logger = logging.getLogger(__name__)
-
-_RECOVERABLE_TMUX_SESSION_ERRORS = (
-    "no server running",
-    "can't find session",
-    "can't find pane",
-    "no such session",
-    "session not found",
-)
-
-
-def _is_recoverable_tmux_session_error(error_text: str) -> bool:
-    normalized = error_text.lower()
-    return any(marker in normalized for marker in _RECOVERABLE_TMUX_SESSION_ERRORS)
 
 
 @dataclass
@@ -301,7 +288,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         ok, err = await self._set_interactive_pipe(meta)
         if ok:
             return True, ""
-        if not _is_recoverable_tmux_session_error(err):
+        if not is_recoverable_tmux_session_error(err):
             return False, f"tmux 管道设置失败: {err}"
 
         rebuilt, rebuild_err = await self._ensure_claude_interactive_session(
@@ -576,17 +563,23 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         session_name = self.build_session_name(terminal_key)
         return self._session_store.get(session_name)
 
-    async def close_terminal(self, terminal_key: str) -> bool:
+    async def close_terminal(self, terminal_key: str) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
         # Cancel any tasks running on this terminal so they release the session lock.
         async with self._lock:
             for meta in self._tasks.values():
                 if meta.session_name == session_name and not meta.cancel_requested:
                     meta.cancel_requested = True
-        exists = await self.session_exists(session_name)
+        try:
+            exists = await self.session_exists(session_name)
+        except TmuxSessionCheckError as exc:
+            return False, f"终端状态检查失败: {exc}"
         if not exists:
-            return False
-        return await self._terminate_session(session_name)
+            return False, "终端不存在"
+        closed = await self._terminate_session(session_name)
+        if not closed:
+            return False, "终端关闭失败"
+        return True, ""
 
     async def ensure_terminal(self, *, terminal_key: str, workdir: str, env: dict[str, str] | None = None) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
@@ -696,7 +689,10 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
 
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
-        exists = await self.session_exists(session_name)
+        try:
+            exists = await self.session_exists(session_name)
+        except TmuxSessionCheckError as exc:
+            return False, f"终端状态检查失败: {exc}"
         if not exists:
             return False, f"tmux 会话不存在: {session_name}\nhint: 请先发送 /claude 创建会话后再打开桌面终端"
         try:
