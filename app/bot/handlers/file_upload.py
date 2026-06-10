@@ -91,7 +91,11 @@ async def _enqueue_or_process_upload(
 ) -> None:
     """If the user has a running task, queue the upload; otherwise process it."""
     if await _user_has_running_task(task_service, user_id):
-        queued = await upload_queue.enqueue(user_id=user_id, filename=filename, data=data)
+        session = await session_service.get(user_id)
+        if session is None:
+            await message.answer("请先使用 /session 或 /claude 创建会话后再上传文件。")
+            return
+        queued = await upload_queue.enqueue(user_id=user_id, filename=filename, data=data, workdir=session.workdir)
         if not queued.accepted:
             await message.answer(f"❌ 文件未加入队列: {filename}\n原因: {queued.reason}")
             return
@@ -118,6 +122,7 @@ async def _process_upload(
     session_service: SessionService,
     filename: str,
     data: bytes,
+    workdir: str | None = None,
 ) -> None:
     """Validate and store a file, then reply with result."""
     user_id = extract_user_id(message)
@@ -126,11 +131,11 @@ async def _process_upload(
         await message.answer("请先使用 /session 或 /claude 创建会话后再上传文件。")
         return
 
-    workdir = session.workdir
+    selected_workdir = workdir or session.workdir
 
     result = await file_receiver.receive_file(
         user_id=user_id,
-        workdir=workdir,
+        workdir=selected_workdir,
         filename=filename,
         data=data,
     )
@@ -169,6 +174,7 @@ async def process_pending_uploads(
                 session_service=session_service,
                 filename=item.filename,
                 data=item.data,
+                workdir=item.workdir,
             )
         except Exception:
             logger.exception("queued upload processing failed", extra={"user_id": user_id, "filename": item.filename})

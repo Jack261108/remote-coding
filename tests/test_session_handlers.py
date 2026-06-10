@@ -106,6 +106,30 @@ async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_handler_rejects_missing_workdir(tmp_path) -> None:
+    factory = StubFactory(StubAdapter(events=[]))
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=SessionService(MemorySessionStore()),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+    )
+    session_service = service._session_service
+    missing_workdir = tmp_path / "missing"
+
+    router = DummyRouter()
+    register_session_handler(router, task_service=service, session_service=session_service)
+    handler = router.handlers[0]
+    message = DummyMessage(f"/session claude_code {missing_workdir}")
+
+    await handler(message)
+
+    assert message.answers == [f"workdir 不存在或不是目录: {missing_workdir.resolve()}"]
+    assert await session_service.get(1) is None
+
+
+@pytest.mark.asyncio
 async def test_status_handler_renders_structured_snapshot(tmp_path) -> None:
     tmux_runner = TmuxRunner(data_dir=str(tmp_path))
     factory = StubFactory(StubAdapter(events=[]))

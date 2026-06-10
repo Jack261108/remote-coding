@@ -94,6 +94,32 @@ async def test_task_failed(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_adapter_run_exception_marks_task_failed(tmp_path: Path) -> None:
+    class RaisingAdapter(StubAdapter):
+        async def run(self, task, *, terminal_key=None, interactive=False, claude_session_id=None):
+            yield CLIEvent(type=EventType.STARTED, task_id=task.task_id)
+            raise RuntimeError("stream boom")
+
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(RaisingAdapter(events=[])),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    events = [event async for event in result.events]
+
+    assert [event.type for event in events] == [EventType.STARTED, EventType.FAILED]
+    assert events[-1].error == "stream boom"
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.status == TaskStatus.FAILED
+    assert status.failure_reason == "stream boom"
+
+
+@pytest.mark.asyncio
 async def test_task_timeout(tmp_path: Path) -> None:
     adapter = StubAdapter(
         events=[
@@ -116,6 +142,38 @@ async def test_task_timeout(tmp_path: Path) -> None:
     status = await service.get_status(result.task.task_id, user_id=1)
     assert status is not None
     assert status.status == TaskStatus.TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_stream_start_is_remembered(tmp_path: Path) -> None:
+    class NotYetRegisteredAdapter(StubAdapter):
+        async def cancel(self, task_id: str) -> bool:
+            self.cancel_called = True
+            return False
+
+    adapter = NotYetRegisteredAdapter(
+        events=[
+            CLIEvent(type=EventType.STARTED, task_id="x"),
+            CLIEvent(type=EventType.EXITED, task_id="x", exit_code=0),
+        ]
+    )
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    canceled = await service.cancel(result.task.task_id, user_id=1)
+    events = [event async for event in result.events]
+
+    assert canceled is True
+    assert [event.type for event in events] == [EventType.CANCELED]
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.status == TaskStatus.CANCELED
 
 
 @pytest.mark.asyncio

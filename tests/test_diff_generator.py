@@ -169,6 +169,22 @@ class TestGenerateUnifiedDiff:
         assert "+line1" in result.content
         assert "+line2" in result.content
 
+    def test_generates_precise_diff_for_modified_existing_file(self, service: DiffGeneratorService, workdir: str) -> None:
+        f = Path(workdir, "existing.py")
+        f.write_text("line1\nline2\n")
+        snapshot = service.capture_snapshot(workdir, [])
+        time.sleep(0.05)
+        f.write_text("line1\nchanged\n")
+        modified = service.detect_modified_files(workdir=workdir, pre_snapshot=snapshot, gitignore_patterns=[])
+
+        result = service.generate_unified_diff(modified, snapshot)
+
+        assert result is not None
+        assert " line1" in result.content
+        assert "-line2" in result.content
+        assert "+changed" in result.content
+        assert "+line1" not in result.content
+
     def test_is_patch_file_below_threshold(self, service: DiffGeneratorService, workdir: str) -> None:
         f = Path(workdir, "small.py")
         f.write_text("x = 1\n")

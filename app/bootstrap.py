@@ -147,7 +147,7 @@ class AppContainer(
             tmux_runner=self.tmux_runner,
         )
 
-        self.upload_store = UploadStoreAdapter(base_dir=settings.default_workdir)
+        self.upload_store = UploadStoreAdapter(base_dir=settings.default_workdir, cleanup_roots=settings.allowed_workdirs)
         self.file_receiver = FileReceiverService(
             upload_store=self.upload_store,
             allowed_extensions=set(settings.allowed_file_extensions),

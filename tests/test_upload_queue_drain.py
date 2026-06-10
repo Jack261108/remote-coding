@@ -68,6 +68,40 @@ async def test_drain_processes_all_queued_files(
 
 
 @pytest.mark.asyncio
+async def test_drain_uses_workdir_captured_when_file_was_queued(
+    upload_queue: UploadQueueManager,
+    file_receiver: AsyncMock,
+    session_service: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Queued uploads are stored in the workdir active at upload time."""
+    queued_workdir = tmp_path / "queued-workdir"
+    current_workdir = tmp_path / "current-workdir"
+    session_service.get = AsyncMock(return_value=SimpleNamespace(workdir=str(current_workdir)))
+
+    await upload_queue.enqueue(user_id=42, filename="queued.py", data=b"aaa", workdir=str(queued_workdir))
+    file_receiver.receive_file = AsyncMock(
+        return_value=FileUploadResult(filename="queued.py", size_bytes=3, path=queued_workdir / ".tg-uploads" / "42" / "queued.py")
+    )
+    message = DummyMessage(user_id=42)
+
+    await process_pending_uploads(
+        message,
+        file_receiver=file_receiver,
+        session_service=session_service,
+        upload_queue=upload_queue,
+        user_id=42,
+    )
+
+    file_receiver.receive_file.assert_awaited_once_with(
+        user_id=42,
+        workdir=str(queued_workdir),
+        filename="queued.py",
+        data=b"aaa",
+    )
+
+
+@pytest.mark.asyncio
 async def test_failed_file_does_not_block_subsequent(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,

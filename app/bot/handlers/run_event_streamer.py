@@ -13,7 +13,7 @@ from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter, normalize_stream_text
 from app.domain.models import EventType
 from app.infra.text_formatting import short_id
-from app.services.diff_generator import DiffGeneratorService
+from app.services.diff_generator import DiffGeneratorService, SnapshotEntry
 from app.services.result_exporter import ResultExporterService
 from app.services.task_service import TaskService
 
@@ -115,7 +115,7 @@ class RunEventStreamer:
         self._interactive_pump: asyncio.Task | None = None
         self._spinner_task: asyncio.Task | None = None
         self._emit_lock = asyncio.Lock()
-        self._pre_snapshot: dict[Path, float] | None = None
+        self._pre_snapshot: dict[Path, SnapshotEntry] | None = None
         self._gitignore_patterns: list[str] = []
 
     def _start_spinner(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -76,6 +77,27 @@ async def _dispatch(snapshot: object, action: PermissionAction) -> object:
     assert isinstance(snapshot, PermissionCallbackRecordSnapshot)
     assert snapshot.decision is action
     return BackendDispatchSucceeded()
+
+
+@pytest.mark.asyncio
+async def test_shielded_call_completes_inner_coroutine_when_outer_task_is_cancelled() -> None:
+    registry = ParserRegistry()
+    gateway = _gateway(registry)
+    inner_started = asyncio.Event()
+    allow_inner_finish = asyncio.Event()
+
+    async def inner() -> str:
+        inner_started.set()
+        await allow_inner_finish.wait()
+        return "done"
+
+    task = asyncio.create_task(gateway._shielded_call(inner()))
+    await inner_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    allow_inner_finish.set()
+
+    assert await task == "done"
 
 
 @pytest.mark.asyncio

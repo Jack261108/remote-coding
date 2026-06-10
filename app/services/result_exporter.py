@@ -53,10 +53,10 @@ class ResultExporterService:
             timestamp=record.created_at,
         )
 
-        # Build content: header + task output (prompt as fallback if no output stored)
-        content = header + (record.prompt if not hasattr(record, "_output") else record.prompt)
-        # The actual output text would come from session store; for now use prompt as placeholder
-        # In practice, the caller provides the output text or it's stored on the record
+        output = getattr(record, "output_text", None)
+        if not isinstance(output, str):
+            output = "任务输出未被记录，无法导出实际输出。"
+        content = header + output
 
         tmp_dir = Path(tempfile.mkdtemp(prefix="export_"))
         filename = f"task_{record.task_id}.md"

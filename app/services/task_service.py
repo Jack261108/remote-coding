@@ -291,9 +291,9 @@ class TaskService:
             timeout_sec=selected_timeout,
             claude_session_id=session.claude_session_id,
         )
-        await self._task_store.add(record)
 
-        # Build file context if ContextBuilderService is available
+        # Build file context before storing the task so creation failures do not leave
+        # a permanently pending record behind.
         effective_prompt = prompt
         extra_cli_args: list[str] = []
         if self._context_builder is not None:
@@ -307,6 +307,8 @@ class TaskService:
             )
             effective_prompt = task_context.augmented_prompt
             extra_cli_args = task_context.cli_args
+
+        await self._task_store.add(record)
 
         execution = ExecutionTask(
             task_id=record.task_id,
@@ -340,29 +342,55 @@ class TaskService:
 
         async def event_stream() -> AsyncIterator[CLIEvent]:
             async with self._semaphore:
-                async for event in adapter.run(
-                    execution,
-                    terminal_key=terminal_key,
-                    interactive=interactive,
-                    claude_session_id=session.claude_session_id,
-                ):
-                    should_yield = True
+                if record.cancel_requested:
+                    canceled_event = CLIEvent(type=EventType.CANCELED, task_id=record.task_id, error="cancel requested before start")
                     lock = self._task_lifecycle_lock(record.task_id)
                     async with lock:
-                        if record.is_final:
-                            logger.info(
-                                "task event ignored after final status",
-                                extra={"task_id": record.task_id, "user_id": record.user_id, "event_type": event.type.value},
-                            )
-                            should_yield = False
-                        else:
-                            await self._apply_event(record, event)
+                        if not record.is_final:
+                            await self._apply_event(record, canceled_event)
+                            await self._task_store.save(record)
+                        cleanup_lock = record.is_final
+                    if cleanup_lock:
+                        self._cleanup_task_lifecycle_lock(record.task_id)
+                    yield canceled_event
+                    return
+                try:
+                    async for event in adapter.run(
+                        execution,
+                        terminal_key=terminal_key,
+                        interactive=interactive,
+                        claude_session_id=session.claude_session_id,
+                    ):
+                        should_yield = True
+                        lock = self._task_lifecycle_lock(record.task_id)
+                        async with lock:
+                            if record.is_final:
+                                logger.info(
+                                    "task event ignored after final status",
+                                    extra={"task_id": record.task_id, "user_id": record.user_id, "event_type": event.type.value},
+                                )
+                                should_yield = False
+                            else:
+                                await self._apply_event(record, event)
+                                await self._task_store.save(record)
+                            cleanup_lock = record.is_final
+                        if cleanup_lock:
+                            self._cleanup_task_lifecycle_lock(record.task_id)
+                        if should_yield:
+                            yield event
+                except Exception as exc:
+                    failed_event = CLIEvent(type=EventType.FAILED, task_id=record.task_id, error=str(exc))
+                    lock = self._task_lifecycle_lock(record.task_id)
+                    async with lock:
+                        should_yield = not record.is_final
+                        if should_yield:
+                            await self._apply_event(record, failed_event)
                             await self._task_store.save(record)
                         cleanup_lock = record.is_final
                     if cleanup_lock:
                         self._cleanup_task_lifecycle_lock(record.task_id)
                     if should_yield:
-                        yield event
+                        yield failed_event
 
         return StartTaskResult(task=record, events=event_stream(), interactive=interactive)
 
@@ -376,6 +404,10 @@ class TaskService:
 
         adapter = self._cli_factory.get(task.provider)
         canceled = await adapter.cancel(task_id)
+        if not canceled and task.status == TaskStatus.PENDING:
+            task.cancel_requested = True
+            await self._task_store.save(task)
+            canceled = True
         if canceled:
             logger.info("task cancel requested", extra={"task_id": task_id, "user_id": user_id, "provider": task.provider})
         return canceled

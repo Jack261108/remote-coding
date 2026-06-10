@@ -255,6 +255,28 @@ async def test_no_files_proceeds_with_original_prompt(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_build_context_failure_does_not_leave_pending_task(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    context_builder = _make_context_builder()
+    context_builder.build_context.side_effect = RuntimeError("context boom")
+    task_store = MemoryTaskStore()
+
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=task_store,
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+        context_builder=context_builder,
+    )
+
+    with pytest.raises(RuntimeError, match="context boom"):
+        await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+
+    assert await task_store.list_by_user(1) == []
+
+
+@pytest.mark.asyncio
 async def test_since_uses_last_task_ended_at(tmp_path: Path) -> None:
     """Verify since parameter reflects the last task's ended_at timestamp."""
     adapter = StubAdapter(

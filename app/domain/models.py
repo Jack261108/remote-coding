@@ -77,6 +77,7 @@ class TaskRecord:
     failure_reason: str | None = None
     output_chars: int = 0
     output_truncated: bool = False
+    cancel_requested: bool = False
 
     @property
     def is_final(self) -> bool:

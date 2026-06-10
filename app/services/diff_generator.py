@@ -10,15 +10,16 @@ from pathlib import Path
 from app.domain.file_models import DiffResult
 
 _PATCH_FILE_THRESHOLD = 4096
+SnapshotEntry = tuple[float, str | None]
 
 
 class DiffGeneratorService:
     def __init__(self) -> None:
         pass
 
-    def capture_snapshot(self, workdir: str, gitignore_patterns: list[str]) -> dict[Path, float]:
-        """Capture mtime of all tracked files in workdir, respecting gitignore patterns."""
-        snapshot: dict[Path, float] = {}
+    def capture_snapshot(self, workdir: str, gitignore_patterns: list[str]) -> dict[Path, SnapshotEntry]:
+        """Capture mtime and text content of all tracked files in workdir, respecting gitignore patterns."""
+        snapshot: dict[Path, SnapshotEntry] = {}
         workdir_path = Path(workdir).resolve()
 
         for root, dirs, files in os.walk(workdir_path, followlinks=False):
@@ -34,31 +35,32 @@ class DiffGeneratorService:
                     continue
                 try:
                     stat = file_path.lstat()
-                    snapshot[file_path] = stat.st_mtime
+                    content = None if self.is_binary_file(file_path) else file_path.read_text(errors="replace")
+                    snapshot[file_path] = (stat.st_mtime, content)
                 except OSError:
                     continue
 
         return snapshot
 
-    def detect_modified_files(self, *, workdir: str, pre_snapshot: dict[Path, float], gitignore_patterns: list[str]) -> list[Path]:
+    def detect_modified_files(self, *, workdir: str, pre_snapshot: dict[Path, SnapshotEntry], gitignore_patterns: list[str]) -> list[Path]:
         """Compare current state against snapshot. Only includes files within workdir,
         excludes binary files and gitignored files."""
         current_snapshot = self.capture_snapshot(workdir, gitignore_patterns)
         modified: list[Path] = []
 
         # Check for modified or new files
-        for path, mtime in current_snapshot.items():
+        for path, entry in current_snapshot.items():
             if not self.is_within_workdir(path, workdir):
                 continue
             if self.is_binary_file(path):
                 continue
             # New file or modified file
-            if path not in pre_snapshot or mtime != pre_snapshot[path]:
+            if path not in pre_snapshot or entry[0] != pre_snapshot[path][0]:
                 modified.append(path)
 
         return sorted(modified)
 
-    def generate_unified_diff(self, modified_files: list[Path], pre_snapshot: dict[Path, float]) -> DiffResult | None:
+    def generate_unified_diff(self, modified_files: list[Path], pre_snapshot: dict[Path, SnapshotEntry]) -> DiffResult | None:
         """Generate unified diff for modified files. Returns None if no modifications."""
         if not modified_files:
             return None
@@ -75,14 +77,9 @@ class DiffGeneratorService:
             current_lines = current_content.splitlines(keepends=True)
 
             if file_path in pre_snapshot:
-                # File existed before — we don't have the old content stored,
-                # so for modified files we show as if the old content was empty
-                # when we can't retrieve it. In practice the snapshot only stores mtime.
-                # We treat new files and modified files the same way for diff display:
-                # show the current content as added lines.
-                old_lines: list[str] = []
+                old_content = pre_snapshot[file_path][1]
+                old_lines = old_content.splitlines(keepends=True) if old_content is not None else []
             else:
-                # New file
                 old_lines = []
 
             diff = difflib.unified_diff(

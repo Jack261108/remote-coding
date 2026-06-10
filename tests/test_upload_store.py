@@ -80,6 +80,14 @@ class TestSaveFile:
         assert p1.read_bytes() == b"a"
         assert p2.read_bytes() == b"b"
 
+    def test_rejects_path_traversal_filename(self, adapter: UploadStoreAdapter, tmp_path: Path) -> None:
+        workdir = str(tmp_path / "workdir")
+
+        with pytest.raises(ValueError, match="invalid upload filename"):
+            asyncio.run(adapter.save_file(42, workdir, "../../escape.txt", b"x"))
+
+        assert not (tmp_path / "workdir" / "escape.txt").exists()
+
 
 class TestCollectPendingFiles:
     def test_collects_files_after_since(self, adapter: UploadStoreAdapter, tmp_path: Path) -> None:
@@ -161,3 +169,22 @@ class TestCleanupExpired:
 
         deleted = adapter.cleanup_expired(max_age_hours=24)
         assert deleted == 0
+
+    def test_cleans_expired_files_from_all_roots(self, tmp_path: Path) -> None:
+        default_workdir = tmp_path / "default"
+        other_workdir = tmp_path / "other"
+        default_workdir.mkdir()
+        other_workdir.mkdir()
+        adapter = UploadStoreAdapter(str(default_workdir), cleanup_roots=[str(default_workdir), str(other_workdir)])
+
+        upload_dir = other_workdir / ".tg-uploads" / "1"
+        upload_dir.mkdir(parents=True)
+        old_file = upload_dir / "old.txt"
+        old_file.write_text("old")
+        old_mtime = time.time() - (25 * 3600)
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        deleted = adapter.cleanup_expired(max_age_hours=24)
+
+        assert deleted == 1
+        assert not old_file.exists()

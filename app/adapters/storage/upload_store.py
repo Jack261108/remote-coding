@@ -14,8 +14,9 @@ UPLOAD_DIR_NAME = ".tg-uploads"
 class UploadStoreAdapter:
     """Manages temporary file storage for user uploads, scoped per user under workdir."""
 
-    def __init__(self, base_dir: str) -> None:
+    def __init__(self, base_dir: str, cleanup_roots: list[str] | None = None) -> None:
         self._base_dir = base_dir
+        self._cleanup_roots = cleanup_roots or [base_dir]
 
     def user_upload_dir(self, user_id: int, workdir: str) -> Path:
         """Returns path: {workdir}/.tg-uploads/{user_id}/"""
@@ -32,6 +33,7 @@ class UploadStoreAdapter:
 
     def deduplicate_filename(self, target_dir: Path, original_name: str) -> str:
         """Returns unique filename by appending numeric suffix if needed."""
+        self._validate_filename(original_name)
         if not (target_dir / original_name).exists():
             return original_name
 
@@ -44,6 +46,11 @@ class UploadStoreAdapter:
             if not (target_dir / candidate).exists():
                 return candidate
             counter += 1
+
+    def _validate_filename(self, filename: str) -> None:
+        path = Path(filename)
+        if path.name != filename or path.is_absolute() or ".." in path.parts:
+            raise ValueError("invalid upload filename")
 
     def collect_pending_files(self, user_id: int, workdir: str, since: datetime) -> list[Path]:
         """Collect files uploaded since the given timestamp."""
@@ -71,28 +78,29 @@ class UploadStoreAdapter:
         cutoff = time.time() - (max_age_hours * 3600)
         deleted = 0
 
-        base = Path(self._base_dir)
-        for uploads_dir in base.rglob(UPLOAD_DIR_NAME):
-            if not uploads_dir.is_dir():
-                continue
-            for user_dir in uploads_dir.iterdir():
-                if not user_dir.is_dir():
+        for root in self._cleanup_roots:
+            base = Path(root)
+            for uploads_dir in base.rglob(UPLOAD_DIR_NAME):
+                if not uploads_dir.is_dir():
                     continue
-                for file_path in user_dir.iterdir():
-                    if not file_path.is_file():
+                for user_dir in uploads_dir.iterdir():
+                    if not user_dir.is_dir():
                         continue
-                    try:
-                        if file_path.stat().st_mtime < cutoff:
-                            file_path.unlink()
-                            deleted += 1
-                    except OSError as exc:
-                        logger.warning("Failed to delete expired file %s: %s", file_path, exc)
+                    for file_path in user_dir.iterdir():
+                        if not file_path.is_file():
+                            continue
+                        try:
+                            if file_path.stat().st_mtime < cutoff:
+                                file_path.unlink()
+                                deleted += 1
+                        except OSError as exc:
+                            logger.warning("Failed to delete expired file %s: %s", file_path, exc)
 
-                # Remove empty user directories
-                try:
-                    if user_dir.exists() and not any(user_dir.iterdir()):
-                        user_dir.rmdir()
-                except OSError:
-                    pass
+                    # Remove empty user directories
+                    try:
+                        if user_dir.exists() and not any(user_dir.iterdir()):
+                            user_dir.rmdir()
+                    except OSError:
+                        pass
 
         return deleted

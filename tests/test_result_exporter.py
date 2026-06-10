@@ -233,6 +233,15 @@ class TestExportMarkdown:
         assert "xyz-789" in content
         assert "gemini" in content
 
+    def test_markdown_without_output_does_not_use_prompt_as_placeholder(self, service: ResultExporterService) -> None:
+        record = _make_task_record(prompt="secret prompt that is not task output")
+
+        result = asyncio.run(service.export_markdown(record))
+
+        content = result.file_path.read_text(encoding="utf-8")
+        assert "secret prompt that is not task output" not in content
+        assert "任务输出未被记录" in content
+
 
 class TestExportZip:
     def test_creates_zip_file(self, service: ResultExporterService, tmp_path: Path) -> None:

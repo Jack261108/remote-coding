@@ -15,6 +15,7 @@ class QueuedUpload:
     data: bytes
     size_bytes: int
     created_at: float
+    workdir: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +93,7 @@ class UploadQueueManager:
             await asyncio.sleep(self._cleanup_interval_sec)
             await self.prune_expired()
 
-    async def enqueue(self, *, user_id: int, filename: str, data: bytes) -> UploadQueueEnqueueResult:
+    async def enqueue(self, *, user_id: int, filename: str, data: bytes, workdir: str | None = None) -> UploadQueueEnqueueResult:
         size_bytes = len(data)
         async with self._lock:
             self._prune_expired_locked(user_id)
@@ -114,7 +115,7 @@ class UploadQueueManager:
             if queue is None:
                 queue = deque()
                 self._queues[user_id] = queue
-            queue.append(QueuedUpload(filename=filename, data=data, size_bytes=size_bytes, created_at=self._clock()))
+            queue.append(QueuedUpload(filename=filename, data=data, size_bytes=size_bytes, created_at=self._clock(), workdir=workdir))
             self._byte_totals[user_id] = current_total + size_bytes
             return UploadQueueEnqueueResult(True)
 

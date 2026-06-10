@@ -45,9 +45,13 @@ def register_session_handler(router, *, task_service: TaskService, session_servi
                 await message.answer(str(exc))
                 return
 
-        if workdir is not None and not task_service.is_workdir_allowed(workdir):
-            await message.answer("workdir 不在白名单中")
-            return
+        if workdir is not None:
+            if not task_service.is_workdir_allowed(workdir):
+                await message.answer("workdir 不在白名单中")
+                return
+            if not Path(workdir).is_dir():
+                await message.answer(f"workdir 不存在或不是目录: {workdir}")
+                return
 
         session = await session_service.switch(user_id=user_id, provider=provider, workdir=workdir)
         await message.answer(

@@ -562,16 +562,12 @@ class PermissionGateway:
         return BackendDispatchSucceeded() if bool(result) else BackendDispatchFailed("backend_rejected")
 
     async def _shielded_call(self, coro: Any) -> Any:
-        """Await *coro* inside ``asyncio.shield``; retry on cancellation.
-
-        When the surrounding task is cancelled, ``asyncio.shield`` raises
-        ``CancelledError`` *without* cancelling the inner coroutine.  We must
-        therefore re-await the coroutine directly so that it still completes.
-        """
+        """Await *coro* inside ``asyncio.shield``; retry on cancellation."""
+        task = asyncio.ensure_future(coro)
         try:
-            return await asyncio.shield(coro)
+            return await asyncio.shield(task)
         except asyncio.CancelledError:
-            return await coro
+            return await task
 
     async def _transition_for_dispatch_failure(
         self,

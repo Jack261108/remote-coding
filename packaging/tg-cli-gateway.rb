@@ -3,7 +3,7 @@ class TgCliGateway < Formula
 
   desc "Telegram interactive remote CLI execution gateway"
   homepage "https://github.com/Jack261108/remote-coding"
-  url "https://github.com/Jack261108/remote-coding/releases/download/v0.1.2/tg-cli-gateway-0.1.2.tar.gz"
+  url "https://github.com/Jack261108/remote-coding/releases/download/v1.0.1/tg-cli-gateway-1.0.1.tar.gz"
   # sha256 is a placeholder — replaced by release.yml on first publish.
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
