@@ -28,11 +28,16 @@ def apply_task_event(
 
         remaining = output_char_limit - record.output_chars
         if len(content) > remaining:
-            event.content = content[:remaining]
+            content = content[:remaining]
+            event.content = content
             record.output_chars += remaining
             record.output_truncated = True
         else:
             record.output_chars += len(content)
+
+        if event.type == EventType.STDERR and content:
+            content = f"[stderr] {content}"
+        record.output_text += content
         return
 
     record.ended_at = utc_now()

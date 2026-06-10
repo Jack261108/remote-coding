@@ -54,7 +54,7 @@ class ResultExporterService:
         )
 
         output = getattr(record, "output_text", None)
-        if not isinstance(output, str):
+        if not isinstance(output, str) or not output:
             output = "任务输出未被记录，无法导出实际输出。"
         content = header + output
 

@@ -348,6 +348,33 @@ async def test_mark_stream_timeout_and_cancel_calls_adapter_after_marking_final(
 
 
 @pytest.mark.asyncio
+async def test_task_record_keeps_exportable_output_text(tmp_path: Path) -> None:
+    adapter = StubAdapter(
+        events=[
+            CLIEvent(type=EventType.STARTED, task_id="x"),
+            CLIEvent(type=EventType.STDOUT, task_id="x", content="hello\n"),
+            CLIEvent(type=EventType.STDERR, task_id="x", content="warn\n"),
+            CLIEvent(type=EventType.EXITED, task_id="x", exit_code=0),
+        ]
+    )
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="secret prompt", workdir=str(tmp_path))
+    _ = [event async for event in result.events]
+
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.output_text == "hello\n[stderr] warn\n"
+    assert "secret prompt" not in status.output_text
+
+
+@pytest.mark.asyncio
 async def test_output_limit_truncate(tmp_path: Path) -> None:
     adapter = StubAdapter(
         events=[
@@ -374,6 +401,7 @@ async def test_output_limit_truncate(tmp_path: Path) -> None:
     status = await service.get_status(result.task.task_id, user_id=1)
     assert status is not None
     assert status.output_chars == 20
+    assert status.output_text == "12345678901234567890"
     assert status.output_truncated is True
 
 

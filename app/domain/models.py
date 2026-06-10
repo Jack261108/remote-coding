@@ -76,6 +76,7 @@ class TaskRecord:
     exit_code: int | None = None
     failure_reason: str | None = None
     output_chars: int = 0
+    output_text: str = ""
     output_truncated: bool = False
     cancel_requested: bool = False
 

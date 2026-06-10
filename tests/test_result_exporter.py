@@ -30,6 +30,7 @@ def _make_task_record(
     status: str = "SUCCEEDED",
     started_at: datetime | None = None,
     ended_at: datetime | None = None,
+    output_text: str = "actual task output",
 ):
     """Create a mock TaskRecord."""
     record = MagicMock()
@@ -38,6 +39,7 @@ def _make_task_record(
     record.prompt = prompt
     record.workdir = workdir
     record.status = status
+    record.output_text = output_text
     record.created_at = datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC)
     record.started_at = started_at or datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC)
     record.ended_at = ended_at or datetime(2025, 1, 15, 10, 35, 0, tzinfo=UTC)
@@ -234,13 +236,23 @@ class TestExportMarkdown:
         assert "gemini" in content
 
     def test_markdown_without_output_does_not_use_prompt_as_placeholder(self, service: ResultExporterService) -> None:
-        record = _make_task_record(prompt="secret prompt that is not task output")
+        record = _make_task_record(prompt="secret prompt that is not task output", output_text="")
 
         result = asyncio.run(service.export_markdown(record))
 
         content = result.file_path.read_text(encoding="utf-8")
         assert "secret prompt that is not task output" not in content
         assert "任务输出未被记录" in content
+
+    def test_markdown_uses_real_output_text(self, service: ResultExporterService) -> None:
+        record = _make_task_record(output_text="actual task output\nline2\n")
+
+        result = asyncio.run(service.export_markdown(record))
+
+        content = result.file_path.read_text(encoding="utf-8")
+        assert "actual task output" in content
+        assert "line2" in content
+        assert "任务输出未被记录" not in content
 
 
 class TestExportZip:
