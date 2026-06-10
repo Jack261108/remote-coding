@@ -79,28 +79,33 @@ class UploadStoreAdapter:
         deleted = 0
 
         for root in self._cleanup_roots:
-            base = Path(root)
-            for uploads_dir in base.rglob(UPLOAD_DIR_NAME):
-                if not uploads_dir.is_dir():
-                    continue
-                for user_dir in uploads_dir.iterdir():
-                    if not user_dir.is_dir():
-                        continue
-                    for file_path in user_dir.iterdir():
-                        if not file_path.is_file():
-                            continue
-                        try:
-                            if file_path.stat().st_mtime < cutoff:
-                                file_path.unlink()
-                                deleted += 1
-                        except OSError as exc:
-                            logger.warning("Failed to delete expired file %s: %s", file_path, exc)
+            base = Path(root).resolve()
+            if not base.is_dir():
+                continue
 
-                    # Remove empty user directories
+            uploads_dir = base / UPLOAD_DIR_NAME
+            if not uploads_dir.is_dir() or uploads_dir.is_symlink():
+                continue
+
+            for user_dir in uploads_dir.iterdir():
+                if not user_dir.is_dir() or user_dir.is_symlink():
+                    continue
+
+                for file_path in user_dir.iterdir():
+                    if not file_path.is_file() or file_path.is_symlink():
+                        continue
                     try:
-                        if user_dir.exists() and not any(user_dir.iterdir()):
-                            user_dir.rmdir()
-                    except OSError:
-                        pass
+                        if file_path.lstat().st_mtime < cutoff:
+                            file_path.unlink()
+                            deleted += 1
+                    except OSError as exc:
+                        logger.warning("Failed to delete expired file %s: %s", file_path, exc)
+
+                # Remove empty user directories
+                try:
+                    if user_dir.exists() and not any(user_dir.iterdir()):
+                        user_dir.rmdir()
+                except OSError:
+                    pass
 
         return deleted

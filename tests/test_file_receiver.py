@@ -107,3 +107,17 @@ class TestReceiveFile:
         )
         assert isinstance(result, FileValidationError)
         assert ".exe" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_rejects_path_traversal_as_validation_error(self, service, tmp_path):
+        """Path traversal filenames should return FileValidationError, not raise ValueError."""
+        workdir = str(tmp_path / "workdir")
+        result = await service.receive_file(
+            user_id=42,
+            workdir=workdir,
+            filename="../../escape.txt",
+            data=b"malicious",
+        )
+        assert isinstance(result, FileValidationError)
+        assert result.filename == "../../escape.txt"
+        assert "无效的文件名" in result.reason

@@ -188,3 +188,28 @@ class TestCleanupExpired:
 
         assert deleted == 1
         assert not old_file.exists()
+
+    def test_does_not_follow_symlinks_outside_cleanup_roots(self, tmp_path: Path) -> None:
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        adapter = UploadStoreAdapter(str(workdir))
+
+        # Create a symlink to outside directory
+        symlink_uploads = workdir / ".tg-uploads"
+        symlink_uploads.symlink_to(outside / ".tg-uploads")
+
+        # Create upload dir in outside location
+        upload_dir = outside / ".tg-uploads" / "1"
+        upload_dir.mkdir(parents=True)
+        old_file = upload_dir / "old.txt"
+        old_file.write_text("old")
+        old_mtime = time.time() - (25 * 3600)
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        deleted = adapter.cleanup_expired(max_age_hours=24)
+
+        # Should not delete files outside the workdir
+        assert deleted == 0
+        assert old_file.exists()

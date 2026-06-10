@@ -51,7 +51,14 @@ class FileReceiverService:
                 reason=f"File size ({size_bytes} bytes) exceeds the {limit_mb:.0f} MB limit.",
             )
 
-        path = await self._upload_store.save_file(user_id, workdir, filename, data)
+        try:
+            path = await self._upload_store.save_file(user_id, workdir, filename, data)
+        except ValueError:
+            return FileValidationError(
+                filename=filename,
+                reason="无效的文件名（包含路径分隔符或非法字符）",
+            )
+
         logger.info(
             "Stored upload: user=%d file=%s size=%d path=%s",
             user_id,
