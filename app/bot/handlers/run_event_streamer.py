@@ -233,14 +233,19 @@ class RunEventStreamer:
         except Exception:
             logger.exception("interactive pump failed", extra={"user_id": self._user_id})
 
-    def _capture_diff_snapshot(self) -> None:
+    async def _capture_diff_snapshot(self) -> None:
         """Capture pre-task filesystem snapshot for diff generation (non-blocking)."""
-        if self._diff_generator is None:
+        diff_generator = self._diff_generator
+        if diff_generator is None:
             return
         try:
             workdir = self._start.task.workdir
-            self._gitignore_patterns = _load_gitignore_patterns(workdir)
-            self._pre_snapshot = self._diff_generator.capture_snapshot(workdir, self._gitignore_patterns)
+
+            def capture() -> tuple[list[str], dict[Path, SnapshotEntry]]:
+                gitignore_patterns = _load_gitignore_patterns(workdir)
+                return gitignore_patterns, diff_generator.capture_snapshot(workdir, gitignore_patterns)
+
+            self._gitignore_patterns, self._pre_snapshot = await asyncio.to_thread(capture)
         except Exception:
             logger.exception("diff snapshot capture failed, skipping diff generation")
             self._pre_snapshot = None
@@ -335,10 +340,11 @@ class RunEventStreamer:
                         self._start.task.provider,
                         self._user_id,
                     )
-                    self._capture_diff_snapshot()
+                    snapshot_task = asyncio.create_task(self._capture_diff_snapshot())
                     self._start_spinner()
                     if self._start.interactive and self._interactive_pump is None:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
+                    await snapshot_task
                     continue
 
                 if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:

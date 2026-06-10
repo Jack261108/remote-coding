@@ -4,21 +4,32 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
+import hashlib
 import os
+import stat
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.domain.file_models import DiffResult
 
 _PATCH_FILE_THRESHOLD = 4096
-SnapshotEntry = tuple[float, str | None]
+_DEFAULT_MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotEntry:
+    mtime: float
+    size: int
+    digest: str | None
+    content: str | None
 
 
 class DiffGeneratorService:
-    def __init__(self) -> None:
-        pass
+    def __init__(self, *, max_snapshot_file_bytes: int = _DEFAULT_MAX_SNAPSHOT_FILE_BYTES) -> None:
+        self._max_snapshot_file_bytes = max_snapshot_file_bytes
 
     def capture_snapshot(self, workdir: str, gitignore_patterns: list[str]) -> dict[Path, SnapshotEntry]:
-        """Capture mtime and text content of all tracked files in workdir, respecting gitignore patterns."""
+        """Capture metadata and bounded text content for tracked files in workdir."""
         snapshot: dict[Path, SnapshotEntry] = {}
         workdir_path = Path(workdir).resolve()
 
@@ -34,9 +45,28 @@ class DiffGeneratorService:
                 if self._matches_gitignore(file_path, workdir_path, gitignore_patterns):
                     continue
                 try:
-                    stat = file_path.lstat()
-                    content = None if self.is_binary_file(file_path) else file_path.read_text(errors="replace")
-                    snapshot[file_path] = (stat.st_mtime, content)
+                    file_stat = file_path.lstat()
+                    if not stat.S_ISREG(file_stat.st_mode):
+                        continue
+                    if self.is_binary_file(file_path):
+                        snapshot[file_path] = SnapshotEntry(
+                            mtime=file_stat.st_mtime,
+                            size=file_stat.st_size,
+                            digest=None,
+                            content=None,
+                        )
+                        continue
+
+                    content = None
+                    digest = self._digest_file(file_path)
+                    if file_stat.st_size <= self._max_snapshot_file_bytes:
+                        content = file_path.read_text(errors="replace")
+                    snapshot[file_path] = SnapshotEntry(
+                        mtime=file_stat.st_mtime,
+                        size=file_stat.st_size,
+                        digest=digest,
+                        content=content,
+                    )
                 except OSError:
                     continue
 
@@ -54,9 +84,21 @@ class DiffGeneratorService:
                 continue
             if self.is_binary_file(path):
                 continue
-            # New file or modified file
-            if path not in pre_snapshot or entry[0] != pre_snapshot[path][0]:
+            previous = pre_snapshot.get(path)
+            if previous is None or self._snapshot_entry_changed(previous, entry):
                 modified.append(path)
+
+        # Check for deleted text files captured before the task.
+        for path, previous in pre_snapshot.items():
+            if path in current_snapshot:
+                continue
+            if previous.content is None and previous.digest is None:
+                continue
+            if not self.is_within_workdir(path, workdir):
+                continue
+            if self._matches_gitignore(path, Path(workdir).resolve(), gitignore_patterns):
+                continue
+            modified.append(path)
 
         return sorted(modified)
 
@@ -69,24 +111,24 @@ class DiffGeneratorService:
         files_with_diff = 0
 
         for file_path in modified_files:
+            file_exists = file_path.exists()
             try:
-                current_content = file_path.read_text(errors="replace")
+                current_content = file_path.read_text(errors="replace") if file_exists else ""
             except OSError:
                 continue
 
             current_lines = current_content.splitlines(keepends=True)
-
-            if file_path in pre_snapshot:
-                old_content = pre_snapshot[file_path][1]
-                old_lines = old_content.splitlines(keepends=True) if old_content is not None else []
-            else:
-                old_lines = []
+            old_entry = pre_snapshot.get(file_path)
+            old_content = old_entry.content if old_entry is not None else None
+            if old_entry is not None and old_content is None:
+                continue
+            old_lines = old_content.splitlines(keepends=True) if old_content is not None else []
 
             diff = difflib.unified_diff(
                 old_lines,
                 current_lines,
                 fromfile=f"a/{file_path.name}",
-                tofile=f"b/{file_path.name}",
+                tofile=f"b/{file_path.name}" if file_exists else "/dev/null",
             )
             diff_text = "".join(diff)
             if diff_text:
@@ -122,6 +164,21 @@ class DiffGeneratorService:
             return b"\x00" in chunk
         except OSError:
             return False
+
+    def _digest_file(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _snapshot_entry_changed(self, previous: SnapshotEntry, current: SnapshotEntry) -> bool:
+        return (
+            previous.mtime != current.mtime
+            or previous.size != current.size
+            or previous.digest != current.digest
+            or previous.content != current.content
+        )
 
     def _matches_gitignore(self, path: Path, workdir_path: Path, patterns: list[str]) -> bool:
         """Check if a path matches any gitignore pattern using fnmatch on relative path."""

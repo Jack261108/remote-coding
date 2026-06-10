@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -116,6 +117,16 @@ class TestCaptureSnapshot:
         paths = [p.name for p in snapshot]
         assert "secret.txt" not in paths
 
+    def test_large_text_file_content_is_not_kept_in_snapshot(self, workdir: str) -> None:
+        service = DiffGeneratorService(max_snapshot_file_bytes=4)
+        large_file = Path(workdir, "large.py")
+        large_file.write_text("line1\nline2\n")
+
+        snapshot = service.capture_snapshot(workdir, [])
+
+        assert snapshot[large_file].content is None
+        assert snapshot[large_file].digest is not None
+
 
 class TestDetectModifiedFiles:
     def test_detects_new_file(self, service: DiffGeneratorService, workdir: str) -> None:
@@ -153,6 +164,28 @@ class TestDetectModifiedFiles:
         snapshot = service.capture_snapshot(workdir, [])
         modified = service.detect_modified_files(workdir=workdir, pre_snapshot=snapshot, gitignore_patterns=[])
         assert modified == []
+
+    def test_detects_text_change_when_mtime_is_preserved(self, service: DiffGeneratorService, workdir: str) -> None:
+        f = Path(workdir, "same_mtime.py")
+        f.write_text("alpha\n")
+        snapshot = service.capture_snapshot(workdir, [])
+        old_stat = f.stat()
+        f.write_text("bravo\n")
+        os.utime(f, (old_stat.st_atime, old_stat.st_mtime))
+
+        modified = service.detect_modified_files(workdir=workdir, pre_snapshot=snapshot, gitignore_patterns=[])
+
+        assert modified == [f]
+
+    def test_detects_deleted_text_file(self, service: DiffGeneratorService, workdir: str) -> None:
+        f = Path(workdir, "removed.py")
+        f.write_text("gone\n")
+        snapshot = service.capture_snapshot(workdir, [])
+        f.unlink()
+
+        modified = service.detect_modified_files(workdir=workdir, pre_snapshot=snapshot, gitignore_patterns=[])
+
+        assert modified == [f]
 
 
 class TestGenerateUnifiedDiff:
@@ -215,3 +248,16 @@ class TestGenerateUnifiedDiff:
         # File doesn't exist — should be skipped gracefully
         result = service.generate_unified_diff([f], {})
         assert result is None
+
+    def test_generates_diff_for_deleted_file(self, service: DiffGeneratorService, workdir: str) -> None:
+        f = Path(workdir, "deleted.py")
+        f.write_text("old\n")
+        snapshot = service.capture_snapshot(workdir, [])
+        f.unlink()
+
+        result = service.generate_unified_diff([f], snapshot)
+
+        assert result is not None
+        assert result.file_count == 1
+        assert "-old" in result.content
+        assert "+++ /dev/null" in result.content

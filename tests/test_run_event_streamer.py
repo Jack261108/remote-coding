@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -111,6 +112,54 @@ async def test_stream_events_does_not_log_raw_stdout_or_stderr_at_info(caplog) -
 
     assert secret not in caplog.text
     assert dispatcher.pushed == [f"stdout {secret}\n", f"[stderr] stderr {secret}\n"]
+
+
+@pytest.mark.asyncio
+async def test_diff_snapshot_capture_does_not_block_event_loop() -> None:
+    class BlockingDiffGenerator:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def capture_snapshot(self, workdir: str, gitignore_patterns: list[str]):
+            self.started.set()
+            self.release.wait(timeout=0.35)
+            return {}
+
+        def detect_modified_files(self, *, workdir: str, pre_snapshot, gitignore_patterns: list[str]):
+            return []
+
+        def generate_unified_diff(self, modified_files, pre_snapshot):
+            return None
+
+    diff_generator = BlockingDiffGenerator()
+    task = SimpleNamespace(task_id="t1", provider="claude_code", session_id="s1", workdir="/tmp")
+    start = SimpleNamespace(
+        task=task,
+        events=_events([CLIEvent(type=EventType.STARTED, task_id="t1"), CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0)]),
+        interactive=False,
+    )
+    streamer = RunEventStreamer(
+        start=start,
+        task_service=DummyTaskService(_status()),
+        user_id=42,
+        presenter=DummyPresenter(),
+        dispatcher=DummyDispatcher(),
+        messenger=DummyMessenger(),
+        lifecycle_message=None,
+        diff_generator=diff_generator,
+    )
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    stream_task = asyncio.create_task(streamer.stream_events())
+
+    assert await asyncio.wait_for(asyncio.to_thread(diff_generator.started.wait, 1), timeout=1)
+    elapsed = loop.time() - started_at
+    diff_generator.release.set()
+    await stream_task
+
+    assert elapsed < 0.2
 
 
 @pytest.mark.asyncio

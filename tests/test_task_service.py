@@ -177,6 +177,52 @@ async def test_cancel_before_stream_start_is_remembered(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_after_adapter_run_entered_before_started_is_reported(tmp_path: Path) -> None:
+    class BlockingBeforeStartAdapter(StubAdapter):
+        def __init__(self) -> None:
+            super().__init__(events=[])
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def run(self, task, *, terminal_key=None, interactive=False, claude_session_id=None):
+            self.entered.set()
+            await self.release.wait()
+            yield CLIEvent(type=EventType.STARTED, task_id=task.task_id)
+            yield CLIEvent(type=EventType.EXITED, task_id=task.task_id, exit_code=0)
+
+        async def cancel(self, task_id: str) -> bool:
+            self.cancel_called = True
+            return False
+
+    adapter = BlockingBeforeStartAdapter()
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    events = result.events.__aiter__()
+    first_event = asyncio.create_task(anext(events))
+    await adapter.entered.wait()
+
+    canceled = await service.cancel(result.task.task_id, user_id=1)
+    status_after_cancel = await service.get_status(result.task.task_id, user_id=1)
+    adapter.release.set()
+
+    event = await first_event
+
+    assert canceled is True
+    assert status_after_cancel is not None
+    assert status_after_cancel.status == TaskStatus.CANCELED
+    assert event.type == EventType.CANCELED
+    with pytest.raises(StopAsyncIteration):
+        await anext(events)
+
+
+@pytest.mark.asyncio
 async def test_task_cancel_call(tmp_path: Path) -> None:
     adapter = StubAdapter(
         events=[
