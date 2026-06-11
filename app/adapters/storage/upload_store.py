@@ -48,6 +48,8 @@ class UploadStoreAdapter:
             counter += 1
 
     def _validate_filename(self, filename: str) -> None:
+        if not filename:
+            raise ValueError("invalid upload filename")
         path = Path(filename)
         if path.name != filename or path.is_absolute() or ".." in path.parts:
             raise ValueError("invalid upload filename")

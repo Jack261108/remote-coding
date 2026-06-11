@@ -88,6 +88,12 @@ class TestSaveFile:
 
         assert not (tmp_path / "workdir" / "escape.txt").exists()
 
+    def test_rejects_empty_filename(self, adapter: UploadStoreAdapter, tmp_path: Path) -> None:
+        workdir = str(tmp_path / "workdir")
+
+        with pytest.raises(ValueError, match="invalid upload filename"):
+            asyncio.run(adapter.save_file(42, workdir, "", b"x"))
+
 
 class TestCollectPendingFiles:
     def test_collects_files_after_since(self, adapter: UploadStoreAdapter, tmp_path: Path) -> None:
