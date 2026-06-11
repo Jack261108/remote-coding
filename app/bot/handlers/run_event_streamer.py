@@ -116,6 +116,7 @@ class RunEventStreamer:
         self._spinner_task: asyncio.Task | None = None
         self._emit_lock = asyncio.Lock()
         self._pre_snapshot: dict[Path, SnapshotEntry] | None = None
+        self._snapshot_task: asyncio.Task | None = None
         self._gitignore_patterns: list[str] = []
 
     def _start_spinner(self) -> None:
@@ -340,15 +341,17 @@ class RunEventStreamer:
                         self._start.task.provider,
                         self._user_id,
                     )
-                    snapshot_task = asyncio.create_task(self._capture_diff_snapshot())
+                    self._snapshot_task = asyncio.create_task(self._capture_diff_snapshot())
                     self._start_spinner()
                     if self._start.interactive and self._interactive_pump is None:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
-                    await snapshot_task
                     continue
 
                 if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
                     saw_terminal = True
+                    if self._snapshot_task is not None:
+                        await self._snapshot_task
+                        self._snapshot_task = None
 
                 if self._start.interactive:
                     async with self._emit_lock:

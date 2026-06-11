@@ -121,6 +121,26 @@ class TestCollectPendingFiles:
         assert len(recent) == 1
         assert recent[0].name == "new.txt"
 
+    def test_skips_symlinks(self, adapter: UploadStoreAdapter, tmp_path: Path) -> None:
+        workdir = str(tmp_path / "workdir")
+        upload_dir = adapter.user_upload_dir(1, workdir)
+        upload_dir.mkdir(parents=True)
+
+        # Create a real file
+        real_file = upload_dir / "real.txt"
+        real_file.write_text("real")
+
+        # Create a symlink pointing to an outside file
+        outside_file = tmp_path / "secret.txt"
+        outside_file.write_text("secret")
+        symlink_file = upload_dir / "link.txt"
+        symlink_file.symlink_to(outside_file)
+
+        result = adapter.collect_pending_files(1, workdir, datetime.fromtimestamp(0, tz=UTC))
+        names = [f.name for f in result]
+        assert "real.txt" in names
+        assert "link.txt" not in names
+
     def test_returns_empty_for_nonexistent_dir(self, adapter: UploadStoreAdapter, tmp_path: Path) -> None:
         workdir = str(tmp_path / "workdir")
         result = adapter.collect_pending_files(999, workdir, datetime.fromtimestamp(0, tz=UTC))

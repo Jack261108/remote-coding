@@ -253,6 +253,66 @@ async def test_task_cancel_call(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_during_pending_to_running_transition_sets_flag(tmp_path: Path) -> None:
+    """Cancel racing with PENDING->RUNNING transition still sets cancel_requested.
+
+    Simulates: adapter.cancel() yields, event_stream transitions task to RUNNING,
+    then cancel() acquires the lock. cancel_requested must still be set.
+    """
+
+    class TransitionDuringCancelAdapter(StubAdapter):
+        def __init__(self) -> None:
+            super().__init__(events=[])
+            self._cancel_event = asyncio.Event()
+            self._stream_started = asyncio.Event()
+
+        async def run(self, task, *, terminal_key=None, interactive=False, claude_session_id=None):
+            self._stream_started.set()
+            yield CLIEvent(type=EventType.STARTED, task_id=task.task_id)
+            # Wait until cancel has been called before producing more events
+            await self._cancel_event.wait()
+            yield CLIEvent(type=EventType.CANCELED, task_id=task.task_id, error="killed")
+
+        async def cancel(self, task_id: str) -> bool:
+            self.cancel_called = True
+            self._cancel_event.set()
+            return True
+
+    adapter = TransitionDuringCancelAdapter()
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+
+    # Start consuming the stream so event_stream transitions task to RUNNING
+    events_iter = result.events.__aiter__()
+    first_event = asyncio.create_task(anext(events_iter))
+    await adapter._stream_started.wait()
+    # Let the STARTED event be processed
+    started = await first_event
+    assert started.type == EventType.STARTED
+
+    # Task is now RUNNING. Cancel should still set cancel_requested.
+    canceled = await service.cancel(result.task.task_id, user_id=1)
+    assert canceled is True
+    assert adapter.cancel_called is True
+
+    # Drain remaining events
+    remaining = [event async for event in events_iter]
+    assert any(e.type == EventType.CANCELED for e in remaining)
+
+    # Verify cancel_requested was set on the record
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.cancel_requested is True
+
+
+@pytest.mark.asyncio
 async def test_mark_stream_timeout_marks_running_task_final(tmp_path: Path) -> None:
     adapter = StubAdapter(
         events=[

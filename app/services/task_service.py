@@ -414,20 +414,24 @@ class TaskService:
 
         adapter = self._cli_factory.get(task.provider)
         canceled = await adapter.cancel(task_id)
-        if task.status == TaskStatus.PENDING:
-            canceled_event = CLIEvent(type=EventType.CANCELED, task_id=task_id, error="cancel requested before start")
-            lock = self._task_lifecycle_lock(task_id)
-            async with lock:
-                if not task.is_final and task.status == TaskStatus.PENDING:
-                    task.cancel_requested = True
+        canceled_event = CLIEvent(type=EventType.CANCELED, task_id=task_id, error="cancel requested before start")
+        lock = self._task_lifecycle_lock(task_id)
+        async with lock:
+            if task.is_final:
+                if task.status == TaskStatus.CANCELED:
+                    canceled = True
+            else:
+                task.cancel_requested = True
+                if task.status == TaskStatus.PENDING:
                     await self._apply_event(task, canceled_event)
                     await self._task_store.save(task)
                     canceled = True
-                elif task.status == TaskStatus.CANCELED:
+                else:
+                    await self._task_store.save(task)
                     canceled = True
-                cleanup_lock = task.is_final
-            if cleanup_lock:
-                self._cleanup_task_lifecycle_lock(task_id)
+            cleanup_lock = task.is_final
+        if cleanup_lock:
+            self._cleanup_task_lifecycle_lock(task_id)
         if canceled:
             logger.info("task cancel requested", extra={"task_id": task_id, "user_id": user_id, "provider": task.provider})
         return canceled

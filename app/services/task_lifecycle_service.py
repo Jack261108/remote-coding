@@ -20,6 +20,8 @@ def apply_task_event(
 
     if event.type in {EventType.STDOUT, EventType.STDERR}:
         content = event.content or ""
+        if event.type == EventType.STDERR and content:
+            content = f"[stderr] {content}"
 
         if record.output_chars >= output_char_limit:
             event.content = ""
@@ -35,8 +37,6 @@ def apply_task_event(
         else:
             record.output_chars += len(content)
 
-        if event.type == EventType.STDERR and content:
-            content = f"[stderr] {content}"
         record.output_text += content
         return
 

@@ -64,7 +64,9 @@ class UploadStoreAdapter:
         result: list[Path] = []
 
         for file_path in upload_dir.iterdir():
-            if file_path.is_file() and file_path.stat().st_mtime > since_ts:
+            if file_path.is_symlink():
+                continue
+            if file_path.is_file() and file_path.lstat().st_mtime > since_ts:
                 result.append(file_path)
 
         return sorted(result)
