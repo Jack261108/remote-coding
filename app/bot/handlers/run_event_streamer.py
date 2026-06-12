@@ -83,6 +83,7 @@ _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"
 _SPINNER_INTERVAL_SEC = 1.0
 _SPINNER_INITIAL_DELAY_SEC = 3.0
 _INTERACTIVE_PUMP_CANCEL_GRACE_SEC = 5.0
+_SNAPSHOT_CAPTURE_TIMEOUT_SEC = 10.0
 _ABANDONED_INTERACTIVE_PUMP_TASKS: set[asyncio.Task] = set()
 
 
@@ -350,8 +351,16 @@ class RunEventStreamer:
                 if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
                     saw_terminal = True
                     if self._snapshot_task is not None:
-                        await self._snapshot_task
-                        self._snapshot_task = None
+                        try:
+                            await asyncio.wait_for(self._snapshot_task, timeout=_SNAPSHOT_CAPTURE_TIMEOUT_SEC)
+                        except TimeoutError:
+                            logger.warning(
+                                "diff snapshot capture timeout, skipping diff generation",
+                                extra={"task_id": self._start.task.task_id, "user_id": self._user_id},
+                            )
+                            self._pre_snapshot = None
+                        finally:
+                            self._snapshot_task = None
 
                 if self._start.interactive:
                     async with self._emit_lock:

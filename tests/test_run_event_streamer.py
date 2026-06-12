@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.bot.handlers import run_event_streamer as run_event_streamer_module
 from app.bot.handlers.run_event_streamer import RunEventStreamer
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus
 
@@ -160,6 +161,54 @@ async def test_diff_snapshot_capture_does_not_block_event_loop() -> None:
     await stream_task
 
     assert elapsed < 0.2
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_skips_diff_when_snapshot_capture_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    class BlockingDiffGenerator:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.detect_called = False
+
+        def capture_snapshot(self, workdir: str, gitignore_patterns: list[str]):
+            self.started.set()
+            self.release.wait(timeout=1)
+            return {}
+
+        def detect_modified_files(self, *, workdir: str, pre_snapshot, gitignore_patterns: list[str]):
+            self.detect_called = True
+            return []
+
+        def generate_unified_diff(self, modified_files, pre_snapshot):
+            return None
+
+    monkeypatch.setattr(run_event_streamer_module, "_SNAPSHOT_CAPTURE_TIMEOUT_SEC", 0.01)
+    diff_generator = BlockingDiffGenerator()
+    task = SimpleNamespace(task_id="t1", provider="claude_code", session_id="s1", workdir="/tmp")
+    start = SimpleNamespace(
+        task=task,
+        events=_events([CLIEvent(type=EventType.STARTED, task_id="t1"), CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0)]),
+        interactive=False,
+    )
+    streamer = RunEventStreamer(
+        start=start,
+        task_service=DummyTaskService(_status()),
+        user_id=42,
+        presenter=DummyPresenter(),
+        dispatcher=DummyDispatcher(),
+        messenger=DummyMessenger(),
+        lifecycle_message=None,
+        diff_generator=diff_generator,
+    )
+
+    stream_task = asyncio.create_task(streamer.stream_events())
+
+    assert await asyncio.wait_for(asyncio.to_thread(diff_generator.started.wait, 1), timeout=1)
+    await asyncio.wait_for(stream_task, timeout=0.5)
+    diff_generator.release.set()
+
+    assert diff_generator.detect_called is False
 
 
 @pytest.mark.asyncio

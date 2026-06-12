@@ -313,6 +313,88 @@ async def test_cancel_during_pending_to_running_transition_sets_flag(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_cancel_while_running_yields_canceled_event(tmp_path: Path) -> None:
+    class CancelAfterStartAdapter(StubAdapter):
+        def __init__(self) -> None:
+            super().__init__(events=[])
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def run(self, task, *, terminal_key=None, interactive=False, claude_session_id=None):
+            self.started.set()
+            yield CLIEvent(type=EventType.STARTED, task_id=task.task_id)
+            await self.cancelled.wait()
+            yield CLIEvent(type=EventType.CANCELED, task_id=task.task_id, error="killed")
+
+        async def cancel(self, task_id: str) -> bool:
+            self.cancel_called = True
+            self.cancelled.set()
+            return True
+
+    adapter = CancelAfterStartAdapter()
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    events = result.events.__aiter__()
+    first = await anext(events)
+    assert first.type == EventType.STARTED
+
+    canceled = await service.cancel(result.task.task_id, user_id=1)
+    remaining = [event async for event in events]
+
+    assert canceled is True
+    assert [event.type for event in remaining] == [EventType.CANCELED]
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.status == TaskStatus.CANCELED
+    assert status.cancel_requested is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_exception_after_task_is_final_does_not_override_status(tmp_path: Path) -> None:
+    class RaiseAfterStartAdapter(StubAdapter):
+        def __init__(self) -> None:
+            super().__init__(events=[])
+            self.release = asyncio.Event()
+
+        async def run(self, task, *, terminal_key=None, interactive=False, claude_session_id=None):
+            yield CLIEvent(type=EventType.STARTED, task_id=task.task_id)
+            await self.release.wait()
+            raise RuntimeError("late boom")
+
+    adapter = RaiseAfterStartAdapter()
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    events = result.events.__aiter__()
+    first = await anext(events)
+    assert first.type == EventType.STARTED
+
+    marked = await service.mark_stream_timeout(result.task.task_id, user_id=1, reason="watchdog")
+    adapter.release.set()
+    remaining = [event async for event in events]
+
+    assert marked is True
+    assert remaining == []
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.status == TaskStatus.TIMEOUT
+    assert status.failure_reason == "watchdog"
+
+
+@pytest.mark.asyncio
 async def test_mark_stream_timeout_marks_running_task_final(tmp_path: Path) -> None:
     adapter = StubAdapter(
         events=[

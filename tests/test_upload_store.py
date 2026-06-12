@@ -80,6 +80,31 @@ class TestSaveFile:
         assert p1.read_bytes() == b"a"
         assert p2.read_bytes() == b"b"
 
+    def test_retries_without_following_symlink_created_after_deduplication(
+        self, adapter: UploadStoreAdapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workdir = str(tmp_path / "workdir")
+        target_dir = adapter.user_upload_dir(42, workdir)
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret")
+        calls = 0
+
+        def deduplicate_with_race(_target_dir: Path, _filename: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                (target_dir / "race.txt").symlink_to(outside)
+                return "race.txt"
+            return "race_1.txt"
+
+        monkeypatch.setattr(adapter, "deduplicate_filename", deduplicate_with_race)
+
+        saved = asyncio.run(adapter.save_file(42, workdir, "race.txt", b"uploaded"))
+
+        assert saved.name == "race_1.txt"
+        assert saved.read_bytes() == b"uploaded"
+        assert outside.read_text() == "secret"
+
     def test_rejects_path_traversal_filename(self, adapter: UploadStoreAdapter, tmp_path: Path) -> None:
         workdir = str(tmp_path / "workdir")
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import time
 from datetime import datetime
@@ -26,10 +27,15 @@ class UploadStoreAdapter:
         """Save file with deduplication. Returns final path."""
         target_dir = self.user_upload_dir(user_id, workdir)
         target_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = self.deduplicate_filename(target_dir, filename)
-        file_path = target_dir / safe_name
-        file_path.write_bytes(data)
-        return file_path
+
+        while True:
+            safe_name = self.deduplicate_filename(target_dir, filename)
+            file_path = target_dir / safe_name
+            try:
+                self._write_new_file(file_path, data)
+                return file_path
+            except FileExistsError:
+                continue
 
     def deduplicate_filename(self, target_dir: Path, original_name: str) -> str:
         """Returns unique filename by appending numeric suffix if needed."""
@@ -46,6 +52,21 @@ class UploadStoreAdapter:
             if not (target_dir / candidate).exists():
                 return candidate
             counter += 1
+
+    def _write_new_file(self, file_path: Path, data: bytes) -> None:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(file_path, flags, 0o644)
+        try:
+            remaining = memoryview(data)
+            while remaining:
+                written = os.write(fd, remaining)
+                if written == 0:
+                    raise OSError("failed to write upload file")
+                remaining = remaining[written:]
+        finally:
+            os.close(fd)
 
     def _validate_filename(self, filename: str) -> None:
         if not filename:
