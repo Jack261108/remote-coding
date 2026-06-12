@@ -15,6 +15,7 @@ from app.domain.models import EventType
 from app.infra.text_formatting import short_id
 from app.services.diff_generator import DiffGeneratorService, SnapshotEntry
 from app.services.result_exporter import ResultExporterService
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ class RunEventStreamer:
         diff_generator: DiffGeneratorService | None = None,
         result_exporter: ResultExporterService | None = None,
         queued_upload_scheduler: Callable[[], None] | None = None,
+        status_display: StatusDisplayService | None = None,
     ) -> None:
         self._start = start
         self._task_service = task_service
@@ -119,6 +121,7 @@ class RunEventStreamer:
         self._pre_snapshot: dict[Path, SnapshotEntry] | None = None
         self._snapshot_task: asyncio.Task | None = None
         self._gitignore_patterns: list[str] = []
+        self._status_display = status_display
 
     def _start_spinner(self) -> None:
         if self._lifecycle_message is None:
@@ -228,6 +231,18 @@ class RunEventStreamer:
                 changed = await self._presenter.wait_for_update(timeout_sec=0.05)
                 if not changed:
                     continue
+                # Update status display based on current tool state
+                if self._status_display and self._lifecycle_message:
+                    snapshot = await self._presenter._snapshot_loader.load_snapshot(log_missing=False)
+                    if snapshot.tool_states:
+                        # Get the most recent tool
+                        latest_tool = snapshot.tool_states[-1]
+                        if latest_tool.tool_name:
+                            await self._status_display.update_for_tool(
+                                chat_id=self._lifecycle_message.chat.id,
+                                task_id=self._start.task.task_id,
+                                tool_name=latest_tool.tool_name,
+                            )
                 async with self._emit_lock:
                     await self._dispatcher.emit_presenter_messages(log_missing=False)
         except asyncio.CancelledError:
@@ -344,6 +359,9 @@ class RunEventStreamer:
                     )
                     self._snapshot_task = asyncio.create_task(self._capture_diff_snapshot())
                     self._start_spinner()
+                    # Send typing action
+                    if self._status_display and self._lifecycle_message:
+                        await self._status_display.send_typing(self._lifecycle_message.chat.id)
                     if self._start.interactive and self._interactive_pump is None:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
                     continue
@@ -378,6 +396,9 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
                         await self._messenger.answer_safely(success_msg)
+                    # Clear status display
+                    if self._status_display and self._lifecycle_message:
+                        await self._status_display.clear(chat_id=self._lifecycle_message.chat.id, task_id=self._start.task.task_id)
                     await self._maybe_auto_export()
                     # Generate and send diff on successful completion
                     await self._generate_and_send_diff()
@@ -403,6 +424,9 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, error_msg):
                         await self._messenger.answer_safely(error_msg)
+                    # Clear status display
+                    if self._status_display and self._lifecycle_message:
+                        await self._status_display.clear(chat_id=self._lifecycle_message.chat.id, task_id=self._start.task.task_id)
         finally:
             if saw_terminal:
                 self._schedule_queued_uploads_once()

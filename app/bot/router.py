@@ -37,6 +37,7 @@ from app.services.session_registry import SessionRegistryService
 from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 from app.services.upload_queue import UploadQueueManager
 
@@ -73,6 +74,7 @@ def create_router(
     external_binding_reaper: ExternalBindingReaper | None = None,
     title_resolver: Callable[[str, str], str | None] | None = None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
+    status_display: StatusDisplayService | None = None,
 ) -> Router:
     router = Router()
 
@@ -136,6 +138,7 @@ def create_router(
         result_exporter=result_exporter,
         queued_upload_scheduler=queued_upload_scheduler,
         permission_gateway=permission_gateway,
+        status_display=status_display,
     )
     register_claude_handler(router, task_service=task_service)
     register_cancel_handler(router, task_service=task_service)

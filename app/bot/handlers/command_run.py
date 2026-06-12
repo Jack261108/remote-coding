@@ -24,6 +24,7 @@ from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.models import EventType
 from app.services.diff_generator import DiffGeneratorService
 from app.services.result_exporter import ResultExporterService
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
@@ -75,6 +76,7 @@ async def run_prompt_and_stream(
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    status_display: StatusDisplayService | None = None,
 ) -> asyncio.Task | None:
     logger.info(
         "run prompt requested",
@@ -196,6 +198,7 @@ async def run_prompt_and_stream(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         queued_upload_scheduler=_schedule_queued_uploads_once if queued_upload_scheduler is not None else None,
+        status_display=status_display,
     )
     await presenter.prime(baseline_current_snapshot=True)
 
@@ -385,6 +388,7 @@ def register_run_handler(
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    status_display: StatusDisplayService | None = None,
 ):
     @router.message(Command("run"))
     async def command_run(message: Message, command: CommandObject) -> None:
@@ -406,4 +410,5 @@ def register_run_handler(
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
             permission_gateway=permission_gateway,
+            status_display=status_display,
         )

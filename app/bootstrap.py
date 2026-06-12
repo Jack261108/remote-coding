@@ -60,6 +60,7 @@ from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.session_supervisor import SessionSupervisor
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
@@ -161,6 +162,7 @@ class AppContainer(
             cleanup_interval_sec=settings.upload_queue_cleanup_interval_sec,
         )
         self.message_sender = AiogramMessageSender(self.bot)
+        self.status_display = StatusDisplayService(bot=self.bot)
         self.file_sender = FileSenderService(
             message_sender=self.message_sender,
             enabled=settings.auto_file_send_enabled,
@@ -430,5 +432,6 @@ class AppContainer(
             external_binding_reaper=self.external_binding_reaper,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
             dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
+            status_display=self.status_display,
         )
         self.dispatcher.include_router(router)
