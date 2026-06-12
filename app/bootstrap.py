@@ -53,6 +53,7 @@ from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
 from app.services.result_exporter import ResultExporterService
+from app.services.risk_evaluator import RiskEvaluator
 from app.services.session_ownership_resolver import SessionOwnershipResolver
 from app.services.session_registry import SessionRegistryService
 from app.services.session_scanner import SessionScanner
@@ -221,6 +222,13 @@ class AppContainer(
             permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
         )
+        self.risk_evaluator = RiskEvaluator(
+            enabled=settings.risk_eval_enabled,
+            dangerous_commands=settings.risk_eval_dangerous_commands,
+            dangerous_paths=settings.risk_eval_dangerous_paths,
+            protected_paths=settings.risk_eval_protected_paths,
+            auto_approve_max_risk=settings.risk_eval_auto_approve_max_risk,
+        )
         self.permission_gateway = PermissionGateway(
             registry=self.permission_callback_registry,
             auto_approve_service=self.auto_approve_service,
@@ -230,6 +238,7 @@ class AppContainer(
             settings=settings,
             message_sender=self.message_sender,
             message_builder=self.permission_message_builder,
+            risk_evaluator=self.risk_evaluator,
         )
         self.unbound_permission_handler.set_permission_gateway(self.permission_gateway)
         self.push_notifier = ExternalSessionPushNotifier(

@@ -153,6 +153,46 @@ class Settings(BaseSettings):
     auto_export_threshold_chars: int = Field(4096, alias="AUTO_EXPORT_THRESHOLD_CHARS")
     zip_max_size_mb: int = Field(50, alias="ZIP_MAX_SIZE_MB")
 
+    # Risk evaluation settings
+    risk_eval_enabled: bool = Field(True, alias="RISK_EVAL_ENABLED")
+    risk_eval_dangerous_commands: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "rm -rf",
+            "sudo rm",
+            "dd ",
+            "mkfs",
+            "git reset --hard",
+            "git push --force",
+            "git push -f",
+            "DROP TABLE",
+            "DELETE FROM",
+            "TRUNCATE",
+            "chmod 777",
+            "chown root",
+        ],
+        alias="RISK_EVAL_DANGEROUS_COMMANDS",
+    )
+    risk_eval_dangerous_paths: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            ".env",
+            ".ssh",
+            "id_rsa",
+            "id_ed25519",
+            "token",
+            "credentials",
+            "private_key",
+            "secrets",
+            ".pem",
+            ".key",
+        ],
+        alias="RISK_EVAL_DANGEROUS_PATHS",
+    )
+    risk_eval_protected_paths: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["/etc", "/var", "/usr", "/root"],
+        alias="RISK_EVAL_PROTECTED_PATHS",
+    )
+    risk_eval_auto_approve_max_risk: str = Field("低", alias="RISK_EVAL_AUTO_APPROVE_MAX_RISK")
+
     @field_validator("tg_allowed_user_ids", mode="before")
     @classmethod
     def parse_user_ids(cls, value: Any) -> list[int]:
@@ -204,6 +244,20 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [ext.strip().lower() for ext in value.split(",") if ext.strip()]
         raise ValueError("ALLOWED_FILE_EXTENSIONS 格式错误，需为逗号分隔扩展名")
+
+    @field_validator(
+        "risk_eval_dangerous_commands",
+        "risk_eval_dangerous_paths",
+        "risk_eval_protected_paths",
+        mode="before",
+    )
+    @classmethod
+    def parse_risk_eval_lists(cls, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [item.strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        raise ValueError("风险评估配置格式错误，需为逗号分隔的字符串列表")
 
     @field_validator("claude_tmux_mode", "claude_install_hooks", "auto_file_send_enabled", mode="before")
     @classmethod

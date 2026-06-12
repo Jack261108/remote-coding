@@ -38,6 +38,7 @@ from app.services.permission_callback_registry import (
     PreflightUnauthorized,
     SessionOrigin,
 )
+from app.services.risk_evaluator import RiskEvaluator
 
 if TYPE_CHECKING:
     from app.services.message_sender import MessageSender
@@ -113,6 +114,7 @@ class PermissionGateway:
         settings: Any,
         message_sender: MessageSender,
         message_builder: Any,
+        risk_evaluator: RiskEvaluator | None = None,
     ) -> None:
         self._registry = registry
         self._auto_approve_service = auto_approve_service
@@ -122,6 +124,7 @@ class PermissionGateway:
         self._settings = settings
         self._message_sender = message_sender
         self.message_builder = message_builder
+        self._risk_evaluator = risk_evaluator
 
     @property
     def registry(self) -> Any:
@@ -233,10 +236,28 @@ class PermissionGateway:
         tool_name: str,
         tool_input: object,
     ) -> AutoApproveOutcome:
-        del tool_input
         # AskUserQuestion 需要用户看到并回答问题，不应自动批准
         if (tool_name or "").strip().lower() == "askuserquestion":
             return AutoApproveOutcome.NOT_APPROVED
+
+        # Risk evaluation - block auto-approve for high-risk commands
+        if self._risk_evaluator is not None:
+            risk_assessment = self._risk_evaluator.evaluate(
+                tool_name=tool_name or "",
+                tool_input=tool_input if isinstance(tool_input, dict) else None,
+            )
+            if risk_assessment is not None and risk_assessment.should_block_auto_approve:
+                logger.warning(
+                    "Auto-approve blocked by risk evaluation",
+                    extra={
+                        "session_id": session_id,
+                        "tool_name": tool_name,
+                        "risk_level": risk_assessment.risk_level.value,
+                        "matched_patterns": risk_assessment.matched_patterns,
+                    },
+                )
+                return AutoApproveOutcome.NOT_APPROVED
+
         if candidate_user_id is None:
             return AutoApproveOutcome.NOT_APPROVED
         if not self._auto_approve_service.is_active(session_id=session_id, user_id=candidate_user_id):
