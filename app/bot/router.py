@@ -26,6 +26,7 @@ from app.bot.handlers.external_permission import register_external_permission_ha
 from app.bot.handlers.external_session import register_external_session_handler
 from app.bot.handlers.file_upload import register_file_upload_handler, schedule_pending_upload_processing
 from app.bot.handlers.session_actions import register_session_action_handlers
+from app.bot.middleware.error_handling import ErrorHandlingMiddleware
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
 from app.services.diff_generator import DiffGeneratorService
@@ -75,6 +76,11 @@ def create_router(
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
 ) -> Router:
     router = Router()
+
+    # 注册错误处理中间件
+    error_handling_middleware = ErrorHandlingMiddleware()
+    router.message.middleware(error_handling_middleware)
+    router.callback_query.middleware(error_handling_middleware)
 
     @router.message(Command("start"))
     async def command_start(message: Message) -> None:
