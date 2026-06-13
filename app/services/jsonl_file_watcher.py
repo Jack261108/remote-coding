@@ -106,7 +106,10 @@ class JSONLFileWatcher:
         self._projects_dir = projects_dir
         self._debounce_sec = debounce_sec
         self._on_change = on_change
-        self._watched_files: dict[str, tuple[str, str]] = {}  # file_path -> (session_id, cwd)
+        # file_path -> (session_id, cwd)
+        # Thread safety: watchdog thread reads via .get() (GIL-protected);
+        # add()/remove() are called from the asyncio thread only.
+        self._watched_files: dict[str, tuple[str, str]] = {}
         self._handler = _DebouncedHandler(
             watched_files=self._watched_files,
             debounce_sec=debounce_sec,
@@ -144,5 +147,7 @@ class JSONLFileWatcher:
         self._handler.cancel_all()
         self._observer.stop()
         self._observer.join(timeout=2.0)
+        if self._observer.is_alive():
+            logger.warning("jsonl file watcher did not stop within timeout, callbacks may still fire")
         self._started = False
         logger.debug("jsonl file watcher stopped")

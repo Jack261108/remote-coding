@@ -61,7 +61,10 @@ class AsyncFifoReader:
                 await asyncio.wait_for(self._process.wait(), timeout=1.0)
             except TimeoutError:
                 self._process.kill()
-                await self._process.wait()
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=1.0)
+                except TimeoutError:
+                    logger.warning("process did not exit after SIGKILL, pid=%s", self._process.pid)
             self._process = None
         try:
             self._fifo_path.unlink(missing_ok=True)

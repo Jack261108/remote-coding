@@ -61,7 +61,11 @@ class SessionSupervisor:
         self._tasks[session_id] = asyncio.create_task(self._watch_session(session_id=session_id, workdir=workdir))
 
     def schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
-        """Request a debounced JSONL sync -- picked up on next poll tick."""
+        """Request a debounced JSONL sync -- picked up on next poll tick.
+
+        Must be called from the asyncio event loop thread (directly from async
+        code or via ``loop.call_soon_threadsafe``).
+        """
         self._jsonl_sync_requests[session_id] = (cwd, asyncio.get_running_loop().time())
         self._wake.set()
 

@@ -56,6 +56,8 @@ class PeriodicJanitor:
             await task
 
     async def _run(self) -> None:
+        if not self._jobs:
+            return
         try:
             while True:
                 now = asyncio.get_running_loop().time()
