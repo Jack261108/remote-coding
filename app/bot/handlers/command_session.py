@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.bot.handlers.admin_challenge import maybe_start_admin_challenge
 from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.session_text import render_structured_session
 from app.services.session_service import SessionService
@@ -57,15 +58,7 @@ def register_session_handler(
 
         if workdir is not None:
             if not task_service.is_workdir_allowed(workdir):
-                if admin_password_service is not None and admin_password_service.is_enabled:
-                    if not Path(workdir).is_dir():
-                        await message.answer(f"workdir 不存在或不是目录: {workdir}")
-                        return
-                    started = admin_password_service.start_challenge(user_id, workdir, "session", provider=provider)
-                    if not started:
-                        await message.answer("已有待处理的密码验证，请先输入密码或 /cancel 取消。")
-                        return
-                    await message.answer(f"目录 {workdir} 不在白名单中，请输入管理员密码以继续（或 /cancel 取消）")
+                if await maybe_start_admin_challenge(message, user_id, workdir, "session", admin_password_service, provider=provider):
                     return
                 await message.answer("workdir 不在白名单中")
                 return
