@@ -50,6 +50,7 @@ from app.services.external_session_discovery import ExternalSessionDiscoveryServ
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 from app.services.file_receiver import FileReceiverService
 from app.services.file_sender import FileSenderService
+from app.services.jsonl_file_watcher import JSONLFileWatcher
 from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
@@ -127,12 +128,18 @@ class AppContainer(
         self.session_context_store = FileSessionContextStore(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
         self.structured_session_store = SessionStore(self.file_session_store)
+        self.jsonl_file_watcher = JSONLFileWatcher(
+            projects_dir=self.claude_paths.projects_dir,
+            debounce_sec=settings.claude_jsonl_sync_debounce_ms / 1000,
+            on_change=self._on_jsonl_file_change,
+        )
         self.session_supervisor = SessionSupervisor(
             session_store=self.structured_session_store,
             claude_jsonl_parser=self.claude_jsonl_parser,
             on_jsonl_sync=self.sync_claude_session,
             on_dispatch_event=self._dispatch_session_event,
             debounce_sec=settings.claude_jsonl_sync_debounce_ms / 1000,
+            jsonl_file_watcher=self.jsonl_file_watcher,
         )
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
@@ -296,6 +303,14 @@ class AppContainer(
         self._pending_dead_unbound_cleanup_ids: set[str] = set()
         self._started = False
 
+    def _on_jsonl_file_change(self, session_id: str, cwd: str) -> None:
+        """Called from watchdog timer thread -- dispatch to asyncio thread safely."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.call_soon_threadsafe(self.session_supervisor.schedule_jsonl_sync, session_id, cwd)
+
     async def _cleanup_dead_unbound_external_session(self, session_id: str) -> bool:
         """Invalidate pending state for a dead-pruned unbound external session."""
 
@@ -347,6 +362,7 @@ class AppContainer(
             logger.warning("Failed to register bot commands: %s", exc)
         if self.settings.claude_install_hooks:
             self.hook_installer.install()
+        self.jsonl_file_watcher.start()
         await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
         if self.settings.claude_tmux_mode:
             await self.session_registry.reconcile_terminal_lifecycle()
@@ -396,6 +412,7 @@ class AppContainer(
             return
         await self._janitor.stop()
         await self.session_supervisor.stop_all()
+        self.jsonl_file_watcher.stop()
         await self.hook_socket_server.stop()
         await self._stop_background_tasks()
         await self.bot.session.close()

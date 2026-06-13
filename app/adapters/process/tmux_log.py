@@ -1,8 +1,75 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+import shlex
 from pathlib import Path
 
 from app.domain.models import CLIEvent, EventType
+
+logger = logging.getLogger(__name__)
+
+
+class AsyncFifoReader:
+    """Event-driven reader for tmux pipe-pane output via named pipe (FIFO).
+
+    Instead of polling a log file, this class creates a FIFO and spawns
+    ``cat`` as a subprocess to read from it.  tmux ``pipe-pane`` writes
+    to the same FIFO, so data flows through the pipe in real time.
+    """
+
+    def __init__(self, fifo_path: Path) -> None:
+        self._fifo_path = fifo_path
+        self._process: asyncio.subprocess.Process | None = None
+
+    async def start(self) -> None:
+        """Create FIFO and start reader subprocess."""
+        self._fifo_path.parent.mkdir(parents=True, exist_ok=True)
+        # Clean up stale FIFO from previous crash
+        try:
+            self._fifo_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        os.mkfifo(self._fifo_path)
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                "cat",
+                str(self._fifo_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except Exception:
+            self._fifo_path.unlink(missing_ok=True)
+            raise
+
+    def pipe_command(self) -> str:
+        """Return the tmux pipe-pane command string."""
+        return f"cat > {shlex.quote(str(self._fifo_path))}"
+
+    async def readlines(self) -> asyncio.StreamReader:
+        """Return the stdout stream for async line iteration."""
+        if self._process is None or self._process.stdout is None:
+            raise RuntimeError("AsyncFifoReader not started")
+        return self._process.stdout
+
+    async def close(self) -> None:
+        """Clean up: terminate subprocess and remove FIFO."""
+        if self._process is not None and self._process.returncode is None:
+            self._process.terminate()
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=1.0)
+            except TimeoutError:
+                self._process.kill()
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=1.0)
+                except TimeoutError:
+                    logger.warning("process did not exit after SIGKILL, pid=%s", self._process.pid)
+            self._process = None
+        try:
+            self._fifo_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class TmuxLogMixin:
@@ -31,7 +98,10 @@ class TmuxLogMixin:
     def _read_exit_code(self, path: Path) -> int | None:
         try:
             return int(path.read_text(encoding="utf-8").strip())
-        except Exception:
+        except (ValueError, FileNotFoundError):
+            return None
+        except OSError:
+            logger.warning("failed to read exit code file", extra={"path": str(path)})
             return None
 
     def _safe_unlink(self, path: Path) -> None:
