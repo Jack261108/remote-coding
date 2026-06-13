@@ -29,24 +29,29 @@ from tests.fakes.cli import StubAdapter, StubFactory, make_settings
 from tests.fakes.telegram import DummyCallbackQuery, DummyMessage
 
 
+class _EventObserverStub:
+    """Minimal stub mimicking aiogram EventObserver for decorator + middleware usage."""
+
+    def __init__(self, handlers: list) -> None:
+        self._handlers = handlers
+
+    def __call__(self, *args, **kwargs):
+        def decorator(fn):
+            self._handlers.append(fn)
+            return fn
+
+        return decorator
+
+    def middleware(self, middleware):  # noqa: ANN001
+        pass
+
+
 class DummyRouter:
     def __init__(self) -> None:
         self.handlers = []
         self.callback_handlers = []
-
-    def message(self, *args, **kwargs):
-        def decorator(fn):
-            self.handlers.append(fn)
-            return fn
-
-        return decorator
-
-    def callback_query(self, *args, **kwargs):
-        def decorator(fn):
-            self.callback_handlers.append(fn)
-            return fn
-
-        return decorator
+        self.message = _EventObserverStub(self.handlers)
+        self.callback_query = _EventObserverStub(self.callback_handlers)
 
 
 @pytest.mark.asyncio
