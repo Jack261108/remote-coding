@@ -343,7 +343,7 @@ async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: p
     async def fake_send(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
 
     async def fake_run_tmux(*args: str, input_data: bytes | None = None):
@@ -372,8 +372,8 @@ async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: p
     assert len(seen_pipe_calls) == 2
     assert seen_pipe_calls[0] == ("pipe-pane", "-t", "tgcli_user_1")
     assert seen_pipe_calls[1][0:3] == ("pipe-pane", "-t", "tgcli_user_1")
-    assert "cat >>" in seen_pipe_calls[1][3]
-    assert "sessions/tgcli_user_1/transcript.raw.log" in seen_pipe_calls[1][3]
+    assert "cat >" in seen_pipe_calls[1][3]
+    assert ".fifo" in seen_pipe_calls[1][3]
 
 
 @pytest.mark.asyncio
@@ -391,7 +391,7 @@ async def test_interactive_run_rebuilds_and_retries_pipe_when_tmux_server_is_mis
     async def fake_send(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
 
     async def fake_run_tmux(*args: str, input_data: bytes | None = None):
@@ -1547,7 +1547,7 @@ async def test_run_task_terminates_ephemeral_session_when_watch_raises(monkeypat
     async def fake_start(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         raise RuntimeError("watch failed")
         yield
 
@@ -1583,7 +1583,7 @@ async def test_run_task_terminates_ephemeral_session_when_generator_is_closed(mo
     async def fake_start(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         await asyncio.sleep(10)
         yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
 
@@ -1624,7 +1624,7 @@ async def test_run_task_does_not_terminate_persistent_session_when_watch_raises(
     async def fake_send(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         raise RuntimeError("watch failed")
         yield
 

@@ -10,10 +10,14 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from typing import TYPE_CHECKING
 
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.session_store import SessionStore
+
+if TYPE_CHECKING:
+    from app.services.jsonl_file_watcher import JSONLFileWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +34,7 @@ class SessionSupervisor:
         on_dispatch_event: Callable[[SessionEvent], Awaitable[None]],
         poll_interval_sec: float = 0.2,
         debounce_sec: float = 0.1,
+        jsonl_file_watcher: JSONLFileWatcher | None = None,
     ) -> None:
         self._session_store = session_store
         self._claude_jsonl_parser = claude_jsonl_parser
@@ -42,6 +47,8 @@ class SessionSupervisor:
         self._jsonl_sync_requests: dict[str, tuple[str, float]] = {}  # session_id -> (cwd, requested_at)
         self._seen_mtimes: dict[str, float] = {}
         self._active = False
+        self._wake: asyncio.Event = asyncio.Event()
+        self._jsonl_file_watcher = jsonl_file_watcher
 
     def watch(self, *, session_id: str, workdir: str) -> None:
         """Start watching a session if not already watched."""
@@ -49,23 +56,29 @@ class SessionSupervisor:
         task = self._tasks.get(session_id)
         if task is not None and not task.done():
             return
+        if self._jsonl_file_watcher is not None:
+            self._jsonl_file_watcher.add(session_id, workdir)
         self._tasks[session_id] = asyncio.create_task(self._watch_session(session_id=session_id, workdir=workdir))
 
     def schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         """Request a debounced JSONL sync -- picked up on next poll tick."""
         self._jsonl_sync_requests[session_id] = (cwd, asyncio.get_event_loop().time())
+        self._wake.set()
 
     def forget(self, session_id: str) -> None:
         """Stop watching a session and clean up state."""
         task = self._tasks.pop(session_id, None)
         self._clear_seen_mtimes(session_id)
         self._jsonl_sync_requests.pop(session_id, None)
+        if self._jsonl_file_watcher is not None:
+            self._jsonl_file_watcher.remove(session_id)
         if task is not None:
             task.cancel()
 
     async def stop_all(self) -> None:
         """Cancel all watched sessions and wait for termination."""
         self._active = False
+        self._wake.set()
         tasks = list(self._tasks.values())
         self._tasks.clear()
         self._seen_mtimes.clear()
@@ -100,7 +113,12 @@ class SessionSupervisor:
                 # Debounced JSONL sync (outside lock to avoid deadlock with _on_jsonl_sync)
                 await self._maybe_process_jsonl_sync(session_id)
 
-                await asyncio.sleep(self._poll_interval_sec)
+                # Wait for wake signal or timeout (event-driven instead of polling)
+                self._wake.clear()
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval_sec)
+                except TimeoutError:
+                    pass
         except asyncio.CancelledError:
             raise
         except Exception:
