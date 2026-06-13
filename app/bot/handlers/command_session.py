@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -10,8 +11,17 @@ from app.bot.presenters.session_text import render_structured_session
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 
+if TYPE_CHECKING:
+    from app.services.admin_password_service import AdminPasswordService
 
-def register_session_handler(router, *, task_service: TaskService, session_service: SessionService):
+
+def register_session_handler(
+    router,
+    *,
+    task_service: TaskService,
+    session_service: SessionService,
+    admin_password_service: AdminPasswordService | None = None,
+):
     @router.message(Command("session"))
     async def command_session(message: Message) -> None:
         user_id = extract_user_id(message)
@@ -47,6 +57,16 @@ def register_session_handler(router, *, task_service: TaskService, session_servi
 
         if workdir is not None:
             if not task_service.is_workdir_allowed(workdir):
+                if admin_password_service is not None and admin_password_service.is_enabled:
+                    if not Path(workdir).is_dir():
+                        await message.answer(f"workdir 不存在或不是目录: {workdir}")
+                        return
+                    started = admin_password_service.start_challenge(user_id, workdir, "session", provider=provider)
+                    if not started:
+                        await message.answer("已有待处理的密码验证，请先输入密码或 /cancel 取消。")
+                        return
+                    await message.answer(f"目录 {workdir} 不在白名单中，请输入管理员密码以继续（或 /cancel 取消）")
+                    return
                 await message.answer("workdir 不在白名单中")
                 return
             if not Path(workdir).is_dir():

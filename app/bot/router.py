@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
@@ -28,6 +29,7 @@ from app.bot.handlers.file_upload import register_file_upload_handler, schedule_
 from app.bot.handlers.session_actions import register_session_action_handlers
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
+from app.services.admin_password_service import VerifyResult
 from app.services.diff_generator import DiffGeneratorService
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
@@ -43,6 +45,7 @@ from app.services.upload_queue import UploadQueueManager
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.admin_password_service import AdminPasswordService
     from app.services.external_binding_reaper import ExternalBindingReaper
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_gateway import PermissionGateway
@@ -75,6 +78,7 @@ def create_router(
     title_resolver: Callable[[str, str], str | None] | None = None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
     status_display: StatusDisplayService | None = None,
+    admin_password_service: AdminPasswordService | None = None,
 ) -> Router:
     router = Router()
 
@@ -140,10 +144,12 @@ def create_router(
         permission_gateway=permission_gateway,
         status_display=status_display,
     )
-    register_claude_handler(router, task_service=task_service)
-    register_cancel_handler(router, task_service=task_service)
+    register_claude_handler(router, task_service=task_service, admin_password_service=admin_password_service)
+    register_cancel_handler(router, task_service=task_service, admin_password_service=admin_password_service)
     register_status_handler(router, task_service=task_service)
-    register_session_handler(router, task_service=task_service, session_service=session_service)
+    register_session_handler(
+        router, task_service=task_service, session_service=session_service, admin_password_service=admin_password_service
+    )
     if permission_gateway is not None:
         register_permission_handlers(
             router,
@@ -225,8 +231,56 @@ def create_router(
             return
 
         user_id = message.from_user.id if message.from_user else 0
+
+        # Handle pending admin password challenge (higher priority than user question)
+        if admin_password_service is not None and admin_password_service.is_enabled:
+            outcome = admin_password_service.verify(user_id, text)
+            if outcome.result == VerifyResult.VERIFIED:
+                challenge = outcome.challenge
+                # Password correct — execute the original action
+                if not Path(challenge.workdir).is_dir():
+                    await message.answer(f"密码验证通过，但目录不存在或不是目录: {challenge.workdir}")
+                    return
+                if challenge.action == "session":
+                    try:
+                        session = await session_service.switch(
+                            user_id=user_id,
+                            provider=challenge.provider,
+                            workdir=challenge.workdir,
+                        )
+                        await message.answer(
+                            f"密码验证通过，session 已更新\n"
+                            f"session_id: {session.session_id}\n"
+                            f"provider: {session.provider}\n"
+                            f"workdir: {session.workdir}\n"
+                            f"claude_chat_active: {session.claude_chat_active}"
+                        )
+                    except Exception as exc:
+                        await message.answer(f"密码验证通过，但切换 session 失败: {exc}")
+                elif challenge.action == "claude":
+                    try:
+                        opened, result_text = await task_service.open_claude_chat_session(user_id, workdir=challenge.workdir)
+                        if opened:
+                            await message.answer(f"密码验证通过，{result_text}\n现在可直接发送文本与 Claude 对话。")
+                        else:
+                            await message.answer(f"密码验证通过，但开启失败: {result_text}")
+                    except Exception as exc:
+                        await message.answer(f"密码验证通过，但开启 Claude 会话失败: {exc}")
+                else:
+                    logger.error("unknown admin password challenge action", extra={"action": challenge.action, "user_id": user_id})
+                    await message.answer("密码验证通过，但操作类型未知，请重新发起命令。")
+                return
+            elif outcome.result == VerifyResult.WRONG_PASSWORD:
+                await message.answer("密码错误，请重试（或 /cancel 取消）")
+                return
+            elif outcome.result == VerifyResult.MAX_ATTEMPTS_EXCEEDED:
+                await message.answer("密码验证次数已用尽，请稍后重试。")
+                return
+            # NO_CHALLENGE: no pending challenge — fall through
+
         if await maybe_handle_pending_user_question_text(message=message, task_service=task_service):
             return
+
         session = await session_service.get(user_id)
         logger.info(
             "claude chat text received",

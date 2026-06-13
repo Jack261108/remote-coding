@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     gemini_cli_bin: str = Field("gemini", alias="GEMINI_CLI_BIN")
 
     allowed_workdirs: Annotated[list[str], NoDecode] = Field(default_factory=lambda: [str(Path.cwd())], alias="ALLOWED_WORKDIRS")
+    admin_password: str | None = Field(None, alias="ADMIN_PASSWORD")
 
     rate_limit_max_requests: int = Field(6, alias="RATE_LIMIT_MAX_REQUESTS")
     rate_limit_window_sec: int = Field(20, alias="RATE_LIMIT_WINDOW_SEC")
@@ -213,7 +214,7 @@ class Settings(BaseSettings):
             raise ValueError("TG_ALLOWED_USER_IDS 不能为空（或使用 * 代表允许所有用户）")
         return items
 
-    @field_validator("tg_proxy_url", "claude_config_dir", mode="before")
+    @field_validator("tg_proxy_url", "claude_config_dir", "admin_password", mode="before")
     @classmethod
     def parse_optional_text(cls, value: Any) -> str | None:
         if value is None:

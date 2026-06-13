@@ -36,6 +36,7 @@ from app.bot.presenters.permission_message_builder import PermissionMessageBuild
 from app.bot.router import create_router
 from app.config.settings import Settings
 from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.admin_password_service import AdminPasswordService
 from app.services.auto_approve_service import AutoApproveService
 from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
@@ -230,6 +231,13 @@ class AppContainer(
             dangerous_paths=settings.risk_eval_dangerous_paths,
             protected_paths=settings.risk_eval_protected_paths,
             auto_approve_max_risk=settings.risk_eval_auto_approve_max_risk,
+        )
+        self.admin_password_service = (
+            AdminPasswordService(
+                password=settings.admin_password,
+            )
+            if settings.admin_password
+            else None
         )
         self.permission_gateway = PermissionGateway(
             registry=self.permission_callback_registry,
@@ -433,5 +441,6 @@ class AppContainer(
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
             dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
             status_display=self.status_display,
+            admin_password_service=self.admin_password_service,
         )
         self.dispatcher.include_router(router)

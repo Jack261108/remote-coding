@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.services.task_service import TaskService
+
+if TYPE_CHECKING:
+    from app.services.admin_password_service import AdminPasswordService
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +22,28 @@ def resolve_claude_workdir_arg(arg_text: str | None) -> str | None:
     return str(Path(arg_text.strip()).resolve())
 
 
-def register_claude_handler(router, *, task_service: TaskService):
+def register_claude_handler(
+    router,
+    *,
+    task_service: TaskService,
+    admin_password_service: AdminPasswordService | None = None,
+):
     @router.message(Command("claude"))
     async def command_claude(message: Message, command: CommandObject) -> None:
         user_id = extract_user_id(message)
         workdir = resolve_claude_workdir_arg(command.args)
         if workdir is not None:
             if not task_service.is_workdir_allowed(workdir):
+                if admin_password_service is not None and admin_password_service.is_enabled:
+                    if not Path(workdir).is_dir():
+                        await message.answer(f"workdir 不存在或不是目录: {workdir}")
+                        return
+                    started = admin_password_service.start_challenge(user_id, workdir, "claude")
+                    if not started:
+                        await message.answer("已有待处理的密码验证，请先输入密码或 /cancel 取消。")
+                        return
+                    await message.answer(f"目录 {workdir} 不在白名单中，请输入管理员密码以继续（或 /cancel 取消）")
+                    return
                 await message.answer("workdir 不在白名单中")
                 return
         try:
