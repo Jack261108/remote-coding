@@ -159,10 +159,16 @@ class Settings(BaseSettings):
     risk_eval_dangerous_commands: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "rm -rf",
+            "rm -r",
+            "rm -f",
             "sudo rm",
             "dd ",
+            "dd if=",
             "mkfs",
+            "unlink",
+            "shred",
             "git reset --hard",
+            "git clean -fd",
             "git push --force",
             "git push -f",
             "DROP TABLE",

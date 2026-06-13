@@ -11,7 +11,7 @@ from app.services.risk_evaluator import RiskEvaluator, RiskLevel
 def evaluator() -> RiskEvaluator:
     return RiskEvaluator(
         enabled=True,
-        dangerous_commands=["rm -rf", "git reset --hard", "DROP TABLE"],
+        dangerous_commands=["rm -rf", "git reset --hard", "git push --force", "DROP TABLE"],
         dangerous_paths=[".env", ".ssh", "id_rsa"],
         protected_paths=["/etc", "/root"],
         auto_approve_max_risk="低",
@@ -58,12 +58,13 @@ class TestRiskEvaluator:
     def test_auto_approve_max_risk_medium(self) -> None:
         evaluator = RiskEvaluator(
             enabled=True,
-            dangerous_commands=["chmod 777"],
+            dangerous_commands=["some_custom_tool"],
             auto_approve_max_risk="中",
         )
-        # Medium risk should not block when max is medium
-        result = evaluator.evaluate("Bash", {"command": "chmod 777 file"})
+        # Medium risk (custom pattern defaults to MEDIUM) should not block when max is medium
+        result = evaluator.evaluate("Bash", {"command": "some_custom_tool --run"})
         if result is not None:
+            assert result.risk_level == RiskLevel.MEDIUM
             assert result.should_block_auto_approve is False
 
     def test_auto_approve_max_risk_blocks_high(self) -> None:

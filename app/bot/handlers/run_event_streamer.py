@@ -226,29 +226,47 @@ class RunEventStreamer:
             raise
 
     async def pump_structured_reply(self) -> None:
+        consecutive_errors = 0
         try:
             while True:
-                changed = await self._presenter.wait_for_update(timeout_sec=0.05)
-                if not changed:
-                    continue
-                # Update status display based on current tool state
-                if self._status_display and self._lifecycle_message:
-                    snapshot = await self._presenter._snapshot_loader.load_snapshot(log_missing=False)
-                    if snapshot.tool_states:
-                        # Get the most recent tool
-                        latest_tool = snapshot.tool_states[-1]
-                        if latest_tool.tool_name:
-                            await self._status_display.update_for_tool(
-                                chat_id=self._lifecycle_message.chat.id,
-                                task_id=self._start.task.task_id,
-                                tool_name=latest_tool.tool_name,
-                            )
-                async with self._emit_lock:
-                    await self._dispatcher.emit_presenter_messages(log_missing=False)
+                try:
+                    changed = await self._presenter.wait_for_update(timeout_sec=0.05)
+                    if not changed:
+                        continue
+                    # Update status display based on current tool state (isolated)
+                    if self._status_display and self._lifecycle_message:
+                        try:
+                            snapshot = await self._presenter._snapshot_loader.load_snapshot(log_missing=False)
+                            if snapshot.tool_states:
+                                # Get the most recent tool
+                                latest_tool = snapshot.tool_states[-1]
+                                if latest_tool.tool_name:
+                                    await self._status_display.update_for_tool(
+                                        chat_id=self._lifecycle_message.chat.id,
+                                        task_id=self._start.task.task_id,
+                                        tool_name=latest_tool.tool_name,
+                                    )
+                        except Exception:
+                            logger.debug("status display update failed", extra={"user_id": self._user_id}, exc_info=True)
+                    async with self._emit_lock:
+                        await self._dispatcher.emit_presenter_messages(log_missing=False)
+                    consecutive_errors = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    consecutive_errors += 1
+                    if consecutive_errors >= 10:
+                        logger.error(
+                            "interactive pump failed after %d consecutive errors, stopping",
+                            consecutive_errors,
+                            extra={"user_id": self._user_id},
+                            exc_info=True,
+                        )
+                        break
+                    logger.warning("interactive pump transient error", extra={"user_id": self._user_id}, exc_info=True)
+                    await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("interactive pump failed", extra={"user_id": self._user_id})
 
     async def _capture_diff_snapshot(self) -> None:
         """Capture pre-task filesystem snapshot for diff generation (non-blocking)."""
@@ -359,9 +377,9 @@ class RunEventStreamer:
                     )
                     self._snapshot_task = asyncio.create_task(self._capture_diff_snapshot())
                     self._start_spinner()
-                    # Send typing action
+                    # Send typing action via state machine transition (IDLE -> STARTING)
                     if self._status_display and self._lifecycle_message:
-                        await self._status_display.send_typing(self._lifecycle_message.chat.id)
+                        await self._status_display.start(task_id=self._start.task.task_id, chat_id=self._lifecycle_message.chat.id)
                     if self._start.interactive and self._interactive_pump is None:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
                     continue
@@ -377,8 +395,9 @@ class RunEventStreamer:
                                 extra={"task_id": self._start.task.task_id, "user_id": self._user_id},
                             )
                             self._pre_snapshot = None
-                        finally:
-                            self._snapshot_task = None
+                        except asyncio.CancelledError:
+                            # Outer task cancelled — let the outer finally handle cleanup
+                            raise
 
                 if self._start.interactive:
                     async with self._emit_lock:
@@ -442,4 +461,14 @@ class RunEventStreamer:
                         await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
                     await self._dispatcher.flush()
             finally:
+                if self._status_display and self._lifecycle_message:
+                    try:
+                        await self._status_display.clear(
+                            chat_id=self._lifecycle_message.chat.id,
+                            task_id=self._start.task.task_id,
+                        )
+                    except Exception:
+                        pass
+                if self._snapshot_task is not None and not self._snapshot_task.done():
+                    self._snapshot_task.cancel()
                 await self._cancel_interactive_pump(timeout_sec=_INTERACTIVE_PUMP_CANCEL_GRACE_SEC)

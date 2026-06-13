@@ -233,7 +233,7 @@ def create_router(
         user_id = message.from_user.id if message.from_user else 0
 
         # Handle pending admin password challenge (higher priority than user question)
-        if admin_password_service is not None and admin_password_service.is_enabled:
+        if admin_password_service is not None and admin_password_service.is_enabled and admin_password_service.has_pending(user_id):
             outcome = admin_password_service.verify(user_id, text)
             if outcome.result == VerifyResult.VERIFIED:
                 challenge = outcome.challenge
@@ -316,6 +316,7 @@ def create_router(
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
             permission_gateway=permission_gateway,
+            status_display=status_display,
         )
         logger.info(
             "claude chat stream spawned",

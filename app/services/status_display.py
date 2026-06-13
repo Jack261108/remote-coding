@@ -22,18 +22,8 @@ class TaskPhase(StrEnum):
     WRITING = "writing"
     EXECUTING = "executing"
     APPROVAL = "approval"
-    COMPACTING = "compacting"
     COMPLETED = "completed"
     FAILED = "failed"
-
-
-@dataclass(frozen=True, slots=True)
-class PhaseTransition:
-    """Defines a valid state transition."""
-
-    from_phase: TaskPhase
-    to_phase: TaskPhase
-    action: ChatAction | None = None
 
 
 # Valid transitions: from_phase -> (to_phase, chat_action)
@@ -92,11 +82,6 @@ TRANSITIONS: dict[TaskPhase, dict[TaskPhase, ChatAction | None]] = {
         TaskPhase.COMPLETED: None,
         TaskPhase.FAILED: None,
     },
-    TaskPhase.COMPACTING: {
-        TaskPhase.THINKING: ChatAction.TYPING,
-        TaskPhase.COMPLETED: None,
-        TaskPhase.FAILED: None,
-    },
     TaskPhase.COMPLETED: {
         TaskPhase.STARTING: ChatAction.TYPING,
     },
@@ -130,7 +115,6 @@ class TaskState:
     task_id: str
     chat_id: int
     current_phase: TaskPhase = TaskPhase.IDLE
-    transition_count: int = 0
 
 
 class StatusDisplayService:
@@ -177,7 +161,6 @@ class StatusDisplayService:
         # Execute transition
         action = valid_targets[to_phase]
         state.current_phase = to_phase
-        state.transition_count += 1
 
         if action is not None:
             await self._send_chat_action(chat_id, action)
@@ -204,6 +187,14 @@ class StatusDisplayService:
         """Update phase based on tool name."""
         phase = TOOL_PHASE_MAP.get(tool_name, TaskPhase.THINKING) if tool_name else TaskPhase.THINKING
         return await self.transition(task_id=task_id, chat_id=chat_id, to_phase=phase)
+
+    async def send_typing(self, chat_id: int) -> None:
+        """Send typing ChatAction."""
+        await self._send_chat_action(chat_id, ChatAction.TYPING)
+
+    async def clear(self, *, chat_id: int, task_id: str) -> None:
+        """Remove task state and stop displaying status."""
+        self._tasks.pop(task_id, None)
 
     def remove(self, task_id: str) -> None:
         """Remove task state."""
