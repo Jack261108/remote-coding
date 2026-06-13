@@ -255,8 +255,9 @@ def create_router(
                             f"workdir: {session.workdir}\n"
                             f"claude_chat_active: {session.claude_chat_active}"
                         )
-                    except Exception as exc:
-                        await message.answer(f"密码验证通过，但切换 session 失败: {exc}")
+                    except Exception:
+                        logger.exception("admin password: session switch failed", extra={"user_id": user_id})
+                        await message.answer("密码验证通过，但切换 session 失败，请稍后重试。")
                 elif challenge.action == "claude":
                     try:
                         opened, result_text = await task_service.open_claude_chat_session(user_id, workdir=challenge.workdir)
@@ -264,8 +265,9 @@ def create_router(
                             await message.answer(f"密码验证通过，{result_text}\n现在可直接发送文本与 Claude 对话。")
                         else:
                             await message.answer(f"密码验证通过，但开启失败: {result_text}")
-                    except Exception as exc:
-                        await message.answer(f"密码验证通过，但开启 Claude 会话失败: {exc}")
+                    except Exception:
+                        logger.exception("admin password: claude session open failed", extra={"user_id": user_id})
+                        await message.answer("密码验证通过，但开启 Claude 会话失败，请稍后重试。")
                 else:
                     logger.error("unknown admin password challenge action", extra={"action": challenge.action, "user_id": user_id})
                     await message.answer("密码验证通过，但操作类型未知，请重新发起命令。")

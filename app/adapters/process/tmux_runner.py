@@ -275,6 +275,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             watch_completed = True
         finally:
             if fifo_reader is not None:
+                await self._clear_interactive_pipe(meta.session_name)
                 await fifo_reader.close()
             if session_started and not meta.persistent_terminal and not watch_completed:
                 terminated = await self._terminate_session(meta.session_name)
@@ -403,6 +404,14 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 fifo_offset += len(line)
                 timeout_anchor = asyncio.get_running_loop().time()
                 self._process_interactive_chunk(meta=meta, offset=fifo_offset)
+            elif line == b"" and fifo_offset > 0:
+                # EOF: FIFO writer closed (tmux pipe-pane disconnected or cat exited)
+                logger.debug("fifo reader EOF", extra={"session": meta.session_name})
+                break
+
+            if meta.exit_file.exists():
+                exit_code = self._read_exit_code(meta.exit_file)
+                break
 
             now = asyncio.get_running_loop().time()
             tick_result, active_state = self._tick_interactive_watch(meta=meta, watch_state=watch_state, now=now)

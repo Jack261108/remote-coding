@@ -302,12 +302,12 @@ class AppContainer(
         self._janitor = PeriodicJanitor()
         self._pending_dead_unbound_cleanup_ids: set[str] = set()
         self._started = False
+        self._asyncio_loop: asyncio.AbstractEventLoop | None = None
 
     def _on_jsonl_file_change(self, session_id: str, cwd: str) -> None:
         """Called from watchdog timer thread -- dispatch to asyncio thread safely."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+        loop = self._asyncio_loop
+        if loop is None or loop.is_closed():
             return
         loop.call_soon_threadsafe(self.session_supervisor.schedule_jsonl_sync, session_id, cwd)
 
@@ -353,6 +353,7 @@ class AppContainer(
     async def start(self) -> None:
         if self._started:
             return
+        self._asyncio_loop = asyncio.get_running_loop()
         # Register command menu (best-effort)
         try:
             from app.bot.commands import BOT_COMMANDS

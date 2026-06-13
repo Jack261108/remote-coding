@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.adapters.claude.paths import ClaudePaths
 from app.bot.handlers.user_utils import extract_user_id
+from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.services.session_scanner import SessionInfo, SessionScanner
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
@@ -40,6 +41,8 @@ def register_resume_handler(
     session_service: SessionService,
     claude_paths: ClaudePaths,
 ) -> None:
+    router.callback_query.middleware(CallbackValidatorMiddleware(prefix=CALLBACK_PREFIX.removesuffix(":")))
+
     @router.message(Command("resume"))
     async def command_resume(message: Message) -> None:
         user_id = extract_user_id(message)

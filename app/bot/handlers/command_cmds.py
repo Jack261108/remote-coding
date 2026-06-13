@@ -9,6 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.user_utils import extract_user_id
+from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.services.claude_command_discovery import ClaudeCommand, discover_commands
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
@@ -48,6 +49,8 @@ def register_cmds_handler(
     session_service: SessionService,
     task_service: TaskService,
 ) -> None:
+    router.callback_query.middleware(CallbackValidatorMiddleware(prefix=_CB_PREFIX.removesuffix(":")))
+
     @router.message(Command("cmds"))
     async def command_cmds(message: Message) -> None:
         user_id = extract_user_id(message)

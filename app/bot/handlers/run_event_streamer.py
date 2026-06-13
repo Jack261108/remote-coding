@@ -236,16 +236,13 @@ class RunEventStreamer:
                     # Update status display based on current tool state (isolated)
                     if self._status_display and self._lifecycle_message:
                         try:
-                            snapshot = await self._presenter._snapshot_loader.load_snapshot(log_missing=False)
-                            if snapshot.tool_states:
-                                # Get the most recent tool
-                                latest_tool = snapshot.tool_states[-1]
-                                if latest_tool.tool_name:
-                                    await self._status_display.update_for_tool(
-                                        chat_id=self._lifecycle_message.chat.id,
-                                        task_id=self._start.task.task_id,
-                                        tool_name=latest_tool.tool_name,
-                                    )
+                            tool_name = await self._presenter.get_current_tool_name()
+                            if tool_name:
+                                await self._status_display.update_for_tool(
+                                    chat_id=self._lifecycle_message.chat.id,
+                                    task_id=self._start.task.task_id,
+                                    tool_name=tool_name,
+                                )
                         except Exception:
                             logger.debug("status display update failed", extra={"user_id": self._user_id}, exc_info=True)
                     async with self._emit_lock:

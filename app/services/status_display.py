@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -115,6 +116,7 @@ class TaskState:
     task_id: str
     chat_id: int
     current_phase: TaskPhase = TaskPhase.IDLE
+    created_at: float = field(default_factory=time.monotonic)
 
 
 class StatusDisplayService:
@@ -200,9 +202,18 @@ class StatusDisplayService:
         """Remove task state."""
         self._tasks.pop(task_id, None)
 
+    def cleanup_stale(self, max_age_sec: float = 3600) -> int:
+        """Remove task states older than *max_age_sec*. Returns count removed."""
+        now = time.monotonic()
+        stale = [tid for tid, s in self._tasks.items() if (now - s.created_at) > max_age_sec]
+        for tid in stale:
+            self._tasks.pop(tid, None)
+        return len(stale)
+
     async def _send_chat_action(self, chat_id: int, action: ChatAction) -> None:
         """Safely send ChatAction, ignoring errors."""
         try:
             await self._bot.send_chat_action(chat_id=chat_id, action=action)
-        except Exception:
-            logger.debug("Failed to send chat action", extra={"chat_id": chat_id, "action": action})
+        except Exception as exc:
+            log_fn = logger.warning if "429" in str(exc) else logger.debug
+            log_fn("Failed to send chat action", extra={"chat_id": chat_id, "action": action, "error": str(exc)})

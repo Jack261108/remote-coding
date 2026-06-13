@@ -57,10 +57,15 @@ _RISK_LEVEL_MAP: dict[str, RiskLevel] = {
             ".ssh",
             "id_rsa",
             "id_ed25519",
-            "token",
-            "credentials",
+            "auth_token",
+            "api_token",
+            "access_token",
+            "refresh_token",
+            ".credentials",
+            "credentials.json",
             "private_key",
-            "secrets",
+            ".secrets",
+            "secrets.json",
             ".pem",
             ".key",
             "chmod 777",
@@ -142,34 +147,35 @@ class RiskEvaluator:
         if not self._enabled:
             return None
 
-        # Extract text to analyze
-        text_parts = []
+        # Extract text to analyze — check each field independently to avoid
+        # cross-field false positives (e.g. command="rm" + file_path="-rf /tmp")
+        text_parts: list[str] = []
         if tool_name:
             text_parts.append(tool_name)
         if tool_input:
             text_parts.extend(self._extract_text_from_input(tool_input))
 
-        raw_text = " ".join(text_parts)
-        if not raw_text.strip():
+        if not text_parts:
             return None
 
-        text_lower = raw_text.lower()
         matched: list[str] = []
 
-        # Check dangerous commands
-        for original, pattern in zip(self._dangerous_cmd_originals, self._dangerous_cmd_patterns, strict=True):
-            if pattern.search(text_lower):
-                matched.append(original)
-
-        # Check dangerous paths
-        for original, pattern in zip(self._dangerous_path_originals, self._dangerous_path_patterns, strict=True):
-            if pattern.search(text_lower):
-                matched.append(original)
-
-        # Check protected paths
-        for original, pattern in zip(self._protected_path_originals, self._protected_path_patterns, strict=True):
-            if pattern.search(text_lower):
-                matched.append(original)
+        for text in text_parts:
+            text_lower = text.lower()
+            if not text_lower.strip():
+                continue
+            # Check dangerous commands
+            for original, pattern in zip(self._dangerous_cmd_originals, self._dangerous_cmd_patterns, strict=True):
+                if pattern.search(text_lower) and original not in matched:
+                    matched.append(original)
+            # Check dangerous paths
+            for original, pattern in zip(self._dangerous_path_originals, self._dangerous_path_patterns, strict=True):
+                if pattern.search(text_lower) and original not in matched:
+                    matched.append(original)
+            # Check protected paths
+            for original, pattern in zip(self._protected_path_originals, self._protected_path_patterns, strict=True):
+                if pattern.search(text_lower) and original not in matched:
+                    matched.append(original)
 
         if not matched:
             return None

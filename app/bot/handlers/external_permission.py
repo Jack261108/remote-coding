@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery
 
 from app.bot.handlers.callback_utils import apply_callback_response
 from app.bot.handlers.user_utils import extract_user_id
+from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
@@ -26,6 +27,8 @@ def register_external_permission_handler(
     external_uq_state: ExternalUserQuestionState | None = None,
     permission_gateway: PermissionGateway,
 ) -> None:
+    router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=3, prefix="ext_"))
+
     @router.callback_query(F.data.startswith("ext_perm:"))
     async def handle_external_permission_callback(callback: CallbackQuery) -> None:
         data = callback.data or ""

@@ -369,11 +369,13 @@ async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: p
     ]
 
     assert [e.type for e in events] == [EventType.STARTED, EventType.EXITED]
-    assert len(seen_pipe_calls) == 2
+    # 3 calls: _bind clears old pipe, _bind sets new FIFO pipe, finally clears pipe before FIFO cleanup
+    assert len(seen_pipe_calls) == 3
     assert seen_pipe_calls[0] == ("pipe-pane", "-t", "tgcli_user_1")
     assert seen_pipe_calls[1][0:3] == ("pipe-pane", "-t", "tgcli_user_1")
     assert "cat >" in seen_pipe_calls[1][3]
     assert ".fifo" in seen_pipe_calls[1][3]
+    assert seen_pipe_calls[2] == ("pipe-pane", "-t", "tgcli_user_1")
 
 
 @pytest.mark.asyncio
