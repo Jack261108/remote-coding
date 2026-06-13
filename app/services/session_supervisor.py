@@ -62,7 +62,7 @@ class SessionSupervisor:
 
     def schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         """Request a debounced JSONL sync -- picked up on next poll tick."""
-        self._jsonl_sync_requests[session_id] = (cwd, asyncio.get_event_loop().time())
+        self._jsonl_sync_requests[session_id] = (cwd, asyncio.get_running_loop().time())
         self._wake.set()
 
     def forget(self, session_id: str) -> None:
@@ -127,6 +127,8 @@ class SessionSupervisor:
             if task is not None and self._tasks.get(session_id) is task:
                 self._tasks.pop(session_id, None)
                 self._clear_seen_mtimes(session_id)
+            # Always clean lock created by this watch_session invocation
+            if self._locks.get(session_id) is lock:
                 self._locks.pop(session_id, None)
 
     # ── Interrupt detection ───────────────────────────────────────────────────
@@ -217,7 +219,7 @@ class SessionSupervisor:
         if entry is None:
             return
         cwd, requested_at = entry
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         if now - requested_at < self._debounce_sec:
             return
         self._jsonl_sync_requests.pop(session_id, None)

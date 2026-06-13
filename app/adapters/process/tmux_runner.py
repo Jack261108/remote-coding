@@ -387,6 +387,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
 
         stdout = await fifo_reader.readlines()
         reader = stdout.readline
+        fifo_offset = 0
 
         while exit_code is None:
             now = asyncio.get_running_loop().time()
@@ -399,8 +400,9 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 raise
 
             if line:
+                fifo_offset += len(line)
                 timeout_anchor = asyncio.get_running_loop().time()
-                self._process_interactive_chunk(meta=meta, offset=0)
+                self._process_interactive_chunk(meta=meta, offset=fifo_offset)
 
             now = asyncio.get_running_loop().time()
             tick_result, active_state = self._tick_interactive_watch(meta=meta, watch_state=watch_state, now=now)
@@ -457,52 +459,14 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 await self._interrupt_session(meta.session_name)
                 break
 
-        canceled = await self._is_cancel_requested(meta.task_id)
-        finished_at = asyncio.get_running_loop().time()
-        if timed_out:
-            finish_extra = self._tmux_log_extra(
-                meta,
-                result="timeout",
-                exit_code=exit_code,
-                timeout_sec=timeout_sec,
-                elapsed_sec=round(finished_at - started_at, 3),
-                canceled=canceled,
-            )
-            logger.warning("tmux task finished", extra=finish_extra)
-            yield CLIEvent(type=EventType.TIMEOUT, task_id=meta.task_id, error=f"任务超时({timeout_sec}s)")
-        elif canceled:
-            finish_extra = self._tmux_log_extra(
-                meta,
-                result="canceled",
-                exit_code=exit_code,
-                timeout_sec=timeout_sec,
-                elapsed_sec=round(finished_at - started_at, 3),
-                canceled=True,
-            )
-            logger.info("tmux task finished", extra=finish_extra)
-            yield CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
-        elif exit_code == 0:
-            finish_extra = self._tmux_log_extra(
-                meta,
-                result="exited",
-                exit_code=exit_code,
-                timeout_sec=timeout_sec,
-                elapsed_sec=round(finished_at - started_at, 3),
-                canceled=False,
-            )
-            logger.info("tmux task finished", extra=finish_extra)
-            yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
-        else:
-            finish_extra = self._tmux_log_extra(
-                meta,
-                result="failed",
-                exit_code=exit_code,
-                timeout_sec=timeout_sec,
-                elapsed_sec=round(finished_at - started_at, 3),
-                canceled=False,
-            )
-            logger.error("tmux task finished", extra=finish_extra)
-            yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, exit_code=exit_code, error=f"进程退出码: {exit_code}")
+        async for event in self._emit_interactive_completion_events(
+            meta=meta,
+            timed_out=timed_out,
+            exit_code=exit_code,
+            started_at=started_at,
+            timeout_sec=timeout_sec,
+        ):
+            yield event
 
     async def _watch_non_interactive(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
         """Polling-based watch for non-interactive mode (reads log file)."""
@@ -722,6 +686,25 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             position = new_position
             self._process_interactive_chunk(meta=meta, offset=position)
 
+        async for event in self._emit_interactive_completion_events(
+            meta=meta,
+            timed_out=timed_out,
+            exit_code=exit_code,
+            started_at=started_at,
+            timeout_sec=timeout_sec,
+        ):
+            yield event
+
+    async def _emit_interactive_completion_events(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        timed_out: bool,
+        exit_code: int | None,
+        started_at: float,
+        timeout_sec: int,
+    ) -> AsyncGenerator[CLIEvent, None]:
+        """Yield final completion events shared by interactive and polling watch paths."""
         canceled = await self._is_cancel_requested(meta.task_id)
         finished_at = asyncio.get_running_loop().time()
         if timed_out:
@@ -731,7 +714,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 exit_code=exit_code,
                 timeout_sec=timeout_sec,
                 elapsed_sec=round(finished_at - started_at, 3),
-                log_position=position,
                 canceled=canceled,
             )
             logger.warning("tmux task finished", extra=finish_extra)
@@ -743,7 +725,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 exit_code=exit_code,
                 timeout_sec=timeout_sec,
                 elapsed_sec=round(finished_at - started_at, 3),
-                log_position=position,
                 canceled=True,
             )
             logger.info("tmux task finished", extra=finish_extra)
@@ -755,7 +736,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 exit_code=exit_code,
                 timeout_sec=timeout_sec,
                 elapsed_sec=round(finished_at - started_at, 3),
-                log_position=position,
                 canceled=False,
             )
             logger.info("tmux task finished", extra=finish_extra)
@@ -767,7 +747,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 exit_code=exit_code,
                 timeout_sec=timeout_sec,
                 elapsed_sec=round(finished_at - started_at, 3),
-                log_position=position,
                 canceled=False,
             )
             logger.error("tmux task finished", extra=finish_extra)

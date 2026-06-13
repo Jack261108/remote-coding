@@ -24,9 +24,9 @@ class _DebouncedHandler(FileSystemEventHandler):
     def __init__(
         self,
         *,
-        watched_files: dict[str, str],
+        watched_files: dict[str, tuple[str, str]],
         debounce_sec: float,
-        on_change: Callable[[str], None],
+        on_change: Callable[[str, str], None],
     ) -> None:
         super().__init__()
         self._watched_files = watched_files
@@ -36,41 +36,40 @@ class _DebouncedHandler(FileSystemEventHandler):
         self._lock = threading.Lock()
 
     def on_modified(self, event: FileSystemEvent) -> None:  # noqa: ANN001
-        if event.is_directory:
-            return
-        dest = event.dest_path if hasattr(event, "dest_path") else event.src_path
-        self._handle_path(dest)
+        if not event.is_directory:
+            self._handle_path(event.src_path)
 
     def on_created(self, event: FileSystemEvent) -> None:  # noqa: ANN001
-        if event.is_directory:
-            return
-        dest = event.dest_path if hasattr(event, "dest_path") else event.src_path
-        self._handle_path(dest)
+        if not event.is_directory:
+            self._handle_path(event.src_path)
 
     def on_moved(self, event: FileSystemEvent) -> None:  # noqa: ANN001
-        if event.is_directory:
-            return
-        dest = event.dest_path if hasattr(event, "dest_path") else event.src_path
-        self._handle_path(dest)
+        if not event.is_directory:
+            self._handle_path(event.dest_path)
 
     def _handle_path(self, path: str) -> None:
-        session_id = self._watched_files.get(path)
-        if session_id is None:
+        entry = self._watched_files.get(path)
+        if entry is None:
             return
+        session_id, cwd = entry
         with self._lock:
             existing = self._timers.get(session_id)
             if existing is not None:
                 existing.cancel()
-            timer = threading.Timer(self._debounce_sec, self._fire, args=[session_id])
+            timer = threading.Timer(
+                self._debounce_sec,
+                self._fire,
+                args=[session_id, cwd],
+            )
             timer.daemon = True
             self._timers[session_id] = timer
             timer.start()
 
-    def _fire(self, session_id: str) -> None:
+    def _fire(self, session_id: str, cwd: str) -> None:
         with self._lock:
             self._timers.pop(session_id, None)
         try:
-            self._on_change(session_id)
+            self._on_change(session_id, cwd)
         except Exception:
             logger.exception("jsonl watcher callback failed", extra={"session_id": session_id})
 
@@ -102,12 +101,12 @@ class JSONLFileWatcher:
         *,
         projects_dir: Path,
         debounce_sec: float,
-        on_change: Callable[[str], None],
+        on_change: Callable[[str, str], None],
     ) -> None:
         self._projects_dir = projects_dir
         self._debounce_sec = debounce_sec
         self._on_change = on_change
-        self._watched_files: dict[str, str] = {}  # file_path -> session_id
+        self._watched_files: dict[str, tuple[str, str]] = {}  # file_path -> (session_id, cwd)
         self._handler = _DebouncedHandler(
             watched_files=self._watched_files,
             debounce_sec=debounce_sec,
@@ -130,11 +129,11 @@ class JSONLFileWatcher:
         safe_session_id = session_id.replace("/", "-").replace(".", "-")
         project_dir = cwd.replace("/", "-").replace(".", "-")
         jsonl_path = str(self._projects_dir / project_dir / f"{safe_session_id}.jsonl")
-        self._watched_files[jsonl_path] = session_id
+        self._watched_files[jsonl_path] = (session_id, cwd)
 
     def remove(self, session_id: str) -> None:
         """Unregister a session from monitoring."""
-        to_remove = [k for k, v in self._watched_files.items() if v == session_id]
+        to_remove = [k for k, v in self._watched_files.items() if v[0] == session_id]
         for k in to_remove:
             self._watched_files.pop(k, None)
 

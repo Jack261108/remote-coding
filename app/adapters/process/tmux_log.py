@@ -26,13 +26,22 @@ class AsyncFifoReader:
     async def start(self) -> None:
         """Create FIFO and start reader subprocess."""
         self._fifo_path.parent.mkdir(parents=True, exist_ok=True)
+        # Clean up stale FIFO from previous crash
+        try:
+            self._fifo_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         os.mkfifo(self._fifo_path)
-        self._process = await asyncio.create_subprocess_exec(
-            "cat",
-            str(self._fifo_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                "cat",
+                str(self._fifo_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except Exception:
+            self._fifo_path.unlink(missing_ok=True)
+            raise
 
     def pipe_command(self) -> str:
         """Return the tmux pipe-pane command string."""
@@ -40,7 +49,8 @@ class AsyncFifoReader:
 
     async def readlines(self) -> asyncio.StreamReader:
         """Return the stdout stream for async line iteration."""
-        assert self._process is not None and self._process.stdout is not None
+        if self._process is None or self._process.stdout is None:
+            raise RuntimeError("AsyncFifoReader not started")
         return self._process.stdout
 
     async def close(self) -> None:
@@ -85,7 +95,10 @@ class TmuxLogMixin:
     def _read_exit_code(self, path: Path) -> int | None:
         try:
             return int(path.read_text(encoding="utf-8").strip())
-        except Exception:
+        except (ValueError, FileNotFoundError):
+            return None
+        except OSError:
+            logger.warning("failed to read exit code file", extra={"path": str(path)})
             return None
 
     def _safe_unlink(self, path: Path) -> None:

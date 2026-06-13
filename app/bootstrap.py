@@ -128,7 +128,7 @@ class AppContainer(
         self.jsonl_file_watcher = JSONLFileWatcher(
             projects_dir=self.claude_paths.projects_dir,
             debounce_sec=settings.claude_jsonl_sync_debounce_ms / 1000,
-            on_change=lambda session_id: self.session_supervisor.schedule_jsonl_sync(session_id, ""),
+            on_change=self._on_jsonl_file_change,
         )
         self.session_supervisor = SessionSupervisor(
             session_store=self.structured_session_store,
@@ -283,6 +283,14 @@ class AppContainer(
         self._janitor = PeriodicJanitor()
         self._pending_dead_unbound_cleanup_ids: set[str] = set()
         self._started = False
+
+    def _on_jsonl_file_change(self, session_id: str, cwd: str) -> None:
+        """Called from watchdog timer thread -- dispatch to asyncio thread safely."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.call_soon_threadsafe(self.session_supervisor.schedule_jsonl_sync, session_id, cwd)
 
     async def _cleanup_dead_unbound_external_session(self, session_id: str) -> bool:
         """Invalidate pending state for a dead-pruned unbound external session."""

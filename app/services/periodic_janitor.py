@@ -40,7 +40,7 @@ class PeriodicJanitor:
         """Start the janitor loop."""
         if self._task is not None and not self._task.done():
             return
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         for name in self._jobs:
             self._last_run[name] = now
         self._task = asyncio.create_task(self._run())
@@ -58,7 +58,7 @@ class PeriodicJanitor:
     async def _run(self) -> None:
         try:
             while True:
-                now = asyncio.get_event_loop().time()
+                now = asyncio.get_running_loop().time()
                 min_sleep = float("inf")
                 for name, (interval, callback) in self._jobs.items():
                     elapsed = now - self._last_run.get(name, 0)
@@ -70,7 +70,7 @@ class PeriodicJanitor:
                             raise
                         except Exception:
                             logger.exception("janitor job failed", extra={"job": name})
-                        self._last_run[name] = asyncio.get_event_loop().time()
+                        self._last_run[name] = asyncio.get_running_loop().time()
                         remaining = interval
                     min_sleep = min(min_sleep, remaining)
                 await asyncio.sleep(max(min_sleep, 0.01))
