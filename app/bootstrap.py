@@ -140,6 +140,10 @@ class AppContainer(
             session_lock_ttl_sec=settings.session_lock_ttl_sec,
             lock_cleanup_interval_sec=settings.lock_cleanup_interval_sec,
             lock_cleanup_batch_size=settings.lock_cleanup_batch_size,
+            poll_interval_sec=settings.tmux_poll_interval_sec,
+            enter_delay_sec=settings.tmux_enter_delay_sec,
+            partial_flush_sec=settings.tmux_partial_flush_sec,
+            interactive_completion_grace_sec=settings.tmux_completion_grace_sec,
         )
         self.cli_factory = CLIAdapterFactory(
             settings=settings,

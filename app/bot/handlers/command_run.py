@@ -21,6 +21,7 @@ from app.bot.presenters.structured_reply_presenter import (
     StructuredReplyPresenter,
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
+from app.config.settings import Settings
 from app.domain.models import EventType
 from app.services.diff_generator import DiffGeneratorService
 from app.services.result_exporter import ResultExporterService
@@ -75,6 +76,7 @@ async def run_prompt_and_stream(
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    settings: Settings | None = None,
 ) -> asyncio.Task | None:
     logger.info(
         "run prompt requested",
@@ -196,6 +198,9 @@ async def run_prompt_and_stream(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         queued_upload_scheduler=_schedule_queued_uploads_once if queued_upload_scheduler is not None else None,
+        structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec if settings else 0.05,
+        spinner_initial_delay_sec=settings.spinner_initial_delay_sec if settings else 3.0,
+        spinner_interval_sec=settings.spinner_interval_sec if settings else 1.0,
     )
     await presenter.prime(baseline_current_snapshot=True)
 
@@ -385,6 +390,7 @@ def register_run_handler(
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    settings: Settings | None = None,
 ):
     @router.message(Command("run"))
     async def command_run(message: Message, command: CommandObject) -> None:
@@ -406,4 +412,5 @@ def register_run_handler(
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
             permission_gateway=permission_gateway,
+            settings=settings,
         )
