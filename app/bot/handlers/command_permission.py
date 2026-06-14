@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.handlers.callback_utils import apply_callback_response
 from app.bot.handlers.user_utils import extract_user_id
+from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 
 if TYPE_CHECKING:
     from app.services.permission_gateway import PermissionGateway
@@ -20,6 +21,8 @@ def register_permission_handlers(
     *,
     permission_gateway: PermissionGateway,
 ):
+    router.callback_query.middleware(CallbackValidatorMiddleware(prefix=_PERMISSION_CALLBACK_PREFIX))
+
     @router.message(Command("approve"))
     async def command_approve(message: Message) -> None:
         user_id = extract_user_id(message)

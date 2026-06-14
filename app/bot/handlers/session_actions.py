@@ -6,6 +6,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.handlers.user_utils import extract_user_id
+from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.infra.text_formatting import format_external_session_bound_message, format_external_session_unbound_message, short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
@@ -31,6 +32,8 @@ def register_session_action_handlers(
     binder: ExternalSessionBinder,
     registry_service: SessionRegistryService | None = None,
 ) -> None:
+    router.callback_query.middleware(CallbackValidatorMiddleware(prefix="sess"))
+
     @router.callback_query(F.data.startswith("sess:select:"))
     async def handle_session_select(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         user_id = extract_user_id(callback)

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.infra.async_utils import cancel_optional_task
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +94,10 @@ class UploadQueueManager:
     async def _cleanup_loop(self) -> None:
         while True:
             await asyncio.sleep(self._cleanup_interval_sec)
-            await self.prune_expired()
+            try:
+                await self.prune_expired()
+            except Exception:
+                logger.exception("upload queue cleanup tick failed")
 
     async def enqueue(self, *, user_id: int, filename: str, data: bytes, workdir: str | None = None) -> UploadQueueEnqueueResult:
         size_bytes = len(data)

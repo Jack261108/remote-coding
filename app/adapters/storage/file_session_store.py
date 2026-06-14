@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.domain.hook_models import validate_session_id
 from app.domain.models import SessionContext
-from app.domain.session_models import ConversationTurn, ParserCheckpoint, SessionState
+from app.domain.session_models import ConversationTurn, ParserCheckpoint, SessionPhase, SessionState
+
+logger = logging.getLogger(__name__)
 
 
 class FileSessionStore:
@@ -107,3 +112,64 @@ class FileSessionStore:
 
     def save_session_context(self, session: SessionContext) -> None:
         self._write_json_atomic(self.session_context_path(session.user_id), session.to_dict())
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session directory and all its contents.
+
+        Returns:
+            True if the session was deleted, False if it didn't exist.
+        """
+        safe_session_id = validate_session_id(session_id)
+        base_dir = self._base_dir.resolve()
+        path = (base_dir / safe_session_id).resolve()
+        if path == base_dir or base_dir not in path.parents:
+            return False
+        if not path.exists():
+            return False
+        shutil.rmtree(path)
+        logger.info("deleted session directory", extra={"session_id": session_id})
+        return True
+
+    def cleanup_stale_sessions(self, max_age_hours: int = 24) -> int:
+        """Clean up session directories for sessions that have ended and are older than max_age_hours.
+
+        Returns:
+            Number of sessions deleted.
+        """
+        now = datetime.now(UTC)
+        max_age = timedelta(hours=max_age_hours)
+        deleted_count = 0
+
+        for state_path in sorted(self._base_dir.glob("*/session.state.json")):
+            try:
+                state = SessionState.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+
+            # Only clean up ended sessions
+            if state.phase not in {SessionPhase.ENDED, SessionPhase.INTERRUPTED}:
+                continue
+
+            # Check if session is old enough
+            ended_at = state.ended_at or state.last_activity
+            if ended_at is None:
+                continue
+            if now - ended_at < max_age:
+                continue
+
+            # Delete the session directory
+            session_dir = state_path.parent
+            try:
+                shutil.rmtree(session_dir)
+                deleted_count += 1
+                logger.info(
+                    "cleaned up stale session",
+                    extra={"session_id": state.session_id, "ended_at": ended_at.isoformat()},
+                )
+            except OSError as exc:
+                logger.warning(
+                    "failed to clean up stale session",
+                    extra={"session_id": state.session_id, "error": str(exc)},
+                )
+
+        return deleted_count

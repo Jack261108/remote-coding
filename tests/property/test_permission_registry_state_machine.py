@@ -45,7 +45,11 @@ APPEND_ONLY_FIELDS = ("decision", "responded_by_user_id", "responded_at", "dispa
 
 
 def _is_authorized(snapshot: PermissionCallbackRecordSnapshot, user_id: int) -> bool:
-    return snapshot.authorization_mode is AuthorizationMode.ALL_USERS or user_id in snapshot.authorized_user_ids
+    if snapshot.authorization_mode is AuthorizationMode.ALL_USERS:
+        return True
+    if snapshot.authorization_mode is AuthorizationMode.SOLE_AUTO_APPROVE_USER:
+        return snapshot.authorized_user_ids == frozenset({user_id})
+    return user_id in snapshot.authorized_user_ids
 
 
 class PermissionRegistryStateMachine(RuleBasedStateMachine):
@@ -104,6 +108,7 @@ class PermissionRegistryStateMachine(RuleBasedStateMachine):
         existing_record = self.registry._records.get(existing_token) if existing_token is not None else None
         before_records = repr(self.registry._records)
         before_index = repr(self.registry._compound_index)
+        authorized_user_ids = frozenset({1}) if authorization_mode is AuthorizationMode.SOLE_AUTO_APPROVE_USER else frozenset({1, 2})
 
         if existing_record is not None and existing_record.status is CallbackRecordStatus.CLAIMED:
             with pytest.raises(InFlightConflictError):
@@ -113,7 +118,7 @@ class PermissionRegistryStateMachine(RuleBasedStateMachine):
                         session_id=session_id,
                         origin=origin,
                         authorization_mode=authorization_mode,
-                        authorized_user_ids=frozenset({1, 2}),
+                        authorized_user_ids=authorized_user_ids,
                     )
                 )
             assert repr(self.registry._records) == before_records
@@ -125,7 +130,7 @@ class PermissionRegistryStateMachine(RuleBasedStateMachine):
                     session_id=session_id,
                     origin=origin,
                     authorization_mode=authorization_mode,
-                    authorized_user_ids=frozenset({1, 2}),
+                    authorized_user_ids=authorized_user_ids,
                 )
             )
             assert token in self.registry._records

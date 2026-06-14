@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,8 @@ from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import SessionContext
 from app.services.auto_approve_service import AutoApproveService
 from app.services.session_service import SessionService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -36,12 +39,28 @@ class TerminalSessionService:
 
     async def resolve_for_task(self, *, user_id: int, provider: str, workdir: str) -> TaskTerminalContext:
         terminal_mode = provider == "claude_code" and self._settings.claude_tmux_mode
-        session = await self._session_service.get_or_create(
+        session, orphaned = await self._session_service.get_or_create(
             user_id=user_id,
             provider=provider,
             workdir=workdir,
             terminal_mode=terminal_mode,
         )
+        # Clean up orphaned terminal resources if detected
+        if orphaned is not None:
+            logger.info(
+                "cleaning up orphaned terminal",
+                extra={
+                    "terminal_id": orphaned.terminal_id,
+                    "claude_session_id": orphaned.claude_session_id,
+                    "user_id": orphaned.user_id,
+                },
+            )
+            # Clear auto-approve state for the old session
+            if self._auto_approve_service is not None and orphaned.claude_session_id:
+                await self._auto_approve_service.clear_session(orphaned.claude_session_id)
+            # Clear the old terminal group
+            await self._session_service.clear_terminal_group(orphaned.terminal_id)
+            self._clear_user_questions(orphaned.user_id)
         terminal_key = session.terminal_id if session.terminal_mode else None
         interactive = bool(terminal_key and provider == "claude_code" and session.claude_chat_active and self._settings.claude_tmux_mode)
         return TaskTerminalContext(session=session, terminal_key=terminal_key, interactive=interactive)
@@ -132,13 +151,27 @@ class TerminalSessionService:
         if not Path(selected_workdir).is_dir():
             return f"workdir 不存在或不是目录: {selected_workdir}"
 
-        updated_session = await self._session_service.switch(
+        updated_session, orphaned = await self._session_service.switch(
             user_id=user_id,
             provider="claude_code",
             workdir=selected_workdir,
             terminal_mode=True,
             claude_chat_active=True,
         )
+        # Clean up orphaned terminal resources if detected
+        if orphaned is not None:
+            logger.info(
+                "cleaning up orphaned terminal during session switch",
+                extra={
+                    "terminal_id": orphaned.terminal_id,
+                    "claude_session_id": orphaned.claude_session_id,
+                    "user_id": orphaned.user_id,
+                },
+            )
+            if self._auto_approve_service is not None and orphaned.claude_session_id:
+                await self._auto_approve_service.clear_session(orphaned.claude_session_id)
+            await self._session_service.clear_terminal_group(orphaned.terminal_id)
+            self._clear_user_questions(orphaned.user_id)
 
         if not updated_session.terminal_id:
             return "会话创建失败: terminal_id 为空"

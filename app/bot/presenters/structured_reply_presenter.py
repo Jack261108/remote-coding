@@ -113,6 +113,16 @@ class StructuredReplyPresenter:
         """
         self._reply_frozen = True
 
+    async def get_current_tool_name(self) -> str | None:
+        """Return the name of the most recently active tool, or None."""
+        try:
+            snapshot = await self._snapshot_loader.load_snapshot(log_missing=False)
+            if snapshot.tool_states:
+                return snapshot.tool_states[-1].tool_name
+        except Exception:
+            pass
+        return None
+
     async def prime(self, *, log_missing: bool = True, baseline_current_snapshot: bool = False) -> None:
         snapshot = await self._snapshot_loader.load_snapshot(log_missing=log_missing)
         self._structured_session_available = snapshot.session_available

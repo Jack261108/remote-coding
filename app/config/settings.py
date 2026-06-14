@@ -81,10 +81,22 @@ class Settings(BaseSettings):
     claude_hook_max_pending_permissions: int = Field(64, alias="CLAUDE_HOOK_MAX_PENDING_PERMISSIONS")
     claude_jsonl_sync_debounce_ms: int = Field(100, alias="CLAUDE_JSONL_SYNC_DEBOUNCE_MS")
     claude_periodic_recheck_ms: int = Field(500, alias="CLAUDE_PERIODIC_RECHECK_MS")
+
+    # Tmux runner timing
+    tmux_poll_interval_sec: float = Field(0.2, alias="TMUX_POLL_INTERVAL_SEC")
+    tmux_enter_delay_sec: float = Field(0.2, alias="TMUX_ENTER_DELAY_SEC")
+    tmux_partial_flush_sec: float = Field(0.5, alias="TMUX_PARTIAL_FLUSH_SEC")
+    tmux_completion_grace_sec: float = Field(0.1, alias="TMUX_COMPLETION_GRACE_SEC")
+
+    # UI timing
+    structured_reply_pump_interval_sec: float = Field(0.05, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
+    spinner_initial_delay_sec: float = Field(3.0, alias="SPINNER_INITIAL_DELAY_SEC")
+    spinner_interval_sec: float = Field(1.0, alias="SPINNER_INTERVAL_SEC")
     codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
     gemini_cli_bin: str = Field("gemini", alias="GEMINI_CLI_BIN")
 
     allowed_workdirs: Annotated[list[str], NoDecode] = Field(default_factory=lambda: [str(Path.cwd())], alias="ALLOWED_WORKDIRS")
+    admin_password: str | None = Field(None, alias="ADMIN_PASSWORD")
 
     rate_limit_max_requests: int = Field(6, alias="RATE_LIMIT_MAX_REQUESTS")
     rate_limit_window_sec: int = Field(20, alias="RATE_LIMIT_WINDOW_SEC")
@@ -129,6 +141,10 @@ class Settings(BaseSettings):
     tombstone_ttl_sec: int = Field(3600, alias="TOMBSTONE_TTL_SEC")
     push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
 
+    # Session cleanup settings
+    session_cleanup_interval_sec: int = Field(3600, alias="SESSION_CLEANUP_INTERVAL_SEC")  # 1 hour
+    session_cleanup_max_age_hours: int = Field(24, alias="SESSION_CLEANUP_MAX_AGE_HOURS")  # 24 hours
+
     # Auto file send settings
     auto_file_send_enabled: bool = Field(True, alias="AUTO_FILE_SEND_ENABLED")
     auto_file_send_extensions: Annotated[list[str], NoDecode] = Field(
@@ -154,6 +170,52 @@ class Settings(BaseSettings):
     auto_export_threshold_chars: int = Field(4096, alias="AUTO_EXPORT_THRESHOLD_CHARS")
     zip_max_size_mb: int = Field(50, alias="ZIP_MAX_SIZE_MB")
 
+    # Risk evaluation settings
+    risk_eval_enabled: bool = Field(True, alias="RISK_EVAL_ENABLED")
+    risk_eval_dangerous_commands: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "rm -rf",
+            "rm -r",
+            "rm -f",
+            "sudo rm",
+            "dd ",
+            "dd if=",
+            "mkfs",
+            "unlink",
+            "shred",
+            "git reset --hard",
+            "git clean -fd",
+            "git push --force",
+            "git push -f",
+            "DROP TABLE",
+            "DELETE FROM",
+            "TRUNCATE",
+            "chmod 777",
+            "chown root",
+        ],
+        alias="RISK_EVAL_DANGEROUS_COMMANDS",
+    )
+    risk_eval_dangerous_paths: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            ".env",
+            ".ssh",
+            "id_rsa",
+            "id_ed25519",
+            "token",
+            "credentials",
+            "private_key",
+            "secrets",
+            ".pem",
+            ".key",
+        ],
+        alias="RISK_EVAL_DANGEROUS_PATHS",
+    )
+    risk_eval_protected_paths: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["/etc", "/var", "/usr", "/root"],
+        alias="RISK_EVAL_PROTECTED_PATHS",
+    )
+    risk_eval_auto_approve_max_risk: str = Field("低", alias="RISK_EVAL_AUTO_APPROVE_MAX_RISK")
+
     @field_validator("tg_allowed_user_ids", mode="before")
     @classmethod
     def parse_user_ids(cls, value: Any) -> list[int]:
@@ -174,7 +236,7 @@ class Settings(BaseSettings):
             raise ValueError("TG_ALLOWED_USER_IDS 不能为空（或使用 * 代表允许所有用户）")
         return items
 
-    @field_validator("tg_proxy_url", "claude_config_dir", mode="before")
+    @field_validator("tg_proxy_url", "claude_config_dir", "admin_password", mode="before")
     @classmethod
     def parse_optional_text(cls, value: Any) -> str | None:
         if value is None:
@@ -205,6 +267,20 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [ext.strip().lower() for ext in value.split(",") if ext.strip()]
         raise ValueError("ALLOWED_FILE_EXTENSIONS 格式错误，需为逗号分隔扩展名")
+
+    @field_validator(
+        "risk_eval_dangerous_commands",
+        "risk_eval_dangerous_paths",
+        "risk_eval_protected_paths",
+        mode="before",
+    )
+    @classmethod
+    def parse_risk_eval_lists(cls, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [item.strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        raise ValueError("风险评估配置格式错误，需为逗号分隔的字符串列表")
 
     @field_validator("claude_tmux_mode", "claude_install_hooks", "auto_file_send_enabled", mode="before")
     @classmethod
@@ -275,6 +351,23 @@ class Settings(BaseSettings):
     def validate_upload_queue_max_files_per_user(cls, value: int) -> int:
         if value < 0:
             raise ValueError("UPLOAD_QUEUE_MAX_FILES_PER_USER 必须大于等于 0")
+        return value
+
+    @field_validator(
+        "tmux_poll_interval_sec",
+        "tmux_enter_delay_sec",
+        "tmux_partial_flush_sec",
+        "tmux_completion_grace_sec",
+        "structured_reply_pump_interval_sec",
+        "spinner_initial_delay_sec",
+        "spinner_interval_sec",
+        "session_health_check_interval_sec",
+        "external_session_stale_timeout_sec",
+    )
+    @classmethod
+    def validate_positive_float(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("配置值必须大于 0")
         return value
 
     @field_validator("rate_limit_bucket_ttl_sec", "permission_lock_ttl_sec", "upload_queue_max_bytes_per_user", mode="before")

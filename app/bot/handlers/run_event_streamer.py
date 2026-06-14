@@ -16,6 +16,7 @@ from app.infra.gitignore_utils import load_gitignore_patterns
 from app.infra.text_formatting import short_id
 from app.services.diff_generator import DiffGeneratorService, SnapshotEntry
 from app.services.result_exporter import ResultExporterService
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ def _build_error_message(*, event_type: EventType, task_id: str, error_text: str
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _SPINNER_INTERVAL_SEC = 1.0
 _SPINNER_INITIAL_DELAY_SEC = 3.0
+_STRUCTURED_REPLY_PUMP_INTERVAL_SEC = 0.05
 _INTERACTIVE_PUMP_CANCEL_GRACE_SEC = 5.0
 _SNAPSHOT_CAPTURE_TIMEOUT_SEC = 10.0
 _ABANDONED_INTERACTIVE_PUMP_TASKS: set[asyncio.Task] = set()
@@ -85,6 +87,10 @@ class RunEventStreamer:
         diff_generator: DiffGeneratorService | None = None,
         result_exporter: ResultExporterService | None = None,
         queued_upload_scheduler: Callable[[], None] | None = None,
+        status_display: StatusDisplayService | None = None,
+        structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
+        spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
+        spinner_interval_sec: float = _SPINNER_INTERVAL_SEC,
     ) -> None:
         self._start = start
         self._task_service = task_service
@@ -103,6 +109,10 @@ class RunEventStreamer:
         self._pre_snapshot: dict[Path, SnapshotEntry] | None = None
         self._snapshot_task: asyncio.Task | None = None
         self._gitignore_patterns: list[str] = []
+        self._status_display = status_display
+        self._structured_reply_pump_interval_sec = structured_reply_pump_interval_sec
+        self._spinner_initial_delay_sec = spinner_initial_delay_sec
+        self._spinner_interval_sec = spinner_interval_sec
 
     def _start_spinner(self) -> None:
         if self._lifecycle_message is None:
@@ -196,28 +206,54 @@ class RunEventStreamer:
         frame_idx = 0
         try:
             # Skip animation for short tasks: wait before the first frame.
-            await asyncio.sleep(_SPINNER_INITIAL_DELAY_SEC)
+            await asyncio.sleep(self._spinner_initial_delay_sec)
             while True:
                 frame = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
                 frame_idx += 1
                 text = f"{frame} 处理中… [{display_task_id}]"
                 await self._messenger.edit_message_safely(self._lifecycle_message, text)
-                await asyncio.sleep(_SPINNER_INTERVAL_SEC)
+                await asyncio.sleep(self._spinner_interval_sec)
         except asyncio.CancelledError:
             raise
 
     async def pump_structured_reply(self) -> None:
+        consecutive_errors = 0
         try:
             while True:
-                changed = await self._presenter.wait_for_update(timeout_sec=0.05)
-                if not changed:
-                    continue
-                async with self._emit_lock:
-                    await self._dispatcher.emit_presenter_messages(log_missing=False)
+                try:
+                    changed = await self._presenter.wait_for_update(timeout_sec=self._structured_reply_pump_interval_sec)
+                    if not changed:
+                        continue
+                    if self._status_display and self._lifecycle_message:
+                        try:
+                            tool_name = await self._presenter.get_current_tool_name()
+                            if tool_name:
+                                await self._status_display.update_for_tool(
+                                    chat_id=self._lifecycle_message.chat.id,
+                                    task_id=self._start.task.task_id,
+                                    tool_name=tool_name,
+                                )
+                        except Exception:
+                            logger.debug("status display update failed", extra={"user_id": self._user_id}, exc_info=True)
+                    async with self._emit_lock:
+                        await self._dispatcher.emit_presenter_messages(log_missing=False)
+                    consecutive_errors = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    consecutive_errors += 1
+                    if consecutive_errors >= 10:
+                        logger.error(
+                            "interactive pump failed after %d consecutive errors, stopping",
+                            consecutive_errors,
+                            extra={"user_id": self._user_id},
+                            exc_info=True,
+                        )
+                        break
+                    logger.warning("interactive pump transient error", extra={"user_id": self._user_id}, exc_info=True)
+                    await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("interactive pump failed", extra={"user_id": self._user_id})
 
     async def _capture_diff_snapshot(self) -> None:
         """Capture pre-task filesystem snapshot for diff generation (non-blocking)."""
@@ -328,6 +364,9 @@ class RunEventStreamer:
                     )
                     self._snapshot_task = asyncio.create_task(self._capture_diff_snapshot())
                     self._start_spinner()
+                    # Send typing action via state machine transition (IDLE -> STARTING)
+                    if self._status_display and self._lifecycle_message:
+                        await self._status_display.start(task_id=self._start.task.task_id, chat_id=self._lifecycle_message.chat.id)
                     if self._start.interactive and self._interactive_pump is None:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
                     continue
@@ -343,8 +382,9 @@ class RunEventStreamer:
                                 extra={"task_id": self._start.task.task_id, "user_id": self._user_id},
                             )
                             self._pre_snapshot = None
-                        finally:
-                            self._snapshot_task = None
+                        except asyncio.CancelledError:
+                            # Outer task cancelled — let the outer finally handle cleanup
+                            raise
 
                 if self._start.interactive:
                     async with self._emit_lock:
@@ -362,6 +402,9 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
                         await self._messenger.answer_safely(success_msg)
+                    # Clear status display
+                    if self._status_display and self._lifecycle_message:
+                        await self._status_display.clear(chat_id=self._lifecycle_message.chat.id, task_id=self._start.task.task_id)
                     await self._maybe_auto_export()
                     # Generate and send diff on successful completion
                     await self._generate_and_send_diff()
@@ -387,6 +430,9 @@ class RunEventStreamer:
                     )
                     if not await self._messenger.edit_message_safely(self._lifecycle_message, error_msg):
                         await self._messenger.answer_safely(error_msg)
+                    # Clear status display
+                    if self._status_display and self._lifecycle_message:
+                        await self._status_display.clear(chat_id=self._lifecycle_message.chat.id, task_id=self._start.task.task_id)
         finally:
             if saw_terminal:
                 self._schedule_queued_uploads_once()
@@ -402,4 +448,14 @@ class RunEventStreamer:
                         await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
                     await self._dispatcher.flush()
             finally:
+                if self._status_display and self._lifecycle_message:
+                    try:
+                        await self._status_display.clear(
+                            chat_id=self._lifecycle_message.chat.id,
+                            task_id=self._start.task.task_id,
+                        )
+                    except Exception:
+                        pass
+                if self._snapshot_task is not None and not self._snapshot_task.done():
+                    self._snapshot_task.cancel()
                 await self._cancel_interactive_pump(timeout_sec=_INTERACTIVE_PUMP_CANCEL_GRACE_SEC)
