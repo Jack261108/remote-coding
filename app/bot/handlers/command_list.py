@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from html import escape
 from typing import TYPE_CHECKING
 
@@ -76,6 +77,216 @@ def _render_full_list(items: list[SessionListItem]) -> tuple[str, InlineKeyboard
     return "\n".join(parts), keyboard
 
 
+def _collect_tmux_items(
+    sessions: list,
+    now: datetime,
+) -> tuple[list[SessionListItem], list[ListSessionView], int]:
+    """Collect tmux session items. Returns (legacy_items, summary_items, invalid_count)."""
+    legacy_items: list[SessionListItem] = []
+    summary_items: list[ListSessionView] = []
+    invalid_count = 0
+    tmux_prefixes = unique_prefixes((s.terminal_id for s in sessions if s.is_alive), min_length=16)
+    for s in sessions:
+        icon = _PHASE_ICONS.get(s.phase, "❓")
+        tags: list[str] = [s.phase]
+        if s.owner_user_id:
+            tags.append(f"owner:{s.owner_user_id}")
+        if s.attached_user_ids:
+            tags.append(f"+{len(s.attached_user_ids)}人")
+        if not s.is_alive:
+            invalid_count += 1
+            continue  # 跳过已断开的 tmux sessions，不显示
+        sid = s.terminal_id
+        sid_prefix = tmux_prefixes[sid]
+        legacy_items.append(
+            SessionListItem(
+                session_id=sid,
+                cwd=s.workdir,
+                status_icon=icon,
+                status_text=" · ".join(tags),
+                source="tmux",
+                buttons=[
+                    ("🔗 绑定", f"sess:attach:{sid_prefix}"),
+                    ("❌ 关闭", f"sess:close:{sid_prefix}"),
+                ],
+            )
+        )
+        summary_items.append(
+            ListSessionView(
+                session_id=sid,
+                title=None,
+                cwd=s.workdir,
+                source=ListSessionSource.TMUX,
+                state=s.phase,
+                activity_at=s.last_activity or now,
+            )
+        )
+    return legacy_items, summary_items, invalid_count
+
+
+def _collect_external_items(
+    external_sessions: list,
+    *,
+    external_discovery: ExternalSessionDiscoveryService | None,
+    external_prefixes: dict[str, str],
+) -> tuple[list[SessionListItem], list[ListSessionView], int]:
+    """Collect external unbound session items. Returns (legacy_items, summary_items, invalid_count)."""
+    legacy_items: list[SessionListItem] = []
+    summary_items: list[ListSessionView] = []
+    invalid_count = 0
+    for ext in external_sessions:
+        # 检测 stale unbound sessions（pid 已死或基于时间）
+        is_dead_pid = _is_dead_pid(ext.pid, session_id=ext.session_id, source="unbound")
+        is_stale_time = (
+            external_discovery.is_session_stale(ext.session_id)
+            if external_discovery is not None and hasattr(external_discovery, "is_session_stale")
+            else False
+        )
+        if is_dead_pid or is_stale_time:
+            invalid_count += 1
+            continue  # 跳过 stale sessions，不显示
+        status = ext.title or "未绑定"
+        legacy_items.append(
+            SessionListItem(
+                session_id=ext.session_id,
+                cwd=ext.cwd,
+                status_icon="📡",
+                status_text=status,
+                source="external",
+                buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{external_prefixes[ext.session_id]}")],
+            )
+        )
+        summary_items.append(
+            ListSessionView(
+                session_id=ext.session_id,
+                title=ext.title,
+                cwd=ext.cwd,
+                source=ListSessionSource.UNBOUND,
+                state="unbound",
+                activity_at=ext.last_seen,
+            )
+        )
+    return legacy_items, summary_items, invalid_count
+
+
+async def _collect_bound_items(
+    bound_sessions: list,
+    *,
+    external_binder: ExternalSessionBinder | None,
+    liveness_enabled: bool,
+    reaper: ExternalBindingReaper | None,
+    title_resolver: Callable[[str, str], str | None] | None,
+    external_prefixes: dict[str, str],
+) -> tuple[list[SessionListItem], list[ListSessionView], int]:
+    """Collect bound session items. Returns (legacy_items, summary_items, invalid_count)."""
+    legacy_items: list[SessionListItem] = []
+    summary_items: list[ListSessionView] = []
+    invalid_count = 0
+
+    if liveness_enabled and reaper is not None:
+        visible = []
+        dead_ids: list[str] = []
+        for binding in bound_sessions:
+            if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
+                dead_ids.append(binding.session_id)
+                invalid_count += 1
+                continue
+            visible.append(binding)
+        bound_sessions = visible
+        for session_id in dead_ids:
+            try:
+                await reaper.remove_with_cleanup(session_id, reason="pid_dead")
+            except Exception:
+                logger.warning(
+                    "failed to reap dead binding during /list",
+                    extra={"session_id": session_id},
+                    exc_info=True,
+                )
+
+    for b in bound_sessions:
+        title = b.title
+        if title is None and title_resolver is not None:
+            try:
+                title = title_resolver(b.session_id, b.cwd)
+                if title is not None and external_binder is not None:
+                    b.title = title
+                    external_binder._binding_store.save_binding(b)
+            except Exception:
+                logger.debug("title resolver failed for bound session", extra={"session_id": b.session_id})
+        legacy_items.append(
+            SessionListItem(
+                session_id=b.session_id,
+                cwd=b.cwd,
+                status_icon="🔗",
+                status_text="已绑定",
+                source="bound",
+                buttons=[(title or _short_cwd(b.cwd), f"sess:select:{external_prefixes[b.session_id]}")],
+            )
+        )
+        summary_items.append(
+            ListSessionView(
+                session_id=b.session_id,
+                title=title,
+                cwd=b.cwd,
+                source=ListSessionSource.BOUND,
+                state="bound",
+                activity_at=b.last_activity_at,
+            )
+        )
+    return legacy_items, summary_items, invalid_count
+
+
+async def _cleanup_dead_sessions(
+    *,
+    user_id: int,
+    external_binder: ExternalSessionBinder | None,
+    liveness_enabled: bool,
+    reaper: ExternalBindingReaper | None,
+    registry_service: SessionRegistryService,
+    external_discovery: ExternalSessionDiscoveryService | None,
+    dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None,
+) -> int:
+    """Clean up dead/stale sessions. Returns count of cleaned sessions."""
+    cleaned = 0
+
+    # 1. 清理 dead pid binding
+    if external_binder is not None and liveness_enabled and reaper is not None:
+        bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
+        for binding in bound_sessions:
+            if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
+                try:
+                    if await reaper.remove_with_cleanup(binding.session_id, reason="pid_dead"):
+                        cleaned += 1
+                except Exception:
+                    logger.warning("cleanup failed for binding", extra={"session_id": binding.session_id})
+
+    # 2. 清理 dead tmux session
+    sessions = await registry_service.list_active_sessions()
+    for s in sessions:
+        if not s.is_alive:
+            try:
+                if await registry_service.close_session(s.terminal_id):
+                    cleaned += 1
+            except Exception:
+                logger.warning("cleanup failed for tmux session", extra={"terminal_id": s.terminal_id})
+
+    # 3. 清理 stale unbound sessions（pid 已死的）
+    if external_discovery is not None:
+        dead_unbound_ids = external_discovery.prune_dead()
+        for session_id in dead_unbound_ids:
+            if dead_unbound_cleanup is not None:
+                try:
+                    await dead_unbound_cleanup(session_id)
+                except Exception:
+                    logger.warning("cleanup failed for unbound session", extra={"session_id": session_id}, exc_info=True)
+            cleaned += 1
+        # 清理基于时间的 stale sessions
+        stale_ids = external_discovery.prune_stale()
+        cleaned += len(stale_ids)
+
+    return cleaned
+
+
 def register_list_handler(
     router: Router,
     *,
@@ -93,44 +304,14 @@ def register_list_handler(
         summary_items: list[ListSessionView] = []
         invalid_count = 0
 
+        # Tmux sessions
         sessions = await registry_service.list_active_sessions()
-        tmux_prefixes = unique_prefixes((s.terminal_id for s in sessions if s.is_alive), min_length=16)
-        for s in sessions:
-            icon = _PHASE_ICONS.get(s.phase, "❓")
-            tags: list[str] = [s.phase]
-            if s.owner_user_id:
-                tags.append(f"owner:{s.owner_user_id}")
-            if s.attached_user_ids:
-                tags.append(f"+{len(s.attached_user_ids)}人")
-            if not s.is_alive:
-                invalid_count += 1
-                continue  # 跳过已断开的 tmux sessions，不显示
-            sid = s.terminal_id
-            sid_prefix = tmux_prefixes[sid]
-            legacy_items.append(
-                SessionListItem(
-                    session_id=sid,
-                    cwd=s.workdir,
-                    status_icon=icon,
-                    status_text=" · ".join(tags),
-                    source="tmux",
-                    buttons=[
-                        ("🔗 绑定", f"sess:attach:{sid_prefix}"),
-                        ("❌ 关闭", f"sess:close:{sid_prefix}"),
-                    ],
-                )
-            )
-            summary_items.append(
-                ListSessionView(
-                    session_id=sid,
-                    title=None,
-                    cwd=s.workdir,
-                    source=ListSessionSource.TMUX,
-                    state=s.phase,
-                    activity_at=s.last_activity or now,
-                )
-            )
+        tmux_legacy, tmux_summary, tmux_invalid = _collect_tmux_items(sessions, now)
+        legacy_items.extend(tmux_legacy)
+        summary_items.extend(tmux_summary)
+        invalid_count += tmux_invalid
 
+        # External token IDs for prefix resolution
         external_sessions = []
         if external_discovery is not None:
             external_sessions = external_discovery.list_unbound()
@@ -140,93 +321,33 @@ def register_list_handler(
         if external_discovery is not None:
             external_token_ids.extend(external_discovery.unavailable_session_ids())
         external_prefixes = unique_prefixes(external_token_ids, min_length=16, max_length=52)
-        for ext in external_sessions:
-            # 检测 stale unbound sessions（pid 已死或基于时间）
-            is_dead_pid = _is_dead_pid(ext.pid, session_id=ext.session_id, source="unbound")
-            is_stale_time = (
-                external_discovery.is_session_stale(ext.session_id)
-                if external_discovery is not None and hasattr(external_discovery, "is_session_stale")
-                else False
-            )
-            if is_dead_pid or is_stale_time:
-                invalid_count += 1
-                continue  # 跳过 stale sessions，不显示
-            status = ext.title or "未绑定"
-            legacy_items.append(
-                SessionListItem(
-                    session_id=ext.session_id,
-                    cwd=ext.cwd,
-                    status_icon="📡",
-                    status_text=status,
-                    source="external",
-                    buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{external_prefixes[ext.session_id]}")],
-                )
-            )
-            summary_items.append(
-                ListSessionView(
-                    session_id=ext.session_id,
-                    title=ext.title,
-                    cwd=ext.cwd,
-                    source=ListSessionSource.UNBOUND,
-                    state="unbound",
-                    activity_at=ext.last_seen,
-                )
-            )
 
+        # External unbound sessions
+        ext_legacy, ext_summary, ext_invalid = _collect_external_items(
+            external_sessions,
+            external_discovery=external_discovery,
+            external_prefixes=external_prefixes,
+        )
+        legacy_items.extend(ext_legacy)
+        summary_items.extend(ext_summary)
+        invalid_count += ext_invalid
+
+        # Bound sessions
         bound_sessions = []
         if external_binder is not None:
             bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
 
-            if liveness_enabled and reaper is not None:
-                visible = []
-                dead_ids: list[str] = []
-                for binding in bound_sessions:
-                    if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
-                        dead_ids.append(binding.session_id)
-                        invalid_count += 1
-                        continue
-                    visible.append(binding)
-                bound_sessions = visible
-                for session_id in dead_ids:
-                    try:
-                        await reaper.remove_with_cleanup(session_id, reason="pid_dead")
-                    except Exception:
-                        logger.warning(
-                            "failed to reap dead binding during /list",
-                            extra={"session_id": session_id},
-                            exc_info=True,
-                        )
-
-        for b in bound_sessions:
-            title = b.title
-            if title is None and title_resolver is not None:
-                try:
-                    title = title_resolver(b.session_id, b.cwd)
-                    if title is not None and external_binder is not None:
-                        b.title = title
-                        external_binder._binding_store.save_binding(b)
-                except Exception:
-                    logger.debug("title resolver failed for bound session", extra={"session_id": b.session_id})
-            legacy_items.append(
-                SessionListItem(
-                    session_id=b.session_id,
-                    cwd=b.cwd,
-                    status_icon="🔗",
-                    status_text="已绑定",
-                    source="bound",
-                    buttons=[(title or _short_cwd(b.cwd), f"sess:select:{external_prefixes[b.session_id]}")],
-                )
-            )
-            summary_items.append(
-                ListSessionView(
-                    session_id=b.session_id,
-                    title=title,
-                    cwd=b.cwd,
-                    source=ListSessionSource.BOUND,
-                    state="bound",
-                    activity_at=b.last_activity_at,
-                )
-            )
+        bound_legacy, bound_summary, bound_invalid = await _collect_bound_items(
+            bound_sessions,
+            external_binder=external_binder,
+            liveness_enabled=liveness_enabled,
+            reaper=reaper,
+            title_resolver=title_resolver,
+            external_prefixes=external_prefixes,
+        )
+        legacy_items.extend(bound_legacy)
+        summary_items.extend(bound_summary)
+        invalid_count += bound_invalid
 
         return legacy_items, summary_items, invalid_count, external_token_ids
 
@@ -254,43 +375,15 @@ def register_list_handler(
     @router.callback_query(F.data == "sess:cleanup")
     async def handle_cleanup(callback: CallbackQuery) -> None:
         user_id = extract_user_id(callback)
-        cleaned = 0
-
-        # 1. 清理 dead pid binding
-        if external_binder is not None and liveness_enabled and reaper is not None:
-            bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
-            for binding in bound_sessions:
-                if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
-                    try:
-                        if await reaper.remove_with_cleanup(binding.session_id, reason="pid_dead"):
-                            cleaned += 1
-                    except Exception:
-                        logger.warning("cleanup failed for binding", extra={"session_id": binding.session_id})
-
-        # 2. 清理 dead tmux session
-        sessions = await registry_service.list_active_sessions()
-        for s in sessions:
-            if not s.is_alive:
-                try:
-                    if await registry_service.close_session(s.terminal_id):
-                        cleaned += 1
-                except Exception:
-                    logger.warning("cleanup failed for tmux session", extra={"terminal_id": s.terminal_id})
-
-        # 3. 清理 stale unbound sessions（pid 已死的）
-        if external_discovery is not None:
-            dead_unbound_ids = external_discovery.prune_dead()
-            for session_id in dead_unbound_ids:
-                if dead_unbound_cleanup is not None:
-                    try:
-                        await dead_unbound_cleanup(session_id)
-                    except Exception:
-                        logger.warning("cleanup failed for unbound session", extra={"session_id": session_id}, exc_info=True)
-                cleaned += 1
-            # 清理基于时间的 stale sessions
-            stale_ids = external_discovery.prune_stale()
-            cleaned += len(stale_ids)
-
+        cleaned = await _cleanup_dead_sessions(
+            user_id=user_id,
+            external_binder=external_binder,
+            liveness_enabled=liveness_enabled,
+            reaper=reaper,
+            registry_service=registry_service,
+            external_discovery=external_discovery,
+            dead_unbound_cleanup=dead_unbound_cleanup,
+        )
         await callback.answer(f"已清理 {cleaned} 个无效会话")
 
         # 刷新摘要视图

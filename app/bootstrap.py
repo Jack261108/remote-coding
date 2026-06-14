@@ -35,6 +35,7 @@ from app.bot.middleware.rate_limit import RateLimitMiddleware
 from app.bot.presenters.permission_message_builder import PermissionMessageBuilder
 from app.bot.router import create_router
 from app.config.settings import Settings
+from app.domain.session_tombstone import SessionTombstoneStore
 from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.auto_approve_service import AutoApproveService
 from app.services.background_task_registry import BackgroundTaskRegistry
@@ -42,6 +43,7 @@ from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.context_builder import ContextBuilderService
 from app.services.diff_generator import DiffGeneratorService
 from app.services.external_binding_cleanup_service import ExternalBindingCleanupService
+from app.services.external_binding_cleanup_task import ExternalBindingCleanupTask
 from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
@@ -49,6 +51,7 @@ from app.services.external_session_discovery import ExternalSessionDiscoveryServ
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 from app.services.file_receiver import FileReceiverService
 from app.services.file_sender import FileSenderService
+from app.services.janitor_task import JanitorTask
 from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
@@ -79,7 +82,17 @@ class AppContainer(
 ):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._init_bot()
+        self._init_storage_and_runners()
+        self._init_file_services()
+        self._init_core_services()
+        self._init_session_and_task_services()
+        self._init_external_services()
+        self._init_infrastructure()
 
+    def _init_bot(self) -> None:
+        """Initialize Telegram bot and dispatcher."""
+        settings = self.settings
         session_kwargs: dict[str, object] = {"timeout": settings.tg_request_timeout_sec}
         if settings.tg_proxy_url:
             session_kwargs["proxy"] = settings.tg_proxy_url
@@ -96,11 +109,13 @@ class AppContainer(
         self.bot = Bot(token=settings.tg_bot_token, session=session)
         self.dispatcher = Dispatcher()
 
+    def _init_storage_and_runners(self) -> None:
+        """Initialize storage backends, hooks, and CLI runners."""
+        settings = self.settings
         self.task_store = MemoryTaskStore(
             max_records=settings.task_store_max_records,
             ttl_hours=settings.task_store_ttl_hours,
         )
-
         self.runner = SubprocessRunner()
         self.claude_paths = ClaudePaths.resolve(settings.claude_config_dir)
         self.hook_installer = HookInstaller(
@@ -118,7 +133,8 @@ class AppContainer(
         self.permission_callback_registry = PermissionCallbackRegistry(
             ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
         )
-        self.auto_approve_service = AutoApproveService()
+        self.tombstone_store = SessionTombstoneStore(ttl_seconds=settings.tombstone_ttl_sec)
+        self.auto_approve_service = AutoApproveService(tombstone=self.tombstone_store)
         self.permission_message_builder = PermissionMessageBuilder()
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
         self.session_context_store = FileSessionContextStore(self.file_session_store)
@@ -147,6 +163,9 @@ class AppContainer(
             tmux_runner=self.tmux_runner,
         )
 
+    def _init_file_services(self) -> None:
+        """Initialize file upload, receive, and queue services."""
+        settings = self.settings
         self.upload_store = UploadStoreAdapter(base_dir=settings.default_workdir, cleanup_roots=settings.allowed_workdirs)
         self.file_receiver = FileReceiverService(
             upload_store=self.upload_store,
@@ -159,6 +178,10 @@ class AppContainer(
             ttl_sec=settings.upload_queue_ttl_sec,
             cleanup_interval_sec=settings.upload_queue_cleanup_interval_sec,
         )
+
+    def _init_core_services(self) -> None:
+        """Initialize message sender, exporters, and diff generator."""
+        settings = self.settings
         self.message_sender = AiogramMessageSender(self.bot)
         self.file_sender = FileSenderService(
             message_sender=self.message_sender,
@@ -175,6 +198,9 @@ class AppContainer(
             max_age_hours=settings.upload_expiry_hours,
         )
 
+    def _init_session_and_task_services(self) -> None:
+        """Initialize session service, task service, and session registry."""
+        settings = self.settings
         self.session_service = SessionService(store=self.session_context_store)
         self.task_service = TaskService(
             settings=settings,
@@ -196,13 +222,16 @@ class AppContainer(
             health_check_interval_sec=settings.session_health_check_interval_sec,
         )
 
-        # External session services
+    def _init_external_services(self) -> None:
+        """Initialize external session discovery, binding, permission, and notification services."""
+        settings = self.settings
         self.external_binding_store = ExternalBindingStore(
             data_dir=Path(settings.tmux_data_dir),
         )
         self.external_discovery = ExternalSessionDiscoveryService(
             stale_timeout_sec=settings.external_session_stale_timeout_sec,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
+            tombstone=self.tombstone_store,
         )
         self.ownership_resolver = SessionOwnershipResolver(
             session_service=self.session_service,
@@ -251,6 +280,7 @@ class AppContainer(
             permission_callback_registry=self.permission_callback_registry,
             external_uq_state=self.external_uq_state,
             external_discovery=self.external_discovery,
+            tombstone=self.tombstone_store,
         )
 
         self.external_binding_cleanup_service = ExternalBindingCleanupService(
@@ -262,6 +292,9 @@ class AppContainer(
             interval_sec=settings.session_health_check_interval_sec,
         )
 
+    def _init_infrastructure(self) -> None:
+        """Initialize lock registries, background tasks, and janitor."""
+        settings = self.settings
         self._jsonl_sync_locks = RefCountedLockRegistry(
             ttl_sec=settings.session_lock_ttl_sec,
             cleanup_interval_sec=settings.lock_cleanup_interval_sec,
@@ -274,7 +307,16 @@ class AppContainer(
         )
         self._background_tasks = BackgroundTaskRegistry(label="bootstrap")
         self._janitor = PeriodicJanitor()
-        self._pending_dead_unbound_cleanup_ids: set[str] = set()
+        self._external_binding_cleanup_task = ExternalBindingCleanupTask(
+            cleanup_service=self.external_binding_cleanup_service,
+            interval_seconds=self.settings.session_health_check_interval_sec,
+        )
+        self._janitor_task = JanitorTask(
+            janitor=self._janitor,
+            interval_seconds=5.0,
+        )
+        self._pending_dead_unbound_cleanup_ids: dict[str, int] = {}  # session_id -> retry_count
+        self._dead_unbound_cleanup_max_retries = 5
         self._started = False
 
     async def _cleanup_dead_unbound_external_session(self, session_id: str) -> bool:
@@ -298,9 +340,17 @@ class AppContainer(
                 success = False
                 logger.exception("dead unbound external session cleanup failed", extra={"session_id": session_id, "step": label})
         if success:
-            self._pending_dead_unbound_cleanup_ids.discard(session_id)
+            self._pending_dead_unbound_cleanup_ids.pop(session_id, None)
         else:
-            self._pending_dead_unbound_cleanup_ids.add(session_id)
+            retry_count = self._pending_dead_unbound_cleanup_ids.get(session_id, 0) + 1
+            if retry_count >= self._dead_unbound_cleanup_max_retries:
+                logger.warning(
+                    "dead unbound external session cleanup exceeded max retries, giving up",
+                    extra={"session_id": session_id, "retry_count": retry_count},
+                )
+                self._pending_dead_unbound_cleanup_ids.pop(session_id, None)
+            else:
+                self._pending_dead_unbound_cleanup_ids[session_id] = retry_count
         return success
 
     async def _prune_unbound_external_sessions(self) -> None:
@@ -310,10 +360,11 @@ class AppContainer(
             dead_ids = self.external_discovery.prune_dead()
         except Exception:
             logger.exception("external discovery dead-prune failed")
-        self._pending_dead_unbound_cleanup_ids.update(dead_ids)
+        for session_id in dead_ids:
+            if session_id not in self._pending_dead_unbound_cleanup_ids:
+                self._pending_dead_unbound_cleanup_ids[session_id] = 0
         for session_id in sorted(self._pending_dead_unbound_cleanup_ids):
-            if await self._cleanup_dead_unbound_external_session(session_id):
-                self._pending_dead_unbound_cleanup_ids.discard(session_id)
+            await self._cleanup_dead_unbound_external_session(session_id)
         self.external_discovery.prune_stale()
 
     async def start(self) -> None:
@@ -334,7 +385,7 @@ class AppContainer(
         await self._restore_session_bindings()
 
         # Initial cleanup passes (before periodic loop starts)
-        await self.external_binding_cleanup_service._cleanup()
+        await self.external_binding_cleanup_service.run_cleanup()
         await self.upload_cleanup.run_cleanup()
 
         # Register periodic jobs
@@ -347,11 +398,6 @@ class AppContainer(
             "upload_file_cleanup",
             self.settings.upload_cleanup_interval_min * 60,
             self.upload_cleanup.run_cleanup,
-        )
-        self._janitor.register(
-            "external_binding_cleanup",
-            self.settings.session_health_check_interval_sec,
-            self.external_binding_cleanup_service._cleanup,
         )
         self._janitor.register(
             "external_discovery_cleanup",
@@ -368,14 +414,16 @@ class AppContainer(
             self.settings.claude_periodic_recheck_ms / 1000,
             self._recheck_active_claude_sessions,
         )
-        await self._janitor.start()
+        self._external_binding_cleanup_task.start()
+        self._janitor_task.start()
         self._started = True
 
     async def stop(self) -> None:
         if not self._started:
             await self.bot.session.close()
             return
-        await self._janitor.stop()
+        await self._janitor_task.stop()
+        await self._external_binding_cleanup_task.stop()
         await self.session_supervisor.stop_all()
         await self.hook_socket_server.stop()
         await self._stop_background_tasks()

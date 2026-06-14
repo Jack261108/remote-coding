@@ -8,7 +8,7 @@ from aiogram.types import Message
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.domain.file_models import FileUploadResult, FileValidationError
-from app.domain.models import TaskStatus
+from app.domain.models import SessionContext, TaskStatus
 from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.file_receiver import FileReceiverService
 from app.services.session_service import SessionService
@@ -88,10 +88,12 @@ async def _enqueue_or_process_upload(
     user_id: int,
     filename: str,
     data: bytes,
+    session: SessionContext | None = None,
 ) -> None:
     """If the user has a running task, queue the upload; otherwise process it."""
     if await _user_has_running_task(task_service, user_id):
-        session = await session_service.get(user_id)
+        if session is None:
+            session = await session_service.get(user_id)
         if session is None:
             await message.answer("请先使用 /session 或 /claude 创建会话后再上传文件。")
             return
@@ -112,6 +114,7 @@ async def _enqueue_or_process_upload(
         session_service=session_service,
         filename=filename,
         data=data,
+        session=session,
     )
 
 
@@ -123,10 +126,12 @@ async def _process_upload(
     filename: str,
     data: bytes,
     workdir: str | None = None,
+    session: SessionContext | None = None,
 ) -> None:
     """Validate and store a file, then reply with result."""
     user_id = extract_user_id(message)
-    session = await session_service.get(user_id)
+    if session is None:
+        session = await session_service.get(user_id)
     if session is None:
         await message.answer("请先使用 /session 或 /claude 创建会话后再上传文件。")
         return
@@ -215,7 +220,7 @@ def register_file_upload_handler(
     upload_queue_ttl_sec: int = 3600,
 ) -> None:
     @router.message(F.document)
-    async def handle_document(message: Message) -> None:
+    async def handle_document(message: Message, session: SessionContext) -> None:
         user_id = extract_user_id(message)
         document = message.document
         if document is None:
@@ -233,15 +238,15 @@ def register_file_upload_handler(
             )
             return
 
-        data = await _download_telegram_file(message, document.file_id)
-        if data is None:
+        file_data = await _download_telegram_file(message, document.file_id)
+        if file_data is None:
             return
 
-        if len(data) > max_size_bytes:
+        if len(file_data) > max_size_bytes:
             await _answer_oversized(
                 message,
                 filename=filename,
-                size_bytes=len(data),
+                size_bytes=len(file_data),
                 upload_max_file_size_mb=upload_max_file_size_mb,
             )
             return
@@ -255,11 +260,12 @@ def register_file_upload_handler(
             upload_queue_ttl_sec=upload_queue_ttl_sec,
             user_id=user_id,
             filename=filename,
-            data=data,
+            data=file_data,
+            session=session,
         )
 
     @router.message(F.photo)
-    async def handle_photo(message: Message) -> None:
+    async def handle_photo(message: Message, session: SessionContext) -> None:
         user_id = extract_user_id(message)
         if not message.photo:
             return
@@ -278,15 +284,15 @@ def register_file_upload_handler(
             )
             return
 
-        data = await _download_telegram_file(message, photo.file_id)
-        if data is None:
+        file_data = await _download_telegram_file(message, photo.file_id)
+        if file_data is None:
             return
 
-        if len(data) > max_size_bytes:
+        if len(file_data) > max_size_bytes:
             await _answer_oversized(
                 message,
                 filename=filename,
-                size_bytes=len(data),
+                size_bytes=len(file_data),
                 upload_max_file_size_mb=upload_max_file_size_mb,
             )
             return
@@ -300,5 +306,6 @@ def register_file_upload_handler(
             upload_queue_ttl_sec=upload_queue_ttl_sec,
             user_id=user_id,
             filename=filename,
-            data=data,
+            data=file_data,
+            session=session,
         )

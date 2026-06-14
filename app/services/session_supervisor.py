@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
+from app.infra.file_mtime_utils import clear_seen_mtimes_for_session, refresh_seen_mtimes
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.session_store import SessionStore
 
@@ -53,12 +54,12 @@ class SessionSupervisor:
 
     def schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         """Request a debounced JSONL sync -- picked up on next poll tick."""
-        self._jsonl_sync_requests[session_id] = (cwd, asyncio.get_event_loop().time())
+        self._jsonl_sync_requests[session_id] = (cwd, asyncio.get_running_loop().time())
 
-    def forget(self, session_id: str) -> None:
+    async def forget(self, session_id: str) -> None:
         """Stop watching a session and clean up state."""
         task = self._tasks.pop(session_id, None)
-        self._clear_seen_mtimes(session_id)
+        clear_seen_mtimes_for_session(session_id, self._seen_mtimes)
         self._jsonl_sync_requests.pop(session_id, None)
         if task is not None:
             task.cancel()
@@ -95,7 +96,7 @@ class SessionSupervisor:
                     # Agent file sync (any phase with subagent containers)
                     if self._has_subagent_files(state):
                         if await self._sync_files_if_needed(state):
-                            self._refresh_seen_mtimes(state)
+                            await self._refresh_seen_mtimes(state)
 
                 # Debounced JSONL sync (outside lock to avoid deadlock with _on_jsonl_sync)
                 await self._maybe_process_jsonl_sync(session_id)
@@ -108,7 +109,7 @@ class SessionSupervisor:
         finally:
             if task is not None and self._tasks.get(session_id) is task:
                 self._tasks.pop(session_id, None)
-                self._clear_seen_mtimes(session_id)
+                clear_seen_mtimes_for_session(session_id, self._seen_mtimes)
                 self._locks.pop(session_id, None)
 
     # ── Interrupt detection ───────────────────────────────────────────────────
@@ -137,7 +138,6 @@ class SessionSupervisor:
 
     async def _sync_files_if_needed(self, state: SessionState) -> bool:
         changed = False
-        session_key = state.session_id
         for tool in state.tool_calls.values():
             if not tool.is_subagent_container:
                 continue
@@ -152,9 +152,9 @@ class SessionSupervisor:
             )
             if not agent_file.exists():
                 continue
+            file_path = str(agent_file)
             mtime = agent_file.stat().st_mtime
-            key = f"{session_key}:{tool.tool_use_id}:{agent_id}"
-            previous = self._seen_mtimes.get(key)
+            previous = self._seen_mtimes.get(file_path)
             if previous is not None and mtime <= previous:
                 continue
             changed = True
@@ -164,11 +164,10 @@ class SessionSupervisor:
             await self._on_jsonl_sync(state.session_id, state.workdir)
         return changed
 
-    def _refresh_seen_mtimes(self, state: SessionState) -> None:
+    async def _refresh_seen_mtimes(self, state: SessionState) -> None:
         session_key = state.session_id
-        stale_keys = [key for key in self._seen_mtimes if key.startswith(f"{session_key}:")]
-        for key in stale_keys:
-            self._seen_mtimes.pop(key, None)
+        # Build path set from current tool calls
+        paths: set[str] = set()
         for tool in state.tool_calls.values():
             if not tool.is_subagent_container:
                 continue
@@ -183,14 +182,10 @@ class SessionSupervisor:
             )
             if not agent_file.exists():
                 continue
-            key = f"{session_key}:{tool.tool_use_id}:{agent_id}"
-            self._seen_mtimes[key] = agent_file.stat().st_mtime
-
-    def _clear_seen_mtimes(self, session_id: str) -> None:
-        prefix = f"{session_id}:"
-        stale_keys = [key for key in self._seen_mtimes if key == session_id or key.startswith(prefix)]
-        for key in stale_keys:
-            self._seen_mtimes.pop(key, None)
+            paths.add(str(agent_file))
+        # Clear stale keys and refresh current ones
+        clear_seen_mtimes_for_session(session_key, self._seen_mtimes)
+        refresh_seen_mtimes(paths, self._seen_mtimes)
 
     # ── Debounced JSONL sync ──────────────────────────────────────────────────
 
@@ -199,7 +194,7 @@ class SessionSupervisor:
         if entry is None:
             return
         cwd, requested_at = entry
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         if now - requested_at < self._debounce_sec:
             return
         self._jsonl_sync_requests.pop(session_id, None)

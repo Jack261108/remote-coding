@@ -275,8 +275,9 @@ async def test_document_size_metadata_rejects_before_download() -> None:
     )
     message = _make_message()
     bot = _attach_document(message, filename="large.py", file_size=1024 * 1024 + 1)
+    session = MagicMock()
 
-    await document_handler(message)
+    await document_handler(message, session=session)
 
     bot.get_file.assert_not_awaited()
     bot.download_file.assert_not_awaited()
@@ -293,8 +294,9 @@ async def test_photo_size_metadata_rejects_before_download() -> None:
     )
     message = _make_message()
     bot = _attach_photo(message, largest_file_size=1024 * 1024 + 1)
+    session = MagicMock()
 
-    await photo_handler(message)
+    await photo_handler(message, session=session)
 
     bot.get_file.assert_not_awaited()
     bot.download_file.assert_not_awaited()
@@ -312,8 +314,10 @@ async def test_running_task_queue_reply_mentions_restart_loss() -> None:
     task_service.list_recent = AsyncMock(return_value=[_running_task()])
     message = _make_message()
     _attach_document(message, filename="queued.py", file_size=4, data=b"data")
+    session = MagicMock()
+    session.workdir = "/tmp/work"
 
-    await document_handler(message)
+    await document_handler(message, session=session)
 
     assert await queue.queued_count(user_id=42) == 1
     message.answer.assert_awaited_once()
@@ -333,14 +337,16 @@ async def test_running_task_rejects_when_queue_count_limit_reached() -> None:
         upload_queue_max_files_per_user=1,
     )
     task_service.list_recent = AsyncMock(return_value=[_running_task()])
+    session = MagicMock()
+    session.workdir = "/tmp/work"
 
     first = _make_message()
     _attach_document(first, filename="first.py", file_size=5, data=b"first")
-    await document_handler(first)
+    await document_handler(first, session=session)
 
     second = _make_message()
     _attach_document(second, filename="second.py", file_size=6, data=b"second")
-    await document_handler(second)
+    await document_handler(second, session=session)
 
     assert await queue.queued_count(user_id=42) == 1
     second.answer.assert_awaited_once()
@@ -357,8 +363,9 @@ async def test_running_task_rejects_downloaded_file_over_size_limit_before_queue
     task_service.list_recent = AsyncMock(return_value=[_running_task()])
     message = _make_message()
     bot = _attach_document(message, filename="no-metadata.bin", file_size=None, data=b"x" * (1024 * 1024 + 1))
+    session = MagicMock()
 
-    await document_handler(message)
+    await document_handler(message, session=session)
 
     bot.get_file.assert_awaited_once()
     bot.download_file.assert_awaited_once()

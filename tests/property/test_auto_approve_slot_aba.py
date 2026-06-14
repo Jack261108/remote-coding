@@ -31,7 +31,7 @@ class AutoApproveSlotStateMachine(RuleBasedStateMachine):
             dict(self.service._activations),
             dict(self.service._slots),
             dict(self.service._active_owners),
-            set(self.service._ended_sessions),
+            self.service._tombstone.ended_ids(),
             dict(self.service._deny_epoch),
         )
 

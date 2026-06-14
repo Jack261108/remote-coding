@@ -1213,7 +1213,7 @@ wheels = [
 
 [[package]]
 name = "tg-cli-gateway"
-version = "0.1.2"
+version = "1.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiogram" },

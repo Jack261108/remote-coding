@@ -12,6 +12,7 @@ from pathlib import Path
 from app.config.settings import Settings
 from app.domain.file_models import ExportResult
 from app.domain.models import TaskRecord
+from app.infra.gitignore_utils import load_gitignore_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ class ResultExporterService:
         md_result = await self.export_markdown(record)
 
         # Collect gitignore patterns
-        gitignore_patterns = self._load_gitignore_patterns(workdir)
+        gitignore_patterns = load_gitignore_patterns(workdir)
 
         # Collect modified files in the time range
         modified_files = self.collect_modified_files(
@@ -209,25 +210,6 @@ class ResultExporterService:
                     return True
 
         return False
-
-    def _load_gitignore_patterns(self, workdir: str) -> list[str]:
-        """Load gitignore patterns from .gitignore file in workdir."""
-        gitignore_path = Path(workdir) / ".gitignore"
-        if not gitignore_path.is_file():
-            return []
-
-        patterns: list[str] = []
-        try:
-            for line in gitignore_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                # Skip empty lines and comments
-                if not line or line.startswith("#"):
-                    continue
-                patterns.append(line)
-        except OSError:
-            logger.warning("Failed to read .gitignore at %s", gitignore_path)
-
-        return patterns
 
 
 class ZipSizeLimitError(Exception):

@@ -9,8 +9,8 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.user_utils import extract_user_id
+from app.domain.models import SessionContext
 from app.services.claude_command_discovery import ClaudeCommand, discover_commands
-from app.services.session_service import SessionService
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -45,18 +45,10 @@ def _parse_callback_data(data: str) -> str | None:
 def register_cmds_handler(
     router: Router,
     *,
-    session_service: SessionService,
     task_service: TaskService,
 ) -> None:
     @router.message(Command("cmds"))
-    async def command_cmds(message: Message) -> None:
-        user_id = extract_user_id(message)
-        session = await session_service.get(user_id)
-
-        if session is None or not session.claude_chat_active:
-            await message.answer("请先发送 /claude 开启会话后再使用 /cmds")
-            return
-
+    async def command_cmds(message: Message, session: SessionContext) -> None:
         workdir = session.workdir
         commands = discover_commands(workdir=workdir)
 
@@ -102,16 +94,11 @@ def register_cmds_handler(
         await message.answer(f"📋 Claude 命令 ({counts})\n点击发送到当前会话:", reply_markup=keyboard)
 
     @router.callback_query(F.data.startswith(_CB_PREFIX))
-    async def handle_cmd_callback(callback: CallbackQuery) -> None:
+    async def handle_cmd_callback(callback: CallbackQuery, session: SessionContext) -> None:
         user_id = extract_user_id(callback)
         slash_text = _parse_callback_data(callback.data or "")
         if not slash_text:
             await callback.answer("Invalid command", show_alert=True)
-            return
-
-        session = await session_service.get(user_id)
-        if session is None or not session.claude_chat_active:
-            await callback.answer("请先发送 /claude 开启会话", show_alert=True)
             return
 
         # Send the slash command as a prompt to the Claude session

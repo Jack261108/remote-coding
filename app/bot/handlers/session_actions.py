@@ -10,7 +10,7 @@ from app.infra.text_formatting import format_external_session_bound_message, for
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.session_action_validator import validate_external_session_select
-from app.services.session_id_resolver import resolve_and_bind, resolve_and_unbind, resolve_unique_prefix
+from app.services.session_id_resolver import BindResult, UnbindResult, resolve_and_bind, resolve_and_unbind, resolve_unique_prefix
 from app.services.session_registry import SessionRegistryService
 
 logger = logging.getLogger(__name__)
@@ -24,14 +24,6 @@ async def _resolve_terminal_id_prefix(
     return resolve_unique_prefix(terminal_id_prefix, candidates)
 
 
-def _session_callback_token(callback: CallbackQuery) -> str | None:
-    data = callback.data or ""
-    parts = data.split(":", 2)
-    if len(parts) < 3:
-        return None
-    return parts[2]
-
-
 def register_session_action_handlers(
     router: Router,
     *,
@@ -40,12 +32,9 @@ def register_session_action_handlers(
     registry_service: SessionRegistryService | None = None,
 ) -> None:
     @router.callback_query(F.data.startswith("sess:select:"))
-    async def handle_session_select(callback: CallbackQuery) -> None:
+    async def handle_session_select(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         user_id = extract_user_id(callback)
-        session_id_prefix = _session_callback_token(callback)
-        if not session_id_prefix:
-            await callback.answer("Invalid callback data")
-            return
+        session_id_prefix = callback_parts[2]
 
         validation = validate_external_session_select(
             session_id_prefix,
@@ -71,50 +60,44 @@ def register_session_action_handlers(
         if callback.message:
             await callback.message.answer(detail_text, reply_markup=keyboard)
 
-    @router.callback_query(F.data.startswith("sess:bind:"))
-    async def handle_session_bind(callback: CallbackQuery) -> None:
+    async def _handle_bind_unbind_action(callback: CallbackQuery, action_type: str, callback_parts: tuple[str, ...]) -> None:
         user_id = extract_user_id(callback)
-        session_id_prefix = _session_callback_token(callback)
-        if not session_id_prefix:
-            await callback.answer("Invalid callback data")
-            return
+        session_id_prefix = callback_parts[2]
 
-        result = await resolve_and_bind(session_id_prefix, user_id=user_id, discovery=discovery, binder=binder)
+        result: BindResult | UnbindResult
+        if action_type == "bind":
+            result = await resolve_and_bind(session_id_prefix, user_id=user_id, discovery=discovery, binder=binder)
+        else:
+            result = await resolve_and_unbind(session_id_prefix, user_id=user_id, discovery=discovery, binder=binder)
+
         if result.success:
-            await callback.answer("绑定成功")
+            success_text = "绑定成功" if action_type == "bind" else "取消绑定成功"
+            await callback.answer(success_text)
             if callback.message:
-                await callback.message.answer(format_external_session_bound_message(result.session_id, result.message))
+                if action_type == "bind":
+                    await callback.message.answer(format_external_session_bound_message(result.session_id, result.message))
+                else:
+                    await callback.message.answer(format_external_session_unbound_message(result.session_id))
         else:
             await callback.answer(f"❌ {result.message}")
+
+    @router.callback_query(F.data.startswith("sess:bind:"))
+    async def handle_session_bind(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
+        await _handle_bind_unbind_action(callback, "bind", callback_parts)
 
     @router.callback_query(F.data.startswith("sess:unbind:"))
-    async def handle_session_unbind(callback: CallbackQuery) -> None:
-        user_id = extract_user_id(callback)
-        session_id_prefix = _session_callback_token(callback)
-        if not session_id_prefix:
-            await callback.answer("Invalid callback data")
-            return
-
-        result = await resolve_and_unbind(session_id_prefix, user_id=user_id, discovery=discovery, binder=binder)
-        if result.success:
-            await callback.answer("取消绑定成功")
-            if callback.message:
-                await callback.message.answer(format_external_session_unbound_message(result.session_id))
-        else:
-            await callback.answer(f"❌ {result.message}")
+    async def handle_session_unbind(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
+        await _handle_bind_unbind_action(callback, "unbind", callback_parts)
 
     # ── tmux session actions ─────────────────────────────────────────────────
 
     @router.callback_query(F.data.startswith("sess:attach:"))
-    async def handle_session_attach(callback: CallbackQuery) -> None:
+    async def handle_session_attach(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         if registry_service is None:
             await callback.answer("功能不可用")
             return
         user_id = extract_user_id(callback)
-        terminal_id_prefix = (callback.data or "").removeprefix("sess:attach:")
-        if not terminal_id_prefix:
-            await callback.answer("Invalid callback data")
-            return
+        terminal_id_prefix = callback_parts[2]
         terminal_id, error = await _resolve_terminal_id_prefix(terminal_id_prefix, registry_service)
         if error or not terminal_id:
             await callback.answer(error or "Session not found")
@@ -125,14 +108,11 @@ def register_session_action_handlers(
             await callback.message.answer(text)
 
     @router.callback_query(F.data.startswith("sess:close:"))
-    async def handle_session_close(callback: CallbackQuery) -> None:
+    async def handle_session_close(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         if registry_service is None:
             await callback.answer("功能不可用")
             return
-        terminal_id_prefix = (callback.data or "").removeprefix("sess:close:")
-        if not terminal_id_prefix:
-            await callback.answer("Invalid callback data")
-            return
+        terminal_id_prefix = callback_parts[2]
         terminal_id, error = await _resolve_terminal_id_prefix(terminal_id_prefix, registry_service)
         if error or not terminal_id:
             await callback.answer(error or "Session not found")

@@ -113,9 +113,15 @@ def _callback_data_from_answer(message: MagicMock) -> list[str]:
 
 
 async def _dispatch_callback(router: Router, callback: MagicMock) -> None:
+    import inspect
+
     for handler in router.callback_query.handlers:
         matched, data = await handler.check(callback)
         if matched:
+            if callback.data:
+                sig = inspect.signature(handler.callback)
+                if "callback_parts" in sig.parameters:
+                    data["callback_parts"] = tuple(callback.data.split(":"))
             await handler.callback(callback, **data)
             return
     raise AssertionError(f"no callback handler matched {callback.data!r}")

@@ -7,6 +7,7 @@ from datetime import datetime
 from app.domain.external_session_models import UnboundExternalSession
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
+from app.domain.session_tombstone import SessionTombstoneStore
 from app.services.process_liveness import process_is_alive
 
 logger = logging.getLogger(__name__)
@@ -20,12 +21,12 @@ class ExternalSessionDiscoveryService:
         *,
         stale_timeout_sec: float = 600.0,
         title_resolver: Callable[[str, str], str | None] | None = None,
+        tombstone: SessionTombstoneStore | None = None,
     ) -> None:
         self._stale_timeout_sec = stale_timeout_sec
         self._title_resolver = title_resolver
         self._sessions: dict[str, UnboundExternalSession] = {}
-        self._ended_session_ids: set[str] = set()
-        self._unavailable_session_ids: set[str] = set()
+        self._tombstone = tombstone or SessionTombstoneStore()
 
     def record_event(self, event: HookEvent) -> None:
         """Record a hook event from an unbound session.
@@ -33,12 +34,12 @@ class ExternalSessionDiscoveryService:
         Creates a new entry if session_id not yet tracked, otherwise updates
         last_seen and increments event_count.
         """
-        if event.session_id in self._ended_session_ids:
+        if self._tombstone.is_ended(event.session_id):
             return
         now = utc_now()
         existing = self._sessions.get(event.session_id)
         if existing is None:
-            self._unavailable_session_ids.discard(event.session_id)
+            self._tombstone.clear(event.session_id)
             title = self._resolve_title(event.session_id, event.cwd)
             self._sessions[event.session_id] = UnboundExternalSession(
                 session_id=event.session_id,
@@ -75,29 +76,35 @@ class ExternalSessionDiscoveryService:
     def mark_session_ended(self, session_id: str) -> None:
         """Remember an ended external session so late hooks cannot rediscover it."""
         self.remove_session(session_id)
-        self._ended_session_ids.add(session_id)
+        self._tombstone.mark_ended(session_id)
 
     def is_session_ended(self, session_id: str) -> bool:
         """Return whether an external session has been marked ended/reaped."""
-        return session_id in self._ended_session_ids
+        return self._tombstone.is_ended(session_id)
 
     def mark_session_unavailable(self, session_id: str) -> None:
         """Remember a removed external session so old callbacks can report it as unavailable."""
         self.remove_session(session_id)
-        self._unavailable_session_ids.add(session_id)
+        self._tombstone.mark_unavailable(session_id)
 
-    def unavailable_session_ids(self) -> set[str]:
-        """Return IDs removed from discovery but still relevant for old callbacks."""
-        return set(self._ended_session_ids | self._unavailable_session_ids)
+    def tombstoned_session_ids(self) -> set[str]:
+        """Return IDs removed from discovery but still relevant for old callbacks.
+
+        Includes both ended and unavailable sessions.
+        """
+        return self._tombstone.ended_ids() | self._tombstone.unavailable_ids()
+
+    # 保留兼容性别名
+    unavailable_session_ids = tombstoned_session_ids
 
     def is_session_unavailable(self, session_id: str) -> bool:
         """Return whether a full session ID is unavailable for old callbacks."""
-        return session_id in self._ended_session_ids or session_id in self._unavailable_session_ids
+        return self._tombstone.is_ended(session_id) or self._tombstone.is_unavailable(session_id)
 
     def has_unavailable_session_prefix(self, session_id_prefix: str) -> bool:
         """Return whether a callback prefix points at an unavailable external session."""
         prefix = session_id_prefix
-        return any(session_id == prefix or session_id.startswith(prefix) for session_id in self.unavailable_session_ids())
+        return any(session_id == prefix or session_id.startswith(prefix) for session_id in self.tombstoned_session_ids())
 
     def list_unbound(self) -> list[UnboundExternalSession]:
         """Return all currently-active unbound sessions without pruning."""

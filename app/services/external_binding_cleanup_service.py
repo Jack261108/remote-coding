@@ -89,9 +89,10 @@ class ExternalBindingCleanupService:
     async def start(self) -> None:
         """Run an initial cleanup pass, then start the periodic task.
 
-        Running cleanup once before the periodic loop ensures stale bindings
-        from a previous process lifetime (e.g. surviving a crash) are
-        eliminated before the bot starts serving requests.
+        Note: This is an alternative API. In the current bootstrap, the
+        lifecycle is managed by ``ExternalBindingCleanupTask`` (via
+        ``PeriodicBackgroundTask``) which calls ``run_cleanup()`` periodically.
+        This method is provided for standalone usage scenarios.
         """
         await self._cleanup()
         self._task = asyncio.create_task(self._periodic_loop())
@@ -99,7 +100,7 @@ class ExternalBindingCleanupService:
     async def stop(self) -> None:
         """Cancel the periodic task and await its termination.
 
-        Idempotent: safe to call multiple times or before ``start()``.
+        Note: This is an alternative API. See ``start()`` for details.
         """
         if self._task is not None and not self._task.done():
             self._task.cancel()
@@ -122,6 +123,13 @@ class ExternalBindingCleanupService:
                 raise
             except Exception:
                 logger.exception("external binding cleanup iteration failed")
+
+    async def run_cleanup(self) -> None:
+        """执行一次清理遍历（公共接口）。
+
+        供 ``ExternalBindingCleanupTask`` 等外部调用者使用。
+        """
+        await self._cleanup()
 
     async def _cleanup(self) -> None:
         """Apply the Decision Matrix to every binding with race-safe re-reads.
