@@ -351,6 +351,24 @@ async def _assert_terminal_group_cleared(session_service) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cleanup_orphaned_terminal_clears_group_auto_approve_and_questions(tmp_path: Path) -> None:
+    auto_approve = RecordingAutoApproveService()
+    service, session_service, _, cleared_users = make_terminal_service(tmp_path)
+    service._auto_approve_service = auto_approve
+    await _seed_terminal_group(session_service)
+
+    await service.cleanup_orphaned_terminal(
+        "user_1_abc123",
+        claude_session_id="claude-owner",
+        user_id=1,
+    )
+
+    await _assert_terminal_group_cleared(session_service)
+    assert set(auto_approve.cleared_session_ids) == {"claude-owner", "claude-attached"}
+    assert set(cleared_users) == {1, 2}
+
+
+@pytest.mark.asyncio
 async def test_close_terminal_cleans_attached_terminal_group(tmp_path: Path) -> None:
     service, session_service, factory, cleared_users = make_terminal_service(tmp_path)
     await _seed_terminal_group(session_service)

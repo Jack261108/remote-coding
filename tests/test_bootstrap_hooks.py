@@ -25,31 +25,53 @@ async def wait_for_jsonl_sync_idle(container: AppContainer, session_id: str) -> 
     await asyncio.sleep(0.2 + debounce + 0.1)
 
 
-def make_settings(tmp_path, *, install_hooks: bool = True, tmux_mode: bool = False) -> Settings:
-    return Settings.model_validate(
-        {
-            "TG_BOT_TOKEN": "123456:TESTTOKEN",
-            "TG_ALLOWED_USER_IDS": "1",
-            "DEFAULT_PROVIDER": "claude_code",
-            "DEFAULT_TIMEOUT_SEC": 10,
-            "MAX_CONCURRENT_TASKS": 1,
-            "CLAUDE_TMUX_MODE": tmux_mode,
-            "TMUX_DATA_DIR": str(tmp_path),
-            "CLAUDE_CLI_BIN": "claude",
-            "CLAUDE_INSTALL_HOOKS": install_hooks,
-            "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
-            "CLAUDE_HOOK_SOCKET_PATH": str(tmp_path / "hook.sock"),
-            "CLAUDE_JSONL_SYNC_DEBOUNCE_MS": 10,
-            "CLAUDE_PERIODIC_RECHECK_MS": 10,
-            "CODEX_CLI_BIN": "codex",
-            "GEMINI_CLI_BIN": "gemini",
-            "ALLOWED_WORKDIRS": str(tmp_path),
-        }
-    )
+def make_settings(tmp_path, *, install_hooks: bool = True, tmux_mode: bool = False, **overrides: object) -> Settings:
+    data = {
+        "TG_BOT_TOKEN": "123456:TESTTOKEN",
+        "TG_ALLOWED_USER_IDS": "1",
+        "DEFAULT_PROVIDER": "claude_code",
+        "DEFAULT_TIMEOUT_SEC": 10,
+        "MAX_CONCURRENT_TASKS": 1,
+        "CLAUDE_TMUX_MODE": tmux_mode,
+        "TMUX_DATA_DIR": str(tmp_path),
+        "CLAUDE_CLI_BIN": "claude",
+        "CLAUDE_INSTALL_HOOKS": install_hooks,
+        "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
+        "CLAUDE_HOOK_SOCKET_PATH": str(tmp_path / "hook.sock"),
+        "CLAUDE_JSONL_SYNC_DEBOUNCE_MS": 10,
+        "CLAUDE_PERIODIC_RECHECK_MS": 10,
+        "CODEX_CLI_BIN": "codex",
+        "GEMINI_CLI_BIN": "gemini",
+        "ALLOWED_WORKDIRS": str(tmp_path),
+    }
+    data.update(overrides)
+    return Settings.model_validate(data)
 
 
 def use_legacy_hook_binding_path(container: AppContainer) -> None:
     delattr(container, "ownership_resolver")
+
+
+@pytest.mark.asyncio
+async def test_container_wires_tmux_timing_settings(tmp_path) -> None:
+    container = AppContainer(
+        make_settings(
+            tmp_path,
+            install_hooks=False,
+            TMUX_POLL_INTERVAL_SEC=1.25,
+            TMUX_ENTER_DELAY_SEC=0.75,
+            TMUX_PARTIAL_FLUSH_SEC=0.5,
+            TMUX_COMPLETION_GRACE_SEC=0.33,
+        )
+    )
+
+    try:
+        assert container.tmux_runner._poll_interval_sec == 1.25
+        assert container.tmux_runner._enter_delay_sec == 0.75
+        assert container.tmux_runner._partial_flush_sec == 0.5
+        assert container.tmux_runner._interactive_completion_grace_sec == 0.33
+    finally:
+        await container.bot.session.close()
 
 
 @pytest.mark.asyncio
@@ -524,7 +546,11 @@ async def test_start_registers_unbound_cleanup_without_replacing_existing_lifecy
         assert "external_binding_cleanup" not in jobs  # moved to ExternalBindingCleanupTask
         assert "session_health_check" in jobs
         assert "external_discovery_cleanup" in jobs
+        assert "session_cleanup" in jobs
         assert "session_lifecycle_reconcile" not in jobs
+
+        session_cleanup_interval, _ = jobs["session_cleanup"]
+        assert session_cleanup_interval == container.settings.session_cleanup_interval_sec
 
         interval, callback = jobs["external_discovery_cleanup"]
         assert interval == container.settings.session_health_check_interval_sec

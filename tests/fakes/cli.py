@@ -152,22 +152,22 @@ class DummyHookSocketServer:
         return self.respond_ok
 
 
-def make_settings(tmp_path: Path, *, claude_tmux_mode: bool = False) -> Settings:
-    return Settings.model_validate(
-        {
-            "TG_BOT_TOKEN": "token",
-            "TG_ALLOWED_USER_IDS": "1",
-            "DEFAULT_PROVIDER": "claude_code",
-            "DEFAULT_TIMEOUT_SEC": 10,
-            "MAX_CONCURRENT_TASKS": 2,
-            "CLAUDE_TMUX_MODE": claude_tmux_mode,
-            "CLAUDE_CLI_BIN": "claude",
-            "CODEX_CLI_BIN": "codex",
-            "GEMINI_CLI_BIN": "gemini",
-            "ALLOWED_WORKDIRS": str(tmp_path),
-            "TASK_OUTPUT_CHAR_LIMIT": 20,
-        }
-    )
+def make_settings(tmp_path: Path, *, claude_tmux_mode: bool = False, **overrides: object) -> Settings:
+    data = {
+        "TG_BOT_TOKEN": "token",
+        "TG_ALLOWED_USER_IDS": "1",
+        "DEFAULT_PROVIDER": "claude_code",
+        "DEFAULT_TIMEOUT_SEC": 10,
+        "MAX_CONCURRENT_TASKS": 2,
+        "CLAUDE_TMUX_MODE": claude_tmux_mode,
+        "CLAUDE_CLI_BIN": "claude",
+        "CODEX_CLI_BIN": "codex",
+        "GEMINI_CLI_BIN": "gemini",
+        "ALLOWED_WORKDIRS": str(tmp_path),
+        "TASK_OUTPUT_CHAR_LIMIT": 20,
+    }
+    data.update(overrides)
+    return Settings.model_validate(data)
 
 
 def make_file_backed_session_service(tmp_path: Path) -> SessionService:

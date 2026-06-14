@@ -134,6 +134,53 @@ async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_handler_cleans_orphaned_terminal_resources(tmp_path) -> None:
+    factory = StubFactory(StubAdapter(events=[]))
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=SessionService(MemorySessionStore()),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+    )
+    session_service = service._session_service
+    old_workdir = tmp_path / "old"
+    new_workdir = tmp_path / "new"
+    old_workdir.mkdir()
+    new_workdir.mkdir()
+    original, _ = await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(old_workdir),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="claude-session-old",
+    )
+    assert original.terminal_id is not None
+    old_terminal_id = original.terminal_id
+    cleanup = AsyncMock()
+    service.cleanup_orphaned_terminal = cleanup
+
+    router = DummyRouter()
+    register_session_handler(router, task_service=service, session_service=session_service)
+    handler = router.handlers[0]
+    message = DummyMessage(f"/session claude_code {new_workdir}")
+
+    await handler(message)
+
+    cleanup.assert_awaited_once_with(
+        old_terminal_id,
+        claude_session_id="claude-session-old",
+        user_id=1,
+    )
+    assert message.answers
+    assert "session 已更新" in message.answers[0]
+
+
+@pytest.mark.asyncio
 async def test_session_handler_rejects_missing_workdir(tmp_path) -> None:
     factory = StubFactory(StubAdapter(events=[]))
     service = TaskService(
@@ -725,7 +772,14 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     run_mock = AsyncMock(return_value=task)
     monkeypatch.setattr("app.bot.router.run_prompt_and_stream", run_mock)
 
-    router = create_router(settings=make_settings(tmp_path, claude_tmux_mode=True), task_service=service, session_service=session_service)
+    settings = make_settings(
+        tmp_path,
+        claude_tmux_mode=True,
+        STRUCTURED_REPLY_PUMP_INTERVAL_SEC=0.77,
+        SPINNER_INITIAL_DELAY_SEC=0.88,
+        SPINNER_INTERVAL_SEC=0.99,
+    )
+    router = create_router(settings=settings, task_service=service, session_service=session_service)
     text_handler = _find_handler_by_name(router, "command_claude_chat_text")
     assert text_handler is not None, "command_claude_chat_text handler not found"
     message = DummyMessage("你好")
@@ -733,3 +787,6 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     await text_handler(message, session=session)
 
     run_mock.assert_awaited_once()
+    assert run_mock.await_args.kwargs["structured_reply_pump_interval_sec"] == 0.77
+    assert run_mock.await_args.kwargs["spinner_initial_delay_sec"] == 0.88
+    assert run_mock.await_args.kwargs["spinner_interval_sec"] == 0.99

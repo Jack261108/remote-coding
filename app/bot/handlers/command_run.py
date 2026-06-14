@@ -10,7 +10,13 @@ from typing import TYPE_CHECKING, Any
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from app.bot.handlers.run_event_streamer import RunEventStreamer, _build_created_message
+from app.bot.handlers.run_event_streamer import (
+    _SPINNER_INITIAL_DELAY_SEC,
+    _SPINNER_INTERVAL_SEC,
+    _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
+    RunEventStreamer,
+    _build_created_message,
+)
 from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.handlers.user_utils import extract_user_id
@@ -87,6 +93,9 @@ async def _create_streaming_components(
     diff_generator: DiffGeneratorService | None,
     result_exporter: ResultExporterService | None,
     schedule_uploads_fn: Callable[[], None] | None,
+    structured_reply_pump_interval_sec: float,
+    spinner_initial_delay_sec: float,
+    spinner_interval_sec: float,
 ) -> _StreamingComponents:
     """Create and wire all streaming components for a task run."""
     messenger = RunTelegramMessenger(
@@ -136,6 +145,9 @@ async def _create_streaming_components(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         queued_upload_scheduler=schedule_uploads_fn,
+        structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
+        spinner_initial_delay_sec=spinner_initial_delay_sec,
+        spinner_interval_sec=spinner_interval_sec,
     )
     await presenter.prime(baseline_current_snapshot=True)
 
@@ -435,6 +447,9 @@ async def run_prompt_and_stream(
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
+    spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
+    spinner_interval_sec: float = _SPINNER_INTERVAL_SEC,
 ) -> asyncio.Task | None:
     logger.info(
         "run prompt requested",
@@ -445,12 +460,20 @@ async def run_prompt_and_stream(
             "workdir": workdir,
         },
     )
-    start = await task_service.create_and_run(
-        user_id=user_id,
-        provider=provider,
-        prompt=prompt,
-        workdir=workdir,
-    )
+    try:
+        start = await task_service.create_and_run(
+            user_id=user_id,
+            provider=provider,
+            prompt=prompt,
+            workdir=workdir,
+        )
+    except ValueError as exc:
+        await message.answer(f"参数错误: {exc}")
+        return None
+    except Exception as exc:
+        logger.exception("failed to create task", extra={"user_id": user_id, "provider": provider})
+        await message.answer(f"创建任务失败: {exc}")
+        return None
 
     logger.info(
         "run prompt created task",
@@ -486,6 +509,9 @@ async def run_prompt_and_stream(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         schedule_uploads_fn=schedule_uploads_fn,
+        structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
+        spinner_initial_delay_sec=spinner_initial_delay_sec,
+        spinner_interval_sec=spinner_interval_sec,
     )
 
     start.events = _wrap_events_with_progress(start.events, state)
@@ -534,6 +560,9 @@ def register_run_handler(
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
+    spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
+    spinner_interval_sec: float = _SPINNER_INTERVAL_SEC,
 ):
     @router.message(Command("run"))
     async def command_run(message: Message, command: CommandObject) -> None:
@@ -551,4 +580,7 @@ def register_run_handler(
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
             permission_gateway=permission_gateway,
+            structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
+            spinner_initial_delay_sec=spinner_initial_delay_sec,
+            spinner_interval_sec=spinner_interval_sec,
         )

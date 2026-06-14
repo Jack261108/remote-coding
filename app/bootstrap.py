@@ -150,6 +150,10 @@ class AppContainer(
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
             data_dir=settings.tmux_data_dir,
+            poll_interval_sec=settings.tmux_poll_interval_sec,
+            enter_delay_sec=settings.tmux_enter_delay_sec,
+            partial_flush_sec=settings.tmux_partial_flush_sec,
+            interactive_completion_grace_sec=settings.tmux_completion_grace_sec,
             claude_cli_bin=settings.claude_cli_bin,
             file_store=self.file_session_store,
             session_store=self.structured_session_store,
@@ -409,10 +413,19 @@ class AppContainer(
             self.settings.session_health_check_interval_sec,
             self.session_registry.reconcile_terminal_lifecycle,
         )
+
+        async def _cleanup_stale_sessions() -> None:
+            self.file_session_store.cleanup_stale_sessions(self.settings.session_cleanup_max_age_hours)
+
         self._janitor.register(
             "periodic_recheck",
             self.settings.claude_periodic_recheck_ms / 1000,
             self._recheck_active_claude_sessions,
+        )
+        self._janitor.register(
+            "session_cleanup",
+            self.settings.session_cleanup_interval_sec,
+            _cleanup_stale_sessions,
         )
         self._external_binding_cleanup_task.start()
         self._janitor_task.start()

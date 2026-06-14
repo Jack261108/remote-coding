@@ -653,6 +653,71 @@ async def test_run_prompt_and_stream_watchdog_allows_structured_progress(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_run_prompt_and_stream_reports_create_errors() -> None:
+    class FailingTaskService(DummyTaskService):
+        async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+            raise RuntimeError("boom")
+
+    message = DummyMessage()
+
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=FailingTaskService([]),
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+    )
+
+    assert task is None
+    assert message.answers == ["创建任务失败: boom"]
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, float] = {}
+    original_init = command_run_module.RunEventStreamer.__init__
+
+    def capture_init(self, *args, **kwargs):
+        captured["structured_reply_pump_interval_sec"] = kwargs["structured_reply_pump_interval_sec"]
+        captured["spinner_initial_delay_sec"] = kwargs["spinner_initial_delay_sec"]
+        captured["spinner_interval_sec"] = kwargs["spinner_interval_sec"]
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(command_run_module.RunEventStreamer, "__init__", capture_init)
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+    )
+
+    task = await run_prompt_and_stream(
+        message=message,
+        task_service=task_service,
+        sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+        user_id=message.from_user.id,
+        provider="claude_code",
+        prompt="hello",
+        workdir="/tmp",
+        structured_reply_pump_interval_sec=0.77,
+        spinner_initial_delay_sec=0.88,
+        spinner_interval_sec=0.99,
+    )
+
+    assert task is not None
+    await task
+    assert captured == {
+        "structured_reply_pump_interval_sec": 0.77,
+        "spinner_initial_delay_sec": 0.88,
+        "spinner_interval_sec": 0.99,
+    }
+
+
+@pytest.mark.asyncio
 async def test_run_prompt_and_stream_watchdog_cancels_stuck_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)

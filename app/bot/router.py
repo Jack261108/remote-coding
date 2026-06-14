@@ -194,6 +194,9 @@ def _create_chat_text_router(
     result_exporter: ResultExporterService | None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None,
     permission_gateway: PermissionGateway | None,
+    structured_reply_pump_interval_sec: float,
+    spinner_initial_delay_sec: float,
+    spinner_interval_sec: float,
 ) -> Router:
     """Create a sub-router for Claude chat text messages (requires active session)."""
     chat_text_router = Router()
@@ -239,6 +242,9 @@ def _create_chat_text_router(
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
             permission_gateway=permission_gateway,
+            structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
+            spinner_initial_delay_sec=spinner_initial_delay_sec,
+            spinner_interval_sec=spinner_interval_sec,
         )
         logger.info(
             "claude chat stream spawned",
@@ -356,6 +362,9 @@ def create_router(
         result_exporter=result_exporter,
         queued_upload_scheduler=queued_upload_scheduler,
         permission_gateway=permission_gateway,
+        structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
+        spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
+        spinner_interval_sec=settings.spinner_interval_sec,
     )
     register_claude_handler(router, task_service=task_service)
     register_cancel_handler(router, task_service=task_service)
@@ -417,6 +426,9 @@ def create_router(
         result_exporter=result_exporter,
         queued_upload_scheduler=queued_upload_scheduler,
         permission_gateway=permission_gateway,
+        structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
+        spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
+        spinner_interval_sec=settings.spinner_interval_sec,
     )
     router.include_router(chat_text_router)
 
