@@ -496,14 +496,23 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 line = b""
             except asyncio.CancelledError:
                 raise
+            except Exception:
+                logger.exception("fifo reader error", extra={"session": meta.session_name})
+                break
 
             if line:
                 fifo_offset += len(line)
                 timeout_anchor = asyncio.get_running_loop().time()
                 self._process_interactive_chunk(meta=meta, offset=fifo_offset)
-            elif line == b"" and fifo_offset > 0:
-                logger.debug("fifo reader EOF", extra={"session": meta.session_name})
-                break
+            elif line == b"":
+                if fifo_offset > 0:
+                    logger.debug("fifo reader EOF", extra={"session": meta.session_name})
+                    break
+                # No data received yet — check if the reader process has exited
+                if hasattr(fifo_reader, "_process") and fifo_reader._process is not None:
+                    if fifo_reader._process.returncode is not None:
+                        logger.debug("fifo reader process exited with no data", extra={"session": meta.session_name})
+                        break
 
             if meta.exit_file.exists():
                 exit_code = self._read_exit_code(meta.exit_file)

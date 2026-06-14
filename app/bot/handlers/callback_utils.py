@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 _INSTRUCTION_LINE = "请点击下方按钮选择允许或拒绝。"
 
@@ -13,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 async def safe_edit_keyboard(
-    message: Any,
-    keyboard: Any | None,
+    message: Message,
+    keyboard: InlineKeyboardMarkup | None,
     log_prefix: str,
 ) -> bool:
     """安全地编辑消息的内联键盘。

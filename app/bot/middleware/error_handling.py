@@ -94,10 +94,13 @@ class ErrorHandlingMiddleware(BaseMiddleware):
         except ValueError as exc:
             logger.warning("Handler error: %s", exc, extra=_extract_event_context(event))
             error_msg = f"操作失败: {exc}"
-            if isinstance(event, Message):
-                await event.answer(error_msg)
-            elif isinstance(event, CallbackQuery):
-                await event.answer(error_msg, show_alert=True)
+            try:
+                if isinstance(event, Message):
+                    await event.answer(error_msg)
+                elif isinstance(event, CallbackQuery):
+                    await event.answer(error_msg, show_alert=True)
+            except Exception:
+                logger.warning("Failed to send error reply to user", exc_info=True)
             return None
         except Exception:
             # logger.exception 包含完整 traceback，确保编程错误不会被静默吞掉。
@@ -106,8 +109,11 @@ class ErrorHandlingMiddleware(BaseMiddleware):
             # 这是预期行为。
             logger.exception("Handler exception", extra=_extract_event_context(event))
             error_msg = "发生内部错误，请稍后重试"
-            if isinstance(event, Message):
-                await event.answer(error_msg)
-            elif isinstance(event, CallbackQuery):
-                await event.answer(error_msg, show_alert=True)
+            try:
+                if isinstance(event, Message):
+                    await event.answer(error_msg)
+                elif isinstance(event, CallbackQuery):
+                    await event.answer(error_msg, show_alert=True)
+            except Exception:
+                logger.warning("Failed to send error reply to user", exc_info=True)
             return None

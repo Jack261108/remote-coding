@@ -80,6 +80,7 @@ def register_session_handler(
                     "user_id": orphaned.user_id,
                 },
             )
+            await session_service.clear_terminal_group(orphaned.terminal_id)
         await message.answer(
             f"session 已更新\n"
             f"session_id: {session.session_id}\n"

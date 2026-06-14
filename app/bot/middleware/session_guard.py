@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -32,6 +33,8 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.services.session_service import SessionService
+
+logger = logging.getLogger(__name__)
 
 
 class SessionGuardMiddleware(BaseMiddleware):
@@ -124,18 +127,24 @@ class SessionGuardMiddleware(BaseMiddleware):
 
         if session is None:
             error_msg = "请先使用 /session 或 /claude 创建会话"
-            if isinstance(event, Message):
-                await event.answer(error_msg)
-            elif isinstance(event, CallbackQuery):
-                await event.answer(error_msg, show_alert=True)
+            try:
+                if isinstance(event, Message):
+                    await event.answer(error_msg)
+                elif isinstance(event, CallbackQuery):
+                    await event.answer(error_msg, show_alert=True)
+            except Exception:
+                logger.warning("Failed to send session guard reply", exc_info=True)
             return None
 
         if self._require_active and not session.claude_chat_active:
             error_msg = "请先发送 /claude 开启会话"
-            if isinstance(event, Message):
-                await event.answer(error_msg)
-            elif isinstance(event, CallbackQuery):
-                await event.answer(error_msg, show_alert=True)
+            try:
+                if isinstance(event, Message):
+                    await event.answer(error_msg)
+                elif isinstance(event, CallbackQuery):
+                    await event.answer(error_msg, show_alert=True)
+            except Exception:
+                logger.warning("Failed to send session guard reply", exc_info=True)
             return None
 
         data["session"] = session
