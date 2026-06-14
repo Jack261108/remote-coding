@@ -254,7 +254,7 @@ async def test_queued_upload_processing_waits_for_other_active_task(tmp_path: Pa
     file_receiver = AsyncMock()
     file_receiver.receive_file = AsyncMock(return_value=FileUploadResult(filename="queued.txt", size_bytes=6, path=tmp_path / "queued.txt"))
     task_service = AsyncMock()
-    task_service.list_recent = AsyncMock(
+    task_service.list_active = AsyncMock(
         side_effect=[
             [
                 _task_record(task_id="completed", user_id=user_id, status=TaskStatus.RUNNING),

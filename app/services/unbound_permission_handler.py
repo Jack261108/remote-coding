@@ -113,7 +113,8 @@ class UnboundPermissionHandler:
         )
         text = render_markdownish_to_telegram_html(gateway.message_builder.build_permission_prompt(prompt))
         notified_user_ids = await self._broadcast(text=text, keyboard=result.keyboard, parse_mode="HTML")
-        state.notified_user_ids.extend(notified_user_ids)
+        async with self._state_lock:
+            state.notified_user_ids.extend(notified_user_ids)
 
         logger.info(
             "unbound permission broadcast sent",
@@ -165,13 +166,33 @@ class UnboundPermissionHandler:
                 if current is state:
                     state.responded = False
                     state.responded_by = None
+                    elapsed = (utc_now() - state.created_at).total_seconds()
+                    remaining = max(0.0, self._permission_ttl_sec - elapsed)
                     self._expiry_tasks[tool_use_id] = asyncio.create_task(
-                        self._expire_permission(tool_use_id),
+                        self._expire_permission(tool_use_id, remaining_ttl=remaining),
                     )
-            logger.warning(
-                "unbound permission decision not forwarded",
-                extra={"tool_use_id": tool_use_id, "user_id": user_id, "decision": decision},
-            )
+            if current is not state:
+                logger.error(
+                    "unbound permission state lost during forwarding (race with invalidate_session), "
+                    "sending deny fallback to unblock Claude",
+                    extra={"tool_use_id": tool_use_id, "user_id": user_id, "session_id": state.session_id},
+                )
+                try:
+                    await self._hook_socket_server.respond_to_permission(
+                        tool_use_id=tool_use_id,
+                        decision="deny",
+                        reason=f"state lost: forwarding failed after session invalidation (user {user_id})",
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to send deny fallback for lost permission state",
+                        extra={"tool_use_id": tool_use_id},
+                    )
+            else:
+                logger.warning(
+                    "unbound permission decision not forwarded",
+                    extra={"tool_use_id": tool_use_id, "user_id": user_id, "decision": decision},
+                )
 
         logger.info(
             "unbound permission responded",
@@ -193,10 +214,11 @@ class UnboundPermissionHandler:
                 self._cancel_expiry_task(tool_use_id)
             return len(tool_use_ids)
 
-    async def _expire_permission(self, tool_use_id: str) -> None:
+    async def _expire_permission(self, tool_use_id: str, *, remaining_ttl: float | None = None) -> None:
         """Auto-deny on TTL expiry if no response received."""
+        delay = remaining_ttl if remaining_ttl is not None else self._permission_ttl_sec
         try:
-            await asyncio.sleep(self._permission_ttl_sec)
+            await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
 
@@ -219,14 +241,16 @@ class UnboundPermissionHandler:
             extra={"tool_use_id": tool_use_id, "session_id": session_id},
         )
 
-    def is_unbound_permission(self, tool_use_id: str) -> bool:
+    async def is_unbound_permission(self, tool_use_id: str) -> bool:
         """Check if a tool_use_id belongs to an unbound permission request."""
-        return tool_use_id in self._pending
+        async with self._state_lock:
+            return tool_use_id in self._pending
 
-    def get_session_id(self, tool_use_id: str) -> str | None:
+    async def get_session_id(self, tool_use_id: str) -> str | None:
         """Get the session_id for an unbound permission request."""
-        state = self._pending.get(tool_use_id)
-        return state.session_id if state is not None else None
+        async with self._state_lock:
+            state = self._pending.get(tool_use_id)
+            return state.session_id if state is not None else None
 
     async def _broadcast(self, *, text: str, keyboard: Keyboard | None, parse_mode: str | None) -> list[int]:
         notified_user_ids: list[int] = []

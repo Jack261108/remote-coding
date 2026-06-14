@@ -211,6 +211,8 @@ class PermissionCallbackRegistry:
         telegram_chat_id: int | None = None,
         telegram_message_id: int | None = None,
     ) -> str:
+        if authorization_mode is AuthorizationMode.SOLE_AUTO_APPROVE_USER and len(authorized_user_ids) != 1:
+            raise ValueError(f"SOLE_AUTO_APPROVE_USER requires exactly one authorized user, got {len(authorized_user_ids)}")
         async with self._lock:
             self._evict_stale()
             compound_key = (session_id, tool_use_id)
@@ -369,6 +371,7 @@ class PermissionCallbackRegistry:
                     record.status = CallbackRecordStatus.RESOLVED
                     record.decision = decision
                     record.dispatch_error_reason = reason
+                    record.responded_at = self._now_datetime()
                     transitioned_tokens.add(record.token)
 
             for compound_key, token in list(self._compound_index.items()):
@@ -376,11 +379,21 @@ class PermissionCallbackRegistry:
                     self._compound_index.pop(compound_key, None)
             return len(transitioned_tokens)
 
-    async def update_telegram_message(self, token: str, chat_id: int, message_id: int, message_text: str | None = None) -> bool:
+    async def update_telegram_message(
+        self,
+        token: str,
+        chat_id: int,
+        message_id: int,
+        message_text: str | None = None,
+        *,
+        user_id: int | None = None,
+    ) -> bool:
         """Update the Telegram message ID for a permission token."""
         async with self._lock:
             record = self._records.get(token)
             if record is None:
+                return False
+            if user_id is not None and not self._is_authorized(record, user_id):
                 return False
             record.telegram_chat_id = chat_id
             record.telegram_message_id = message_id
@@ -417,6 +430,8 @@ class PermissionCallbackRegistry:
     def _is_authorized(self, record: PermissionCallbackRecord, user_id: int) -> bool:
         if record.authorization_mode is AuthorizationMode.ALL_USERS:
             return True
+        if record.authorization_mode is AuthorizationMode.SOLE_AUTO_APPROVE_USER:
+            return record.authorized_user_ids == frozenset({user_id})
         return user_id in record.authorized_user_ids
 
     def _dispatch_failed_reason(self, record: PermissionCallbackRecord) -> str:
@@ -433,22 +448,24 @@ class PermissionCallbackRegistry:
             return deadline <= self._clock()
         return record.expires_at <= self._now_datetime()
 
-    def _prune_expired(self) -> set[str]:
-        return {token for token, record in self._records.items() if self._is_expired(record)}
+    _NON_PENDING_EVICT_GRACE_MULTIPLIER = 5
 
     def _evict_stale(self) -> None:
-        monotonic_stale_cutoff = self._clock() - self._ttl_sec
-        wall_stale_cutoff = self._now_datetime() - timedelta(seconds=self._ttl_sec)
+        grace = self._ttl_sec * self._NON_PENDING_EVICT_GRACE_MULTIPLIER
+        monotonic_grace_cutoff = self._clock() - grace
+        wall_grace_cutoff = self._now_datetime() - timedelta(seconds=grace)
         stale_tokens = []
         for token, record in self._records.items():
-            if record.status is not CallbackRecordStatus.PENDING:
-                continue
             deadline = self._ttl_deadlines.get(token)
-            if deadline is not None:
-                if deadline <= monotonic_stale_cutoff:
+            if record.status is CallbackRecordStatus.PENDING:
+                if self._is_expired(record):
                     stale_tokens.append(token)
-            elif record.expires_at <= wall_stale_cutoff:
-                stale_tokens.append(token)
+            else:
+                if deadline is not None:
+                    if deadline <= monotonic_grace_cutoff:
+                        stale_tokens.append(token)
+                elif record.expires_at <= wall_grace_cutoff:
+                    stale_tokens.append(token)
 
         for token in stale_tokens:
             self._records.pop(token, None)
