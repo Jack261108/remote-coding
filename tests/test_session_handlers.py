@@ -42,24 +42,28 @@ def _find_handler_by_name(router, name: str):
     return None
 
 
+class _DummyEventObserver:
+    def __init__(self, handlers: list) -> None:
+        self._handlers = handlers
+        self.middlewares = []
+
+    def __call__(self, *args, **kwargs):
+        def decorator(fn):
+            self._handlers.append(fn)
+            return fn
+
+        return decorator
+
+    def middleware(self, middleware) -> None:
+        self.middlewares.append(middleware)
+
+
 class DummyRouter:
     def __init__(self) -> None:
         self.handlers = []
         self.callback_handlers = []
-
-    def message(self, *args, **kwargs):
-        def decorator(fn):
-            self.handlers.append(fn)
-            return fn
-
-        return decorator
-
-    def callback_query(self, *args, **kwargs):
-        def decorator(fn):
-            self.callback_handlers.append(fn)
-            return fn
-
-        return decorator
+        self.message = _DummyEventObserver(self.handlers)
+        self.callback_query = _DummyEventObserver(self.callback_handlers)
 
 
 async def _call_callback(router: DummyRouter, index: int, callback) -> None:
@@ -89,7 +93,7 @@ async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
         structured_session_store=tmux_runner._session_store,
     )
     session_service = service._session_service
-    session = await session_service.switch(
+    session, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -561,7 +565,7 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    session = await service._session_service.switch(
+    session, _ = await service._session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -642,7 +646,7 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    session = await session_service.switch(
+    session, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -708,7 +712,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    session = await session_service.switch(
+    session, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
