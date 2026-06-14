@@ -32,7 +32,7 @@ def register_session_action_handlers(
     binder: ExternalSessionBinder,
     registry_service: SessionRegistryService | None = None,
 ) -> None:
-    router.callback_query.middleware(CallbackValidatorMiddleware(prefix="sess"))
+    router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=3, prefix="sess"))
 
     @router.callback_query(F.data.startswith("sess:select:"))
     async def handle_session_select(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:

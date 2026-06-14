@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
-from app.infra.file_mtime_utils import clear_seen_mtimes_for_session, refresh_seen_mtimes
+from app.infra.file_mtime_utils import refresh_seen_mtimes
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.session_store import SessionStore
 
@@ -42,6 +42,7 @@ class SessionSupervisor:
         self._locks: dict[str, asyncio.Lock] = {}
         self._jsonl_sync_requests: dict[str, tuple[str, float]] = {}  # session_id -> (cwd, requested_at)
         self._seen_mtimes: dict[str, float] = {}
+        self._session_mtime_keys: dict[str, set[str]] = {}  # session_id -> tracked file paths
         self._active = False
 
     def watch(self, *, session_id: str, workdir: str) -> None:
@@ -59,7 +60,7 @@ class SessionSupervisor:
     async def forget(self, session_id: str) -> None:
         """Stop watching a session and clean up state."""
         task = self._tasks.pop(session_id, None)
-        clear_seen_mtimes_for_session(session_id, self._seen_mtimes)
+        self._clear_session_mtimes(session_id)
         self._jsonl_sync_requests.pop(session_id, None)
         if task is not None:
             task.cancel()
@@ -70,6 +71,7 @@ class SessionSupervisor:
         tasks = list(self._tasks.values())
         self._tasks.clear()
         self._seen_mtimes.clear()
+        self._session_mtime_keys.clear()
         self._jsonl_sync_requests.clear()
         for task in tasks:
             task.cancel()
@@ -96,7 +98,7 @@ class SessionSupervisor:
                     # Agent file sync (any phase with subagent containers)
                     if self._has_subagent_files(state):
                         if await self._sync_files_if_needed(state):
-                            await self._refresh_seen_mtimes(state)
+                            self._refresh_seen_mtimes(state)
 
                 # Debounced JSONL sync (outside lock to avoid deadlock with _on_jsonl_sync)
                 await self._maybe_process_jsonl_sync(session_id)
@@ -109,7 +111,7 @@ class SessionSupervisor:
         finally:
             if task is not None and self._tasks.get(session_id) is task:
                 self._tasks.pop(session_id, None)
-                clear_seen_mtimes_for_session(session_id, self._seen_mtimes)
+                self._clear_session_mtimes(session_id)
                 self._locks.pop(session_id, None)
 
     # ── Interrupt detection ───────────────────────────────────────────────────
@@ -135,6 +137,12 @@ class SessionSupervisor:
 
     def _has_subagent_files(self, state: SessionState) -> bool:
         return any(tool.is_subagent_container for tool in state.tool_calls.values())
+
+    def _clear_session_mtimes(self, session_id: str) -> None:
+        """Remove all tracked mtime entries for a session using the key index."""
+        keys = self._session_mtime_keys.pop(session_id, set())
+        for key in keys:
+            self._seen_mtimes.pop(key, None)
 
     async def _sync_files_if_needed(self, state: SessionState) -> bool:
         changed = False
@@ -164,7 +172,7 @@ class SessionSupervisor:
             await self._on_jsonl_sync(state.session_id, state.workdir)
         return changed
 
-    async def _refresh_seen_mtimes(self, state: SessionState) -> None:
+    def _refresh_seen_mtimes(self, state: SessionState) -> None:
         session_key = state.session_id
         # Build path set from current tool calls
         paths: set[str] = set()
@@ -183,9 +191,10 @@ class SessionSupervisor:
             if not agent_file.exists():
                 continue
             paths.add(str(agent_file))
-        # Clear stale keys and refresh current ones
-        clear_seen_mtimes_for_session(session_key, self._seen_mtimes)
+        # Clear stale keys via tracked index and refresh current ones
+        self._clear_session_mtimes(session_key)
         refresh_seen_mtimes(paths, self._seen_mtimes)
+        self._session_mtime_keys[session_key] = set(paths)
 
     # ── Debounced JSONL sync ──────────────────────────────────────────────────
 
