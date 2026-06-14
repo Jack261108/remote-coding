@@ -143,6 +143,7 @@ def create_router(
         queued_upload_scheduler=queued_upload_scheduler,
         permission_gateway=permission_gateway,
         status_display=status_display,
+        settings=settings,
     )
     register_claude_handler(router, task_service=task_service, admin_password_service=admin_password_service)
     register_cancel_handler(router, task_service=task_service, admin_password_service=admin_password_service)
@@ -319,6 +320,7 @@ def create_router(
             queued_upload_scheduler=queued_upload_scheduler,
             permission_gateway=permission_gateway,
             status_display=status_display,
+            settings=settings,
         )
         logger.info(
             "claude chat stream spawned",

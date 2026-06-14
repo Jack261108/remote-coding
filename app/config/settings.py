@@ -81,6 +81,17 @@ class Settings(BaseSettings):
     claude_hook_max_pending_permissions: int = Field(64, alias="CLAUDE_HOOK_MAX_PENDING_PERMISSIONS")
     claude_jsonl_sync_debounce_ms: int = Field(100, alias="CLAUDE_JSONL_SYNC_DEBOUNCE_MS")
     claude_periodic_recheck_ms: int = Field(500, alias="CLAUDE_PERIODIC_RECHECK_MS")
+
+    # Tmux runner timing
+    tmux_poll_interval_sec: float = Field(0.2, alias="TMUX_POLL_INTERVAL_SEC")
+    tmux_enter_delay_sec: float = Field(0.2, alias="TMUX_ENTER_DELAY_SEC")
+    tmux_partial_flush_sec: float = Field(0.5, alias="TMUX_PARTIAL_FLUSH_SEC")
+    tmux_completion_grace_sec: float = Field(0.1, alias="TMUX_COMPLETION_GRACE_SEC")
+
+    # UI timing
+    structured_reply_pump_interval_sec: float = Field(0.05, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
+    spinner_initial_delay_sec: float = Field(3.0, alias="SPINNER_INITIAL_DELAY_SEC")
+    spinner_interval_sec: float = Field(1.0, alias="SPINNER_INTERVAL_SEC")
     codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
     gemini_cli_bin: str = Field("gemini", alias="GEMINI_CLI_BIN")
 
@@ -334,6 +345,23 @@ class Settings(BaseSettings):
     def validate_upload_queue_max_files_per_user(cls, value: int) -> int:
         if value < 0:
             raise ValueError("UPLOAD_QUEUE_MAX_FILES_PER_USER 必须大于等于 0")
+        return value
+
+    @field_validator(
+        "tmux_poll_interval_sec",
+        "tmux_enter_delay_sec",
+        "tmux_partial_flush_sec",
+        "tmux_completion_grace_sec",
+        "structured_reply_pump_interval_sec",
+        "spinner_initial_delay_sec",
+        "spinner_interval_sec",
+        "session_health_check_interval_sec",
+        "external_session_stale_timeout_sec",
+    )
+    @classmethod
+    def validate_positive_float(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("配置值必须大于 0")
         return value
 
     @field_validator("rate_limit_bucket_ttl_sec", "permission_lock_ttl_sec", "upload_queue_max_bytes_per_user", mode="before")

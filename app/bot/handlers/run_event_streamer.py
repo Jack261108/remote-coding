@@ -83,6 +83,7 @@ def _build_error_message(*, event_type: EventType, task_id: str, error_text: str
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _SPINNER_INTERVAL_SEC = 1.0
 _SPINNER_INITIAL_DELAY_SEC = 3.0
+_STRUCTURED_REPLY_PUMP_INTERVAL_SEC = 0.05
 _INTERACTIVE_PUMP_CANCEL_GRACE_SEC = 5.0
 _SNAPSHOT_CAPTURE_TIMEOUT_SEC = 10.0
 _ABANDONED_INTERACTIVE_PUMP_TASKS: set[asyncio.Task] = set()
@@ -103,6 +104,9 @@ class RunEventStreamer:
         result_exporter: ResultExporterService | None = None,
         queued_upload_scheduler: Callable[[], None] | None = None,
         status_display: StatusDisplayService | None = None,
+        structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
+        spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
+        spinner_interval_sec: float = _SPINNER_INTERVAL_SEC,
     ) -> None:
         self._start = start
         self._task_service = task_service
@@ -122,6 +126,9 @@ class RunEventStreamer:
         self._snapshot_task: asyncio.Task | None = None
         self._gitignore_patterns: list[str] = []
         self._status_display = status_display
+        self._structured_reply_pump_interval_sec = structured_reply_pump_interval_sec
+        self._spinner_initial_delay_sec = spinner_initial_delay_sec
+        self._spinner_interval_sec = spinner_interval_sec
 
     def _start_spinner(self) -> None:
         if self._lifecycle_message is None:
@@ -215,13 +222,13 @@ class RunEventStreamer:
         frame_idx = 0
         try:
             # Skip animation for short tasks: wait before the first frame.
-            await asyncio.sleep(_SPINNER_INITIAL_DELAY_SEC)
+            await asyncio.sleep(self._spinner_initial_delay_sec)
             while True:
                 frame = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
                 frame_idx += 1
                 text = f"{frame} 处理中… [{display_task_id}]"
                 await self._messenger.edit_message_safely(self._lifecycle_message, text)
-                await asyncio.sleep(_SPINNER_INTERVAL_SEC)
+                await asyncio.sleep(self._spinner_interval_sec)
         except asyncio.CancelledError:
             raise
 
@@ -230,10 +237,9 @@ class RunEventStreamer:
         try:
             while True:
                 try:
-                    changed = await self._presenter.wait_for_update(timeout_sec=0.05)
+                    changed = await self._presenter.wait_for_update(timeout_sec=self._structured_reply_pump_interval_sec)
                     if not changed:
                         continue
-                    # Update status display based on current tool state (isolated)
                     if self._status_display and self._lifecycle_message:
                         try:
                             tool_name = await self._presenter.get_current_tool_name()
