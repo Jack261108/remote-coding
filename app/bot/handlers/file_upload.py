@@ -49,10 +49,14 @@ async def _answer_oversized(message: Message, *, filename: str, size_bytes: int,
 
 async def _user_has_running_task(task_service: TaskService, user_id: int, *, exclude_task_id: str | None = None) -> bool:
     """Check if the user has a task currently in RUNNING or PENDING state."""
-    recent = await task_service.list_recent(user_id, limit=5)
+    tasks = await task_service.list_active(user_id)
+    if not isinstance(tasks, list) or not tasks:
+        tasks = await task_service.list_recent(user_id, limit=5)
+    if not isinstance(tasks, list):
+        tasks = []
     return any(
         t.status in (TaskStatus.RUNNING, TaskStatus.PENDING) and (exclude_task_id is None or getattr(t, "task_id", None) != exclude_task_id)
-        for t in recent
+        for t in tasks
     )
 
 

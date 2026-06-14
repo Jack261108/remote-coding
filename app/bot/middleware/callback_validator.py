@@ -49,7 +49,7 @@ class CallbackValidatorMiddleware(BaseMiddleware):
 
     def __init__(
         self,
-        expected_parts: int | tuple[int, ...],
+        expected_parts: int | tuple[int, ...] | None = None,
         prefix: str | tuple[str, ...] | None = None,
     ) -> None:
         """初始化回调数据验证中间件。
@@ -58,13 +58,16 @@ class CallbackValidatorMiddleware(BaseMiddleware):
         ----------
         expected_parts:
             回调数据按 ``:`` 拆分后期望的段数。
-            可以是单个整数或可接受的段数元组。
+            可以是单个整数、可接受的段数元组，或 ``None`` 表示不校验段数。
         prefix:
             可选，首段必须以此前缀开头。
             可以是单个字符串或可接受的前缀元组。
         """
         super().__init__()
-        self._expected_parts = expected_parts if isinstance(expected_parts, tuple) else (expected_parts,)
+        if expected_parts is None:
+            self._expected_parts: tuple[int, ...] | None = None
+        else:
+            self._expected_parts = expected_parts if isinstance(expected_parts, tuple) else (expected_parts,)
         self._prefix = prefix
 
     async def __call__(
@@ -104,7 +107,7 @@ class CallbackValidatorMiddleware(BaseMiddleware):
 
         parts = event.data.split(":")
 
-        if len(parts) not in self._expected_parts:
+        if self._expected_parts is not None and len(parts) not in self._expected_parts:
             await event.answer("无效的回调数据", show_alert=True)
             return None
 

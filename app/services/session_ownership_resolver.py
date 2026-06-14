@@ -44,8 +44,10 @@ class SessionOwnershipResolver:
 
         NO workdir-based matching is performed here for external sessions.
         """
-        # Priority 1: Check if tmux-owned (O(1) lookup by claude_session_id)
-        ctx = await self._session_service.lookup_by_claude_session_id(session_id)
+        # Priority 1: Check if tmux-owned. Prefer the indexed lookup when
+        # available, but keep a list_all fallback for lightweight test doubles
+        # and older SessionService-compatible implementations.
+        ctx = await self._lookup_tmux_context(session_id)
         if ctx is not None and ctx.terminal_id is not None:
             return OwnershipResult(
                 owner_user_id=ctx.user_id,
@@ -71,5 +73,15 @@ class SessionOwnershipResolver:
 
     async def is_tmux_owned(self, session_id: str) -> bool:
         """Quick check if session is tmux-owned (has terminal_id)."""
-        ctx = await self._session_service.lookup_by_claude_session_id(session_id)
+        ctx = await self._lookup_tmux_context(session_id)
         return ctx is not None and ctx.terminal_id is not None
+
+    async def _lookup_tmux_context(self, session_id: str):
+        lookup = getattr(self._session_service, "lookup_by_claude_session_id", None)
+        if lookup is not None:
+            return await lookup(session_id)
+
+        for ctx in await self._session_service.list_all():
+            if ctx.claude_session_id == session_id and ctx.terminal_id is not None:
+                return ctx
+        return None
