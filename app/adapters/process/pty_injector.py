@@ -137,55 +137,6 @@ async def inject_option_selection(
     return True, ""
 
 
-async def inject_text_answer(
-    pane_id: str,
-    *,
-    text: str,
-    option_count: int,
-    submit_after: bool = False,
-    enter_delay_sec: float = 0.15,
-    tmux_bin: str = _DEFAULT_TMUX_BIN,
-) -> tuple[bool, str]:
-    """Navigate past options to the text input field, type text, and submit.
-
-    Moves cursor down past all options to reach "Other (type answer)", selects it,
-    then types the text.
-    """
-    resolved = shutil.which(tmux_bin)
-    if resolved is None:
-        return False, "tmux not found"
-    # Move to "Other" option (after all regular options)
-    for _ in range(option_count):
-        ok, err = await inject_keys_via_tmux(pane_id, "Down", tmux_bin=resolved)
-        if not ok:
-            return False, err
-        await asyncio.sleep(0.05)
-
-    # Select "Other"
-    ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=resolved)
-    if not ok:
-        return False, err
-    await asyncio.sleep(enter_delay_sec)
-
-    # Type the text (use tmux send-keys with literal text)
-    ok, err = await inject_keys_via_tmux(pane_id, text, tmux_bin=resolved)
-    if not ok:
-        return False, err
-
-    # Submit
-    ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=resolved)
-    if not ok:
-        return False, err
-
-    if submit_after:
-        await asyncio.sleep(enter_delay_sec)
-        ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=resolved)
-        if not ok:
-            return False, err
-
-    return True, ""
-
-
 async def _get_ppid(pid: int) -> int | None:
     """Get parent PID of a process."""
     try:

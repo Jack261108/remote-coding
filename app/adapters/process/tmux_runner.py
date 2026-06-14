@@ -380,34 +380,15 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 last_partial_emit = now
 
             if meta.interactive:
-                tick_result, active_state = self._tick_interactive_watch(meta=meta, watch_state=watch_state, now=now)
-                if tick_result is not None:
-                    exit_code = tick_result
-                    # If session was interrupted (Esc), mark as canceled so the
-                    # lifecycle message shows "中断" instead of "完成".
-                    if active_state is not None and active_state.interrupted:
-                        meta.cancel_requested = True
+                exit_code, timeout_anchor = await self._handle_interactive_tick(
+                    meta=meta,
+                    watch_state=watch_state,
+                    started_at=started_at,
+                    timeout_anchor=timeout_anchor,
+                    now=now,
+                )
+                if exit_code is not None:
                     break
-                if active_state is not None:
-                    if watch_state.last_interactive_revision is None:
-                        watch_state.last_interactive_revision = active_state.revision
-                    elif active_state.revision != watch_state.last_interactive_revision:
-                        watch_state.last_interactive_revision = active_state.revision
-                        watch_state.last_progress_at = now
-                        timeout_anchor = now
-                # Fallback: if we have been idle for a while, check pane content
-                # to detect manual Esc cancellation that did not produce a hook
-                # event (including fast Esc before any progress was observed).
-                # Skip the first few seconds to avoid false positives during
-                # initial prompt submission.
-                idle_anchor = watch_state.last_progress_at or started_at
-                if (now - started_at) >= self._interactive_idle_check_sec and (now - idle_anchor) >= self._interactive_idle_check_sec:
-                    if await self._is_claude_idle_in_pane(meta.session_name):
-                        meta.cancel_requested = True
-                        exit_code = 0
-                        break
-                    # Don't check again for another interval
-                    watch_state.last_progress_at = now
 
             if meta.exit_file.exists():
                 exit_code = self._read_exit_code(meta.exit_file)
@@ -416,66 +397,180 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             timeout_started_at = timeout_anchor if meta.interactive else started_at
             if (now - timeout_started_at) >= timeout_sec:
                 timed_out = True
-                action = "interrupt" if meta.persistent_terminal else "terminate"
-                logger.warning(
-                    "tmux task timeout",
-                    extra=self._tmux_log_extra(
-                        meta,
-                        timeout_sec=timeout_sec,
-                        elapsed_sec=round(now - started_at, 3),
-                        idle_sec=round(now - timeout_started_at, 3),
-                        action=action,
-                        log_position=position,
-                        baseline_captured=meta.baseline_captured,
-                        baseline_offset=meta.baseline_offset,
-                        last_interactive_revision=watch_state.last_interactive_revision,
-                        saw_interactive_progress=watch_state.saw_interactive_progress,
-                        **self._structured_state_log_extra(None),
-                    ),
+                await self._handle_watch_timeout(
+                    meta=meta,
+                    timeout_sec=timeout_sec,
+                    started_at=started_at,
+                    now=now,
+                    timeout_started_at=timeout_started_at,
+                    position=position,
+                    watch_state=watch_state,
                 )
-                if meta.persistent_terminal:
-                    await self._interrupt_session(meta.session_name)
-                else:
-                    await self._terminate_session(meta.session_name)
                 break
 
             if await self._is_cancel_requested(meta.task_id):
-                action = "interrupt" if meta.persistent_terminal else "terminate"
-                logger.info(
-                    "tmux task cancel detected",
-                    extra=self._tmux_log_extra(
-                        meta,
-                        action=action,
-                        log_position=position,
-                        elapsed_sec=round(now - started_at, 3),
-                    ),
-                )
-                if meta.persistent_terminal:
-                    await self._interrupt_session(meta.session_name)
-                else:
-                    await self._terminate_session(meta.session_name)
+                await self._handle_watch_cancel(meta=meta, started_at=started_at, now=now, position=position)
                 break
 
             await asyncio.sleep(self._poll_interval_sec)
 
+        # Drain remaining text
+        drain_events, partial = self._drain_final_text(meta=meta, position=position, partial=partial)
+        for event in drain_events:
+            yield event
+
+        # Determine and yield final result
+        canceled = await self._is_cancel_requested(meta.task_id)
+        if not meta.interactive and self._session_store.get(meta.session_name) is not None:
+            self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_ENDED))
+
+        finished_at = asyncio.get_running_loop().time()
+        yield self._finalize_watch_result(
+            meta=meta,
+            timed_out=timed_out,
+            canceled=canceled,
+            exit_code=exit_code,
+            timeout_sec=timeout_sec,
+            started_at=started_at,
+            finished_at=finished_at,
+            position=position,
+        )
+
+    async def _handle_interactive_tick(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        watch_state: _InteractiveWatchState,
+        started_at: float,
+        timeout_anchor: float,
+        now: float,
+    ) -> tuple[int | None, float]:
+        """Process one interactive watch tick. Returns (exit_code, updated_timeout_anchor)."""
+        tick_result, active_state = self._tick_interactive_watch(meta=meta, watch_state=watch_state, now=now)
+        if tick_result is not None:
+            # If session was interrupted (Esc), mark as canceled so the
+            # lifecycle message shows "中断" instead of "完成".
+            if active_state is not None and active_state.interrupted:
+                meta.cancel_requested = True
+            return tick_result, timeout_anchor
+        if active_state is not None:
+            if watch_state.last_interactive_revision is None:
+                watch_state.last_interactive_revision = active_state.revision
+            elif active_state.revision != watch_state.last_interactive_revision:
+                watch_state.last_interactive_revision = active_state.revision
+                watch_state.last_progress_at = now
+                timeout_anchor = now
+        # Fallback: if we have been idle for a while, check pane content
+        # to detect manual Esc cancellation that did not produce a hook
+        # event (including fast Esc before any progress was observed).
+        # Skip the first few seconds to avoid false positives during
+        # initial prompt submission.
+        idle_anchor = watch_state.last_progress_at or started_at
+        if (now - started_at) >= self._interactive_idle_check_sec and (now - idle_anchor) >= self._interactive_idle_check_sec:
+            if await self._is_claude_idle_in_pane(meta.session_name):
+                meta.cancel_requested = True
+                return 0, timeout_anchor
+            # Don't check again for another interval
+            watch_state.last_progress_at = now
+        return None, timeout_anchor
+
+    async def _handle_watch_timeout(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        timeout_sec: int,
+        started_at: float,
+        now: float,
+        timeout_started_at: float,
+        position: int,
+        watch_state: _InteractiveWatchState,
+    ) -> None:
+        """Handle timeout: log, interrupt/terminate session."""
+        action = "interrupt" if meta.persistent_terminal else "terminate"
+        logger.warning(
+            "tmux task timeout",
+            extra=self._tmux_log_extra(
+                meta,
+                timeout_sec=timeout_sec,
+                elapsed_sec=round(now - started_at, 3),
+                idle_sec=round(now - timeout_started_at, 3),
+                action=action,
+                log_position=position,
+                baseline_captured=meta.baseline_captured,
+                baseline_offset=meta.baseline_offset,
+                last_interactive_revision=watch_state.last_interactive_revision,
+                saw_interactive_progress=watch_state.saw_interactive_progress,
+                **self._structured_state_log_extra(None),
+            ),
+        )
+        if meta.persistent_terminal:
+            await self._interrupt_session(meta.session_name)
+        else:
+            await self._terminate_session(meta.session_name)
+
+    async def _handle_watch_cancel(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        started_at: float,
+        now: float,
+        position: int,
+    ) -> None:
+        """Handle cancel detection: log, interrupt/terminate session."""
+        action = "interrupt" if meta.persistent_terminal else "terminate"
+        logger.info(
+            "tmux task cancel detected",
+            extra=self._tmux_log_extra(
+                meta,
+                action=action,
+                log_position=position,
+                elapsed_sec=round(now - started_at, 3),
+            ),
+        )
+        if meta.persistent_terminal:
+            await self._interrupt_session(meta.session_name)
+        else:
+            await self._terminate_session(meta.session_name)
+
+    def _drain_final_text(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        position: int,
+        partial: str,
+    ) -> tuple[list[CLIEvent], str]:
+        """Read and process any remaining text after the main watch loop.
+
+        Returns (events_to_yield, remaining_partial).
+        """
+        events: list[CLIEvent] = []
         text, new_position = self._read_new_text(meta.log_file, position)
         if text:
             position = new_position
             if meta.interactive:
                 self._process_interactive_chunk(meta=meta, offset=position)
             else:
-                partial, events = self._split_to_events(task_id=meta.task_id, text=partial + text)
-                for event in events:
-                    yield event
+                partial, parsed = self._split_to_events(task_id=meta.task_id, text=partial + text)
+                events.extend(parsed)
 
         if partial and not meta.interactive:
-            yield CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=partial)
+            events.append(CLIEvent(type=EventType.STDOUT, task_id=meta.task_id, content=partial))
+            partial = ""
+        return events, partial
 
-        canceled = await self._is_cancel_requested(meta.task_id)
-        if not meta.interactive and self._session_store.get(meta.session_name) is not None:
-            self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_ENDED))
-
-        finished_at = asyncio.get_running_loop().time()
+    def _finalize_watch_result(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        timed_out: bool,
+        canceled: bool,
+        exit_code: int | None,
+        timeout_sec: int,
+        started_at: float,
+        finished_at: float,
+        position: int,
+    ) -> CLIEvent:
+        """Determine the final CLIEvent based on watch outcome."""
         if timed_out:
             finish_extra = self._tmux_log_extra(
                 meta,
@@ -487,7 +582,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 canceled=canceled,
             )
             logger.warning("tmux task finished", extra=finish_extra)
-            yield CLIEvent(type=EventType.TIMEOUT, task_id=meta.task_id, error=f"任务超时({timeout_sec}s)")
+            return CLIEvent(type=EventType.TIMEOUT, task_id=meta.task_id, error=f"任务超时({timeout_sec}s)")
         elif canceled:
             finish_extra = self._tmux_log_extra(
                 meta,
@@ -499,7 +594,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 canceled=True,
             )
             logger.info("tmux task finished", extra=finish_extra)
-            yield CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
+            return CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
         elif exit_code == 0:
             finish_extra = self._tmux_log_extra(
                 meta,
@@ -511,7 +606,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 canceled=False,
             )
             logger.info("tmux task finished", extra=finish_extra)
-            yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
+            return CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
         else:
             finish_extra = self._tmux_log_extra(
                 meta,
@@ -523,7 +618,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 canceled=False,
             )
             logger.error("tmux task finished", extra=finish_extra)
-            yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, exit_code=exit_code, error=f"进程退出码: {exit_code}")
+            return CLIEvent(type=EventType.FAILED, task_id=meta.task_id, exit_code=exit_code, error=f"进程退出码: {exit_code}")
 
     def _process_interactive_chunk(self, *, meta: _TmuxTaskMeta, offset: int) -> None:
         state = self._session_store.mark_interactive_turn_processing(

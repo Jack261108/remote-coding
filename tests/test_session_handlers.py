@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -29,6 +30,18 @@ from tests.fakes.cli import StubAdapter, StubFactory, make_settings
 from tests.fakes.telegram import DummyCallbackQuery, DummyMessage
 
 
+def _find_handler_by_name(router, name: str):
+    """Search main router and sub-routers for a handler by function name."""
+    for h in router.message.handlers:
+        if h.callback.__name__ == name:
+            return h.callback
+    for sub in router.sub_routers:
+        result = _find_handler_by_name(sub, name)
+        if result is not None:
+            return result
+    return None
+
+
 class DummyRouter:
     def __init__(self) -> None:
         self.handlers = []
@@ -47,6 +60,17 @@ class DummyRouter:
             return fn
 
         return decorator
+
+
+async def _call_callback(router: DummyRouter, index: int, callback) -> None:
+    """Dispatch a callback to a DummyRouter handler, injecting callback_parts when needed."""
+    handler = router.callback_handlers[index]
+    kwargs = {}
+    if callback.data:
+        sig = inspect.signature(handler)
+        if "callback_parts" in sig.parameters:
+            kwargs["callback_parts"] = tuple(callback.data.split(":"))
+    await handler(callback, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -267,7 +291,7 @@ async def test_external_permission_callback_delegates_reformatted_payload_to_gat
     message = DummyMessage("Permission request")
     callback = DummyCallbackQuery("ext_perm:tok12345:allow", user_id=321, message=message)
 
-    await router.callback_handlers[0](callback)
+    await _call_callback(router, 0, callback)
 
     assert gateway.calls == [("perm:tok12345:allow", 321)]
     assert callback.answers == [("已批准", False)]
@@ -317,7 +341,7 @@ async def test_external_user_question_callback_still_uses_existing_handler(monke
     message = DummyMessage("Question")
     callback = DummyCallbackQuery("ext_uq:tool-question:0", user_id=1, message=message)
 
-    await router.callback_handlers[1](callback)
+    await _call_callback(router, 1, callback)
 
     hook_socket_server.respond_to_permission.assert_awaited_once_with(
         tool_use_id="tool-question",
@@ -371,7 +395,7 @@ async def test_external_user_question_callback_rejects_invalidated_session(monke
 
     callback = DummyCallbackQuery("ext_uq:tool-question:0", user_id=1, message=DummyMessage("Question"))
 
-    await router.callback_handlers[1](callback)
+    await _call_callback(router, 1, callback)
 
     assert callback.answers == [("Question expired or already answered", True)]
     assert injected == []
@@ -436,11 +460,10 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
 
     router = DummyRouter()
     register_user_question_handlers(router, task_service=service)
-    callback_handler = router.callback_handlers[0]
     message = DummyMessage("需要你选择")
     callback = DummyCallbackQuery("ask:tool-ask-1:0:0", message=message)
 
-    await callback_handler(callback)
+    await _call_callback(router, 0, callback)
 
     assert factory._interactive_inputs == []
     assert factory._user_question_option_actions == [("user_1_36d00faeb25f", str(tmp_path), 0, False)]
@@ -510,11 +533,10 @@ async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path
 
     router = DummyRouter()
     register_user_question_handlers(router, task_service=service)
-    callback_handler = router.callback_handlers[0]
     message = DummyMessage("需要你选择", user_id=2)
     callback = DummyCallbackQuery("ask:tool-ask-1:0:0", user_id=2, message=message)
 
-    await callback_handler(callback)
+    await _call_callback(router, 0, callback)
 
     assert factory._interactive_inputs == []
     assert factory._user_question_option_actions == []
@@ -575,11 +597,10 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
 
     router = DummyRouter()
     register_user_question_handlers(router, task_service=service)
-    callback_handler = router.callback_handlers[0]
     message = DummyMessage("需要你选择")
 
     toggle_callback = DummyCallbackQuery("ask:toggle:tool-ask-multi:0:0", message=message)
-    await callback_handler(toggle_callback)
+    await _call_callback(router, 0, toggle_callback)
 
     assert message.answers == []
     assert len(message.edited_reply_markups) == 1
@@ -593,7 +614,7 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
     assert toggle_callback.answers == [("已选择: 保留日志", False)]
 
     submit_callback = DummyCallbackQuery("ask:submit:tool-ask-multi:0", message=message)
-    await callback_handler(submit_callback)
+    await _call_callback(router, 0, submit_callback)
 
     assert factory._interactive_inputs == []
     assert factory._user_question_option_actions == [(session.terminal_id, str(tmp_path), 0, False)]
@@ -659,10 +680,11 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
     monkeypatch.setattr("app.bot.router.run_prompt_and_stream", run_mock)
 
     router = create_router(settings=make_settings(tmp_path, claude_tmux_mode=True), task_service=service, session_service=session_service)
-    text_handler = router.message.handlers[-1].callback
+    text_handler = _find_handler_by_name(router, "command_claude_chat_text")
+    assert text_handler is not None, "command_claude_chat_text handler not found"
     message = DummyMessage("直接删除")
 
-    await text_handler(message)
+    await text_handler(message, session=session)
 
     run_mock.assert_not_awaited()
     assert factory._interactive_inputs == []
@@ -686,7 +708,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    await session_service.switch(
+    session = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -700,9 +722,10 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     monkeypatch.setattr("app.bot.router.run_prompt_and_stream", run_mock)
 
     router = create_router(settings=make_settings(tmp_path, claude_tmux_mode=True), task_service=service, session_service=session_service)
-    text_handler = router.message.handlers[-1].callback
+    text_handler = _find_handler_by_name(router, "command_claude_chat_text")
+    assert text_handler is not None, "command_claude_chat_text handler not found"
     message = DummyMessage("你好")
 
-    await text_handler(message)
+    await text_handler(message, session=session)
 
     run_mock.assert_awaited_once()
