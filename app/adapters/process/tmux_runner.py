@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.adapters.process.tmux_commands import TmuxCommandMixin
-from app.adapters.process.tmux_log import TmuxLogMixin
+from app.adapters.process.tmux_log import AsyncFifoReader, TmuxLogMixin
 from app.adapters.process.tmux_session import TmuxSessionCheckError, TmuxSessionMixin, is_recoverable_tmux_session_error
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
@@ -220,6 +220,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
     async def _run_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int, env: dict[str, str] | None, workdir: str, command: str):
         session_started = False
         watch_completed = False
+        fifo_reader: AsyncFifoReader | None = None
         if meta.persistent_terminal:
             if meta.interactive:
                 ready, err = await self._ensure_claude_interactive_session(session_name=meta.session_name, workdir=workdir, env=env)
@@ -229,14 +230,24 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
                 return
             if meta.interactive:
-                pipe_ready, pipe_err = await self._bind_interactive_pipe(meta=meta, workdir=workdir, env=env)
+                fifo_reader = AsyncFifoReader(self._fifo_path(meta.session_name))
+                await fifo_reader.start()
+                pipe_ready, pipe_err = await self._bind_interactive_pipe(
+                    meta=meta,
+                    workdir=workdir,
+                    env=env,
+                    pipe_cmd=fifo_reader.pipe_command(),
+                )
                 if not pipe_ready:
+                    await fifo_reader.close()
                     yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=pipe_err)
                     return
                 self._capture_interactive_baseline(meta=meta)
             meta.command_started_at = utc_now()
             sent, send_err = await self._send_command(meta.session_name, command, workdir=workdir, env=env, interactive=meta.interactive)
             if not sent:
+                if fifo_reader is not None:
+                    await fifo_reader.close()
                 yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=send_err)
                 return
         else:
@@ -263,10 +274,13 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
 
         try:
             yield CLIEvent(type=EventType.STARTED, task_id=meta.task_id, content=f"tmux_session={meta.session_name}")
-            async for event in self._watch_task(meta=meta, timeout_sec=timeout_sec):
+            async for event in self._watch_task(meta=meta, timeout_sec=timeout_sec, fifo_reader=fifo_reader):
                 yield event
             watch_completed = True
         finally:
+            if fifo_reader is not None:
+                await self._clear_interactive_pipe(meta.session_name)
+                await fifo_reader.close()
             if session_started and not meta.persistent_terminal and not watch_completed:
                 terminated = await self._terminate_session(meta.session_name)
                 if not terminated:
@@ -279,9 +293,11 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             if meta.command_file is not None:
                 self._safe_unlink(meta.command_file)
 
-    async def _bind_interactive_pipe(self, *, meta: _TmuxTaskMeta, workdir: str, env: dict[str, str] | None) -> tuple[bool, str]:
+    async def _bind_interactive_pipe(
+        self, *, meta: _TmuxTaskMeta, workdir: str, env: dict[str, str] | None, pipe_cmd: str | None = None
+    ) -> tuple[bool, str]:
         await self._clear_interactive_pipe(meta.session_name)
-        ok, err = await self._set_interactive_pipe(meta)
+        ok, err = await self._set_interactive_pipe(meta, pipe_cmd=pipe_cmd)
         if ok:
             return True, ""
         if not is_recoverable_tmux_session_error(err):
@@ -304,7 +320,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             )
 
         await self._clear_interactive_pipe(meta.session_name)
-        ok, retry_err = await self._set_interactive_pipe(meta)
+        ok, retry_err = await self._set_interactive_pipe(meta, pipe_cmd=pipe_cmd)
         if ok:
             return True, ""
         return False, "\n".join(
@@ -322,8 +338,12 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         except Exception:
             pass
 
-    async def _set_interactive_pipe(self, meta: _TmuxTaskMeta) -> tuple[bool, str]:
-        pipe_cmd = f"cat >> {shlex.quote(str(meta.log_file))}"
+    def _fifo_path(self, session_name: str) -> Path:
+        return self._data_dir / f"{session_name}.fifo"
+
+    async def _set_interactive_pipe(self, meta: _TmuxTaskMeta, *, pipe_cmd: str | None = None) -> tuple[bool, str]:
+        if pipe_cmd is None:
+            pipe_cmd = f"cat >> {shlex.quote(str(meta.log_file))}"
         try:
             code, _, err_text = await self._run_tmux("pipe-pane", "-t", meta.session_name, pipe_cmd)
         except FileNotFoundError:
@@ -334,7 +354,12 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             return True, ""
         return False, err_text.strip() or "unknown error"
 
-    async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int):
+    async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int, fifo_reader: AsyncFifoReader | None = None):
+        if meta.interactive and fifo_reader is not None:
+            async for event in self._watch_interactive_fifo(meta=meta, timeout_sec=timeout_sec, fifo_reader=fifo_reader):
+                yield event
+            return
+
         watch_started_at = utc_now()
         watch_state = _InteractiveWatchState(
             watch_started_at=watch_started_at,
@@ -434,6 +459,95 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             started_at=started_at,
             finished_at=finished_at,
             position=position,
+        )
+
+    async def _watch_interactive_fifo(self, *, meta: _TmuxTaskMeta, timeout_sec: int, fifo_reader: AsyncFifoReader):
+        watch_started_at = utc_now()
+        watch_state = _InteractiveWatchState(
+            watch_started_at=watch_started_at,
+            completion_started_after=meta.command_started_at or watch_started_at,
+            latest_completed_turn_id_before_run=meta.baseline_completed_turn_id,
+            structured_offset_before_run=meta.baseline_offset,
+        )
+        timed_out = False
+        exit_code: int | None = None
+        started_at = asyncio.get_running_loop().time()
+        timeout_anchor = started_at
+        fifo_offset = 0
+
+        exit_code = self._init_interactive_watch(meta=meta, watch_state=watch_state, now=started_at)
+        if watch_state.latest_completed_turn_id_before_run is None and not meta.baseline_captured:
+            watch_state.latest_completed_turn_id_before_run = self._session_store.latest_completed_assistant_turn_id(
+                terminal_id=meta.terminal_id,
+                workdir=meta.workdir,
+                claude_session_id=meta.claude_session_id,
+                fallback_session_id=meta.session_name,
+            )
+
+        stdout = await fifo_reader.readlines()
+        reader = stdout.readline
+
+        while exit_code is None:
+            now = asyncio.get_running_loop().time()
+            remaining = max(0.1, timeout_sec - (now - timeout_anchor))
+            try:
+                line = await asyncio.wait_for(reader(), timeout=min(1.0, remaining))
+            except TimeoutError:
+                line = b""
+            except asyncio.CancelledError:
+                raise
+
+            if line:
+                fifo_offset += len(line)
+                timeout_anchor = asyncio.get_running_loop().time()
+                self._process_interactive_chunk(meta=meta, offset=fifo_offset)
+            elif line == b"" and fifo_offset > 0:
+                logger.debug("fifo reader EOF", extra={"session": meta.session_name})
+                break
+
+            if meta.exit_file.exists():
+                exit_code = self._read_exit_code(meta.exit_file)
+                break
+
+            now = asyncio.get_running_loop().time()
+            exit_code, timeout_anchor = await self._handle_interactive_tick(
+                meta=meta,
+                watch_state=watch_state,
+                started_at=started_at,
+                timeout_anchor=timeout_anchor,
+                now=now,
+            )
+            if exit_code is not None:
+                break
+
+            if (now - timeout_anchor) >= timeout_sec:
+                timed_out = True
+                await self._handle_watch_timeout(
+                    meta=meta,
+                    timeout_sec=timeout_sec,
+                    started_at=started_at,
+                    now=now,
+                    timeout_started_at=timeout_anchor,
+                    position=fifo_offset,
+                    watch_state=watch_state,
+                )
+                break
+
+            if await self._is_cancel_requested(meta.task_id):
+                await self._handle_watch_cancel(meta=meta, started_at=started_at, now=now, position=fifo_offset)
+                break
+
+        canceled = await self._is_cancel_requested(meta.task_id)
+        finished_at = asyncio.get_running_loop().time()
+        yield self._finalize_watch_result(
+            meta=meta,
+            timed_out=timed_out,
+            canceled=canceled,
+            exit_code=exit_code,
+            timeout_sec=timeout_sec,
+            started_at=started_at,
+            finished_at=finished_at,
+            position=fifo_offset,
         )
 
     async def _handle_interactive_tick(
