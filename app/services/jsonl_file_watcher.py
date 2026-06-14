@@ -47,7 +47,9 @@ class _DebouncedHandler(FileSystemEventHandler):
         if not event.is_directory:
             self._handle_path(event.dest_path)
 
-    def _handle_path(self, path: str) -> None:
+    def _handle_path(self, path: bytes | str) -> None:
+        if isinstance(path, bytes):
+            path = path.decode(errors="surrogateescape")
         entry = self._watched_files.get(path)
         if entry is None:
             return

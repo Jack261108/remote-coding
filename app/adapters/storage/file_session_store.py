@@ -146,14 +146,12 @@ class FileSessionStore:
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 continue
 
-            # Only clean up ended sessions
-            if state.phase not in {SessionPhase.ENDED, SessionPhase.INTERRUPTED}:
+            # Only clean up ended or interrupted sessions.
+            if state.phase != SessionPhase.ENDED and not state.interrupted:
                 continue
 
-            # Check if session is old enough
-            ended_at = state.ended_at or state.last_activity
-            if ended_at is None:
-                continue
+            # Check if session is old enough.
+            ended_at = state.last_activity
             if now - ended_at < max_age:
                 continue
 
