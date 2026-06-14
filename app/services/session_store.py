@@ -253,6 +253,25 @@ class SessionStoreFacade:
     def _persist(self, state: SessionState, *, publish: bool = True) -> None:
         persist_session_state(state, self._cache, self._repository, self._notifier, publish=publish)
 
+    def cleanup_stale_sessions(self, max_age_hours: int = 24) -> int:
+        """Clean up session directories for sessions that have ended and are older than max_age_hours.
+
+        Returns:
+            Number of sessions deleted.
+        """
+        return self._file_store.cleanup_stale_sessions(max_age_hours=max_age_hours)
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session directory and all its contents.
+
+        Returns:
+            True if the session was deleted, False if it didn't exist.
+        """
+        # Remove from cache
+        self._cache.remove(session_id)
+        # Delete from disk
+        return self._file_store.delete_session(session_id)
+
 
 # Backward-compat alias
 SessionStore = SessionStoreFacade

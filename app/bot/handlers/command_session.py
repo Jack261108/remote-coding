@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,8 @@ from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.session_text import render_structured_session
 from app.services.session_service import SessionService
 from app.services.task_service import TaskService
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.services.admin_password_service import AdminPasswordService
@@ -66,7 +69,17 @@ def register_session_handler(
                 await message.answer(f"workdir 不存在或不是目录: {workdir}")
                 return
 
-        session = await session_service.switch(user_id=user_id, provider=provider, workdir=workdir)
+        session, orphaned = await session_service.switch(user_id=user_id, provider=provider, workdir=workdir)
+        # Clean up orphaned terminal resources if detected
+        if orphaned is not None:
+            logger.info(
+                "cleaning up orphaned terminal",
+                extra={
+                    "terminal_id": orphaned.terminal_id,
+                    "claude_session_id": orphaned.claude_session_id,
+                    "user_id": orphaned.user_id,
+                },
+            )
         await message.answer(
             f"session 已更新\n"
             f"session_id: {session.session_id}\n"

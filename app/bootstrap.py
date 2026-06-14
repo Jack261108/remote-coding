@@ -354,6 +354,26 @@ class AppContainer(
                 self._pending_dead_unbound_cleanup_ids.discard(session_id)
         self.external_discovery.prune_stale()
 
+    async def _cleanup_stale_sessions(self) -> None:
+        """Clean up stale session files from disk."""
+        try:
+            deleted = self.structured_session_store.cleanup_stale_sessions(
+                max_age_hours=self.settings.session_cleanup_max_age_hours,
+            )
+            if deleted > 0:
+                logger.info("cleaned up stale sessions", extra={"deleted": deleted})
+        except Exception:
+            logger.exception("session cleanup failed")
+
+    async def _cleanup_stale_external_user_questions(self) -> None:
+        """Clean up stale external user questions from memory."""
+        try:
+            pruned = self.external_uq_state.prune_stale()
+            if pruned > 0:
+                logger.info("cleaned up stale external user questions", extra={"pruned": pruned})
+        except Exception:
+            logger.exception("external user question cleanup failed")
+
     async def start(self) -> None:
         if self._started:
             return
@@ -408,6 +428,16 @@ class AppContainer(
             self.settings.claude_periodic_recheck_ms / 1000,
             self._recheck_active_claude_sessions,
         )
+        self._janitor.register(
+            "session_cleanup",
+            self.settings.session_cleanup_interval_sec,
+            self._cleanup_stale_sessions,
+        )
+        self._janitor.register(
+            "external_user_question_cleanup",
+            60,  # Every minute
+            self._cleanup_stale_external_user_questions,
+        )
         await self._janitor.start()
         self._started = True
 
@@ -420,6 +450,8 @@ class AppContainer(
         self.jsonl_file_watcher.stop()
         await self.hook_socket_server.stop()
         await self._stop_background_tasks()
+        # Flush external bindings to disk before shutdown
+        self.external_binding_store.flush()
         await self.bot.session.close()
         self._started = False
 

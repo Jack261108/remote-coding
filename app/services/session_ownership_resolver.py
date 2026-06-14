@@ -44,15 +44,14 @@ class SessionOwnershipResolver:
 
         NO workdir-based matching is performed here for external sessions.
         """
-        # Priority 1: Check if tmux-owned
-        all_contexts = await self._session_service.list_all()
-        for ctx in all_contexts:
-            if ctx.claude_session_id == session_id and ctx.terminal_id is not None:
-                return OwnershipResult(
-                    owner_user_id=ctx.user_id,
-                    origin=SessionOrigin.TMUX,
-                    ownership_state="owned",
-                )
+        # Priority 1: Check if tmux-owned (O(1) lookup by claude_session_id)
+        ctx = await self._session_service.lookup_by_claude_session_id(session_id)
+        if ctx is not None and ctx.terminal_id is not None:
+            return OwnershipResult(
+                owner_user_id=ctx.user_id,
+                origin=SessionOrigin.TMUX,
+                ownership_state="owned",
+            )
 
         # Priority 2: Check external binding
         binding = self._binding_store.get_binding(session_id)
@@ -72,5 +71,5 @@ class SessionOwnershipResolver:
 
     async def is_tmux_owned(self, session_id: str) -> bool:
         """Quick check if session is tmux-owned (has terminal_id)."""
-        all_contexts = await self._session_service.list_all()
-        return any(ctx.claude_session_id == session_id and ctx.terminal_id is not None for ctx in all_contexts)
+        ctx = await self._session_service.lookup_by_claude_session_id(session_id)
+        return ctx is not None and ctx.terminal_id is not None

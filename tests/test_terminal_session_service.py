@@ -31,7 +31,7 @@ class RecordingAutoApproveService:
 @pytest.mark.asyncio
 async def test_resolve_for_task_enables_interactive_only_for_active_claude_chat(tmp_path: Path) -> None:
     service, session_service, _, _ = make_terminal_service(tmp_path, claude_tmux_mode=True)
-    session = await session_service.get_or_create(
+    session, _ = await session_service.get_or_create(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -306,7 +306,7 @@ async def test_open_claude_chat_session_rejects_explicit_workdir_outside_allowli
 
 
 async def _seed_terminal_group(session_service, terminal_id: str = "user_1_abc123") -> None:
-    owner = await session_service.switch(
+    owner, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir="/proj",
@@ -318,7 +318,7 @@ async def _seed_terminal_group(session_service, terminal_id: str = "user_1_abc12
     owner.attached_user_ids = [2]
     await session_service.save_session_context(owner)
 
-    attached = await session_service.switch(
+    attached, _ = await session_service.switch(
         user_id=2,
         provider="claude_code",
         workdir="/proj",

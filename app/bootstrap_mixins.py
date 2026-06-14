@@ -596,41 +596,43 @@ class HookHandlingMixin(AppContainerBase):
     async def _bind_hook_session(self, event: HookEvent) -> None:
         if not event.session_id:
             return
-        matched = await self._match_session_context(event)  # type: ignore[attr-defined]
-        logger.info(
-            "hook session match result",
-            extra={
-                "hook_session_id": event.session_id,
-                "hook_event": event.event,
-                "hook_status": event.status,
-                "hook_cwd": event.cwd,
-                "matched_user_id": matched.user_id if matched is not None else None,
-                "matched_workdir": matched.workdir if matched is not None else None,
-                "matched_terminal_id": matched.terminal_id if matched is not None else None,
-                "matched_claude_session_id": matched.claude_session_id if matched is not None else None,
-            },
-        )
-        if matched is None:
-            return
-        workdir = event.cwd or matched.workdir
-        await self.task_service.bind_claude_session(
-            user_id=matched.user_id,
-            claude_session_id=event.session_id,
-            workdir=workdir,
-        )
-        state = self.structured_session_store.get_or_create(
-            session_id=event.session_id,
-            provider="claude_code",
-            workdir=workdir,
-            terminal_id=matched.terminal_id,
-            user_id=matched.user_id,
-            claude_session_id=event.session_id,
-        )
-        state.terminal_id = matched.terminal_id
-        state.user_id = matched.user_id
-        state.workdir = workdir
-        state.claude_session_id = event.session_id
-        self.structured_session_store.save(state)
+        # Use per-session lock to prevent concurrent modifications to the same SessionState
+        async with self._session_event_locks.lock(event.session_id):
+            matched = await self._match_session_context(event)  # type: ignore[attr-defined]
+            logger.info(
+                "hook session match result",
+                extra={
+                    "hook_session_id": event.session_id,
+                    "hook_event": event.event,
+                    "hook_status": event.status,
+                    "hook_cwd": event.cwd,
+                    "matched_user_id": matched.user_id if matched is not None else None,
+                    "matched_workdir": matched.workdir if matched is not None else None,
+                    "matched_terminal_id": matched.terminal_id if matched is not None else None,
+                    "matched_claude_session_id": matched.claude_session_id if matched is not None else None,
+                },
+            )
+            if matched is None:
+                return
+            workdir = event.cwd or matched.workdir
+            await self.task_service.bind_claude_session(
+                user_id=matched.user_id,
+                claude_session_id=event.session_id,
+                workdir=workdir,
+            )
+            state = self.structured_session_store.get_or_create(
+                session_id=event.session_id,
+                provider="claude_code",
+                workdir=workdir,
+                terminal_id=matched.terminal_id,
+                user_id=matched.user_id,
+                claude_session_id=event.session_id,
+            )
+            state.terminal_id = matched.terminal_id
+            state.user_id = matched.user_id
+            state.workdir = workdir
+            state.claude_session_id = event.session_id
+            self.structured_session_store.save(state)
 
 
 class SessionMatchingMixin(AppContainerBase):
@@ -906,7 +908,9 @@ class SessionRestoreMixin(AppContainerBase):
             ):
                 self.session_supervisor.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)
                 continue
+            # Clean up orphaned session state: clear binding and delete state files
             await self.session_service.clear_claude_session(user_id=session.user_id)
+            self.structured_session_store.delete_session(claude_session_id)
 
 
 class EventDispatchMixin(AppContainerBase):

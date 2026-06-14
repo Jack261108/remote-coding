@@ -83,6 +83,8 @@ class SessionContextStore(Protocol):
 
     async def save(self, session: SessionContext) -> None: ...
 
+    async def delete(self, user_id: int) -> bool: ...
+
     async def get_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None: ...
 
 
@@ -109,3 +111,10 @@ class MemorySessionStore:
     async def save(self, session: SessionContext) -> None:
         async with self._lock:
             self._sessions[session.user_id] = session
+
+    async def delete(self, user_id: int) -> bool:
+        async with self._lock:
+            if user_id in self._sessions:
+                del self._sessions[user_id]
+                return True
+            return False

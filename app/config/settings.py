@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     external_session_stale_timeout_sec: float = Field(600.0, alias="EXTERNAL_SESSION_STALE_TIMEOUT_SEC")
     push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
 
+    # Session cleanup settings
+    session_cleanup_interval_sec: int = Field(3600, alias="SESSION_CLEANUP_INTERVAL_SEC")  # 1 hour
+    session_cleanup_max_age_hours: int = Field(24, alias="SESSION_CLEANUP_MAX_AGE_HOURS")  # 24 hours
+
     # Auto file send settings
     auto_file_send_enabled: bool = Field(True, alias="AUTO_FILE_SEND_ENABLED")
     auto_file_send_extensions: Annotated[list[str], NoDecode] = Field(

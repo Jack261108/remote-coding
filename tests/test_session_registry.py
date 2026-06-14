@@ -71,7 +71,7 @@ def _make_registry(tmp_path, *, alive_sessions: set[str] | None = None, auto_app
 
 
 async def _seed_terminal_group(session_service: SessionService, terminal_id: str = "user_1_abc123") -> None:
-    owner = await session_service.switch(
+    owner, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir="/proj",
@@ -83,7 +83,7 @@ async def _seed_terminal_group(session_service: SessionService, terminal_id: str
     owner.attached_user_ids = [2]
     await session_service.save_session_context(owner)
 
-    attached = await session_service.switch(
+    attached, _ = await session_service.switch(
         user_id=2,
         provider="claude_code",
         workdir="/proj",
@@ -710,7 +710,7 @@ async def test_health_check_cleans_dead_terminal_group_owner_and_attached_contex
         auto_approve_service=auto_approve,
     )
     await _seed_terminal_group(session_service)
-    other = await session_service.switch(
+    other, _ = await session_service.switch(
         user_id=3,
         provider="claude_code",
         workdir="/other",

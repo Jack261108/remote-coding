@@ -76,6 +76,7 @@ class SessionSupervisor:
         self._jsonl_sync_requests.pop(session_id, None)
         if self._jsonl_file_watcher is not None:
             self._jsonl_file_watcher.remove(session_id)
+        self._locks.pop(session_id, None)
         if task is not None:
             task.cancel()
 
@@ -85,6 +86,7 @@ class SessionSupervisor:
         self._wake.set()
         tasks = list(self._tasks.values())
         self._tasks.clear()
+        self._locks.clear()
         self._seen_mtimes.clear()
         self._jsonl_sync_requests.clear()
         for task in tasks:

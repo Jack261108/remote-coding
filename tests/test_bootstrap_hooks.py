@@ -442,7 +442,7 @@ async def test_start_runs_tmux_health_check_before_restore(tmp_path, monkeypatch
 async def test_start_clears_dead_tmux_binding_before_restoring_watchers(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = make_settings(tmp_path, install_hooks=False, tmux_mode=True)
     first = AppContainer(settings)
-    session = await first.session_service.switch(
+    session, _ = await first.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -540,7 +540,7 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     use_legacy_hook_binding_path(container)
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -617,7 +617,7 @@ async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_work
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     use_legacy_hook_binding_path(container)
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -653,7 +653,7 @@ async def test_handle_hook_event_does_not_bind_session_by_unique_workdir_when_cl
 ) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -689,7 +689,7 @@ async def test_handle_hook_event_does_not_bind_session_for_stale_processing_term
 ) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -735,7 +735,7 @@ async def test_handle_hook_event_binds_session_when_terminal_state_has_content_w
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     use_legacy_hook_binding_path(container)
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -793,7 +793,7 @@ async def test_handle_hook_event_binds_session_when_pending_interactive_task_mat
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     use_legacy_hook_binding_path(container)
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -841,7 +841,7 @@ async def test_handle_hook_event_does_not_bind_session_when_only_final_task_matc
 ) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1184,7 +1184,7 @@ async def test_container_uses_independent_session_lock_registries(tmp_path) -> N
 async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session_one = await container.session_service.switch(
+    session_one, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1216,7 +1216,7 @@ async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_
 @pytest.mark.asyncio
 async def test_match_session_context_prefers_terminal_binding(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1244,7 +1244,7 @@ async def test_match_session_context_prefers_terminal_binding(tmp_path, monkeypa
 @pytest.mark.asyncio
 async def test_restore_session_bindings_clears_empty_terminal_binding_when_snapshot_missing(tmp_path) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1367,7 +1367,7 @@ async def test_periodic_recheck_syncs_processing_claude_session(tmp_path, monkey
 async def test_start_restores_persisted_claude_session_snapshot(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = make_settings(tmp_path, install_hooks=False)
     first = AppContainer(settings)
-    session = await first.session_service.switch(
+    session, _ = await first.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1511,7 +1511,7 @@ async def test_start_clears_stale_claude_session_binding_when_only_empty_termina
 ) -> None:
     settings = make_settings(tmp_path, install_hooks=False)
     first = AppContainer(settings)
-    session = await first.session_service.switch(
+    session, _ = await first.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1564,7 +1564,7 @@ async def test_start_clears_stale_claude_session_binding_when_only_empty_termina
 async def test_start_keeps_claude_session_binding_when_terminal_state_has_content(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = make_settings(tmp_path, install_hooks=False)
     first = AppContainer(settings)
-    session = await first.session_service.switch(
+    session, _ = await first.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),

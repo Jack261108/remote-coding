@@ -64,7 +64,7 @@ class SessionRegistryService:
             attached_ids = list(set(attached_ids) | set(owner.attached_user_ids))
         return owner, attached_ids
 
-    def _terminal_lock(self, terminal_id: str) -> asyncio.Lock:
+    def _terminal_lock(self, terminal_id: str):
         return self._session_service.terminal_group_lock(terminal_id)
 
     async def _check_session_liveness(self, tmux_name: str, **log_extra: object) -> bool | None:
@@ -183,13 +183,26 @@ class SessionRegistryService:
             workdir = state.workdir if state else (owner.workdir if owner else ".")
 
             # Update user's SessionContext
-            await self._session_service.switch(
+            _, orphaned = await self._session_service.switch(
                 user_id=user_id,
                 provider="claude_code",
                 workdir=workdir,
                 terminal_mode=True,
                 claude_chat_active=True,
             )
+            # Clean up orphaned terminal resources if detected
+            if orphaned is not None:
+                logger.info(
+                    "cleaning up orphaned terminal during attach",
+                    extra={
+                        "terminal_id": orphaned.terminal_id,
+                        "claude_session_id": orphaned.claude_session_id,
+                        "user_id": orphaned.user_id,
+                    },
+                )
+                if self._auto_approve_service is not None and orphaned.claude_session_id:
+                    await self._auto_approve_service.clear_session(orphaned.claude_session_id)
+                await self._session_service.clear_terminal_group(orphaned.terminal_id)
             # Override terminal_id to point to the target session (switch() builds from user_id+workdir)
             updated = await self._session_service.get(user_id)
             if updated and updated.terminal_id != terminal_id:
@@ -253,11 +266,24 @@ class SessionRegistryService:
                 await self._session_service.save_session_context(owner)
 
         # Reset user's session
-        await self._session_service.switch(
+        _, orphaned = await self._session_service.switch(
             user_id=user_id,
             terminal_mode=False,
             claude_chat_active=False,
         )
+        # Clean up orphaned terminal resources if detected
+        if orphaned is not None:
+            logger.info(
+                "cleaning up orphaned terminal during detach",
+                extra={
+                    "terminal_id": orphaned.terminal_id,
+                    "claude_session_id": orphaned.claude_session_id,
+                    "user_id": orphaned.user_id,
+                },
+            )
+            if self._auto_approve_service is not None and orphaned.claude_session_id:
+                await self._auto_approve_service.clear_session(orphaned.claude_session_id)
+            await self._session_service.clear_terminal_group(orphaned.terminal_id)
 
     # ── Auto-reattach ──────────────────────────────────────────────────────────
 

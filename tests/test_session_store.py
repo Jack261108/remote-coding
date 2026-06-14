@@ -712,7 +712,7 @@ async def test_session_service_switch_rebuilds_terminal_id_when_workdir_changes(
     store = _Store()
     service = SessionService(store)
 
-    first = await service.switch(
+    first, _ = await service.switch(
         user_id=1,
         provider="claude_code",
         workdir=old_workdir,
@@ -720,7 +720,7 @@ async def test_session_service_switch_rebuilds_terminal_id_when_workdir_changes(
         claude_chat_active=True,
     )
     first_terminal_id = first.terminal_id
-    second = await service.switch(user_id=1, workdir=new_workdir)
+    second, _ = await service.switch(user_id=1, workdir=new_workdir)
 
     assert second.workdir == new_workdir
     assert first_terminal_id != second.terminal_id
@@ -732,7 +732,7 @@ async def test_session_service_clear_terminal_group_resets_owner_and_attached_co
     from app.services.session_service import SessionService
 
     service = SessionService(FileSessionContextStore(FileSessionStore(str(tmp_path))))
-    owner = await service.switch(
+    owner, _ = await service.switch(
         user_id=1,
         provider="claude_code",
         workdir="/proj",
@@ -744,7 +744,7 @@ async def test_session_service_clear_terminal_group_resets_owner_and_attached_co
     owner.attached_user_ids = [2]
     await service.save_session_context(owner)
 
-    attached = await service.switch(
+    attached, _ = await service.switch(
         user_id=2,
         provider="claude_code",
         workdir="/proj",
@@ -756,7 +756,7 @@ async def test_session_service_clear_terminal_group_resets_owner_and_attached_co
     attached.is_owner = False
     await service.save_session_context(attached)
 
-    other = await service.switch(
+    other, _ = await service.switch(
         user_id=3,
         provider="claude_code",
         workdir="/other",
