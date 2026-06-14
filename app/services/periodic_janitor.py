@@ -60,19 +60,33 @@ class PeriodicJanitor:
             while True:
                 now = asyncio.get_event_loop().time()
                 min_sleep = float("inf")
+                due_jobs: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
                 for name, (interval, callback) in self._jobs.items():
                     elapsed = now - self._last_run.get(name, 0)
                     remaining = interval - elapsed
                     if remaining <= 0:
+                        due_jobs.append((name, callback))
+                        remaining = interval
+                    min_sleep = min(min_sleep, remaining)
+
+                # Execute due jobs in parallel
+                if due_jobs:
+
+                    async def _run_job(name: str, callback: Callable[[], Awaitable[Any]]) -> None:
                         try:
                             await callback()
                         except asyncio.CancelledError:
                             raise
                         except Exception:
                             logger.exception("janitor job failed", extra={"job": name})
-                        self._last_run[name] = asyncio.get_event_loop().time()
-                        remaining = interval
-                    min_sleep = min(min_sleep, remaining)
+
+                    tasks = [asyncio.create_task(_run_job(name, cb)) for name, cb in due_jobs]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    # Update last_run times after all jobs complete
+                    now = asyncio.get_event_loop().time()
+                    for name, _ in due_jobs:
+                        self._last_run[name] = now
+
                 await asyncio.sleep(max(min_sleep, 0.01))
         except asyncio.CancelledError:
             raise

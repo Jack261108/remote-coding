@@ -800,7 +800,7 @@ async def test_open_claude_chat_session_clears_stale_claude_session_without_prev
         semaphore=asyncio.Semaphore(2),
     )
 
-    session = await session_service.get_or_create(
+    session, _ = await session_service.get_or_create(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1759,7 +1759,7 @@ async def test_get_or_create_keeps_claude_chat_active_when_not_explicitly_set(tm
         claude_chat_active=True,
     )
 
-    session = await session_service.get_or_create(
+    session, _ = await session_service.get_or_create(
         user_id=1,
         provider="codex",
         workdir=str(tmp_path),
@@ -1772,7 +1772,7 @@ async def test_get_or_create_keeps_claude_chat_active_when_not_explicitly_set(tm
 @pytest.mark.asyncio
 async def test_session_service_terminal_id_changes_with_workdir(tmp_path: Path) -> None:
     session_service = make_file_backed_session_service(tmp_path)
-    first = await session_service.get_or_create(
+    first, _ = await session_service.get_or_create(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path / "one"),
@@ -1780,7 +1780,7 @@ async def test_session_service_terminal_id_changes_with_workdir(tmp_path: Path) 
         claude_chat_active=True,
     )
 
-    second = await session_service.get_or_create(
+    second, _ = await session_service.get_or_create(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path / "two"),
@@ -1794,7 +1794,7 @@ async def test_session_service_terminal_id_changes_with_workdir(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_file_backed_session_service_persists_context(tmp_path: Path) -> None:
     service = make_file_backed_session_service(tmp_path)
-    session = await service.get_or_create(
+    session, _ = await service.get_or_create(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),

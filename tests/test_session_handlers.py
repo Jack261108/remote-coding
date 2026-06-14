@@ -65,7 +65,7 @@ async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
         structured_session_store=tmux_runner._session_store,
     )
     session_service = service._session_service
-    session = await session_service.switch(
+    session, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -539,7 +539,7 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    session = await service._session_service.switch(
+    session, _ = await service._session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -621,7 +621,7 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    session = await session_service.switch(
+    session, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),

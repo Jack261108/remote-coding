@@ -179,6 +179,8 @@ class ExternalBindingCleanupService:
                 continue
 
             # Step v: final re-read after the await closes the race window.
+            # Re-fetch now to get accurate idle age after await.
+            now = utc_now()
             current = self._binding_store.get_binding(session_id)
             if current is None:
                 continue

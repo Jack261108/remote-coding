@@ -140,6 +140,16 @@ class ExternalBindingStore:
             logger.error("Failed to load external bindings from %s: %s", self._file_path, exc)
             return {}
 
+    def flush(self) -> None:
+        """Force persist all bindings to disk, bypassing throttle.
+
+        This should be called during graceful shutdown to ensure no
+        in-memory updates are lost.
+        """
+        self._persist()
+        # Clear throttle state so next touch after restart persists immediately
+        self._last_persist_at.clear()
+
     def _persist(self) -> None:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         data: dict[str, dict] = {}
