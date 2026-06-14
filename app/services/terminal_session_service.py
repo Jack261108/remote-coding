@@ -37,6 +37,26 @@ class TerminalSessionService:
         self._clear_user_questions = clear_user_questions
         self._auto_approve_service = auto_approve_service
 
+    async def cleanup_orphaned_terminal(self, orphaned_terminal_id: str, *, claude_session_id: str | None, user_id: int) -> None:
+        logger.info(
+            "cleaning up orphaned terminal",
+            extra={
+                "terminal_id": orphaned_terminal_id,
+                "claude_session_id": claude_session_id,
+                "user_id": user_id,
+            },
+        )
+        contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == orphaned_terminal_id]
+        claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})
+        if claude_session_id:
+            claude_session_ids.append(claude_session_id)
+        if self._auto_approve_service is not None:
+            for session_id in sorted(set(claude_session_ids)):
+                await self._auto_approve_service.clear_session(session_id)
+        affected_user_ids = await self._session_service.clear_terminal_group(orphaned_terminal_id)
+        for affected_user_id in affected_user_ids or [user_id]:
+            self._clear_user_questions(affected_user_id)
+
     async def resolve_for_task(self, *, user_id: int, provider: str, workdir: str) -> TaskTerminalContext:
         terminal_mode = provider == "claude_code" and self._settings.claude_tmux_mode
         session, orphaned = await self._session_service.get_or_create(
@@ -47,20 +67,11 @@ class TerminalSessionService:
         )
         # Clean up orphaned terminal resources if detected
         if orphaned is not None:
-            logger.info(
-                "cleaning up orphaned terminal",
-                extra={
-                    "terminal_id": orphaned.terminal_id,
-                    "claude_session_id": orphaned.claude_session_id,
-                    "user_id": orphaned.user_id,
-                },
+            await self.cleanup_orphaned_terminal(
+                orphaned.terminal_id,
+                claude_session_id=orphaned.claude_session_id,
+                user_id=orphaned.user_id,
             )
-            # Clear auto-approve state for the old session
-            if self._auto_approve_service is not None and orphaned.claude_session_id:
-                await self._auto_approve_service.clear_session(orphaned.claude_session_id)
-            # Clear the old terminal group
-            await self._session_service.clear_terminal_group(orphaned.terminal_id)
-            self._clear_user_questions(orphaned.user_id)
         terminal_key = session.terminal_id if session.terminal_mode else None
         interactive = bool(terminal_key and provider == "claude_code" and session.claude_chat_active and self._settings.claude_tmux_mode)
         return TaskTerminalContext(session=session, terminal_key=terminal_key, interactive=interactive)
@@ -129,14 +140,11 @@ class TerminalSessionService:
                 if text != "终端不存在":
                     return f"旧终端关闭失败: {text}"
                 if session is not None and session.terminal_id:
-                    terminal_id = session.terminal_id
-                    contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == terminal_id]
-                    if self._auto_approve_service is not None:
-                        for session_id in sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id}):
-                            await self._auto_approve_service.clear_session(session_id)
-                    affected_user_ids = await self._session_service.clear_terminal_group(terminal_id)
-                    for affected_user_id in affected_user_ids:
-                        self._clear_user_questions(affected_user_id)
+                    await self.cleanup_orphaned_terminal(
+                        session.terminal_id,
+                        claude_session_id=session.claude_session_id,
+                        user_id=user_id,
+                    )
                 else:
                     await self._session_service.clear_claude_session(user_id=user_id)
         elif session is not None:
@@ -160,18 +168,11 @@ class TerminalSessionService:
         )
         # Clean up orphaned terminal resources if detected
         if orphaned is not None:
-            logger.info(
-                "cleaning up orphaned terminal during session switch",
-                extra={
-                    "terminal_id": orphaned.terminal_id,
-                    "claude_session_id": orphaned.claude_session_id,
-                    "user_id": orphaned.user_id,
-                },
+            await self.cleanup_orphaned_terminal(
+                orphaned.terminal_id,
+                claude_session_id=orphaned.claude_session_id,
+                user_id=orphaned.user_id,
             )
-            if self._auto_approve_service is not None and orphaned.claude_session_id:
-                await self._auto_approve_service.clear_session(orphaned.claude_session_id)
-            await self._session_service.clear_terminal_group(orphaned.terminal_id)
-            self._clear_user_questions(orphaned.user_id)
 
         if not updated_session.terminal_id:
             return "会话创建失败: terminal_id 为空"

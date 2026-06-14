@@ -11,7 +11,7 @@ from app.domain.models import utc_now
 from app.infra.text_formatting import format_external_session_bound_message, format_external_session_unbound_message, short_id
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, resolve_and_unbind
+from app.services.session_id_resolver import BindResult, UnbindResult, _resolve_session_id, resolve_and_bind, resolve_and_unbind
 from app.services.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,34 @@ async def _handle_list(
     await message.answer("\n".join(lines))
 
 
+async def _handle_bind_unbind_action(
+    message: Message,
+    *,
+    action_type: str,
+    user_id: int,
+    session_id: str,
+    binder: ExternalSessionBinder,
+    discovery: ExternalSessionDiscoveryService,
+) -> None:
+    if not session_id:
+        await message.answer(f"用法: /external {action_type} <session_id>")
+        return
+
+    result: BindResult | UnbindResult
+    if action_type == "bind":
+        result = await resolve_and_bind(session_id, user_id=user_id, discovery=discovery, binder=binder)
+    else:
+        result = await resolve_and_unbind(session_id, user_id=user_id, discovery=discovery, binder=binder)
+
+    if result.success:
+        if action_type == "bind":
+            await message.answer(format_external_session_bound_message(result.session_id, result.message))
+        else:
+            await message.answer(format_external_session_unbound_message(result.session_id))
+    else:
+        await message.answer(f"❌ {result.message}")
+
+
 async def _handle_bind(
     message: Message,
     *,
@@ -107,15 +135,14 @@ async def _handle_bind(
     binder: ExternalSessionBinder,
     discovery: ExternalSessionDiscoveryService,
 ) -> None:
-    if not session_id:
-        await message.answer("用法: /external bind <session_id>")
-        return
-
-    result = await resolve_and_bind(session_id, user_id=user_id, discovery=discovery, binder=binder)
-    if result.success:
-        await message.answer(format_external_session_bound_message(result.session_id, result.message))
-    else:
-        await message.answer(f"❌ {result.message}")
+    await _handle_bind_unbind_action(
+        message,
+        action_type="bind",
+        user_id=user_id,
+        session_id=session_id,
+        binder=binder,
+        discovery=discovery,
+    )
 
 
 async def _handle_unbind(
@@ -126,15 +153,14 @@ async def _handle_unbind(
     binder: ExternalSessionBinder,
     discovery: ExternalSessionDiscoveryService,
 ) -> None:
-    if not session_id:
-        await message.answer("用法: /external unbind <session_id>")
-        return
-
-    result = await resolve_and_unbind(session_id, user_id=user_id, discovery=discovery, binder=binder)
-    if result.success:
-        await message.answer(format_external_session_unbound_message(result.session_id))
-    else:
-        await message.answer(f"❌ {result.message}")
+    await _handle_bind_unbind_action(
+        message,
+        action_type="unbind",
+        user_id=user_id,
+        session_id=session_id,
+        binder=binder,
+        discovery=discovery,
+    )
 
 
 async def _handle_status(

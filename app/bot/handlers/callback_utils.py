@@ -4,11 +4,28 @@ from __future__ import annotations
 
 import logging
 
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 _INSTRUCTION_LINE = "请点击下方按钮选择允许或拒绝。"
 
 logger = logging.getLogger(__name__)
+
+
+async def safe_edit_keyboard(
+    message: Message,
+    keyboard: InlineKeyboardMarkup | None,
+    log_prefix: str,
+) -> bool:
+    """安全地编辑消息的内联键盘。
+
+    失败时记录异常并返回 ``False``，成功返回 ``True``。
+    """
+    try:
+        await message.edit_reply_markup(reply_markup=keyboard)
+        return True
+    except Exception:
+        logger.exception("%s failed", log_prefix)
+        return False
 
 
 def build_approval_message(original_text: str, approval_text: str) -> str:

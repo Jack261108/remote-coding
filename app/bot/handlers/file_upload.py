@@ -8,6 +8,7 @@ from aiogram.types import Message
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.domain.file_models import FileUploadResult, FileValidationError
+from app.domain.models import SessionContext, TaskStatus
 from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.file_receiver import FileReceiverService
 from app.services.session_service import SessionService
@@ -16,44 +17,6 @@ from app.services.upload_queue import UploadQueueManager
 
 logger = logging.getLogger(__name__)
 _ACTIVE_UPLOAD_TASKS = BackgroundTaskRegistry(label="upload")
-_user_upload_locks: dict[int, asyncio.Lock] = {}
-
-
-class _SizeExceededError(Exception):
-    """Raised when a streaming download exceeds the configured size limit."""
-
-
-class _SizeLimitWriter:
-    """BinaryIO-compatible writer that aborts when cumulative writes exceed *max_size*.
-
-    Used as the ``destination`` parameter of ``bot.download_file()`` so that
-    aiogram's per-chunk ``write()`` calls can be intercepted and the download
-    aborted *mid-stream* instead of buffering the entire file first.
-    """
-
-    def __init__(self, max_size: int) -> None:
-        self._max_size = max_size
-        self._total = 0
-        self._buf = bytearray()
-
-    # BinaryIO interface ---------------------------------------------------
-
-    def write(self, data: bytes | bytearray) -> int:
-        n = len(data)
-        self._total += n
-        if self._total > self._max_size:
-            raise _SizeExceededError(f"Download size {self._total} exceeds limit {self._max_size}")
-        self._buf.extend(data)
-        return n
-
-    def flush(self) -> None:  # noqa: D401 – required by BinaryIO protocol
-        pass
-
-    def seek(self, offset: int, whence: int = 0) -> int:
-        return 0
-
-    def getvalue(self) -> bytes:
-        return bytes(self._buf)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -86,25 +49,19 @@ async def _answer_oversized(message: Message, *, filename: str, size_bytes: int,
 
 async def _user_has_running_task(task_service: TaskService, user_id: int, *, exclude_task_id: str | None = None) -> bool:
     """Check if the user has a task currently in RUNNING or PENDING state."""
-    active = await task_service.list_active(user_id)
-    return any(exclude_task_id is None or t.task_id != exclude_task_id for t in active)
+    tasks = await task_service.list_active(user_id)
+    if not isinstance(tasks, list) or not tasks:
+        tasks = await task_service.list_recent(user_id, limit=5)
+    if not isinstance(tasks, list):
+        tasks = []
+    return any(
+        t.status in (TaskStatus.RUNNING, TaskStatus.PENDING) and (exclude_task_id is None or getattr(t, "task_id", None) != exclude_task_id)
+        for t in tasks
+    )
 
 
-async def _download_telegram_file(
-    message: Message,
-    file_id: str,
-    *,
-    max_size_bytes: int,
-) -> bytes | None:
-    """从 Telegram 流式下载文件，超过大小限制时立即中止。
-
-    使用 ``_SizeLimitWriter`` 作为 ``bot.download_file`` 的 destination，
-    在每个 chunk 写入时累计检查大小，超限即抛出 ``_SizeExceededError`` 中止下载，
-    避免将整个文件加载到内存后再检查。
-
-    成功时返回文件字节；超限时向用户发送拒绝消息并返回 None；
-    其他异常记录日志并返回 None。
-    """
+async def _download_telegram_file(message: Message, file_id: str) -> bytes | None:
+    """从 Telegram 下载文件，失败时发送错误消息并返回 None。"""
     try:
         bot = message.bot
         if bot is None:
@@ -114,17 +71,11 @@ async def _download_telegram_file(
         if file_obj.file_path is None:
             await message.answer("❌ 下载失败: Telegram 未返回文件路径。")
             return None
-
-        writer = _SizeLimitWriter(max_size_bytes)
-        await bot.download_file(file_obj.file_path, destination=writer)
-        return writer.getvalue()
-    except _SizeExceededError:
-        logger.warning(
-            "Download aborted: file exceeds %d bytes limit",
-            max_size_bytes,
-        )
-        await message.answer(f"❌ 文件被拒绝: 大小超过 {_format_size(max_size_bytes)} 限制。")
-        return None
+        bio = await bot.download_file(file_obj.file_path)
+        if bio is None:
+            await message.answer("❌ 下载失败: 无法从 Telegram 下载文件。")
+            return None
+        return bio.read()
     except Exception as exc:
         logger.exception("Failed to download file %s: %s", file_id, exc)
         return None
@@ -141,37 +92,34 @@ async def _enqueue_or_process_upload(
     user_id: int,
     filename: str,
     data: bytes,
+    session: SessionContext | None = None,
 ) -> None:
     """If the user has a running task, queue the upload; otherwise process it."""
-    lock = _user_upload_locks.setdefault(user_id, asyncio.Lock())
-    async with lock:
-        if await _user_has_running_task(task_service, user_id):
+    if await _user_has_running_task(task_service, user_id):
+        if session is None:
             session = await session_service.get(user_id)
-            if session is None:
-                await message.answer("请先使用 /session 或 /claude 创建会话后再上传文件。")
-                return
-            queued = await upload_queue.enqueue(user_id=user_id, filename=filename, data=data, workdir=session.workdir)
-            if not queued.accepted:
-                await message.answer(f"❌ 文件未加入队列: {filename}\n原因: {queued.reason}")
-                return
-            await message.answer(
-                f"⏳ 任务运行中，文件 {filename} 已加入队列，将在任务完成后处理。\n"
-                f"注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失；"
-                f"排队文件超过 {_format_ttl(upload_queue_ttl_sec)} 未处理会过期。"
-            )
+        if session is None:
+            await message.answer("请先使用 /session 或 /claude 创建会话后再上传文件。")
             return
-
-        await _process_upload(
-            message,
-            file_receiver=file_receiver,
-            session_service=session_service,
-            filename=filename,
-            data=data,
+        queued = await upload_queue.enqueue(user_id=user_id, filename=filename, data=data, workdir=session.workdir)
+        if not queued.accepted:
+            await message.answer(f"❌ 文件未加入队列: {filename}\n原因: {queued.reason}")
+            return
+        await message.answer(
+            f"⏳ 任务运行中，文件 {filename} 已加入队列，将在任务完成后处理。\n"
+            f"注意：队列仅保存在内存中，如果 bot 在任务完成前重启，已排队文件会丢失；"
+            f"排队文件超过 {_format_ttl(upload_queue_ttl_sec)} 未处理会过期。"
         )
+        return
 
-    # Clean up per-user lock when no longer contended
-    if not lock.locked():
-        _user_upload_locks.pop(user_id, None)
+    await _process_upload(
+        message,
+        file_receiver=file_receiver,
+        session_service=session_service,
+        filename=filename,
+        data=data,
+        session=session,
+    )
 
 
 async def _process_upload(
@@ -182,10 +130,12 @@ async def _process_upload(
     filename: str,
     data: bytes,
     workdir: str | None = None,
+    session: SessionContext | None = None,
 ) -> None:
     """Validate and store a file, then reply with result."""
     user_id = extract_user_id(message)
-    session = await session_service.get(user_id)
+    if session is None:
+        session = await session_service.get(user_id)
     if session is None:
         await message.answer("请先使用 /session 或 /claude 创建会话后再上传文件。")
         return
@@ -274,7 +224,7 @@ def register_file_upload_handler(
     upload_queue_ttl_sec: int = 3600,
 ) -> None:
     @router.message(F.document)
-    async def handle_document(message: Message) -> None:
+    async def handle_document(message: Message, session: SessionContext) -> None:
         user_id = extract_user_id(message)
         document = message.document
         if document is None:
@@ -283,22 +233,26 @@ def register_file_upload_handler(
         filename = document.file_name or "unnamed_file"
         max_size_bytes = _max_upload_size_bytes(upload_max_file_size_mb)
         file_size = document.file_size
-
-        # Default upper bound when Telegram metadata is unavailable
-        if file_size is None:
-            file_size = max_size_bytes
-
         if _metadata_exceeds_limit(file_size, max_size_bytes=max_size_bytes):
             await _answer_oversized(
                 message,
                 filename=filename,
-                size_bytes=file_size,
+                size_bytes=file_size,  # type: ignore[arg-type]
                 upload_max_file_size_mb=upload_max_file_size_mb,
             )
             return
 
-        data = await _download_telegram_file(message, document.file_id, max_size_bytes=max_size_bytes)
-        if data is None:
+        file_data = await _download_telegram_file(message, document.file_id)
+        if file_data is None:
+            return
+
+        if len(file_data) > max_size_bytes:
+            await _answer_oversized(
+                message,
+                filename=filename,
+                size_bytes=len(file_data),
+                upload_max_file_size_mb=upload_max_file_size_mb,
+            )
             return
 
         await _enqueue_or_process_upload(
@@ -310,11 +264,12 @@ def register_file_upload_handler(
             upload_queue_ttl_sec=upload_queue_ttl_sec,
             user_id=user_id,
             filename=filename,
-            data=data,
+            data=file_data,
+            session=session,
         )
 
     @router.message(F.photo)
-    async def handle_photo(message: Message) -> None:
+    async def handle_photo(message: Message, session: SessionContext) -> None:
         user_id = extract_user_id(message)
         if not message.photo:
             return
@@ -333,8 +288,17 @@ def register_file_upload_handler(
             )
             return
 
-        data = await _download_telegram_file(message, photo.file_id, max_size_bytes=max_size_bytes)
-        if data is None:
+        file_data = await _download_telegram_file(message, photo.file_id)
+        if file_data is None:
+            return
+
+        if len(file_data) > max_size_bytes:
+            await _answer_oversized(
+                message,
+                filename=filename,
+                size_bytes=len(file_data),
+                upload_max_file_size_mb=upload_max_file_size_mb,
+            )
             return
 
         await _enqueue_or_process_upload(
@@ -346,5 +310,6 @@ def register_file_upload_handler(
             upload_queue_ttl_sec=upload_queue_ttl_sec,
             user_id=user_id,
             filename=filename,
-            data=data,
+            data=file_data,
+            session=session,
         )

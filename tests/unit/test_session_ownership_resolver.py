@@ -37,15 +37,24 @@ def binding_store(tmp_path: Path) -> ExternalBindingStore:
     return ExternalBindingStore(data_dir=tmp_path)
 
 
-@pytest.fixture
-def session_service() -> AsyncMock:
-    svc = AsyncMock()
-    svc.list_all = AsyncMock(return_value=[])
-    return svc
+class _FakeSessionService:
+    def __init__(self) -> None:
+        self.list_all = AsyncMock(return_value=[])
+
+    async def lookup_by_claude_session_id(self, session_id: str) -> SessionContext | None:
+        for ctx in await self.list_all():
+            if ctx.claude_session_id == session_id:
+                return ctx
+        return None
 
 
 @pytest.fixture
-def resolver(session_service: AsyncMock, binding_store: ExternalBindingStore) -> SessionOwnershipResolver:
+def session_service() -> _FakeSessionService:
+    return _FakeSessionService()
+
+
+@pytest.fixture
+def resolver(session_service: _FakeSessionService, binding_store: ExternalBindingStore) -> SessionOwnershipResolver:
     return SessionOwnershipResolver(
         session_service=session_service,
         binding_store=binding_store,
@@ -53,7 +62,7 @@ def resolver(session_service: AsyncMock, binding_store: ExternalBindingStore) ->
 
 
 @pytest.mark.asyncio
-async def test_resolve_tmux_owned(resolver: SessionOwnershipResolver, session_service: AsyncMock) -> None:
+async def test_resolve_tmux_owned(resolver: SessionOwnershipResolver, session_service: _FakeSessionService) -> None:
     """Session with terminal_id and matching claude_session_id is tmux-owned."""
     session_service.list_all.return_value = [
         _make_context(user_id=42, claude_session_id="sess-abc", terminal_id="term-1"),
@@ -69,7 +78,7 @@ async def test_resolve_tmux_owned(resolver: SessionOwnershipResolver, session_se
 @pytest.mark.asyncio
 async def test_resolve_external_bound(
     resolver: SessionOwnershipResolver,
-    session_service: AsyncMock,
+    session_service: _FakeSessionService,
     binding_store: ExternalBindingStore,
 ) -> None:
     """Session in binding store is externally bound."""
@@ -92,7 +101,7 @@ async def test_resolve_external_bound(
 
 
 @pytest.mark.asyncio
-async def test_resolve_unbound(resolver: SessionOwnershipResolver, session_service: AsyncMock) -> None:
+async def test_resolve_unbound(resolver: SessionOwnershipResolver, session_service: _FakeSessionService) -> None:
     """Session with no ownership is unbound."""
     session_service.list_all.return_value = []
 
@@ -106,7 +115,7 @@ async def test_resolve_unbound(resolver: SessionOwnershipResolver, session_servi
 @pytest.mark.asyncio
 async def test_tmux_priority_over_binding(
     resolver: SessionOwnershipResolver,
-    session_service: AsyncMock,
+    session_service: _FakeSessionService,
     binding_store: ExternalBindingStore,
 ) -> None:
     """Tmux ownership takes priority over external binding."""
@@ -133,7 +142,7 @@ async def test_tmux_priority_over_binding(
 @pytest.mark.asyncio
 async def test_no_workdir_matching_without_terminal_id(
     resolver: SessionOwnershipResolver,
-    session_service: AsyncMock,
+    session_service: _FakeSessionService,
 ) -> None:
     """Session without terminal_id is NOT matched even if claude_session_id matches.
 
@@ -156,7 +165,7 @@ async def test_no_workdir_matching_without_terminal_id(
 
 
 @pytest.mark.asyncio
-async def test_is_tmux_owned_true(resolver: SessionOwnershipResolver, session_service: AsyncMock) -> None:
+async def test_is_tmux_owned_true(resolver: SessionOwnershipResolver, session_service: _FakeSessionService) -> None:
     session_service.list_all.return_value = [
         _make_context(user_id=1, claude_session_id="sess-t", terminal_id="term-1"),
     ]
@@ -165,7 +174,7 @@ async def test_is_tmux_owned_true(resolver: SessionOwnershipResolver, session_se
 
 
 @pytest.mark.asyncio
-async def test_is_tmux_owned_false_no_terminal(resolver: SessionOwnershipResolver, session_service: AsyncMock) -> None:
+async def test_is_tmux_owned_false_no_terminal(resolver: SessionOwnershipResolver, session_service: _FakeSessionService) -> None:
     session_service.list_all.return_value = [
         _make_context(user_id=1, claude_session_id="sess-t", terminal_id=None),
     ]
@@ -174,7 +183,7 @@ async def test_is_tmux_owned_false_no_terminal(resolver: SessionOwnershipResolve
 
 
 @pytest.mark.asyncio
-async def test_is_tmux_owned_false_no_match(resolver: SessionOwnershipResolver, session_service: AsyncMock) -> None:
+async def test_is_tmux_owned_false_no_match(resolver: SessionOwnershipResolver, session_service: _FakeSessionService) -> None:
     session_service.list_all.return_value = [
         _make_context(user_id=1, claude_session_id="other-sess", terminal_id="term-1"),
     ]

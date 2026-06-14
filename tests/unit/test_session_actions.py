@@ -20,6 +20,12 @@ from app.services.external_session_discovery import ExternalSessionDiscoveryServ
 from app.services.session_id_resolver import _resolve_session_id, unique_prefixes
 
 
+async def _dispatch(router, index: int, callback) -> None:
+    """Dispatch a callback to a handler, injecting callback_parts as the middleware would."""
+    handler = router.callback_query.handlers[index]
+    await handler.callback(callback, callback_parts=tuple(callback.data.split(":")))
+
+
 @pytest.fixture
 def discovery() -> ExternalSessionDiscoveryService:
     return ExternalSessionDiscoveryService()
@@ -171,7 +177,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with()
         callback.message.answer.assert_awaited_once()
@@ -195,7 +201,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with()
         callback.message.answer.assert_awaited_once()
@@ -222,7 +228,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with("Session is not available to bind")
         callback.message.answer.assert_not_awaited()
@@ -244,7 +250,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with("Session is no longer available")
         callback.message.answer.assert_not_awaited()
@@ -269,7 +275,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with("Ambiguous prefix, 2 matches. Be more specific.")
         callback.message.answer.assert_not_awaited()
@@ -292,7 +298,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with("Session is no longer available")
         callback.message.answer.assert_not_awaited()
@@ -316,7 +322,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with()
         keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
@@ -343,7 +349,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with("Session is no longer available")
         callback.message.answer.assert_not_awaited()
@@ -365,7 +371,7 @@ class TestSessionSelectHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[0].callback(callback)
+        await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with("Session is no longer available")
         callback.message.answer.assert_not_awaited()
@@ -452,7 +458,7 @@ class TestTmuxSessionActionHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[3].callback(callback)
+        await _dispatch(router, 3, callback)
 
         registry.attach_user.assert_awaited_once_with(user_id=42, terminal_id=terminal_id)
 
@@ -474,7 +480,7 @@ class TestTmuxSessionActionHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[3].callback(callback)
+        await _dispatch(router, 3, callback)
 
         callback.answer.assert_awaited_once_with("Session not found")
         registry.attach_user.assert_not_awaited()
@@ -497,7 +503,7 @@ class TestTmuxSessionActionHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[4].callback(callback)
+        await _dispatch(router, 4, callback)
 
         registry.close_session.assert_awaited_once_with(terminal_id)
 
@@ -519,7 +525,7 @@ class TestTmuxSessionActionHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[4].callback(callback)
+        await _dispatch(router, 4, callback)
 
         callback.answer.assert_awaited_once_with("Session not found")
         registry.close_session.assert_not_awaited()
@@ -571,7 +577,7 @@ class TestSessionUnbindHandler:
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
 
-        await router.callback_query.handlers[2].callback(callback)
+        await _dispatch(router, 2, callback)
 
         callback.answer.assert_awaited_once_with("❌ Session is no longer available")
         assert binder._binding_store.get_binding(new_session_id) is not None

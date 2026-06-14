@@ -4,7 +4,9 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+
+from app.domain.session_tombstone import SessionTombstoneStore
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +69,11 @@ CommitSlotResult = CommitSlotSucceeded | CommitSlotSessionEnded | CommitSlotMism
 class AutoApproveService:
     """Manages per-session auto-approve state (in-memory only)."""
 
-    # How long to remember ended sessions before pruning (24 hours).
-    _ENDED_SESSION_TTL = timedelta(hours=24)
-
-    def __init__(self) -> None:
+    def __init__(self, tombstone: SessionTombstoneStore | None = None) -> None:
         self._activations: dict[tuple[int, str], AutoApproveActivation] = {}
         self._slots: dict[str, ActivationSlot] = {}
         self._active_owners: dict[str, int] = {}
-        self._ended_sessions: dict[str, datetime] = {}  # session_id -> ended_at
+        self._tombstone = tombstone or SessionTombstoneStore()
         self._user_locks: dict[int, asyncio.Lock] = {}
         self._deny_epoch: dict[int, int] = {}
         self._service_lock = asyncio.Lock()
@@ -93,14 +92,7 @@ class AutoApproveService:
 
     def is_session_ended(self, session_id: str) -> bool:
         """Check if the session has been tombstoned as ended."""
-        return session_id in self._ended_sessions
-
-    def _prune_ended_sessions(self) -> None:
-        """Remove expired entries from _ended_sessions."""
-        cutoff = datetime.now(UTC) - self._ENDED_SESSION_TTL
-        expired = [sid for sid, ended_at in self._ended_sessions.items() if ended_at < cutoff]
-        for sid in expired:
-            del self._ended_sessions[sid]
+        return self._tombstone.is_ended(session_id)
 
     def is_active(self, session_id: str | None = None, *, user_id: int | None = None) -> bool:
         """Check if auto-approve is active.
@@ -134,7 +126,7 @@ class AutoApproveService:
     async def activate(self, session_id: str, *, user_id: int) -> None:
         """Compatibility wrapper for legacy callers."""
         async with self._service_lock:
-            if session_id in self._ended_sessions:
+            if self._tombstone.is_ended(session_id):
                 logger.warning(
                     "auto-approve activation ignored for ended session",
                     extra={"session_id": session_id, "user_id": user_id},
@@ -189,7 +181,7 @@ class AutoApproveService:
     async def commit_slot_if_session_alive(self, *, session_id: str, user_id: int, attempt_id: str) -> CommitSlotResult:
         """Commit a slot only if the session was not ended before commit."""
         async with self._service_lock:
-            if session_id in self._ended_sessions:
+            if self._tombstone.is_ended(session_id):
                 return CommitSlotSessionEnded()
 
             slot = self._slots.get(session_id)
@@ -205,7 +197,7 @@ class AutoApproveService:
     async def activate_if_session_alive(self, *, user_id: int, session_id: str) -> bool:
         """Activate auto-approve unless the session has already ended."""
         async with self._service_lock:
-            if session_id in self._ended_sessions:
+            if self._tombstone.is_ended(session_id):
                 return False
             self._activate(user_id=user_id, session_id=session_id)
             return True
@@ -220,7 +212,11 @@ class AutoApproveService:
             return deactivated
 
     async def deactivate_all_for_user(self, user_id: int) -> int:
-        """Panic-stop all auto-approve state for a user and advance the deny epoch."""
+        """Panic-stop all auto-approve state for a user and advance the deny epoch.
+
+        Lock ordering: per_user_lock must be acquired before _service_lock
+        to avoid deadlock. This is the only method that nests both locks.
+        """
         async with self.per_user_lock(user_id):
             async with self._service_lock:
                 self._release_all_slots_for_user_locked(user_id)
@@ -316,8 +312,7 @@ class AutoApproveService:
             self._deactivate(user_id=user_id, session_id=session_id)
 
         self._active_owners.pop(session_id, None)
-        self._ended_sessions[session_id] = datetime.now(UTC)
-        self._prune_ended_sessions()
+        self._tombstone.mark_ended(session_id)
 
         for user_id in affected_user_ids:
             self._cleanup_user_lock_if_idle_locked(user_id)

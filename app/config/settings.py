@@ -138,6 +138,7 @@ class Settings(BaseSettings):
 
     # External session settings
     external_session_stale_timeout_sec: float = Field(600.0, alias="EXTERNAL_SESSION_STALE_TIMEOUT_SEC")
+    tombstone_ttl_sec: int = Field(3600, alias="TOMBSTONE_TTL_SEC")
     push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
 
     # Session cleanup settings
@@ -337,6 +338,7 @@ class Settings(BaseSettings):
         "auto_export_threshold_chars",
         "zip_max_size_mb",
         "push_notification_retry_count",
+        "tombstone_ttl_sec",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:

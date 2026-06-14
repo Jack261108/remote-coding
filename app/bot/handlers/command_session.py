@@ -80,6 +80,11 @@ def register_session_handler(
                     "user_id": orphaned.user_id,
                 },
             )
+            await task_service.cleanup_orphaned_terminal(
+                orphaned.terminal_id,
+                claude_session_id=orphaned.claude_session_id,
+                user_id=orphaned.user_id,
+            )
         await message.answer(
             f"session 已更新\n"
             f"session_id: {session.session_id}\n"

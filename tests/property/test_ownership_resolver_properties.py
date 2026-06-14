@@ -8,7 +8,6 @@ from __future__ import annotations
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 from hypothesis import HealthCheck, assume, given, settings
@@ -70,6 +69,20 @@ def _make_binding(session_id: str, user_id: int, cwd: str = "/tmp") -> ExternalB
     )
 
 
+class _FakeSessionService:
+    def __init__(self, contexts: list[SessionContext]) -> None:
+        self._contexts = contexts
+
+    async def list_all(self) -> list[SessionContext]:
+        return self._contexts
+
+    async def lookup_by_claude_session_id(self, session_id: str) -> SessionContext | None:
+        for ctx in self._contexts:
+            if ctx.claude_session_id == session_id:
+                return ctx
+        return None
+
+
 def _make_resolver(contexts: list[SessionContext], bindings: list[ExternalBinding] | None = None) -> SessionOwnershipResolver:
     """Create a resolver with given contexts and optional bindings."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -77,19 +90,7 @@ def _make_resolver(contexts: list[SessionContext], bindings: list[ExternalBindin
         for b in bindings or []:
             store.save_binding(b)
 
-        svc = AsyncMock()
-        svc.list_all = AsyncMock(return_value=contexts)
-
-        # Create a lookup function that finds context by claude_session_id
-        async def lookup_by_claude_session_id(session_id: str):
-            for ctx in contexts:
-                if ctx.claude_session_id == session_id:
-                    return ctx
-            return None
-
-        svc.lookup_by_claude_session_id = AsyncMock(side_effect=lookup_by_claude_session_id)
-
-        return SessionOwnershipResolver(session_service=svc, binding_store=store)
+        return SessionOwnershipResolver(session_service=_FakeSessionService(contexts), binding_store=store)
 
 
 # --- Property 9: Ownership resolver priority chain ---

@@ -30,14 +30,8 @@ def register_external_permission_handler(
     router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=3, prefix="ext_"))
 
     @router.callback_query(F.data.startswith("ext_perm:"))
-    async def handle_external_permission_callback(callback: CallbackQuery) -> None:
-        data = callback.data or ""
-        parts = data.split(":")
-        if len(parts) != 3:
-            await callback.answer("Invalid callback data", show_alert=True)
-            return
-
-        _, token, decision = parts
+    async def handle_external_permission_callback(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
+        _, token, decision = callback_parts
         if decision not in ("allow", "deny", "auto_approve"):
             await callback.answer("Invalid decision", show_alert=True)
             return
@@ -54,17 +48,11 @@ def register_external_permission_handler(
         )
 
     @router.callback_query(F.data.startswith("ext_uq:"))
-    async def handle_external_user_question_callback(callback: CallbackQuery) -> None:
+    async def handle_external_user_question_callback(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         """Handle user clicking an AskUserQuestion option button for external sessions."""
         from app.adapters.process.pty_injector import inject_option_selection
 
-        data = callback.data or ""
-        parts = data.split(":")
-        if len(parts) != 3:
-            await callback.answer("Invalid callback data", show_alert=True)
-            return
-
-        _, tool_use_id, option_index_str = parts
+        _, tool_use_id, option_index_str = callback_parts
         try:
             option_index = int(option_index_str)
         except ValueError:

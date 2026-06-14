@@ -109,6 +109,13 @@ class TaskService:
     def _cleanup_task_lifecycle_lock(self, task_id: str) -> None:
         self._task_lifecycle_locks.pop(task_id, None)
 
+    async def cleanup_orphaned_terminal(self, terminal_id: str, *, claude_session_id: str | None, user_id: int) -> None:
+        await self._terminal_session_service.cleanup_orphaned_terminal(
+            terminal_id,
+            claude_session_id=claude_session_id,
+            user_id=user_id,
+        )
+
     # ─── Structured session methods ───────────────────────────────
 
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True) -> SessionState | None:

@@ -12,6 +12,7 @@ from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter, normalize_stream_text
 from app.domain.models import EventType
+from app.infra.gitignore_utils import load_gitignore_patterns
 from app.infra.text_formatting import short_id
 from app.services.diff_generator import DiffGeneratorService, SnapshotEntry
 from app.services.result_exporter import ResultExporterService
@@ -19,23 +20,6 @@ from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
-
-
-def _load_gitignore_patterns(workdir: str) -> list[str]:
-    """Load gitignore patterns from workdir/.gitignore."""
-    gitignore_path = Path(workdir) / ".gitignore"
-    if not gitignore_path.is_file():
-        return []
-    patterns: list[str] = []
-    try:
-        for line in gitignore_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            patterns.append(line)
-    except OSError:
-        logger.warning("Failed to read .gitignore at %s", gitignore_path)
-    return patterns
 
 
 async def _load_status_summary(task_service: TaskService, task_id: str, user_id: int) -> tuple[str, bool]:
@@ -280,7 +264,7 @@ class RunEventStreamer:
             workdir = self._start.task.workdir
 
             def capture() -> tuple[list[str], dict[Path, SnapshotEntry]]:
-                gitignore_patterns = _load_gitignore_patterns(workdir)
+                gitignore_patterns = load_gitignore_patterns(workdir)
                 return gitignore_patterns, diff_generator.capture_snapshot(workdir, gitignore_patterns)
 
             self._gitignore_patterns, self._pre_snapshot = await asyncio.to_thread(capture)

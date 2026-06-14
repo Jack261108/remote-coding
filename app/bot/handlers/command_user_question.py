@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+from typing import TypeGuard
 
 from aiogram import F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.bot.handlers.callback_utils import safe_edit_keyboard
 from app.bot.handlers.user_utils import extract_user_id
 from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.bot.presenters.structured_reply_presenter import UserQuestionOutput, build_user_question_prompt
 from app.domain.user_question_models import UserQuestionPrompt
 from app.services.task_service import TaskService
 
-logger = logging.getLogger(__name__)
 _QUESTION_CALLBACK_PREFIX = "ask"
 _QUESTION_CALLBACK_ACTION_TOGGLE = "toggle"
 _QUESTION_CALLBACK_ACTION_SUBMIT = "submit"
@@ -24,6 +24,10 @@ class ParsedUserQuestionCallback:
     tool_use_id: str
     question_index: int
     option_index: int | None = None
+
+
+def _is_accessible_message(message: object) -> TypeGuard[Message]:
+    return message is not None and hasattr(message, "answer") and hasattr(message, "edit_reply_markup")
 
 
 def build_user_question_callback_data(*, tool_use_id: str, question_index: int, option_index: int) -> str:
@@ -38,10 +42,10 @@ def build_multi_select_submit_callback_data(*, tool_use_id: str, question_index:
     return f"{_QUESTION_CALLBACK_PREFIX}:{_QUESTION_CALLBACK_ACTION_SUBMIT}:{tool_use_id}:{question_index}"
 
 
-def parse_user_question_callback_data(data: str | None) -> ParsedUserQuestionCallback | None:
+def parse_user_question_callback_data(data: str | tuple[str, ...] | None) -> ParsedUserQuestionCallback | None:
     if not data:
         return None
-    parts = data.split(":")
+    parts = list(data) if isinstance(data, tuple) else data.split(":")
     if not parts or parts[0] != _QUESTION_CALLBACK_PREFIX:
         return None
     if len(parts) == 5 and parts[1] == _QUESTION_CALLBACK_ACTION_TOGGLE:
@@ -67,6 +71,9 @@ def parse_user_question_callback_data(data: str | None) -> ParsedUserQuestionCal
             return None
     if len(parts) == 4:
         _, tool_use_id, question_index_text, option_index_text = parts
+        # 验证 tool_use_id 格式（至少应为非空字符串）
+        if not tool_use_id:
+            return None
         try:
             return ParsedUserQuestionCallback(
                 action="select",
@@ -169,12 +176,14 @@ def register_user_question_handlers(router, *, task_service: TaskService):
     router.callback_query.middleware(CallbackValidatorMiddleware(prefix=_QUESTION_CALLBACK_PREFIX))
 
     @router.callback_query(F.data.startswith(f"{_QUESTION_CALLBACK_PREFIX}:"))
-    async def callback_user_question(callback: CallbackQuery) -> None:
+    async def callback_user_question(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         user_id = extract_user_id(callback)
-        parsed = parse_user_question_callback_data(callback.data)
+        parsed = parse_user_question_callback_data(callback_parts)
         if parsed is None:
             await callback.answer("无效的选择操作", show_alert=True)
             return
+
+        callback_message = callback.message if _is_accessible_message(callback.message) else None
 
         if parsed.action == _QUESTION_CALLBACK_ACTION_TOGGLE:
             ok, text, prompt, selected_option_indexes = await task_service.toggle_pending_user_question_multi_select_option(
@@ -183,23 +192,12 @@ def register_user_question_handlers(router, *, task_service: TaskService):
                 question_index=parsed.question_index,
                 option_index=parsed.option_index if parsed.option_index is not None else -1,
             )
-            if callback.message is not None and ok and prompt is not None:
-                try:
-                    await callback.message.edit_reply_markup(  # type: ignore[union-attr]
-                        reply_markup=build_user_question_keyboard(
-                            prompt,
-                            selected_option_indexes=selected_option_indexes,
-                        )
-                    )
-                except Exception:
-                    logger.exception(
-                        "failed to refresh multi-select inline keyboard",
-                        extra={
-                            "user_id": user_id,
-                            "tool_use_id": parsed.tool_use_id,
-                            "question_index": parsed.question_index,
-                        },
-                    )
+            if callback_message is not None and ok and prompt is not None:
+                await safe_edit_keyboard(
+                    callback_message,
+                    build_user_question_keyboard(prompt, selected_option_indexes=selected_option_indexes),
+                    "refresh multi-select inline keyboard",
+                )
             await callback.answer(text, show_alert=not ok)
             return
 
@@ -209,27 +207,17 @@ def register_user_question_handlers(router, *, task_service: TaskService):
                 tool_use_id=parsed.tool_use_id,
                 question_index=parsed.question_index,
             )
-            if callback.message is not None and ok:
-                try:
-                    await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
-                except Exception:
-                    logger.exception(
-                        "failed to clear multi-select inline keyboard",
-                        extra={
-                            "user_id": user_id,
-                            "tool_use_id": parsed.tool_use_id,
-                            "question_index": parsed.question_index,
-                        },
-                    )
-                await callback.message.answer(text)
+            if callback_message is not None and ok:
+                await safe_edit_keyboard(callback_message, None, "clear multi-select inline keyboard")
+                await callback_message.answer(text)
                 await _acknowledge_and_send_next_prompt(
-                    message=callback.message,  # type: ignore[arg-type]
+                    message=callback_message,
                     task_service=task_service,
                     user_id=user_id,
                     next_prompt=next_prompt,
                 )
-            elif callback.message is not None and not ok:
-                await callback.message.answer(f"选择失败: {text}")
+            elif callback_message is not None and not ok:
+                await callback_message.answer(f"选择失败: {text}")
             await callback.answer(text, show_alert=not ok)
             return
 
@@ -239,26 +227,16 @@ def register_user_question_handlers(router, *, task_service: TaskService):
             question_index=parsed.question_index,
             option_index=parsed.option_index if parsed.option_index is not None else -1,
         )
-        if callback.message is not None:
+        if callback_message is not None:
             if ok:
-                try:
-                    await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
-                except Exception:
-                    logger.exception(
-                        "failed to clear user question inline keyboard",
-                        extra={
-                            "user_id": user_id,
-                            "tool_use_id": parsed.tool_use_id,
-                            "question_index": parsed.question_index,
-                        },
-                    )
-                await callback.message.answer(text)
+                await safe_edit_keyboard(callback_message, None, "clear user question inline keyboard")
+                await callback_message.answer(text)
                 await _acknowledge_and_send_next_prompt(
-                    message=callback.message,  # type: ignore[arg-type]
+                    message=callback_message,
                     task_service=task_service,
                     user_id=user_id,
                     next_prompt=next_prompt,
                 )
             else:
-                await callback.message.answer(f"选择失败: {text}")
+                await callback_message.answer(f"选择失败: {text}")
         await callback.answer(text, show_alert=not ok)

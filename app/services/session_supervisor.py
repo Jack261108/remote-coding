@@ -10,14 +10,11 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import TYPE_CHECKING
 
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
+from app.infra.file_mtime_utils import refresh_seen_mtimes
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
 from app.services.session_store import SessionStore
-
-if TYPE_CHECKING:
-    from app.services.jsonl_file_watcher import JSONLFileWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +31,6 @@ class SessionSupervisor:
         on_dispatch_event: Callable[[SessionEvent], Awaitable[None]],
         poll_interval_sec: float = 0.2,
         debounce_sec: float = 0.1,
-        jsonl_file_watcher: JSONLFileWatcher | None = None,
     ) -> None:
         self._session_store = session_store
         self._claude_jsonl_parser = claude_jsonl_parser
@@ -46,9 +42,8 @@ class SessionSupervisor:
         self._locks: dict[str, asyncio.Lock] = {}
         self._jsonl_sync_requests: dict[str, tuple[str, float]] = {}  # session_id -> (cwd, requested_at)
         self._seen_mtimes: dict[str, float] = {}
+        self._session_mtime_keys: dict[str, set[str]] = {}  # session_id -> tracked file paths
         self._active = False
-        self._wake: asyncio.Event = asyncio.Event()
-        self._jsonl_file_watcher = jsonl_file_watcher
 
     def watch(self, *, session_id: str, workdir: str) -> None:
         """Start watching a session if not already watched."""
@@ -56,38 +51,27 @@ class SessionSupervisor:
         task = self._tasks.get(session_id)
         if task is not None and not task.done():
             return
-        if self._jsonl_file_watcher is not None:
-            self._jsonl_file_watcher.add(session_id, workdir)
         self._tasks[session_id] = asyncio.create_task(self._watch_session(session_id=session_id, workdir=workdir))
 
     def schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
-        """Request a debounced JSONL sync -- picked up on next poll tick.
-
-        Must be called from the asyncio event loop thread (directly from async
-        code or via ``loop.call_soon_threadsafe``).
-        """
+        """Request a debounced JSONL sync -- picked up on next poll tick."""
         self._jsonl_sync_requests[session_id] = (cwd, asyncio.get_running_loop().time())
-        self._wake.set()
 
-    def forget(self, session_id: str) -> None:
+    async def forget(self, session_id: str) -> None:
         """Stop watching a session and clean up state."""
         task = self._tasks.pop(session_id, None)
-        self._clear_seen_mtimes(session_id)
+        self._clear_session_mtimes(session_id)
         self._jsonl_sync_requests.pop(session_id, None)
-        if self._jsonl_file_watcher is not None:
-            self._jsonl_file_watcher.remove(session_id)
-        self._locks.pop(session_id, None)
         if task is not None:
             task.cancel()
 
     async def stop_all(self) -> None:
         """Cancel all watched sessions and wait for termination."""
         self._active = False
-        self._wake.set()
         tasks = list(self._tasks.values())
         self._tasks.clear()
-        self._locks.clear()
         self._seen_mtimes.clear()
+        self._session_mtime_keys.clear()
         self._jsonl_sync_requests.clear()
         for task in tasks:
             task.cancel()
@@ -119,12 +103,7 @@ class SessionSupervisor:
                 # Debounced JSONL sync (outside lock to avoid deadlock with _on_jsonl_sync)
                 await self._maybe_process_jsonl_sync(session_id)
 
-                # Wait for wake signal or timeout (event-driven instead of polling)
-                self._wake.clear()
-                try:
-                    await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval_sec)
-                except TimeoutError:
-                    pass
+                await asyncio.sleep(self._poll_interval_sec)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -132,9 +111,7 @@ class SessionSupervisor:
         finally:
             if task is not None and self._tasks.get(session_id) is task:
                 self._tasks.pop(session_id, None)
-                self._clear_seen_mtimes(session_id)
-            # Always clean lock created by this watch_session invocation
-            if self._locks.get(session_id) is lock:
+                self._clear_session_mtimes(session_id)
                 self._locks.pop(session_id, None)
 
     # ── Interrupt detection ───────────────────────────────────────────────────
@@ -161,9 +138,14 @@ class SessionSupervisor:
     def _has_subagent_files(self, state: SessionState) -> bool:
         return any(tool.is_subagent_container for tool in state.tool_calls.values())
 
+    def _clear_session_mtimes(self, session_id: str) -> None:
+        """Remove all tracked mtime entries for a session using the key index."""
+        keys = self._session_mtime_keys.pop(session_id, set())
+        for key in keys:
+            self._seen_mtimes.pop(key, None)
+
     async def _sync_files_if_needed(self, state: SessionState) -> bool:
         changed = False
-        session_key = state.session_id
         for tool in state.tool_calls.values():
             if not tool.is_subagent_container:
                 continue
@@ -178,9 +160,9 @@ class SessionSupervisor:
             )
             if not agent_file.exists():
                 continue
+            file_path = str(agent_file)
             mtime = agent_file.stat().st_mtime
-            key = f"{session_key}:{tool.tool_use_id}:{agent_id}"
-            previous = self._seen_mtimes.get(key)
+            previous = self._seen_mtimes.get(file_path)
             if previous is not None and mtime <= previous:
                 continue
             changed = True
@@ -192,9 +174,8 @@ class SessionSupervisor:
 
     def _refresh_seen_mtimes(self, state: SessionState) -> None:
         session_key = state.session_id
-        stale_keys = [key for key in self._seen_mtimes if key.startswith(f"{session_key}:")]
-        for key in stale_keys:
-            self._seen_mtimes.pop(key, None)
+        # Build path set from current tool calls
+        paths: set[str] = set()
         for tool in state.tool_calls.values():
             if not tool.is_subagent_container:
                 continue
@@ -209,14 +190,11 @@ class SessionSupervisor:
             )
             if not agent_file.exists():
                 continue
-            key = f"{session_key}:{tool.tool_use_id}:{agent_id}"
-            self._seen_mtimes[key] = agent_file.stat().st_mtime
-
-    def _clear_seen_mtimes(self, session_id: str) -> None:
-        prefix = f"{session_id}:"
-        stale_keys = [key for key in self._seen_mtimes if key == session_id or key.startswith(prefix)]
-        for key in stale_keys:
-            self._seen_mtimes.pop(key, None)
+            paths.add(str(agent_file))
+        # Clear stale keys via tracked index and refresh current ones
+        self._clear_session_mtimes(session_key)
+        refresh_seen_mtimes(paths, self._seen_mtimes)
+        self._session_mtime_keys[session_key] = set(paths)
 
     # ── Debounced JSONL sync ──────────────────────────────────────────────────
 
