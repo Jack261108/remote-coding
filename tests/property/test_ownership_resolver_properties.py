@@ -80,6 +80,15 @@ def _make_resolver(contexts: list[SessionContext], bindings: list[ExternalBindin
         svc = AsyncMock()
         svc.list_all = AsyncMock(return_value=contexts)
 
+        # Create a lookup function that finds context by claude_session_id
+        async def lookup_by_claude_session_id(session_id: str):
+            for ctx in contexts:
+                if ctx.claude_session_id == session_id:
+                    return ctx
+            return None
+
+        svc.lookup_by_claude_session_id = AsyncMock(side_effect=lookup_by_claude_session_id)
+
         return SessionOwnershipResolver(session_service=svc, binding_store=store)
 
 
