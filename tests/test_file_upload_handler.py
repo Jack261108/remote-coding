@@ -38,8 +38,9 @@ def test_format_size_mb() -> None:
 async def test_user_has_running_task_true() -> None:
     task_service = AsyncMock()
     record = MagicMock(spec=TaskRecord)
+    record.task_id = "task-1"
     record.status = TaskStatus.RUNNING
-    task_service.list_recent = AsyncMock(return_value=[record])
+    task_service.list_active = AsyncMock(return_value=[record])
 
     result = await _user_has_running_task(task_service, user_id=123)
     assert result is True
@@ -48,9 +49,7 @@ async def test_user_has_running_task_true() -> None:
 @pytest.mark.asyncio
 async def test_user_has_running_task_false_when_all_final() -> None:
     task_service = AsyncMock()
-    record = MagicMock(spec=TaskRecord)
-    record.status = TaskStatus.SUCCEEDED
-    task_service.list_recent = AsyncMock(return_value=[record])
+    task_service.list_active = AsyncMock(return_value=[])
 
     result = await _user_has_running_task(task_service, user_id=123)
     assert result is False
@@ -59,7 +58,7 @@ async def test_user_has_running_task_false_when_all_final() -> None:
 @pytest.mark.asyncio
 async def test_user_has_running_task_false_when_no_tasks() -> None:
     task_service = AsyncMock()
-    task_service.list_recent = AsyncMock(return_value=[])
+    task_service.list_active = AsyncMock(return_value=[])
 
     result = await _user_has_running_task(task_service, user_id=123)
     assert result is False
@@ -93,7 +92,7 @@ def _make_services():
     file_receiver.receive_file = AsyncMock()
     session_service = AsyncMock()
     task_service = AsyncMock()
-    task_service.list_recent = AsyncMock(return_value=[])
+    task_service.list_active = AsyncMock(return_value=[])
     return file_receiver, session_service, task_service
 
 
@@ -132,6 +131,22 @@ def _register_upload_handlers(
     return document_handler, photo_handler, upload_queue, file_receiver, session_service, task_service
 
 
+def _make_download_side_effect(data: bytes):
+    """Return an async side-effect for ``bot.download_file`` that writes *data*
+    into the ``destination`` writer (matching the real aiogram streaming behaviour)."""
+
+    async def _side_effect(file_path, destination=None, **kwargs):
+        if destination is not None:
+            destination.write(data)
+            destination.flush()
+            if hasattr(destination, "seek"):
+                destination.seek(0)
+            return destination
+        return io.BytesIO(data)
+
+    return _side_effect
+
+
 def _attach_document(
     message: MagicMock, *, filename: str = "test.py", file_size: int | None = 11, data: bytes = b"hello world"
 ) -> AsyncMock:
@@ -145,7 +160,7 @@ def _attach_document(
     file_obj = MagicMock()
     file_obj.file_path = f"documents/{filename}"
     bot.get_file = AsyncMock(return_value=file_obj)
-    bot.download_file = AsyncMock(return_value=io.BytesIO(data))
+    bot.download_file = AsyncMock(side_effect=_make_download_side_effect(data))
     return bot
 
 
@@ -165,7 +180,7 @@ def _attach_photo(message: MagicMock, *, largest_file_size: int | None = 11, dat
     file_obj = MagicMock()
     file_obj.file_path = "photos/large.jpg"
     bot.get_file = AsyncMock(return_value=file_obj)
-    bot.download_file = AsyncMock(return_value=io.BytesIO(data))
+    bot.download_file = AsyncMock(side_effect=_make_download_side_effect(data))
     return bot
 
 
@@ -192,7 +207,7 @@ async def test_handle_document_success() -> None:
     file_obj = MagicMock()
     file_obj.file_path = "documents/test.py"
     bot.get_file = AsyncMock(return_value=file_obj)
-    bot.download_file = AsyncMock(return_value=io.BytesIO(b"hello world"))
+    bot.download_file = AsyncMock(side_effect=_make_download_side_effect(b"hello world"))
 
     # Import the actual handler function by extracting from registration
     from app.bot.handlers.file_upload import _process_upload
@@ -309,7 +324,7 @@ async def test_running_task_queue_reply_mentions_restart_loss() -> None:
     document_handler, _photo_handler, queue, _file_receiver, _session_service, task_service = _register_upload_handlers(
         upload_max_file_size_mb=1
     )
-    task_service.list_recent = AsyncMock(return_value=[_running_task()])
+    task_service.list_active = AsyncMock(return_value=[_running_task()])
     message = _make_message()
     _attach_document(message, filename="queued.py", file_size=4, data=b"data")
 
@@ -332,7 +347,7 @@ async def test_running_task_rejects_when_queue_count_limit_reached() -> None:
         upload_max_file_size_mb=1,
         upload_queue_max_files_per_user=1,
     )
-    task_service.list_recent = AsyncMock(return_value=[_running_task()])
+    task_service.list_active = AsyncMock(return_value=[_running_task()])
 
     first = _make_message()
     _attach_document(first, filename="first.py", file_size=5, data=b"first")
@@ -354,7 +369,7 @@ async def test_running_task_rejects_downloaded_file_over_size_limit_before_queue
     document_handler, _photo_handler, queue, _file_receiver, _session_service, task_service = _register_upload_handlers(
         upload_max_file_size_mb=1
     )
-    task_service.list_recent = AsyncMock(return_value=[_running_task()])
+    task_service.list_active = AsyncMock(return_value=[_running_task()])
     message = _make_message()
     bot = _attach_document(message, filename="no-metadata.bin", file_size=None, data=b"x" * (1024 * 1024 + 1))
 
@@ -366,7 +381,7 @@ async def test_running_task_rejects_downloaded_file_over_size_limit_before_queue
     message.answer.assert_awaited_once()
     reply = message.answer.call_args[0][0]
     assert "文件被拒绝" in reply
-    assert "1 MB" in reply
+    assert "1.0 MB" in reply
     assert "已加入队列" not in reply
 
 

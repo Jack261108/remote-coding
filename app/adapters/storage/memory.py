@@ -65,6 +65,11 @@ class MemoryTaskStore:
         items.sort(key=lambda x: x.created_at, reverse=True)
         return items[:limit]
 
+    async def list_active_by_user(self, user_id: int) -> list[TaskRecord]:
+        async with self._lock:
+            self._evict_expired_and_overflow_locked()
+            return [x for x in self._tasks.values() if x.user_id == user_id and not x.is_final]
+
     async def iter_all(self) -> Iterable[TaskRecord]:
         async with self._lock:
             self._evict_expired_and_overflow_locked()

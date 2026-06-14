@@ -31,7 +31,7 @@ class AgentFileWatcher(BaseSessionWatcher):
 
     def _clear_seen_mtimes_for_session(self, session_id: str) -> None:
         prefix = f"{session_id}:"
-        stale_keys = [key for key in self._seen_mtimes if key == session_id or key.startswith(prefix)]
+        stale_keys = [key for key in self._seen_mtimes if key.startswith(prefix)]
         for key in stale_keys:
             self._seen_mtimes.pop(key, None)
 
@@ -41,8 +41,9 @@ class AgentFileWatcher(BaseSessionWatcher):
             return
         if active_task is task:
             self._tasks.pop(session_id, None)
-        self._clear_seen_mtimes_for_session(session_id)
-        self._session_locks.pop(session_id, None)
+        if active_task is None or active_task is task:
+            self._clear_seen_mtimes_for_session(session_id)
+            self._session_locks.pop(session_id, None)
 
     def forget(self, *, session_id: str) -> None:
         self._clear_seen_mtimes_for_session(session_id)
@@ -61,14 +62,18 @@ class AgentFileWatcher(BaseSessionWatcher):
         task = asyncio.current_task()
         try:
             while self._active:
+                needs_update = False
                 async with lock:
                     state = self._session_store.get(session_id)
                     if state is None:
                         return
                     if not self._should_watch(state):
                         return
-                    if await self._sync_if_needed(state):
+                    if await self._check_changed(state):
                         self._refresh_seen_mtimes(state)
+                        needs_update = True
+                if needs_update:
+                    await self._on_update(session_id, workdir)
                 await asyncio.sleep(self._poll_interval_sec)
         except asyncio.CancelledError:
             raise
@@ -89,7 +94,8 @@ class AgentFileWatcher(BaseSessionWatcher):
             return False
         return any(tool.is_subagent_container for tool in state.tool_calls.values())
 
-    async def _sync_if_needed(self, state: SessionState) -> bool:
+    async def _check_changed(self, state: SessionState) -> bool:
+        """Check if any subagent files have changed. Returns True if changed."""
         changed = False
         session_key = state.session_id
         for tool in state.tool_calls.values():
@@ -104,9 +110,10 @@ class AgentFileWatcher(BaseSessionWatcher):
                 agent_id=agent_id,
                 cwd=state.workdir,
             )
-            if not agent_file.exists():
+            try:
+                mtime = agent_file.stat().st_mtime
+            except OSError:
                 continue
-            mtime = agent_file.stat().st_mtime
             key = f"{session_key}:{tool.tool_use_id}:{agent_id}"
             previous = self._seen_mtimes.get(key)
             if previous is not None and mtime <= previous:
@@ -115,7 +122,6 @@ class AgentFileWatcher(BaseSessionWatcher):
             break
         if changed:
             self._claude_jsonl_parser.reset_state(state.claude_session_id or state.session_id)
-            await self._on_update(state.session_id, state.workdir)
         return changed
 
     def _refresh_seen_mtimes(self, state: SessionState) -> None:
@@ -135,7 +141,9 @@ class AgentFileWatcher(BaseSessionWatcher):
                 agent_id=agent_id,
                 cwd=state.workdir,
             )
-            if not agent_file.exists():
+            try:
+                mtime = agent_file.stat().st_mtime
+            except OSError:
                 continue
             key = f"{session_key}:{tool.tool_use_id}:{agent_id}"
-            self._seen_mtimes[key] = agent_file.stat().st_mtime
+            self._seen_mtimes[key] = mtime

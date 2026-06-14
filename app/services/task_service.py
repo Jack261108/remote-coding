@@ -514,6 +514,9 @@ class TaskService:
     async def list_recent(self, user_id: int, limit: int = 10) -> list[TaskRecord]:
         return await self._task_store.list_by_user(user_id=user_id, limit=limit)
 
+    async def list_active(self, user_id: int) -> list[TaskRecord]:
+        return await self._task_store.list_active_by_user(user_id=user_id)
+
     def available_providers(self) -> list[str]:
         return self._cli_factory.available_providers()
 
