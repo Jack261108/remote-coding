@@ -549,8 +549,25 @@ async def test_start_registers_unbound_cleanup_without_replacing_existing_lifecy
         assert "session_cleanup" in jobs
         assert "session_lifecycle_reconcile" not in jobs
 
-        session_cleanup_interval, _ = jobs["session_cleanup"]
+        session_cleanup_interval, session_cleanup_callback = jobs["session_cleanup"]
         assert session_cleanup_interval == container.settings.session_cleanup_interval_sec
+        cleanup_calls: list[int] = []
+        to_thread_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+        def fake_cleanup(max_age_hours: int) -> None:
+            cleanup_calls.append(max_age_hours)
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            to_thread_calls.append((func, args, kwargs))
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(container.file_session_store, "cleanup_stale_sessions", fake_cleanup)
+        monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+        await session_cleanup_callback()
+
+        assert cleanup_calls == [container.settings.session_cleanup_max_age_hours]
+        assert to_thread_calls == [(fake_cleanup, (container.settings.session_cleanup_max_age_hours,), {})]
 
         interval, callback = jobs["external_discovery_cleanup"]
         assert interval == container.settings.session_health_check_interval_sec

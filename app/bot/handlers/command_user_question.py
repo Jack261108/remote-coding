@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TypeGuard
 
 from aiogram import F
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.callback_utils import safe_edit_keyboard
 from app.bot.handlers.user_utils import extract_user_id
@@ -27,7 +27,9 @@ class ParsedUserQuestionCallback:
 
 
 def _is_accessible_message(message: object) -> TypeGuard[Message]:
-    return message is not None and hasattr(message, "answer") and hasattr(message, "edit_reply_markup")
+    if message is None or isinstance(message, InaccessibleMessage):
+        return False
+    return callable(getattr(message, "answer", None)) and callable(getattr(message, "edit_reply_markup", None))
 
 
 def build_user_question_callback_data(*, tool_use_id: str, question_index: int, option_index: int) -> str:

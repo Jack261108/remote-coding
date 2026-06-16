@@ -46,15 +46,30 @@ class TerminalSessionService:
                 "user_id": user_id,
             },
         )
-        contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == orphaned_terminal_id]
-        claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})
-        if claude_session_id:
-            claude_session_ids.append(claude_session_id)
-        if self._auto_approve_service is not None:
-            for session_id in sorted(set(claude_session_ids)):
-                await self._auto_approve_service.clear_session(session_id)
-        affected_user_ids = await self._session_service.clear_terminal_group(orphaned_terminal_id)
-        for affected_user_id in affected_user_ids or [user_id]:
+        async with self._session_service.terminal_group_lock(orphaned_terminal_id):
+            contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == orphaned_terminal_id]
+            claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})
+            if claude_session_id:
+                claude_session_ids.append(claude_session_id)
+
+            closed, close_text = await self._cli_factory.close_terminal(orphaned_terminal_id)
+            if not closed:
+                logger.warning(
+                    "failed to close orphaned terminal",
+                    extra={
+                        "terminal_id": orphaned_terminal_id,
+                        "close_text": close_text,
+                        "user_id": user_id,
+                    },
+                )
+
+            if self._auto_approve_service is not None:
+                for session_id in sorted(set(claude_session_ids)):
+                    await self._auto_approve_service.clear_session(session_id)
+            affected_user_ids = await self._session_service.clear_terminal_group(orphaned_terminal_id)
+        user_ids_to_clear = set(affected_user_ids)
+        user_ids_to_clear.add(user_id)
+        for affected_user_id in sorted(user_ids_to_clear):
             self._clear_user_questions(affected_user_id)
 
     async def resolve_for_task(self, *, user_id: int, provider: str, workdir: str) -> TaskTerminalContext:

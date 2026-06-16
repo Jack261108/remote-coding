@@ -671,7 +671,8 @@ async def test_run_prompt_and_stream_reports_create_errors() -> None:
     )
 
     assert task is None
-    assert message.answers == ["创建任务失败: boom"]
+    assert message.answers == ["创建任务失败，请稍后重试"]
+    assert "boom" not in message.answers[0]
 
 
 @pytest.mark.asyncio

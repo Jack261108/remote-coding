@@ -4,13 +4,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import InaccessibleMessage
 
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
-from app.bot.handlers.command_user_question import register_user_question_handlers
+from app.bot.handlers.command_user_question import _is_accessible_message, register_user_question_handlers
 from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.router import create_router
 from app.domain.models import TaskRecord, TaskStatus
@@ -75,6 +76,13 @@ async def _call_callback(router: DummyRouter, index: int, callback) -> None:
         if "callback_parts" in sig.parameters:
             kwargs["callback_parts"] = tuple(callback.data.split(":"))
     await handler(callback, **kwargs)
+
+
+def test_is_accessible_message_rejects_inaccessible_message() -> None:
+    inaccessible = InaccessibleMessage.model_construct(chat=None, message_id=1, date=0)
+
+    assert _is_accessible_message(inaccessible) is False
+    assert _is_accessible_message(DummyMessage("Question")) is True
 
 
 @pytest.mark.asyncio

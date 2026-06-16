@@ -49,7 +49,8 @@ async def test_command_claude_reports_open_errors() -> None:
 
     await router.handlers[0](message, SimpleNamespace(args=None))
 
-    assert message.answers == ["开启失败: boom"]
+    assert message.answers == ["开启失败，请稍后重试"]
+    assert "boom" not in message.answers[0]
 
 
 @pytest.mark.asyncio

@@ -415,7 +415,10 @@ class AppContainer(
         )
 
         async def _cleanup_stale_sessions() -> None:
-            self.file_session_store.cleanup_stale_sessions(self.settings.session_cleanup_max_age_hours)
+            await asyncio.to_thread(
+                self.file_session_store.cleanup_stale_sessions,
+                self.settings.session_cleanup_max_age_hours,
+            )
 
         self._janitor.register(
             "periodic_recheck",

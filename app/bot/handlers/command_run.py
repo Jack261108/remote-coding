@@ -470,9 +470,9 @@ async def run_prompt_and_stream(
     except ValueError as exc:
         await message.answer(f"参数错误: {exc}")
         return None
-    except Exception as exc:
+    except Exception:
         logger.exception("failed to create task", extra={"user_id": user_id, "provider": provider})
-        await message.answer(f"创建任务失败: {exc}")
+        await message.answer("创建任务失败，请稍后重试")
         return None
 
     logger.info(

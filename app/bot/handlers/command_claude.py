@@ -32,9 +32,9 @@ def register_claude_handler(router, *, task_service: TaskService):
         except ValueError as exc:
             await message.answer(f"参数错误: {exc}")
             return
-        except Exception as exc:
+        except Exception:
             logger.exception("failed to open claude chat session", extra={"user_id": user_id, "workdir": workdir})
-            await message.answer(f"开启失败: {exc}")
+            await message.answer("开启失败，请稍后重试")
             return
 
         if opened:
