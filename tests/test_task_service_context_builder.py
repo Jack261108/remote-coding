@@ -96,6 +96,44 @@ async def test_augmented_prompt_used_in_execution(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cleanup_runs_after_final_task_save(tmp_path: Path) -> None:
+    events_seen: list[str] = []
+
+    class RecordingTaskStore(MemoryTaskStore):
+        async def save(self, record):
+            await super().save(record)
+            if record.is_final:
+                events_seen.append("final_save")
+
+    adapter = StubAdapter(
+        events=[
+            CLIEvent(type=EventType.STARTED, task_id="x"),
+            CLIEvent(type=EventType.EXITED, task_id="x", exit_code=0),
+        ]
+    )
+    context_builder = _make_context_builder()
+
+    async def cleanup_after_task(user_id: int, workdir: str) -> None:
+        assert events_seen == ["final_save"]
+        events_seen.append("cleanup")
+
+    context_builder.cleanup_after_task = AsyncMock(side_effect=cleanup_after_task)
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=RecordingTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+        context_builder=context_builder,
+    )
+
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    _ = [event async for event in result.events]
+
+    assert events_seen == ["final_save", "cleanup"]
+
+
+@pytest.mark.asyncio
 async def test_cleanup_called_on_task_success(tmp_path: Path) -> None:
     """Verify cleanup_after_task is called when task succeeds."""
     adapter = StubAdapter(

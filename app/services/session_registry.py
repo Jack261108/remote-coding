@@ -350,6 +350,7 @@ class SessionRegistryService:
     async def reconcile_terminal_lifecycle(self) -> None:
         """Run one tmux terminal lifecycle reconciliation pass."""
         await self._run_health_check()
+        await self._cleanup_orphaned_managed_sessions()
 
     async def start_health_check(self) -> None:
         """Start the periodic health check background task."""
@@ -369,7 +370,7 @@ class SessionRegistryService:
         while True:
             await asyncio.sleep(self._health_check_interval_sec)
             try:
-                await self._run_health_check()
+                await self.reconcile_terminal_lifecycle()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -406,14 +407,50 @@ class SessionRegistryService:
                 if alive is None or alive:
                     continue
 
-                contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == terminal_id]
-                claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})
-                if self._auto_approve_service is not None:
-                    for session_id in claude_session_ids:
-                        await self._auto_approve_service.clear_session(session_id)
-
                 logger.info(
                     "health check: cleaning stale binding",
                     extra={"terminal_id": terminal_id},
                 )
-                await self._session_service.clear_terminal_group(terminal_id)
+                await self._clear_terminal_group_bindings(terminal_id)
+
+    async def _clear_terminal_group_bindings(self, terminal_id: str) -> list[int]:
+        contexts = [ctx for ctx in await self._session_service.list_all() if ctx.terminal_id == terminal_id]
+        claude_session_ids = sorted({ctx.claude_session_id for ctx in contexts if ctx.claude_session_id})
+        if self._auto_approve_service is not None:
+            for session_id in claude_session_ids:
+                await self._auto_approve_service.clear_session(session_id)
+        return await self._session_service.clear_terminal_group(terminal_id)
+
+    async def _cleanup_orphaned_managed_sessions(self) -> None:
+        managed_sessions = await self._tmux_runner.list_managed_sessions()
+        if not managed_sessions:
+            return
+        contexts = await self._session_service.list_all()
+        referenced_terminal_ids = {ctx.terminal_id for ctx in contexts if ctx.terminal_id}
+        for tmux_name in managed_sessions:
+            terminal_id = self._terminal_id_from_managed_session(tmux_name)
+            if terminal_id is None or terminal_id in referenced_terminal_ids:
+                continue
+            async with self._terminal_lock(terminal_id):
+                current_contexts = await self._session_service.list_all()
+                if any(ctx.terminal_id == terminal_id for ctx in current_contexts):
+                    continue
+                ok, text = await self._close_terminal_result(terminal_id)
+                if ok:
+                    logger.info("orphaned tmux session closed", extra={"terminal_id": terminal_id, "tmux_session": tmux_name})
+                else:
+                    logger.warning(
+                        "failed to close orphaned tmux session",
+                        extra={"terminal_id": terminal_id, "tmux_session": tmux_name, "reason": text},
+                    )
+
+    @staticmethod
+    def _terminal_id_from_managed_session(tmux_name: str) -> str | None:
+        terminal_id = tmux_name.removeprefix("tgcli_")
+        return terminal_id or None
+
+    async def _close_terminal_result(self, terminal_id: str) -> tuple[bool, str]:
+        result = await self._tmux_runner.close_terminal(terminal_id)
+        if isinstance(result, tuple):
+            return bool(result[0]), str(result[1])
+        return bool(result), ""

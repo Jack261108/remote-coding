@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -446,6 +446,7 @@ async def run_prompt_and_stream(
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
+    pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None = None,
     permission_gateway: PermissionGateway | None = None,
     structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
     spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
@@ -461,6 +462,8 @@ async def run_prompt_and_stream(
         },
     )
     try:
+        if pending_upload_finalizer is not None:
+            await pending_upload_finalizer(message, user_id)
         start = await task_service.create_and_run(
             user_id=user_id,
             provider=provider,
@@ -559,6 +562,7 @@ def register_run_handler(
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
+    pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None = None,
     permission_gateway: PermissionGateway | None = None,
     structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
     spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
@@ -579,6 +583,7 @@ def register_run_handler(
             diff_generator=diff_generator,
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
+            pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
             structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
             spinner_initial_delay_sec=spinner_initial_delay_sec,

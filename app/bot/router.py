@@ -24,7 +24,11 @@ from app.bot.handlers.command_status import register_status_handler
 from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
 from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.handlers.external_session import register_external_session_handler
-from app.bot.handlers.file_upload import register_file_upload_handler, schedule_pending_upload_processing
+from app.bot.handlers.file_upload import (
+    flush_pending_uploads_for_task_start,
+    register_file_upload_handler,
+    schedule_pending_upload_processing,
+)
 from app.bot.handlers.session_actions import register_session_action_handlers
 from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.bot.middleware.error_handling import ErrorHandlingMiddleware
@@ -193,6 +197,7 @@ def _create_chat_text_router(
     diff_generator: DiffGeneratorService | None,
     result_exporter: ResultExporterService | None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None,
+    pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None,
     permission_gateway: PermissionGateway | None,
     structured_reply_pump_interval_sec: float,
     spinner_initial_delay_sec: float,
@@ -241,6 +246,7 @@ def _create_chat_text_router(
             diff_generator=diff_generator,
             result_exporter=result_exporter,
             queued_upload_scheduler=queued_upload_scheduler,
+            pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
             structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
             spinner_initial_delay_sec=spinner_initial_delay_sec,
@@ -338,6 +344,7 @@ def create_router(
     )
 
     queued_upload_scheduler = None
+    pending_upload_finalizer = None
     if file_receiver is not None and upload_queue is not None:
 
         def _queued_upload_scheduler(message: Message, user_id: int, completed_task_id: str) -> None:
@@ -351,7 +358,18 @@ def create_router(
                 completed_task_id=completed_task_id,
             )
 
+        async def _pending_upload_finalizer(message: Message, user_id: int) -> None:
+            await flush_pending_uploads_for_task_start(
+                message,
+                file_receiver=file_receiver,
+                session_service=session_service,
+                upload_queue=upload_queue,
+                user_id=user_id,
+                task_service=task_service,
+            )
+
         queued_upload_scheduler = _queued_upload_scheduler
+        pending_upload_finalizer = _pending_upload_finalizer
 
     # 核心命令处理器
     register_run_handler(
@@ -361,6 +379,7 @@ def create_router(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         queued_upload_scheduler=queued_upload_scheduler,
+        pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
         structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
         spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
@@ -425,6 +444,7 @@ def create_router(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         queued_upload_scheduler=queued_upload_scheduler,
+        pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
         structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
         spinner_initial_delay_sec=settings.spinner_initial_delay_sec,

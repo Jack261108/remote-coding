@@ -732,3 +732,55 @@ async def test_health_check_cleans_dead_terminal_group_owner_and_attached_contex
     assert other.claude_chat_active is True
     assert other.claude_session_id == "claude-other"
     assert other.is_owner is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closes_ownerless_managed_tmux_session(tmp_path) -> None:
+    registry, session_service, _, tmux = _make_registry(
+        tmp_path,
+        alive_sessions={"tgcli_user_1_kept", "tgcli_user_orphan"},
+    )
+    kept, _ = await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    kept.terminal_id = "user_1_kept"
+    await session_service.save_session_context(kept)
+
+    await registry.reconcile_terminal_lifecycle()
+
+    assert tmux.closed_terminal_keys == ["user_orphan"]
+    assert "tgcli_user_orphan" not in tmux._alive_sessions
+    assert "tgcli_user_1_kept" in tmux._alive_sessions
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_close_orphan_when_bound_during_recheck(tmp_path) -> None:
+    registry, session_service, _, tmux = _make_registry(tmp_path, alive_sessions={"tgcli_user_late"})
+    original_list_all = session_service.list_all
+    calls = 0
+
+    async def binding_on_second_list():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            late, _ = await session_service.switch(
+                user_id=2,
+                provider="claude_code",
+                workdir="/late",
+                terminal_mode=True,
+                claude_chat_active=True,
+            )
+            late.terminal_id = "user_late"
+            await session_service.save_session_context(late)
+        return await original_list_all()
+
+    session_service.list_all = binding_on_second_list  # type: ignore[method-assign]
+
+    await registry.reconcile_terminal_lifecycle()
+
+    assert tmux.closed_terminal_keys == []
+    assert "tgcli_user_late" in tmux._alive_sessions

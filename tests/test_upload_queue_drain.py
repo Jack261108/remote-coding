@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from app.bot.handlers.file_upload import process_pending_uploads, schedule_pending_upload_processing
+from app.bot.handlers.file_upload import flush_pending_uploads_for_task_start, process_pending_uploads, schedule_pending_upload_processing
 from app.domain.file_models import FileUploadResult, FileValidationError
+from app.domain.models import TaskStatus
 from app.services.upload_queue import UploadQueueManager
 from tests.fakes.telegram import DummyMessage
 
@@ -180,3 +182,79 @@ async def test_schedule_creates_background_task(
 
     file_receiver.receive_file.assert_awaited_once()
     assert message.answers == ["✅ 文件已接收: scheduled.py (4 B)"]
+
+
+@pytest.mark.asyncio
+async def test_flush_waits_for_in_progress_drain_before_returning(
+    upload_queue: UploadQueueManager,
+    file_receiver: AsyncMock,
+    session_service: AsyncMock,
+) -> None:
+    await upload_queue.enqueue(user_id=42, filename="first.py", data=b"first")
+    await upload_queue.enqueue(user_id=42, filename="second.py", data=b"second")
+    first_started = asyncio.Event()
+    allow_second = asyncio.Event()
+
+    async def receive_file(**kwargs):
+        if kwargs["filename"] == "first.py":
+            first_started.set()
+            return FileUploadResult(filename="first.py", size_bytes=5, path=Path("/tmp/first.py"))
+        await allow_second.wait()
+        return FileUploadResult(filename="second.py", size_bytes=6, path=Path("/tmp/second.py"))
+
+    file_receiver.receive_file = AsyncMock(side_effect=receive_file)
+    message = DummyMessage(user_id=42)
+    drain_task = asyncio.create_task(
+        process_pending_uploads(
+            message,
+            file_receiver=file_receiver,
+            session_service=session_service,
+            upload_queue=upload_queue,
+            user_id=42,
+        )
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+
+    flush_task = asyncio.create_task(
+        flush_pending_uploads_for_task_start(
+            message,
+            file_receiver=file_receiver,
+            session_service=session_service,
+            upload_queue=upload_queue,
+            user_id=42,
+        )
+    )
+    await asyncio.sleep(0)
+    assert flush_task.done() is False
+
+    allow_second.set()
+    await drain_task
+    await flush_task
+
+    assert file_receiver.receive_file.await_count == 2
+    assert await upload_queue.queued_count(user_id=42) == 0
+
+
+@pytest.mark.asyncio
+async def test_process_pending_uploads_keeps_queue_when_another_task_is_active(
+    upload_queue: UploadQueueManager,
+    file_receiver: AsyncMock,
+    session_service: AsyncMock,
+) -> None:
+    await upload_queue.enqueue(user_id=42, filename="queued.py", data=b"data")
+    task_service = AsyncMock()
+    task_service.list_active.return_value = [SimpleNamespace(task_id="running", status=TaskStatus.RUNNING)]
+    message = DummyMessage(user_id=42)
+
+    await process_pending_uploads(
+        message,
+        file_receiver=file_receiver,
+        session_service=session_service,
+        upload_queue=upload_queue,
+        user_id=42,
+        task_service=task_service,
+        completed_task_id="completed",
+    )
+
+    file_receiver.receive_file.assert_not_awaited()
+    assert await upload_queue.queued_count(user_id=42) == 1

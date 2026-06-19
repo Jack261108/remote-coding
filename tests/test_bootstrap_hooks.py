@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.bootstrap import AppContainer
+from app.bootstrap_base import AppContainerBase
 from app.config.settings import Settings
 from app.domain.hook_models import HookEvent
 from app.domain.models import TaskRecord, TaskStatus
@@ -50,6 +53,17 @@ def make_settings(tmp_path, *, install_hooks: bool = True, tmux_mode: bool = Fal
 
 def use_legacy_hook_binding_path(container: AppContainer) -> None:
     delattr(container, "ownership_resolver")
+
+
+@pytest.fixture(autouse=True)
+async def cleanup_app_containers() -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        containers = [obj for obj in gc.get_objects() if isinstance(obj, AppContainerBase)]
+        for container in containers:
+            await container.session_supervisor.stop_all()
+            await container.bot.session.close()
 
 
 @pytest.mark.asyncio
@@ -1681,3 +1695,73 @@ async def test_session_end_runs_unified_permission_cleanup_in_order(tmp_path) ->
         "unbound:ended-session",
         "binding:ended-session",
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_end_dispatch_clears_active_session_context(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=True,
+            claude_chat_active=True,
+        )
+        session.terminal_id = "terminal-ended"
+        session.claude_session_id = "claude-session-ended"
+        await container.session_service.save_session_context(session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-session-ended",
+                type=SessionEventType.SESSION_ENDED,
+                payload={"cwd": str(tmp_path)},
+            )
+        )
+
+        state = container.structured_session_store.get("claude-session-ended")
+        assert state is not None
+        assert state.phase == SessionPhase.ENDED
+        current = await container.session_service.get(1)
+        assert current is not None
+        assert current.claude_chat_active is False
+        assert current.terminal_mode is False
+        assert current.terminal_id is None
+        assert current.claude_session_id is None
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_late_old_event_does_not_clear_new_session_context(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        old_session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=True,
+            claude_chat_active=True,
+        )
+        old_session.terminal_id = "terminal-new"
+        old_session.claude_session_id = "claude-session-new"
+        await container.session_service.save_session_context(old_session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-session-old",
+                type=SessionEventType.HOOK_RECEIVED,
+                payload={"session_id": "claude-session-old", "cwd": str(tmp_path), "event": "SessionEnd", "status": "ended"},
+            )
+        )
+
+        current = await container.session_service.get(1)
+        assert current is not None
+        assert current.claude_chat_active is True
+        assert current.terminal_id == "terminal-new"
+        assert current.claude_session_id == "claude-session-new"
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()

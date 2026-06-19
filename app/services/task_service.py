@@ -356,6 +356,7 @@ class TaskService:
                         if not record.is_final:
                             await self._apply_event(record, canceled_event)
                             await self._task_store.save(record)
+                            await self._cleanup_after_final_task(record)
                         cleanup_lock = record.is_final
                     if cleanup_lock:
                         self._cleanup_task_lifecycle_lock(record.task_id)
@@ -387,6 +388,7 @@ class TaskService:
                             else:
                                 await self._apply_event(record, event)
                                 await self._task_store.save(record)
+                                await self._cleanup_after_final_task(record)
                             cleanup_lock = record.is_final
                         if cleanup_lock:
                             self._cleanup_task_lifecycle_lock(record.task_id)
@@ -403,6 +405,7 @@ class TaskService:
                         if should_yield:
                             await self._apply_event(record, failed_event)
                             await self._task_store.save(record)
+                            await self._cleanup_after_final_task(record)
                         cleanup_lock = record.is_final
                     if cleanup_lock:
                         self._cleanup_task_lifecycle_lock(record.task_id)
@@ -432,6 +435,7 @@ class TaskService:
                 if task.status == TaskStatus.PENDING:
                     await self._apply_event(task, canceled_event)
                     await self._task_store.save(task)
+                    await self._cleanup_after_final_task(task)
                     canceled = True
                 else:
                     await self._task_store.save(task)
@@ -456,6 +460,7 @@ class TaskService:
             else:
                 await self._apply_event(task, CLIEvent(type=EventType.TIMEOUT, task_id=task_id, error=reason))
                 await self._task_store.save(task)
+                await self._cleanup_after_final_task(task)
                 cleanup_lock = task.is_final
                 marked = True
         if cleanup_lock:
@@ -484,6 +489,7 @@ class TaskService:
                 provider = task.provider
                 await self._apply_event(task, CLIEvent(type=EventType.TIMEOUT, task_id=task_id, error=reason))
                 await self._task_store.save(task)
+                await self._cleanup_after_final_task(task)
                 cleanup_lock = task.is_final
                 marked = True
         if cleanup_lock:
@@ -587,12 +593,14 @@ class TaskService:
             logger=logger,
             log_extra=log_extra,
         )
-        # Cleanup uploaded files when task reaches final state
-        if record.is_final and self._context_builder is not None:
-            try:
-                await self._context_builder.cleanup_after_task(record.user_id, record.workdir)
-            except Exception:
-                logger.warning("cleanup_after_task failed", exc_info=True, extra={"task_id": record.task_id, "user_id": record.user_id})
+
+    async def _cleanup_after_final_task(self, record: TaskRecord) -> None:
+        if not record.is_final or self._context_builder is None:
+            return
+        try:
+            await self._context_builder.cleanup_after_task(record.user_id, record.workdir)
+        except Exception:
+            logger.warning("cleanup_after_task failed", exc_info=True, extra={"task_id": record.task_id, "user_id": record.user_id})
 
     async def _get_last_task_ended_at(self, user_id: int) -> datetime:
         """Return the ended_at timestamp of the user's most recently completed task, or epoch if none."""

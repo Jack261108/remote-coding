@@ -101,6 +101,12 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             cleanup_batch_size=lock_cleanup_batch_size,
             clock=lock_clock,
         )
+        self._pane_io_locks = RefCountedLockRegistry(
+            ttl_sec=session_lock_ttl_sec,
+            cleanup_interval_sec=lock_cleanup_interval_sec,
+            cleanup_batch_size=lock_cleanup_batch_size,
+            clock=lock_clock,
+        )
         self._lock = asyncio.Lock()
         self._file_store = file_store or FileSessionStore(str(self._data_dir))
         self._session_store = session_store or SessionStore(self._file_store)
@@ -817,10 +823,11 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
     async def send_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
         prompt = self._wrap_interactive_prompt(prompt=text)
-        ready, err = await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=None)
-        if not ready:
-            return False, err
-        return await self._send_command(session_name, prompt, workdir=workdir, env=None, interactive=True)
+        async with self._pane_io_lock(session_name):
+            ready, err = await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=None)
+            if not ready:
+                return False, err
+            return await self._send_command(session_name, prompt, workdir=workdir, env=None, interactive=True)
 
     async def select_user_question_option(
         self,
@@ -831,21 +838,22 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         submit_after: bool = False,
     ) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
-        ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
-        if not ready:
-            return False, err
-        ok, err = await self._move_user_question_cursor_to_option(session_name=session_name, target_index=option_index)
-        if not ok:
-            return False, err
-        ok, err = await self._send_keys(session_name, "C-m")
-        if not ok:
-            return False, err
-        if submit_after:
-            await asyncio.sleep(self._enter_delay_sec)
+        async with self._pane_io_lock(session_name):
+            ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
+            if not ready:
+                return False, err
+            ok, err = await self._move_user_question_cursor_to_option(session_name=session_name, target_index=option_index)
+            if not ok:
+                return False, err
             ok, err = await self._send_keys(session_name, "C-m")
             if not ok:
                 return False, err
-        return True, ""
+            if submit_after:
+                await asyncio.sleep(self._enter_delay_sec)
+                ok, err = await self._send_keys(session_name, "C-m")
+                if not ok:
+                    return False, err
+            return True, ""
 
     async def answer_user_question_with_text(
         self,
@@ -857,28 +865,29 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         submit_after: bool = False,
     ) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
-        ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
-        if not ready:
-            return False, err
-        ok, err = await self._move_user_question_cursor_to_option(session_name=session_name, target_index=option_count)
-        if not ok:
-            return False, err
-        ok, err = await self._send_keys(session_name, "C-m")
-        if not ok:
-            return False, err
-        await asyncio.sleep(self._enter_delay_sec)
-        ok, err = await self._paste_text(session_name, text)
-        if not ok:
-            return False, err
-        ok, err = await self._send_keys(session_name, "C-m")
-        if not ok:
-            return False, err
-        if submit_after:
-            await asyncio.sleep(self._enter_delay_sec)
+        async with self._pane_io_lock(session_name):
+            ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
+            if not ready:
+                return False, err
+            ok, err = await self._move_user_question_cursor_to_option(session_name=session_name, target_index=option_count)
+            if not ok:
+                return False, err
             ok, err = await self._send_keys(session_name, "C-m")
             if not ok:
                 return False, err
-        return True, ""
+            await asyncio.sleep(self._enter_delay_sec)
+            ok, err = await self._paste_text(session_name, text)
+            if not ok:
+                return False, err
+            ok, err = await self._send_keys(session_name, "C-m")
+            if not ok:
+                return False, err
+            if submit_after:
+                await asyncio.sleep(self._enter_delay_sec)
+                ok, err = await self._send_keys(session_name, "C-m")
+                if not ok:
+                    return False, err
+            return True, ""
 
     async def advance_user_question_after_multi_select(
         self,
@@ -888,18 +897,19 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         final_question: bool,
     ) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
-        ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
-        if not ready:
-            return False, err
-        ok, err = await self._send_keys(session_name, "Right")
-        if not ok:
-            return False, err
-        if final_question:
-            await asyncio.sleep(self._enter_delay_sec)
-            ok, err = await self._send_keys(session_name, "C-m")
+        async with self._pane_io_lock(session_name):
+            ready, err = await self._ensure_live_claude_session_for_user_question(session_name=session_name)
+            if not ready:
+                return False, err
+            ok, err = await self._send_keys(session_name, "Right")
             if not ok:
                 return False, err
-        return True, ""
+            if final_question:
+                await asyncio.sleep(self._enter_delay_sec)
+                ok, err = await self._send_keys(session_name, "C-m")
+                if not ok:
+                    return False, err
+            return True, ""
 
     async def reveal_terminal(self, terminal_key: str) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
@@ -941,6 +951,11 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
     @asynccontextmanager
     async def _session_lock(self, session_name: str) -> AsyncIterator[None]:
         async with self._session_locks.lock(session_name):
+            yield
+
+    @asynccontextmanager
+    async def _pane_io_lock(self, session_name: str) -> AsyncIterator[None]:
+        async with self._pane_io_locks.lock(session_name):
             yield
 
     async def _is_claude_idle_in_pane(self, session_name: str) -> bool:

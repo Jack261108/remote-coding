@@ -9,6 +9,7 @@ from aiogram.types import Message
 from app.bot.handlers.user_utils import extract_user_id
 from app.domain.file_models import FileUploadResult, FileValidationError
 from app.domain.models import SessionContext, TaskStatus
+from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.file_receiver import FileReceiverService
 from app.services.session_service import SessionService
@@ -17,6 +18,7 @@ from app.services.upload_queue import UploadQueueManager
 
 logger = logging.getLogger(__name__)
 _ACTIVE_UPLOAD_TASKS = BackgroundTaskRegistry(label="upload")
+_UPLOAD_PROCESSING_LOCKS = RefCountedLockRegistry(ttl_sec=300, cleanup_interval_sec=60, cleanup_batch_size=50)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -167,26 +169,47 @@ async def process_pending_uploads(
     completed_task_id: str | None = None,
 ) -> None:
     """Process any queued uploads for a user after their task completes."""
-    if task_service is not None and await _user_has_running_task(task_service, user_id, exclude_task_id=completed_task_id):
-        logger.info(
-            "queued upload processing deferred because another task is active",
-            extra={"user_id": user_id, "completed_task_id": completed_task_id},
-        )
-        return
-
-    pending = await upload_queue.drain(user_id=user_id)
-    for item in pending:
-        try:
-            await _process_upload(
-                message,
-                file_receiver=file_receiver,
-                session_service=session_service,
-                filename=item.filename,
-                data=item.data,
-                workdir=item.workdir,
+    async with _UPLOAD_PROCESSING_LOCKS.lock(str(user_id)):
+        if task_service is not None and await _user_has_running_task(task_service, user_id, exclude_task_id=completed_task_id):
+            logger.info(
+                "queued upload processing deferred because another task is active",
+                extra={"user_id": user_id, "completed_task_id": completed_task_id},
             )
-        except Exception:
-            logger.exception("queued upload processing failed", extra={"user_id": user_id, "filename": item.filename})
+            return
+
+        pending = await upload_queue.drain(user_id=user_id)
+        for item in pending:
+            try:
+                await _process_upload(
+                    message,
+                    file_receiver=file_receiver,
+                    session_service=session_service,
+                    filename=item.filename,
+                    data=item.data,
+                    workdir=item.workdir,
+                )
+            except Exception:
+                logger.exception("queued upload processing failed", extra={"user_id": user_id, "filename": item.filename})
+
+
+async def flush_pending_uploads_for_task_start(
+    message: Message,
+    *,
+    file_receiver: FileReceiverService,
+    session_service: SessionService,
+    upload_queue: UploadQueueManager,
+    user_id: int,
+    task_service: TaskService | None = None,
+) -> None:
+    """Flush queued uploads before starting a new task for this user."""
+    await process_pending_uploads(
+        message,
+        file_receiver=file_receiver,
+        session_service=session_service,
+        upload_queue=upload_queue,
+        user_id=user_id,
+        task_service=task_service,
+    )
 
 
 def schedule_pending_upload_processing(

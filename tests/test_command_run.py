@@ -49,8 +49,10 @@ class DummyTaskService:
         self._structured_reply_turn_id: str | None = None
         self._structured_permission_key: str | None = None
         self._structured_user_question_key: str | None = None
+        self.create_calls: list[tuple[int, str | None, str, str | None]] = []
 
     async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
+        self.create_calls.append((user_id, provider, prompt, workdir))
         task = SimpleNamespace(
             task_id="t1",
             provider="claude_code",
@@ -147,6 +149,48 @@ async def _run_and_wait(
     await asyncio.sleep(wait_sec)
     if task is not None:
         await task
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_waits_for_pending_upload_finalizer_before_create_task() -> None:
+    message = DummyMessage()
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+    )
+    finalizer_started = asyncio.Event()
+    release_finalizer = asyncio.Event()
+
+    async def finalizer(message_arg: DummyMessage, user_id: int) -> None:
+        assert message_arg is message
+        assert user_id == message.from_user.id
+        finalizer_started.set()
+        await release_finalizer.wait()
+
+    outer_task = asyncio.create_task(
+        run_prompt_and_stream(
+            message=message,
+            task_service=task_service,
+            sender_factory=lambda: ChunkSender(chunk_size=50, flush_interval_sec=0.01),
+            user_id=message.from_user.id,
+            provider="claude_code",
+            prompt="hello",
+            workdir="/tmp",
+            pending_upload_finalizer=finalizer,
+        )
+    )
+    await asyncio.wait_for(finalizer_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert task_service.create_calls == []
+
+    release_finalizer.set()
+    stream_task = await outer_task
+    assert task_service.create_calls == [(message.from_user.id, "claude_code", "hello", "/tmp")]
+    if stream_task is not None:
+        await stream_task
 
 
 class FakeRegistry:

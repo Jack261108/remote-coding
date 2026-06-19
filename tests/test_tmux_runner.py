@@ -199,6 +199,77 @@ async def test_send_command_uses_ctrl_m_in_interactive(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_send_command_reloads_buffer_after_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    paste_calls = 0
+    load_calls = 0
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        nonlocal paste_calls, load_calls
+        if args and args[0] == "load-buffer":
+            load_calls += 1
+            return 0, "", ""
+        if args and args[0] == "paste-buffer":
+            paste_calls += 1
+            if paste_calls == 1:
+                return 1, "", "lost buffer"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_force_rebuild_session(session_name: str, *, workdir: str, env, interactive: bool = False):
+        assert interactive is True
+        return True, ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(runner, "_force_rebuild_session", fake_force_rebuild_session)
+
+    ok, err = await runner._send_command("tgcli_user_1", "hello", workdir="/tmp", env=None, interactive=True)
+
+    assert ok is True
+    assert err == ""
+    assert load_calls == 2
+    assert paste_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_send_interactive_input_waits_for_pane_io_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    entered = asyncio.Event()
+    allow_finish = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str, workdir: str, env):
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_send(session_name: str, command: str, *, workdir: str, env, interactive: bool = False):
+        calls.append("send")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_claude_interactive_session", fake_ensure)
+    monkeypatch.setattr(runner, "_send_command", fake_send)
+
+    async def hold_lock() -> None:
+        async with runner._pane_io_lock("tgcli_user_1"):
+            entered.set()
+            await allow_finish.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task = asyncio.create_task(runner.send_interactive_input(terminal_key="user_1", workdir="/tmp", text="hello"))
+    await asyncio.sleep(0)
+    assert calls == []
+    allow_finish.set()
+
+    ok, err = await task
+    await holder
+
+    assert ok is True
+    assert err == ""
+    assert calls == ["ensure", "send"]
+
+
+@pytest.mark.asyncio
 async def test_select_user_question_option_sends_expected_tmux_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = TmuxRunner()
     key_calls: list[tuple[str, ...]] = []

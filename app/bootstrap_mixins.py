@@ -917,6 +917,7 @@ class EventDispatchMixin(AppContainerBase):
     """Session event dispatch with per-session locking."""
 
     async def _dispatch_session_event(self, event: SessionEvent) -> None:
+        is_session_end = self._is_session_end_dispatch_event(event)
         async with self._session_event_locks.lock(event.session_id):
             self.structured_session_store.get_or_create(
                 session_id=event.session_id,
@@ -925,5 +926,39 @@ class EventDispatchMixin(AppContainerBase):
                 claude_session_id=event.session_id,
             )
             self.structured_session_store.process(event)
-        if event.type == SessionEventType.SESSION_ENDED:
+        if is_session_end:
+            await self._reconcile_session_context_after_session_end(event.session_id)
             await self._session_event_locks.cleanup_key(event.session_id, require_expired=False)
+
+    @staticmethod
+    def _is_session_end_dispatch_event(event: SessionEvent) -> bool:
+        if event.type == SessionEventType.SESSION_ENDED:
+            return True
+        if event.type != SessionEventType.HOOK_RECEIVED:
+            return False
+        return event.payload.get("event") == "SessionEnd" or event.payload.get("status") == "ended"
+
+    async def _reconcile_session_context_after_session_end(self, session_id: str) -> None:
+        session = await self.session_service.lookup_by_claude_session_id(session_id)
+        if session is None or session.claude_session_id != session_id:
+            return
+        if session.terminal_id:
+            terminal_id = session.terminal_id
+            async with self.session_service.terminal_group_lock(terminal_id):
+                current = await self.session_service.lookup_by_claude_session_id(session_id)
+                if current is None or current.claude_session_id != session_id or current.terminal_id != terminal_id:
+                    return
+                await self.session_service.clear_terminal_group(terminal_id)
+            logger.info("session context cleared after session end", extra={"session_id": session_id, "terminal_id": terminal_id})
+            return
+        if not session.claude_chat_active:
+            await self.session_service.clear_claude_session(user_id=session.user_id)
+            return
+        current, _ = await self.session_service.switch(
+            user_id=session.user_id,
+            terminal_mode=False,
+            claude_chat_active=False,
+        )
+        current.claude_session_id = None
+        await self.session_service.save_session_context(current)
+        logger.info("terminal-less session context cleared after session end", extra={"session_id": session_id, "user_id": session.user_id})
