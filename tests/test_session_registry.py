@@ -784,3 +784,77 @@ async def test_reconcile_does_not_close_orphan_when_bound_during_recheck(tmp_pat
 
     assert tmux.closed_terminal_keys == []
     assert "tgcli_user_late" in tmux._alive_sessions
+
+
+@pytest.mark.asyncio
+async def test_reconcile_logs_warning_when_orphan_close_fails(tmp_path, caplog) -> None:
+    import logging
+
+    registry, session_service, _, tmux = _make_registry(
+        tmp_path,
+        alive_sessions={"tgcli_user_1_kept", "tgcli_user_orphan"},
+    )
+    kept, _ = await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    kept.terminal_id = "user_1_kept"
+    await session_service.save_session_context(kept)
+
+    async def failing_close_terminal(terminal_key: str):
+        # Record the call but never remove the session from _alive_sessions,
+        # and report a structured failure (tuple) as the real adapter can.
+        tmux.closed_terminal_keys.append(terminal_key)
+        return (False, "busy")
+
+    tmux.close_terminal = failing_close_terminal  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.WARNING, logger="app.services.session_registry"):
+        await registry.reconcile_terminal_lifecycle()
+
+    # Orphan must remain alive because close failed.
+    assert "tgcli_user_orphan" in tmux._alive_sessions
+    assert tmux.closed_terminal_keys == ["user_orphan"]
+
+    warning_records = [
+        r for r in caplog.records if r.levelno == logging.WARNING and "failed to close orphaned tmux session" in r.getMessage()
+    ]
+    assert len(warning_records) == 1
+    assert warning_records[0].reason == "busy"
+    assert warning_records[0].terminal_id == "user_orphan"
+    assert warning_records[0].tmux_session == "tgcli_user_orphan"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_handles_non_tuple_close_result(tmp_path) -> None:
+    registry, session_service, _, tmux = _make_registry(
+        tmp_path,
+        alive_sessions={"tgcli_user_1_kept", "tgcli_user_orphan"},
+    )
+    kept, _ = await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir="/proj",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    kept.terminal_id = "user_1_kept"
+    await session_service.save_session_context(kept)
+
+    async def bool_close_terminal(terminal_key: str):
+        # Return a bare bool (non-tuple) to exercise _close_terminal_result's
+        # isinstance=False branch; never remove the session.
+        tmux.closed_terminal_keys.append(terminal_key)
+        return False
+
+    tmux.close_terminal = bool_close_terminal  # type: ignore[method-assign]
+
+    # Must not raise.
+    await registry.reconcile_terminal_lifecycle()
+
+    # Orphan remains because close reported failure.
+    assert "tgcli_user_orphan" in tmux._alive_sessions
+    assert tmux.closed_terminal_keys == ["user_orphan"]

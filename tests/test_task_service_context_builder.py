@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -235,6 +236,46 @@ async def test_cleanup_called_on_task_canceled(tmp_path: Path) -> None:
     _ = [event async for event in result.events]
 
     context_builder.cleanup_after_task.assert_awaited_once_with(1, str(tmp_path.resolve()))
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_does_not_break_task_flow(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """cleanup_after_task raising must be swallowed: task still reaches terminal state and a warning is logged."""
+    adapter = StubAdapter(
+        events=[
+            CLIEvent(type=EventType.STARTED, task_id="x"),
+            CLIEvent(type=EventType.EXITED, task_id="x", exit_code=0),
+        ]
+    )
+    context_builder = _make_context_builder()
+    context_builder.cleanup_after_task = AsyncMock(side_effect=RuntimeError("boom"))
+
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+        context_builder=context_builder,
+    )
+
+    caplog.set_level(logging.WARNING, logger="app.services.task_service")
+
+    # Should NOT raise: the cleanup exception is swallowed inside _cleanup_after_final_task.
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    events = [event async for event in result.events]
+
+    # Task still reached a terminal state.
+    assert [e.type for e in events] == [EventType.STARTED, EventType.EXITED]
+    status = await service.get_status(result.task.task_id, user_id=1)
+    assert status is not None
+    assert status.status == TaskStatus.SUCCEEDED
+
+    # The swallowed failure was logged as a warning.
+    cleanup_records = [r for r in caplog.records if r.message == "cleanup_after_task failed"]
+    assert cleanup_records, "expected a 'cleanup_after_task failed' warning log"
+    assert cleanup_records[0].exc_info is not None
+    assert "boom" in caplog.text
 
 
 @pytest.mark.asyncio

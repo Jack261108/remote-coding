@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import warnings
 from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -60,10 +62,44 @@ async def cleanup_app_containers() -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Per-container try/except: a single container's cleanup failure must not
+        # abort cleanup of the others (which would mask resource leaks behind an
+        # unrelated exception). Collect failures and surface them after best-effort
+        # cleanup so no container is left dangling.
         containers = [obj for obj in gc.get_objects() if isinstance(obj, AppContainerBase)]
+        cleanup_errors: list[tuple[Any, BaseException]] = []
         for container in containers:
-            await container.session_supervisor.stop_all()
-            await container.bot.session.close()
+            try:
+                await container.session_supervisor.stop_all()
+            except BaseException as exc:  # noqa: BLE001 - cleanup must be best-effort
+                cleanup_errors.append((container, exc))
+            try:
+                await container.bot.session.close()
+            except BaseException as exc:  # noqa: BLE001 - cleanup must be best-effort
+                cleanup_errors.append((container, exc))
+
+        # Verify no *uncleaned* AppContainerBase instances leak past cleanup. We count
+        # containers whose supervisor is still active (the reliable teardown signal) rather
+        # than merely-reachable ones: a container referenced only by a still-live test frame
+        # is not a leak. This is a soft check (warning, not hard assertion) so a flaky gc
+        # snapshot does not turn a green test red while still surfacing genuine leaks.
+        gc.collect()
+        leaked = [
+            obj
+            for obj in gc.get_objects()
+            if isinstance(obj, AppContainerBase) and getattr(getattr(obj, "session_supervisor", None), "_active", False)
+        ]
+        if leaked:
+            warnings.warn(
+                f"{len(leaked)} AppContainerBase instance(s) still have an active session supervisor after cleanup",
+                stacklevel=1,
+            )
+
+        if cleanup_errors:
+            # Re-raise the first error so genuine failures are not silenced, but only
+            # after every container has had a chance to be cleaned up.
+            container, exc = cleanup_errors[0]
+            raise RuntimeError(f"cleanup failed for {container!r}: {exc!r}") from exc
 
 
 @pytest.mark.asyncio
@@ -1736,18 +1772,53 @@ async def test_session_end_dispatch_clears_active_session_context(tmp_path) -> N
 
 @pytest.mark.asyncio
 async def test_late_old_event_does_not_clear_new_session_context(tmp_path) -> None:
+    """A late SessionEnd carrying a stale session_id must not clear the active session.
+
+    This targets the ``session.claude_session_id != session_id`` guard in
+    ``_reconcile_session_context_after_session_end`` (bootstrap_mixins.py:943), NOT the
+    ``session is None`` early return. To hit the != guard we need
+    ``lookup_by_claude_session_id("claude-session-old")`` to return a non-None context
+    whose ``claude_session_id`` is the *new* id ("claude-session-new"). That is exactly the
+    stale-index state the guard defends against: the old event's id still resolves in the
+    index, but the resolved context has since been re-bound to a newer session.
+
+    The setup uses the terminal-less chat-active path so that the outer ``!=`` guard is the
+    *last* line of defence: the terminal branch has a second re-check guard
+    (bootstrap_mixins.py:949) that would independently catch this stale-id case, so a
+    terminal-mode setup would not actually fail when the outer ``!=`` clause is removed.
+    The terminal-less path (lines 954-964) has no such second check, so removing the outer
+    ``!=`` clause lets reconcile proceed and wrongly switch+clear the new session -> test
+    fails. With the guard intact the reconcile early-returns and the new session survives.
+
+    We build the stale-index state by saving the active context under the new id (registering
+    the new id in the index) and then injecting a stale index entry that maps the OLD id
+    onto that same (now re-bound) context.
+    """
     container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
     try:
-        old_session, _ = await container.session_service.switch(
+        active_session, _ = await container.session_service.switch(
             user_id=1,
             provider="claude_code",
             workdir=str(tmp_path),
-            terminal_mode=True,
+            terminal_mode=False,
             claude_chat_active=True,
         )
-        old_session.terminal_id = "terminal-new"
-        old_session.claude_session_id = "claude-session-new"
-        await container.session_service.save_session_context(old_session)
+        active_session.claude_session_id = "claude-session-new"
+        await container.session_service.save_session_context(active_session)
+        assert active_session.terminal_id is None
+        assert active_session.claude_chat_active is True
+
+        # Inject the stale-index state: the OLD session id still resolves in the index,
+        # but to the context that is now bound to the NEW session id. This is the precise
+        # condition the ``session.claude_session_id != session_id`` guard exists for.
+        store = container.session_service._store
+        store._claude_session_index["claude-session-old"] = active_session
+
+        # Spy: confirm lookup_by_claude_session_id("claude-session-old") returns non-None
+        # (i.e. we really are exercising the != guard, not the None early-return).
+        looked_up = await container.session_service.lookup_by_claude_session_id("claude-session-old")
+        assert looked_up is not None
+        assert looked_up.claude_session_id == "claude-session-new"
 
         await container._dispatch_session_event(
             SessionEvent(
@@ -1759,9 +1830,166 @@ async def test_late_old_event_does_not_clear_new_session_context(tmp_path) -> No
 
         current = await container.session_service.get(1)
         assert current is not None
+        # Guard intact: the new session context must survive untouched.
         assert current.claude_chat_active is True
-        assert current.terminal_id == "terminal-new"
+        assert current.terminal_id is None
         assert current.claude_session_id == "claude-session-new"
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_status_ended_branch_triggers_reconcile(tmp_path) -> None:
+    """Exercise the ``status == "ended"`` clause of ``_is_session_end_dispatch_event``
+    (bootstrap_mixins.py:939) independently of the ``event == "SessionEnd"`` clause.
+
+    We dispatch a HOOK_RECEIVED whose ``status`` is ``"ended"`` but whose ``event`` is a
+    non-SessionEnd value (``"Notification"``). The ``or`` short-circuits on the status
+    clause, ``is_session_end`` becomes True and reconcile clears the terminal group.
+
+    Note: HookEvent.from_dict (invoked by the HOOK_RECEIVED processor) requires both
+    ``event`` and ``status`` to be valid non-empty strings, so we cannot literally omit
+    the ``event`` key. We instead keep ``event`` at a valid non-SessionEnd value so only
+    the status clause is the trigger -- this is what isolates the branch under test.
+    If the ``event.payload.get("status") == "ended"`` clause were removed, the event would
+    not be treated as a session end and reconcile would not run -> terminal context would
+    remain active -> test fails.
+    """
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=True,
+            claude_chat_active=True,
+        )
+        session.terminal_id = "term-x"
+        session.claude_session_id = "claude-x"
+        await container.session_service.save_session_context(session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-x",
+                type=SessionEventType.HOOK_RECEIVED,
+                payload={
+                    "session_id": "claude-x",
+                    "cwd": str(tmp_path),
+                    "event": "Notification",  # valid, but NOT SessionEnd -> only status clause triggers
+                    "status": "ended",
+                },
+            )
+        )
+
+        current = await container.session_service.get(1)
+        assert current is not None
+        # Reconcile fired via the status clause -> terminal group cleared.
+        assert current.terminal_mode is False
+        assert current.terminal_id is None
+        assert current.claude_chat_active is False
+        assert current.claude_session_id is None
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_event_sessionend_branch_triggers_reconcile(tmp_path) -> None:
+    """Exercise the ``event == "SessionEnd"`` clause of ``_is_session_end_dispatch_event``
+    (bootstrap_mixins.py:939) independently of the ``status == "ended"`` clause.
+
+    We dispatch a HOOK_RECEIVED whose ``event`` is ``"SessionEnd"`` but whose ``status`` is
+    a non-ended value (``"running"``). The ``or`` short-circuits on the event clause,
+    ``is_session_end`` becomes True and reconcile clears the terminal group.
+
+    See the sibling test for why the ``event`` key cannot be literally omitted: HookEvent
+    validation requires a valid non-empty ``event``/``status``. Keeping ``status`` at a
+    non-ended value isolates the event clause as the sole trigger. If the
+    ``event.payload.get("event") == "SessionEnd"`` clause were removed, this event would
+    not be treated as a session end -> terminal context would remain active -> test fails.
+    """
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=True,
+            claude_chat_active=True,
+        )
+        session.terminal_id = "term-x"
+        session.claude_session_id = "claude-x"
+        await container.session_service.save_session_context(session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-x",
+                type=SessionEventType.HOOK_RECEIVED,
+                payload={
+                    "session_id": "claude-x",
+                    "cwd": str(tmp_path),
+                    "event": "SessionEnd",
+                    "status": "running",  # valid, but NOT ended -> only event clause triggers
+                },
+            )
+        )
+
+        current = await container.session_service.get(1)
+        assert current is not None
+        # Reconcile fired via the event clause -> terminal group cleared.
+        assert current.terminal_mode is False
+        assert current.terminal_id is None
+        assert current.claude_chat_active is False
+        assert current.claude_session_id is None
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_end_reconcile_terminal_less_path_clears_chat_active_and_session_id(tmp_path) -> None:
+    """End-to-end cover for the terminal-less reconcile branch
+    (bootstrap_mixins.py:954-964): no ``terminal_id`` but ``claude_chat_active`` is True ->
+    ``switch(terminal_mode=False, claude_chat_active=False)`` then clear
+    ``claude_session_id`` and persist.
+
+    Constructed via ``switch(terminal_mode=False, claude_chat_active=True)`` so the
+    resulting context has ``terminal_id is None`` and an active chat, then bind a claude
+    session id and dispatch SESSION_ENDED. If the ``current.claude_session_id = None``
+    line (bootstrap_mixins.py:962) were removed, the session id would survive -> test fails.
+    """
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=False,
+            claude_chat_active=True,
+        )
+        # terminal-less chat-active context: no terminal_id, chat active.
+        assert session.terminal_id is None
+        assert session.claude_chat_active is True
+
+        session.claude_session_id = "claude-x"
+        await container.session_service.save_session_context(session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-x",
+                type=SessionEventType.SESSION_ENDED,
+                payload={"cwd": str(tmp_path)},
+            )
+        )
+
+        current = await container.session_service.get(1)
+        assert current is not None
+        # Path C: switch clears terminal_mode + claude_chat_active, then clears claude_session_id.
+        assert current.terminal_mode is False
+        assert current.claude_chat_active is False
+        assert current.claude_session_id is None
+        assert current.terminal_id is None
     finally:
         await container.session_supervisor.stop_all()
         await container.bot.session.close()

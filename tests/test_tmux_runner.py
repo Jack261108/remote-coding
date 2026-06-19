@@ -1901,3 +1901,277 @@ async def test_persistent_session_locks_are_ref_counted_and_cleaned(monkeypatch:
         advance(2.0)
 
     assert len(runner._session_locks) <= 1
+
+
+@pytest.mark.asyncio
+async def test_select_user_question_option_waits_for_pane_io_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str) -> tuple[bool, str]:
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_move(*, session_name: str, target_index: int) -> tuple[bool, str]:
+        calls.append(f"move:{target_index}")
+        return True, ""
+
+    async def fake_send_keys(session_name: str, *keys: str) -> tuple[bool, str]:
+        calls.append(f"keys:{keys}")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_live_claude_session_for_user_question", fake_ensure)
+    monkeypatch.setattr(runner, "_move_user_question_cursor_to_option", fake_move)
+    monkeypatch.setattr(runner, "_send_keys", fake_send_keys)
+
+    held = runner._pane_io_lock("tgcli_user_1")
+    await held.__aenter__()
+    try:
+        task = asyncio.create_task(
+            runner.select_user_question_option(terminal_key="user_1", workdir="/tmp", option_index=2, submit_after=True)
+        )
+        await asyncio.sleep(0)
+        assert calls == []
+
+        await held.__aexit__(None, None, None)
+        ok, err = await task
+    finally:
+        # Ensure lock released even on assertion failure above
+        try:
+            await held.__aexit__(None, None, None)
+        except RuntimeError:
+            pass
+
+    assert ok is True
+    assert err == ""
+    assert calls == ["ensure", "move:2", "keys:('C-m',)", "keys:('C-m',)"]
+
+
+@pytest.mark.asyncio
+async def test_answer_user_question_with_text_waits_for_pane_io_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(enter_delay_sec=0.0)
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str) -> tuple[bool, str]:
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_move(*, session_name: str, target_index: int) -> tuple[bool, str]:
+        calls.append(f"move:{target_index}")
+        return True, ""
+
+    async def fake_send_keys(session_name: str, *keys: str) -> tuple[bool, str]:
+        calls.append(f"keys:{keys}")
+        return True, ""
+
+    async def fake_paste_text(session_name: str, text: str) -> tuple[bool, str]:
+        calls.append(f"paste:{text}")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_live_claude_session_for_user_question", fake_ensure)
+    monkeypatch.setattr(runner, "_move_user_question_cursor_to_option", fake_move)
+    monkeypatch.setattr(runner, "_send_keys", fake_send_keys)
+    monkeypatch.setattr(runner, "_paste_text", fake_paste_text)
+
+    held = runner._pane_io_lock("tgcli_user_1")
+    await held.__aenter__()
+    try:
+        task = asyncio.create_task(
+            runner.answer_user_question_with_text(
+                terminal_key="user_1",
+                workdir="/tmp",
+                option_count=3,
+                text="2026-05-01",
+                submit_after=False,
+            )
+        )
+        await asyncio.sleep(0)
+        assert calls == []
+
+        await held.__aexit__(None, None, None)
+        ok, err = await task
+    finally:
+        try:
+            await held.__aexit__(None, None, None)
+        except RuntimeError:
+            pass
+
+    assert ok is True
+    assert err == ""
+    assert calls == [
+        "ensure",
+        "move:3",
+        "keys:('C-m',)",
+        "paste:2026-05-01",
+        "keys:('C-m',)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_advance_user_question_after_multi_select_waits_for_pane_io_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = TmuxRunner(enter_delay_sec=0.0)
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str) -> tuple[bool, str]:
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_send_keys(session_name: str, *keys: str) -> tuple[bool, str]:
+        calls.append(f"keys:{keys}")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_live_claude_session_for_user_question", fake_ensure)
+    monkeypatch.setattr(runner, "_send_keys", fake_send_keys)
+
+    held = runner._pane_io_lock("tgcli_user_1")
+    await held.__aenter__()
+    try:
+        task = asyncio.create_task(
+            runner.advance_user_question_after_multi_select(terminal_key="user_1", workdir="/tmp", final_question=True)
+        )
+        await asyncio.sleep(0)
+        assert calls == []
+
+        await held.__aexit__(None, None, None)
+        ok, err = await task
+    finally:
+        try:
+            await held.__aexit__(None, None, None)
+        except RuntimeError:
+            pass
+
+    assert ok is True
+    assert err == ""
+    assert calls == ["ensure", "keys:('Right',)", "keys:('C-m',)"]
+
+
+@pytest.mark.asyncio
+async def test_send_command_rebuilds_and_retries_when_ctrl_u_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """路径A：send-keys C-u 返回非0 → _force_rebuild_session → 重试 C-u。"""
+    runner = TmuxRunner()
+    cu_calls: list[tuple[str, ...]] = []
+    rebuild_calls: list[dict] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        if args and args[0] == "send-keys" and len(args) >= 4 and args[3] == "C-u":
+            cu_calls.append(args)
+            if len(cu_calls) == 1:
+                return 1, "", "session not found"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_force_rebuild_session(session_name: str, *, workdir: str, env, interactive: bool = False):
+        rebuild_calls.append({"session_name": session_name, "interactive": interactive})
+        return True, ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(runner, "_force_rebuild_session", fake_force_rebuild_session)
+
+    ok, err = await runner._send_command("tgcli_user_1", "hello", workdir="/tmp", env=None, interactive=True)
+
+    assert ok is True
+    assert err == ""
+    # C-u sent twice: first failed, retry after rebuild succeeded
+    assert len(cu_calls) == 2
+    assert rebuild_calls == [{"session_name": "tgcli_user_1", "interactive": True}]
+
+
+@pytest.mark.asyncio
+async def test_send_command_reloads_buffer_and_retries_when_enter_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """路径C：send-keys Enter/C-m 返回非0 → rebuild → 重新 _load_and_paste_text + 重新 send-keys。"""
+    runner = TmuxRunner(enter_delay_sec=0.0)
+    load_calls = 0
+    paste_calls = 0
+    enter_calls: list[tuple[str, ...]] = []
+    rebuild_calls: list[dict] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        nonlocal load_calls, paste_calls
+        if args and args[0] == "load-buffer":
+            load_calls += 1
+            return 0, "", ""
+        if args and args[0] == "paste-buffer":
+            paste_calls += 1
+            return 0, "", ""
+        if args and args[0] == "send-keys" and len(args) >= 4 and args[1] == "-t" and args[3] in {"Enter", "C-m"}:
+            enter_calls.append(args)
+            if len(enter_calls) == 1:
+                return 1, "", "no such session"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_force_rebuild_session(session_name: str, *, workdir: str, env, interactive: bool = False):
+        rebuild_calls.append({"session_name": session_name, "interactive": interactive})
+        return True, ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(runner, "_force_rebuild_session", fake_force_rebuild_session)
+
+    ok, err = await runner._send_command("tgcli_user_1", "hello", workdir="/tmp", env=None, interactive=True)
+
+    assert ok is True
+    assert err == ""
+    assert rebuild_calls == [{"session_name": "tgcli_user_1", "interactive": True}]
+    # Buffer reloaded and pasted twice: once before Enter failure, once after rebuild
+    assert load_calls == 2
+    assert paste_calls == 2
+    # C-m sent twice: first failed, retry after rebuild+reload succeeded
+    assert len(enter_calls) == 2
+    assert all(call[3] == "C-m" for call in enter_calls)
+
+
+@pytest.mark.asyncio
+async def test_send_command_force_rebuild_uses_persistent_session_when_not_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """interactive=False 分支：paste 失败 → _force_rebuild_session(interactive=False) 走 _ensure_persistent_session。"""
+    runner = TmuxRunner()
+    ensure_persistent_calls: list[str] = []
+    ensure_interactive_calls: list[str] = []
+    rebuild_interactive_args: list[bool] = []
+    paste_calls = 0
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        nonlocal paste_calls
+        # load-buffer succeeds; paste-buffer fails first time, succeeds on retry.
+        if args and args[0] == "paste-buffer":
+            paste_calls += 1
+            if paste_calls == 1:
+                return 1, "", "no such pane"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_terminate_session(session_name: str) -> bool:
+        return True
+
+    async def fake_ensure_persistent_session(session_name: str, *, workdir: str, env):
+        ensure_persistent_calls.append(session_name)
+        return True, ""
+
+    async def fake_ensure_claude_interactive_session(*, session_name: str, workdir: str, env):
+        ensure_interactive_calls.append(session_name)
+        return True, ""
+
+    real_force = runner._force_rebuild_session
+
+    async def spy_force_rebuild_session(session_name: str, *, workdir: str, env, interactive: bool = False):
+        rebuild_interactive_args.append(interactive)
+        # Delegate to the real method so _terminate_session + the interactive-branch
+        # dispatch are exercised (both terminate and ensure methods are monkeypatched).
+        return await real_force(session_name, workdir=workdir, env=env, interactive=interactive)
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(runner, "_terminate_session", fake_terminate_session)
+    monkeypatch.setattr(runner, "_ensure_persistent_session", fake_ensure_persistent_session)
+    monkeypatch.setattr(runner, "_ensure_claude_interactive_session", fake_ensure_claude_interactive_session)
+    monkeypatch.setattr(runner, "_force_rebuild_session", spy_force_rebuild_session)
+
+    ok, err = await runner._send_command("tgcli_user_1", "hello", workdir="/tmp", env=None, interactive=False)
+
+    assert ok is True
+    assert err == ""
+    assert rebuild_interactive_args == [False]
+    assert ensure_persistent_calls == ["tgcli_user_1"]
+    assert ensure_interactive_calls == []
