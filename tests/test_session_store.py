@@ -327,6 +327,63 @@ def test_mark_structured_user_question_emitted_does_not_regress_same_tool_cursor
     assert updated.structured_user_question_key == "tool-ask-key:2"
 
 
+def test_session_store_find_by_terminal_id_strong_cached_hit_returns_without_repository_scan(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(
+        session_id="claude-session-strong-cache",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    state.pending_permission = PendingPermission(
+        tool_use_id="tool-strong",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    state.turns.append(ConversationTurn(turn_id="turn-strong", role="assistant", text="等待授权", is_complete=True))
+
+    def fail_if_repository_scanned():
+        raise AssertionError("repository should not be scanned for strong cached hit")
+
+    store._lookup._repository.list_states = fail_if_repository_scanned
+
+    matched = store.find_by_terminal_id("user_1_8c393341f536")
+
+    assert matched is state
+    assert matched.session_id == "claude-session-strong-cache"
+
+
+def test_session_store_find_by_terminal_id_scans_repository_for_non_strong_cached_hit(tmp_path) -> None:
+    file_store = FileSessionStore(str(tmp_path))
+    disk_store = SessionStore(file_store)
+    persisted = disk_store.get_or_create(
+        session_id="claude-session-persisted-pending",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    persisted.phase = SessionPhase.WAITING_FOR_APPROVAL
+    persisted.pending_permission = PendingPermission(
+        tool_use_id="tool-persisted",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    persisted.turns.append(ConversationTurn(turn_id="turn-persisted", role="assistant", text="等待授权", is_complete=True))
+    disk_store._persist(persisted)
+
+    store = SessionStore(file_store)
+    cached = store.get_or_create(
+        session_id="claude-session-cached-idle",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    cached.phase = SessionPhase.WAITING_FOR_INPUT
+
+    matched = store.find_by_terminal_id("user_1_8c393341f536")
+
+    assert matched is not None
+    assert matched.session_id == "claude-session-persisted-pending"
+
+
 def test_session_store_find_by_terminal_id_prefers_pending_active_state_over_newer_idle_state(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     now = utc_now()

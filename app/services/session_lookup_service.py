@@ -70,6 +70,10 @@ class SessionLookupService:
             state.revision,
         )
 
+    def _is_strong_terminal_cache_hit(self, state: SessionState) -> bool:
+        is_claude, has_pending_permission, has_content, _, is_active, _, _ = self._state_rank(state)
+        return bool(is_claude and has_pending_permission and has_content and is_active)
+
     def _explicit_resolution_rank(self, state: SessionState) -> tuple[int, int, float, float, int]:
         has_content = int(bool(state.turns or state.tool_calls or state.pending_permission is not None))
         has_pending_permission = int(state.pending_permission is not None or state.phase == SessionPhase.WAITING_FOR_APPROVAL)
@@ -177,7 +181,7 @@ class SessionLookupService:
                 continue
             if best is None or self._state_rank(state) > self._state_rank(best):
                 best = state
-        if best is not None and self._state_rank(best)[:4] == (1, 1, 1, 1):
+        if best is not None and self._is_strong_terminal_cache_hit(best):
             return best
 
         for state in self._repository.list_states():

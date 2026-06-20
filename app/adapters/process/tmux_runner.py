@@ -14,6 +14,7 @@ from app.adapters.process.tmux_log import AsyncFifoReader, TmuxLogMixin
 from app.adapters.process.tmux_session import TmuxSessionCheckError, TmuxSessionMixin, is_recoverable_tmux_session_error
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
+from app.domain.protocols import SessionStoreProtocol
 from app.domain.session_models import (
     ConversationTurn,
     SessionEvent,
@@ -24,7 +25,6 @@ from app.domain.session_models import (
     is_claude_session_id,
 )
 from app.infra.lock_registry import RefCountedLockRegistry
-from app.services.session_store import SessionStore
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
@@ -79,7 +79,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         interactive_completion_grace_sec: float = 0.1,
         claude_cli_bin: str = "claude",
         file_store: FileSessionStore | None = None,
-        session_store: SessionStore | None = None,
+        session_store: SessionStoreProtocol | None = None,
         session_lock_ttl_sec: int = 3600,
         lock_cleanup_interval_sec: int = 60,
         lock_cleanup_batch_size: int = 50,
@@ -109,7 +109,24 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         )
         self._lock = asyncio.Lock()
         self._file_store = file_store or FileSessionStore(str(self._data_dir))
-        self._session_store = session_store or SessionStore(self._file_store)
+        self._session_store_impl = session_store
+
+    @property
+    def _session_store(self) -> SessionStoreProtocol:
+        return self._require_session_store()
+
+    def _require_session_store(self) -> SessionStoreProtocol:
+        if self._session_store_impl is None:
+            raise RuntimeError("session_store is required for TmuxRunner session tracking")
+        return self._session_store_impl
+
+    async def _register_task(self, meta: _TmuxTaskMeta) -> None:
+        async with self._lock:
+            self._tasks[meta.task_id] = meta
+
+    async def _unregister_task(self, task_id: str) -> None:
+        async with self._lock:
+            self._tasks.pop(task_id, None)
 
     def _tmux_log_extra(self, meta: _TmuxTaskMeta, **extra) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -207,7 +224,8 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             prompt_text=(argv[0].strip() if interactive and argv else ""),
         )
 
-        self._session_store.get_or_create(
+        session_store = self._require_session_store()
+        session_store.get_or_create(
             session_id=session_name,
             provider="claude_code",
             workdir=workdir,
@@ -215,9 +233,13 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         )
 
         if persistent_terminal:
-            async with self._session_lock(session_name):
-                async for event in self._run_task(meta=meta, timeout_sec=timeout_sec, env=env, workdir=workdir, command=command):
-                    yield event
+            await self._register_task(meta)
+            try:
+                async with self._session_lock(session_name):
+                    async for event in self._run_task(meta=meta, timeout_sec=timeout_sec, env=env, workdir=workdir, command=command):
+                        yield event
+            finally:
+                await self._unregister_task(meta.task_id)
             return
 
         async for event in self._run_task(meta=meta, timeout_sec=timeout_sec, env=env, workdir=workdir, command=command):
@@ -228,29 +250,51 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         watch_completed = False
         fifo_reader: AsyncFifoReader | None = None
         if meta.persistent_terminal:
-            if meta.interactive:
-                ready, err = await self._ensure_claude_interactive_session(session_name=meta.session_name, workdir=workdir, env=env)
-            else:
-                ready, err = await self._ensure_persistent_session(meta.session_name, workdir=workdir, env=env)
-            if not ready:
-                yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
+            if meta.cancel_requested:
+                yield CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
                 return
             if meta.interactive:
-                fifo_reader = AsyncFifoReader(self._fifo_path(meta.session_name))
-                await fifo_reader.start()
-                pipe_ready, pipe_err = await self._bind_interactive_pipe(
-                    meta=meta,
-                    workdir=workdir,
-                    env=env,
-                    pipe_cmd=fifo_reader.pipe_command(),
-                )
-                if not pipe_ready:
-                    await fifo_reader.close()
-                    yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=pipe_err)
+                async with self._pane_io_lock(meta.session_name):
+                    if meta.cancel_requested:
+                        yield CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
+                        return
+                    ready, err = await self._ensure_claude_interactive_session(session_name=meta.session_name, workdir=workdir, env=env)
+                    if not ready:
+                        yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
+                        return
+                    if meta.cancel_requested:
+                        yield CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
+                        return
+                    fifo_reader = AsyncFifoReader(self._fifo_path(meta.session_name))
+                    await fifo_reader.start()
+                    pipe_ready, pipe_err = await self._bind_interactive_pipe(
+                        meta=meta,
+                        workdir=workdir,
+                        env=env,
+                        pipe_cmd=fifo_reader.pipe_command(),
+                    )
+                    if not pipe_ready:
+                        await fifo_reader.close()
+                        yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=pipe_err)
+                        return
+                    self._capture_interactive_baseline(meta=meta)
+                    if meta.cancel_requested:
+                        await self._clear_interactive_pipe(meta.session_name)
+                        await fifo_reader.close()
+                        yield CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
+                        return
+                    meta.command_started_at = utc_now()
+                    sent, send_err = await self._send_command(meta.session_name, command, workdir=workdir, env=env, interactive=True)
+            else:
+                ready, err = await self._ensure_persistent_session(meta.session_name, workdir=workdir, env=env)
+                if not ready:
+                    yield CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error=err)
                     return
-                self._capture_interactive_baseline(meta=meta)
-            meta.command_started_at = utc_now()
-            sent, send_err = await self._send_command(meta.session_name, command, workdir=workdir, env=env, interactive=meta.interactive)
+                if meta.cancel_requested:
+                    yield CLIEvent(type=EventType.CANCELED, task_id=meta.task_id, error="任务已取消")
+                    return
+                meta.command_started_at = utc_now()
+                sent, send_err = await self._send_command(meta.session_name, command, workdir=workdir, env=env, interactive=False)
             if not sent:
                 if fifo_reader is not None:
                     await fifo_reader.close()
@@ -263,8 +307,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 return
             session_started = True
 
-        async with self._lock:
-            self._tasks[meta.task_id] = meta
+        await self._register_task(meta)
 
         if meta.interactive:
             state = self._session_store.mark_interactive_turn_processing(
@@ -790,15 +833,16 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             for meta in self._tasks.values():
                 if meta.session_name == session_name and not meta.cancel_requested:
                     meta.cancel_requested = True
-        try:
-            exists = await self.session_exists(session_name)
-        except TmuxSessionCheckError as exc:
-            return False, f"终端状态检查失败: {exc}"
-        if not exists:
-            return False, "终端不存在"
-        closed = await self._terminate_session(session_name)
-        if not closed:
-            return False, "终端关闭失败"
+        async with self._session_lock(session_name):
+            try:
+                exists = await self.session_exists(session_name)
+            except TmuxSessionCheckError as exc:
+                return False, f"终端状态检查失败: {exc}"
+            if not exists:
+                return False, "终端不存在"
+            closed = await self._terminate_session(session_name)
+            if not closed:
+                return False, "终端关闭失败"
         return True, ""
 
     async def ensure_terminal(self, *, terminal_key: str, workdir: str, env: dict[str, str] | None = None) -> tuple[bool, str]:
@@ -823,11 +867,12 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
     async def send_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
         session_name = self.build_session_name(terminal_key)
         prompt = self._wrap_interactive_prompt(prompt=text)
-        async with self._pane_io_lock(session_name):
-            ready, err = await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=None)
-            if not ready:
-                return False, err
-            return await self._send_command(session_name, prompt, workdir=workdir, env=None, interactive=True)
+        async with self._session_lock(session_name):
+            async with self._pane_io_lock(session_name):
+                ready, err = await self._ensure_claude_interactive_session(session_name=session_name, workdir=workdir, env=None)
+                if not ready:
+                    return False, err
+                return await self._send_command(session_name, prompt, workdir=workdir, env=None, interactive=True)
 
     async def select_user_question_option(
         self,

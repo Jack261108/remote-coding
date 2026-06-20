@@ -7,6 +7,7 @@ import pytest
 from aiogram.types import InaccessibleMessage
 
 from app.adapters.process.tmux_runner import TmuxRunner
+from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_session import register_session_handler
@@ -26,6 +27,7 @@ from app.domain.session_models import (
 from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
 from app.services.external_user_question_state import ExternalUserQuestionState, PendingExternalUserQuestion
 from app.services.session_service import SessionService
+from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 from tests.fakes.cli import StubAdapter, StubFactory, make_settings
 from tests.fakes.telegram import DummyCallbackQuery, DummyMessage
@@ -78,6 +80,11 @@ async def _call_callback(router: DummyRouter, index: int, callback) -> None:
     await handler(callback, **kwargs)
 
 
+def _tmux_runner_with_session_store(tmp_path) -> TmuxRunner:
+    file_store = FileSessionStore(str(tmp_path))
+    return TmuxRunner(data_dir=str(tmp_path), file_store=file_store, session_store=SessionStore(file_store))
+
+
 def test_is_accessible_message_rejects_inaccessible_message() -> None:
     inaccessible = InaccessibleMessage.model_construct(chat=None, message_id=1, date=0)
 
@@ -87,7 +94,7 @@ def test_is_accessible_message_rejects_inaccessible_message() -> None:
 
 @pytest.mark.asyncio
 async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -214,7 +221,7 @@ async def test_session_handler_rejects_missing_workdir(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_status_handler_renders_structured_snapshot(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -463,7 +470,7 @@ async def test_external_user_question_callback_rejects_invalidated_session(monke
 
 @pytest.mark.asyncio
 async def test_user_question_callback_handler_records_choice_and_prompts_next_question(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -534,7 +541,7 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
 
 @pytest.mark.asyncio
 async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -607,7 +614,7 @@ async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path
 
 @pytest.mark.asyncio
 async def test_user_question_callback_handler_toggles_multi_select_and_submits(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -687,7 +694,7 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
 async def test_router_text_chat_answers_pending_user_question_instead_of_creating_new_task(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -753,7 +760,7 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
 
 @pytest.mark.asyncio
 async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True

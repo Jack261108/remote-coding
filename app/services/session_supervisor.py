@@ -51,7 +51,27 @@ class SessionSupervisor:
         task = self._tasks.get(session_id)
         if task is not None and not task.done():
             return
-        self._tasks[session_id] = asyncio.create_task(self._watch_session(session_id=session_id, workdir=workdir))
+        self._start_watch_task(session_id=session_id, workdir=workdir)
+
+    def _start_watch_task(self, *, session_id: str, workdir: str) -> None:
+        task = asyncio.create_task(self._watch_session(session_id=session_id, workdir=workdir))
+        self._tasks[session_id] = task
+        task.add_done_callback(lambda done: self._on_watch_done(done, session_id=session_id, workdir=workdir))
+
+    def _on_watch_done(self, task: asyncio.Task[None], *, session_id: str, workdir: str) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.exception(
+            "session supervisor watcher crashed",
+            extra={"session_id": session_id, "workdir": workdir},
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        current = self._tasks.get(session_id)
+        if self._active and (current is None or current is task):
+            self._start_watch_task(session_id=session_id, workdir=workdir)
 
     def schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         """Request a debounced JSONL sync -- picked up on next poll tick."""
@@ -62,22 +82,26 @@ class SessionSupervisor:
         task = self._tasks.pop(session_id, None)
         self._clear_session_mtimes(session_id)
         self._jsonl_sync_requests.pop(session_id, None)
+        self._locks.pop(session_id, None)
         if task is not None:
             task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     async def stop_all(self) -> None:
         """Cancel all watched sessions and wait for termination."""
         self._active = False
         tasks = list(self._tasks.values())
-        self._tasks.clear()
-        self._seen_mtimes.clear()
-        self._session_mtime_keys.clear()
-        self._jsonl_sync_requests.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
+        self._tasks.clear()
+        self._locks.clear()
+        self._seen_mtimes.clear()
+        self._session_mtime_keys.clear()
+        self._jsonl_sync_requests.clear()
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -86,28 +110,31 @@ class SessionSupervisor:
         task = asyncio.current_task()
         try:
             while self._active:
-                async with lock:
-                    state = self._session_store.get(session_id)
-                    if state is None:
-                        return
+                try:
+                    async with lock:
+                        state = self._session_store.get(session_id)
+                        if state is None:
+                            return
 
-                    # Interrupt detection (PROCESSING, WAITING_FOR_APPROVAL)
-                    if state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
-                        await self._maybe_detect_interrupt(state)
+                        # Interrupt detection (PROCESSING, WAITING_FOR_APPROVAL)
+                        if state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+                            await self._maybe_detect_interrupt(state)
 
-                    # Agent file sync (any phase with subagent containers)
-                    if self._has_subagent_files(state):
-                        if await self._sync_files_if_needed(state):
-                            self._refresh_seen_mtimes(state)
+                        # Agent file sync (any phase with subagent containers)
+                        if self._has_subagent_files(state):
+                            if await self._sync_files_if_needed(state):
+                                self._refresh_seen_mtimes(state)
 
-                # Debounced JSONL sync (outside lock to avoid deadlock with _on_jsonl_sync)
-                await self._maybe_process_jsonl_sync(session_id)
+                    # Debounced JSONL sync (outside lock to avoid deadlock with _on_jsonl_sync)
+                    await self._maybe_process_jsonl_sync(session_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("session supervisor tick failed", extra={"session_id": session_id, "workdir": workdir})
 
                 await asyncio.sleep(self._poll_interval_sec)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("session supervisor failed", extra={"session_id": session_id, "workdir": workdir})
         finally:
             if task is not None and self._tasks.get(session_id) is task:
                 self._tasks.pop(session_id, None)

@@ -82,6 +82,70 @@ async def test_hook_socket_server_emits_plain_event(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_hook_socket_server_isolates_sync_event_handler_exception(tmp_path, caplog) -> None:
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+    caplog.set_level(logging.ERROR, logger="app.adapters.claude.hook_socket_server")
+
+    def on_event(event: HookEvent) -> None:
+        raise RuntimeError("handler failed")
+
+    await server.start(on_event)
+    try:
+        reader, writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "SessionStart",
+                "status": "starting",
+            },
+        )
+        assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+    records = [record for record in caplog.records if record.message == "hook socket callback failed"]
+    assert records
+    assert records[0].callback == "event"
+    assert records[0].session_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_isolates_async_event_handler_exception(tmp_path, caplog) -> None:
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+    caplog.set_level(logging.ERROR, logger="app.adapters.claude.hook_socket_server")
+
+    async def on_event(event: HookEvent) -> None:
+        raise RuntimeError("async handler failed")
+
+    await server.start(on_event)
+    try:
+        reader, writer = await _send_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "SessionStart",
+                "status": "starting",
+            },
+        )
+        assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+    records = [record for record in caplog.records if record.message == "hook socket callback failed"]
+    assert records
+    assert records[0].callback == "event"
+    assert records[0].session_id == "s1"
+
+
+@pytest.mark.asyncio
 async def test_hook_socket_server_accepts_normalized_claude_payload(tmp_path) -> None:
     seen: list[HookEvent] = []
     delivered = asyncio.Event()
@@ -916,6 +980,61 @@ async def test_hook_socket_server_returns_false_and_emits_failure_when_writer_br
     assert sent is False
     assert failures == [("s1", "tool-1")]
     assert await server.get_pending_permission(session_id="s1") is None
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_isolates_permission_failure_handler_exception(tmp_path, caplog) -> None:
+    server = HookSocketServer(str(_socket_path()))
+    caplog.set_level(logging.ERROR, logger="app.adapters.claude.hook_socket_server")
+
+    async def on_failure(session_id: str, tool_use_id: str) -> None:
+        raise RuntimeError("failure handler failed")
+
+    server._permission_failure_handler = on_failure
+    event = HookEvent(
+        session_id="s1",
+        cwd="/tmp/project",
+        event="PermissionRequest",
+        status="waiting_for_approval",
+        tool="Bash",
+        tool_input={"command": "pwd"},
+        tool_use_id="tool-1",
+    )
+    server._pending_permissions["tool-1"] = PendingPermissionRequest(
+        session_id="s1",
+        tool_use_id="tool-1",
+        writer=BrokenWriter(),
+        event=event,
+    )
+
+    sent = await server.respond_to_permission(tool_use_id="tool-1", decision="allow")
+
+    assert sent is False
+    assert await server.get_pending_permission(session_id="s1") is None
+    records = [record for record in caplog.records if record.message == "hook socket callback failed"]
+    assert records
+    assert records[0].callback == "permission_failure"
+    assert records[0].tool_use_id == "tool-1"
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_isolates_permission_resolved_handler_exception(caplog) -> None:
+    server = HookSocketServer(str(_socket_path()))
+    caplog.set_level(logging.ERROR, logger="app.adapters.claude.hook_socket_server")
+
+    async def on_resolved(session_id: str, tool_use_id: str, reason: str) -> None:
+        raise RuntimeError("resolved handler failed")
+
+    server._permission_resolved_handler = on_resolved
+
+    await server._emit_permission_resolved("s1", "tool-1", "terminal_approved")
+
+    records = [record for record in caplog.records if record.message == "hook socket callback failed"]
+    assert records
+    assert records[0].callback == "permission_resolved"
+    assert records[0].session_id == "s1"
+    assert records[0].tool_use_id == "tool-1"
+    assert records[0].reason == "terminal_approved"
 
 
 @pytest.mark.asyncio
