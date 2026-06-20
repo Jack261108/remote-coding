@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.handlers.command_utils import split_command_text
 from app.bot.handlers.run_event_streamer import (
     _SPINNER_INITIAL_DELAY_SEC,
     _SPINNER_INTERVAL_SEC,
@@ -58,7 +59,7 @@ def parse_run_args(text: str | None) -> tuple[str | None, str]:
     if not text:
         raise ValueError("用法: /run <provider> <task text>")
 
-    parts = text.strip().split(maxsplit=1)
+    parts = split_command_text(text, maxsplit=1)
     if len(parts) < 2:
         raise ValueError("用法: /run <provider> <task text>")
 

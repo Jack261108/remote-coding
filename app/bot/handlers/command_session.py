@@ -8,6 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.bot.handlers.admin_challenge import maybe_start_admin_challenge
+from app.bot.handlers.command_utils import split_message_command
 from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.session_text import render_structured_session
 from app.services.session_service import SessionService
@@ -29,7 +30,7 @@ def register_session_handler(
     @router.message(Command("session"))
     async def command_session(message: Message) -> None:
         user_id = extract_user_id(message)
-        args = (message.text or "").split(maxsplit=2)
+        args = split_message_command(message, maxsplit=2)
 
         if len(args) == 1:
             session = await session_service.get(user_id)

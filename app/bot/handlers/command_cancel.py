@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.handlers.command_utils import command_args
 from app.bot.handlers.user_utils import extract_user_id
 from app.services.task_service import TaskService
 
@@ -20,7 +21,7 @@ def register_cancel_handler(
 ):
     @router.message(Command("cancel"))
     async def command_cancel(message: Message, command: CommandObject) -> None:
-        task_id = (command.args or "").strip()
+        task_id = command_args(command)
         user_id = extract_user_id(message)
 
         # Cancel pending admin password challenge if no task_id given

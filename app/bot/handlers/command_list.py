@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from html import escape
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
@@ -13,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from app.bot.handlers.user_utils import extract_user_id
 from app.bot.session_list_renderer import ListSessionSource, ListSessionView, build_session_list_message
 from app.domain.models import SessionListItem, utc_now
+from app.infra.text_formatting import html_escape, short_cwd
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.process_liveness import process_is_alive
@@ -32,16 +32,6 @@ _PHASE_ICONS = {
     "compacting": "🔄",
     "ended": "⏹️",
 }
-
-
-def _short_cwd(cwd: str) -> str:
-    """Return last 2 path segments as a short display name."""
-    parts = cwd.rstrip("/").split("/")
-    return "/".join(parts[-2:]) if len(parts) >= 2 else cwd
-
-
-def _html(text: str) -> str:
-    return escape(text, quote=False)
 
 
 def _is_dead_pid(pid: int | None, *, session_id: str, source: str) -> bool:
@@ -65,10 +55,10 @@ def _render_full_list(items: list[SessionListItem]) -> tuple[str, InlineKeyboard
     parts: list[str] = ["📋 <b>活跃会话</b>\n"]
     buttons: list[list[InlineKeyboardButton]] = []
     for item in items:
-        short_cwd = _html(_short_cwd(item.cwd))
-        sid_short = _html(item.session_id[:8])
-        status_text = _html(item.status_text)
-        parts.append(f"{item.status_icon} <b>{short_cwd}</b>")
+        cwd_label = html_escape(short_cwd(item.cwd, fallback=""))
+        sid_short = html_escape(item.session_id[:8])
+        status_text = html_escape(item.status_text)
+        parts.append(f"{item.status_icon} <b>{cwd_label}</b>")
         parts.append(f"   <code>{sid_short}</code> · {status_text}")
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data) for btn_text, cb_data in item.buttons])
         parts.append("")
@@ -153,7 +143,7 @@ def _collect_external_items(
                 status_icon="📡",
                 status_text=status,
                 source="external",
-                buttons=[(ext.title or _short_cwd(ext.cwd), f"sess:select:{external_prefixes[ext.session_id]}")],
+                buttons=[(ext.title or short_cwd(ext.cwd, fallback=""), f"sess:select:{external_prefixes[ext.session_id]}")],
             )
         )
         summary_items.append(
@@ -220,7 +210,7 @@ async def _collect_bound_items(
                 status_icon="🔗",
                 status_text="已绑定",
                 source="bound",
-                buttons=[(title or _short_cwd(b.cwd), f"sess:select:{external_prefixes[b.session_id]}")],
+                buttons=[(title or short_cwd(b.cwd, fallback=""), f"sess:select:{external_prefixes[b.session_id]}")],
             )
         )
         summary_items.append(

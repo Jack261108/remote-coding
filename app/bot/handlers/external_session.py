@@ -6,31 +6,20 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.bot.handlers.command_utils import split_message_command
 from app.bot.handlers.user_utils import extract_user_id
-from app.domain.models import utc_now
-from app.infra.text_formatting import format_external_session_bound_message, format_external_session_unbound_message, short_id
+from app.infra.text_formatting import (
+    format_external_session_bound_message,
+    format_external_session_unbound_message,
+    relative_time_compact_en,
+    short_id,
+)
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.session_id_resolver import BindResult, UnbindResult, _resolve_session_id, resolve_and_bind, resolve_and_unbind
 from app.services.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
-
-
-def _time_ago(dt) -> str:  # noqa: ANN001
-    """Format a datetime as a human-readable 'X ago' string."""
-    delta = utc_now() - dt
-    total_sec = int(delta.total_seconds())
-    if total_sec < 60:
-        return f"{total_sec}s ago"
-    minutes = total_sec // 60
-    if minutes < 60:
-        return f"{minutes}m ago"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours}h ago"
-    days = hours // 24
-    return f"{days}d ago"
 
 
 def register_external_session_handler(
@@ -43,9 +32,8 @@ def register_external_session_handler(
     @router.message(Command("external"))
     async def command_external(message: Message) -> None:
         user_id = extract_user_id(message)
-        text = (message.text or "").strip()
         # Parse: /external <subcommand> [args]
-        parts = text.split(maxsplit=2)
+        parts = split_message_command(message, maxsplit=2)
         # parts[0] = "/external"
         if len(parts) < 2:
             await message.answer(
@@ -87,13 +75,13 @@ async def _handle_list(
     if unbound:
         lines.append("\n🆓 Unbound:")
         for s in unbound:
-            ago = _time_ago(s.first_seen)
+            ago = relative_time_compact_en(s.first_seen)
             lines.append(f"  • {short_id(s.session_id, 12)}... | {s.cwd} | first seen {ago}")
 
     if bound:
         lines.append("\n🔗 Your bound sessions:")
         for b in bound:
-            ago = _time_ago(b.bound_at)
+            ago = relative_time_compact_en(b.bound_at)
             lines.append(f"  • {short_id(b.session_id, 12)}... | {b.cwd} | bound {ago}")
 
     await message.answer("\n".join(lines))

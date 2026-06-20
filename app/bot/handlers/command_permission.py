@@ -7,6 +7,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.handlers.callback_utils import apply_callback_response
+from app.bot.handlers.command_utils import command_args
 from app.bot.handlers.user_utils import extract_user_id
 from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 
@@ -31,7 +32,7 @@ def register_permission_handlers(
     @router.message(Command("deny"))
     async def command_deny(message: Message, command: CommandObject) -> None:
         user_id = extract_user_id(message)
-        reason = (command.args or "").strip() or None
+        reason = command_args(command) or None
         await message.answer(await permission_gateway.handle_deny_command(user_id=user_id, reason=reason))
 
     @router.callback_query(F.data.startswith(f"{_PERMISSION_CALLBACK_PREFIX}:"))

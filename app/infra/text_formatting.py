@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import UTC, datetime
 
 
 def short_id(id_str: str, length: int = 8) -> str:
@@ -17,6 +18,63 @@ def short_id(id_str: str, length: int = 8) -> str:
     'abc123de'
     """
     return id_str[:length]
+
+
+def short_cwd(cwd: str, *, fallback: str = "unknown") -> str:
+    stripped = cwd.rstrip("/")
+    if not stripped:
+        return fallback
+    parts = stripped.split("/")
+    return "/".join(parts[-2:]) if len(parts) >= 2 else stripped
+
+
+def html_escape(text: str) -> str:
+    return html.escape(text, quote=False)
+
+
+def truncate_text(text: str, max_chars: int, *, suffix: str = "…") -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= len(suffix):
+        return suffix[:max_chars]
+    return text[: max_chars - len(suffix)] + suffix
+
+
+def ensure_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def relative_time_zh(activity_at: datetime, now: datetime) -> str:
+    delta_sec = max(0, int((ensure_aware_utc(now) - ensure_aware_utc(activity_at)).total_seconds()))
+    if delta_sec < 60:
+        return "刚刚"
+    minutes = delta_sec // 60
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前"
+    days = hours // 24
+    if days == 1:
+        return "昨天"
+    return f"{days} 天前"
+
+
+def relative_time_compact_en(activity_at: datetime, now: datetime | None = None) -> str:
+    now_utc = ensure_aware_utc(now or datetime.now(UTC))
+    delta_sec = max(0, int((now_utc - ensure_aware_utc(activity_at)).total_seconds()))
+    if delta_sec < 60:
+        return f"{delta_sec}s ago"
+    minutes = delta_sec // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    return f"{days}d ago"
 
 
 def format_external_session_bound_message(session_id: str | None, message: str) -> str:
