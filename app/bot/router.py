@@ -5,10 +5,11 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import BaseFilter, Command
 from aiogram.types import Message
 
 from app.adapters.claude.paths import ClaudePaths
+from app.bot.handlers.admin_challenge import maybe_handle_admin_password_text
 from app.bot.handlers.command_attach import register_attach_handler
 from app.bot.handlers.command_cancel import register_cancel_handler
 from app.bot.handlers.command_claude import register_claude_handler
@@ -50,6 +51,7 @@ from app.services.upload_queue import UploadQueueManager
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.admin_password_service import AdminPasswordService
     from app.services.external_binding_reaper import ExternalBindingReaper
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_gateway import PermissionGateway
@@ -58,9 +60,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class PendingAdminPasswordFilter(BaseFilter):
+    def __init__(self, admin_password_service: AdminPasswordService | None) -> None:
+        self._admin_password_service = admin_password_service
+
+    async def __call__(self, message: Message) -> bool:
+        user_id = message.from_user.id if message.from_user else 0
+        return bool(
+            user_id
+            and self._admin_password_service is not None
+            and self._admin_password_service.is_enabled
+            and self._admin_password_service.has_pending(user_id)
+        )
+
+
 def _register_middleware(
     router: Router,
     session_service: SessionService,
+    *,
+    admin_password_service: AdminPasswordService | None = None,
 ) -> tuple[SessionGuardMiddleware, SessionGuardMiddleware]:
     """Register global middleware (error handling, session guards). Returns guard instances."""
     error_handling_middleware = ErrorHandlingMiddleware()
@@ -72,10 +90,12 @@ def _register_middleware(
         require_active=False,
         skip_commands=("/start", "/session", "/claude", "/exit", "/quit"),
         skip_callback_prefixes=("ext_perm:", "ext_uq:", "sess:", "ask:"),
+        admin_password_service=admin_password_service,
     )
     guard_active = SessionGuardMiddleware(
         session_service,
         require_active=True,
+        admin_password_service=admin_password_service,
     )
     router.message.middleware(guard_basic)
     router.callback_query.middleware(guard_basic)
@@ -288,11 +308,12 @@ def create_router(
     external_binding_reaper: ExternalBindingReaper | None = None,
     title_resolver: Callable[[str, str], str | None] | None = None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
+    admin_password_service: AdminPasswordService | None = None,
 ) -> Router:
     router = Router()
 
     # 注册中间件
-    _, guard_active = _register_middleware(router, session_service)
+    _, guard_active = _register_middleware(router, session_service, admin_password_service=admin_password_service)
 
     # 回调数据验证中间件
     session_callbacks = CallbackValidatorMiddleware(expected_parts=3, prefix="sess")
@@ -386,9 +407,11 @@ def create_router(
         spinner_interval_sec=settings.spinner_interval_sec,
     )
     register_claude_handler(router, task_service=task_service)
-    register_cancel_handler(router, task_service=task_service)
+    register_cancel_handler(router, task_service=task_service, admin_password_service=admin_password_service)
     register_status_handler(router, task_service=task_service)
-    register_session_handler(router, task_service=task_service, session_service=session_service)
+    register_session_handler(
+        router, task_service=task_service, session_service=session_service, admin_password_service=admin_password_service
+    )
     if permission_gateway is not None:
         register_permission_handlers(
             router,
@@ -433,6 +456,15 @@ def create_router(
         title_resolver=title_resolver,
         dead_unbound_cleanup=dead_unbound_cleanup,
     )
+
+    @router.message(PendingAdminPasswordFilter(admin_password_service), F.text & ~F.text.startswith("/"))
+    async def admin_password_text(message: Message) -> None:
+        await maybe_handle_admin_password_text(
+            message,
+            task_service=task_service,
+            session_service=session_service,
+            admin_password_service=admin_password_service,
+        )
 
     # Claude 聊天文本子路由器
     chat_text_router = _create_chat_text_router(

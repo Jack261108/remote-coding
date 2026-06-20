@@ -37,6 +37,7 @@ from app.bot.router import create_router
 from app.config.settings import Settings
 from app.domain.session_tombstone import SessionTombstoneStore
 from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.admin_password_service import AdminPasswordService
 from app.services.auto_approve_service import AutoApproveService
 from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
@@ -56,6 +57,7 @@ from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
 from app.services.result_exporter import ResultExporterService
+from app.services.risk_evaluator import RiskEvaluator
 from app.services.session_ownership_resolver import SessionOwnershipResolver
 from app.services.session_registry import SessionRegistryService
 from app.services.session_scanner import SessionScanner
@@ -135,6 +137,7 @@ class AppContainer(
         )
         self.tombstone_store = SessionTombstoneStore(ttl_seconds=settings.tombstone_ttl_sec)
         self.auto_approve_service = AutoApproveService(tombstone=self.tombstone_store)
+        self.admin_password_service = AdminPasswordService(settings.admin_password or "")
         self.permission_message_builder = PermissionMessageBuilder()
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
         self.session_context_store = FileSessionContextStore(self.file_session_store)
@@ -254,6 +257,13 @@ class AppContainer(
             permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
         )
+        self.risk_evaluator = RiskEvaluator(
+            enabled=settings.risk_eval_enabled,
+            dangerous_commands=settings.risk_eval_dangerous_commands,
+            dangerous_paths=settings.risk_eval_dangerous_paths,
+            protected_paths=settings.risk_eval_protected_paths,
+            auto_approve_max_risk=settings.risk_eval_auto_approve_max_risk,
+        )
         self.permission_gateway = PermissionGateway(
             registry=self.permission_callback_registry,
             auto_approve_service=self.auto_approve_service,
@@ -263,6 +273,7 @@ class AppContainer(
             settings=settings,
             message_sender=self.message_sender,
             message_builder=self.permission_message_builder,
+            risk_evaluator=self.risk_evaluator,
         )
         self.unbound_permission_handler.set_permission_gateway(self.permission_gateway)
         self.push_notifier = ExternalSessionPushNotifier(
@@ -485,5 +496,6 @@ class AppContainer(
             external_binding_reaper=self.external_binding_reaper,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
             dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
+            admin_password_service=self.admin_password_service,
         )
         self.dispatcher.include_router(router)

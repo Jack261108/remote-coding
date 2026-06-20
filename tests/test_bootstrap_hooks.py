@@ -146,6 +146,37 @@ async def test_wire_passes_dead_unbound_cleanup_to_list_router(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_wire_passes_admin_password_service_to_router(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, ADMIN_PASSWORD="secret"))
+    captured: dict[str, object] = {}
+
+    def fake_create_router(**kwargs):
+        captured.update(kwargs)
+        return Router()
+
+    from aiogram import Router
+
+    monkeypatch.setattr("app.bootstrap.create_router", fake_create_router)
+
+    try:
+        container.wire()
+    finally:
+        await container.bot.session.close()
+
+    assert captured["admin_password_service"] is container.admin_password_service
+    assert container.admin_password_service.is_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_permission_gateway_receives_risk_evaluator(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, RISK_EVAL_AUTO_APPROVE_MAX_RISK="中"))
+    try:
+        assert container.permission_gateway._risk_evaluator is container.risk_evaluator
+    finally:
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
 async def test_app_container_start_installs_hooks_and_starts_server(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=True))
 

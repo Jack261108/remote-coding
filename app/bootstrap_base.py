@@ -13,8 +13,10 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings
 from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.admin_password_service import AdminPasswordService
 from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
+from app.services.risk_evaluator import RiskEvaluator
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
@@ -43,6 +45,8 @@ class AppContainerBase:
     claude_jsonl_parser: ClaudeJSONLParser
     structured_session_store: SessionStore
     session_supervisor: SessionSupervisor
+    admin_password_service: AdminPasswordService
+    risk_evaluator: RiskEvaluator
     tmux_runner: TmuxRunner
     cli_factory: CLIAdapterFactory
     session_service: SessionService

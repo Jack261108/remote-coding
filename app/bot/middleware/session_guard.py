@@ -26,13 +26,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.services.session_service import SessionService
+
+if TYPE_CHECKING:
+    from app.services.admin_password_service import AdminPasswordService
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,7 @@ class SessionGuardMiddleware(BaseMiddleware):
         require_active: bool = False,
         skip_commands: tuple[str, ...] = (),
         skip_callback_prefixes: tuple[str, ...] = (),
+        admin_password_service: AdminPasswordService | None = None,
     ) -> None:
         """初始化会话守卫中间件。
 
@@ -78,6 +82,7 @@ class SessionGuardMiddleware(BaseMiddleware):
         self._require_active = require_active
         self._skip_commands = skip_commands
         self._skip_callback_prefixes = skip_callback_prefixes
+        self._admin_password_service = admin_password_service
 
     async def __call__(
         self,
@@ -116,6 +121,11 @@ class SessionGuardMiddleware(BaseMiddleware):
         if self._skip_commands and isinstance(event, Message) and event.text:
             text = event.text.strip()
             if any(text == cmd or text.startswith(f"{cmd} ") for cmd in self._skip_commands):
+                return await handler(event, data)
+
+        if isinstance(event, Message) and self._admin_password_service is not None and self._admin_password_service.has_pending(user_id):
+            text = (event.text or "").strip()
+            if text and (not text.startswith("/") or text == "/cancel" or text.startswith("/cancel ")):
                 return await handler(event, data)
 
         # 跳过不需要会话的回调前缀
