@@ -282,6 +282,16 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         raise ValueError("风险评估配置格式错误，需为逗号分隔的字符串列表")
 
+    @field_validator("risk_eval_auto_approve_max_risk")
+    @classmethod
+    def validate_risk_eval_auto_approve_max_risk(cls, value: str) -> str:
+        # 取值必须与 RiskLevel 枚举一致（app/services/risk_evaluator.py），
+        # 否则 RiskLevel(value) 在 bootstrap 阶段抛出不可读的 ValueError 导致启动崩溃。
+        valid = {"低", "中", "高", "极高"}
+        if value not in valid:
+            raise ValueError(f"RISK_EVAL_AUTO_APPROVE_MAX_RISK 必须是 {'/'.join(valid)} 之一，当前为 {value!r}")
+        return value
+
     @field_validator("claude_tmux_mode", "claude_install_hooks", "auto_file_send_enabled", mode="before")
     @classmethod
     def parse_bool_flag(cls, value: Any) -> bool:
