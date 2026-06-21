@@ -88,8 +88,8 @@ def _register_middleware(
     guard_basic = SessionGuardMiddleware(
         session_service,
         require_active=False,
-        skip_commands=("/start", "/session", "/claude", "/exit", "/quit"),
-        skip_callback_prefixes=("ext_perm:", "ext_uq:", "sess:", "ask:"),
+        skip_commands=("/start", "/session", "/claude", "/exit", "/quit", "/approve", "/deny"),
+        skip_callback_prefixes=("perm:", "ext_perm:", "ext_uq:", "sess:", "ask:"),
         admin_password_service=admin_password_service,
     )
     guard_active = SessionGuardMiddleware(
