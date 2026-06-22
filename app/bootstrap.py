@@ -253,9 +253,10 @@ class AppContainer(
         self.unbound_permission_handler = UnboundPermissionHandler(
             message_sender=self.message_sender,
             hook_socket_server=self.hook_socket_server,
-            allowed_user_ids=settings.allowed_user_id_set,
+            allowed_user_ids=settings.effective_unbound_permission_notify_user_id_set,
             permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
+            notify_user_ids_resolver=self._resolve_unbound_permission_notify_user_ids,
         )
         self.risk_evaluator = RiskEvaluator(
             enabled=settings.risk_eval_enabled,
@@ -306,6 +307,19 @@ class AppContainer(
             ttl=timedelta(hours=settings.external_binding_idle_ttl_hours),
             interval_sec=settings.session_health_check_interval_sec,
         )
+
+    async def _resolve_unbound_permission_notify_user_ids(self) -> set[int]:
+        configured_user_ids = self.settings.unbound_permission_notify_user_id_set
+        if configured_user_ids:
+            return configured_user_ids
+
+        user_ids = {session.user_id for session in await self.session_service.list_all()}
+        user_ids.update(binding.user_id for binding in self.external_binding_store.list_all())
+        if not user_ids:
+            logger.warning(
+                "unbound permission notification has no recipients; set UNBOUND_PERMISSION_NOTIFY_USER_IDS when TG_ALLOWED_USER_IDS=*"
+            )
+        return user_ids
 
     def _init_infrastructure(self) -> None:
         """Initialize lock registries, background tasks, and janitor."""

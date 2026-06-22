@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -43,10 +43,12 @@ class UnboundPermissionHandler:
         allowed_user_ids: set[int],
         permission_ttl_sec: int = 600,
         title_resolver: Callable[[str, str], str | None] | None = None,
+        notify_user_ids_resolver: Callable[[], Awaitable[set[int]]] | None = None,
     ) -> None:
         self._message_sender = message_sender
         self._hook_socket_server = hook_socket_server
         self._allowed_user_ids = allowed_user_ids
+        self._notify_user_ids_resolver = notify_user_ids_resolver
         self._permission_ttl_sec = permission_ttl_sec
         self._title_resolver = title_resolver
         self._permission_gateway: PermissionGateway | None = None
@@ -254,7 +256,7 @@ class UnboundPermissionHandler:
 
     async def _broadcast(self, *, text: str, keyboard: Keyboard | None, parse_mode: str | None) -> list[int]:
         notified_user_ids: list[int] = []
-        for user_id in self._allowed_user_ids:
+        for user_id in sorted(await self._notification_user_ids()):
             try:
                 await self._message_sender.send_message(chat_id=user_id, text=text, keyboard=keyboard, parse_mode=parse_mode)
                 notified_user_ids.append(user_id)
@@ -264,6 +266,13 @@ class UnboundPermissionHandler:
                     extra={"user_id": user_id},
                 )
         return notified_user_ids
+
+    async def _notification_user_ids(self) -> set[int]:
+        user_ids = set(self._allowed_user_ids)
+        resolver = self._notify_user_ids_resolver
+        if user_ids or resolver is None:
+            return user_ids
+        return await resolver()
 
     def _resolve_title(self, session_id: str, cwd: str) -> str | None:
         if self._title_resolver is None:

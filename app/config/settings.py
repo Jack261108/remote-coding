@@ -61,6 +61,10 @@ class Settings(BaseSettings):
 
     tg_bot_token: str = Field(..., alias="TG_BOT_TOKEN", min_length=1)
     tg_allowed_user_ids: Annotated[list[int], NoDecode] = Field(..., alias="TG_ALLOWED_USER_IDS")
+    unbound_permission_notify_user_ids: Annotated[list[int], NoDecode] = Field(
+        default_factory=list,
+        alias="UNBOUND_PERMISSION_NOTIFY_USER_IDS",
+    )
     tg_proxy_url: str | None = Field(None, alias="TG_PROXY_URL")
     tg_request_timeout_sec: int = Field(30, alias="TG_REQUEST_TIMEOUT_SEC")
     tg_polling_retry_delay_sec: int = Field(5, alias="TG_POLLING_RETRY_DELAY_SEC")
@@ -219,22 +223,42 @@ class Settings(BaseSettings):
     @field_validator("tg_allowed_user_ids", mode="before")
     @classmethod
     def parse_user_ids(cls, value: Any) -> list[int]:
-        if isinstance(value, list):
-            if any(str(x).strip() == "*" for x in value):
-                return []
-            items = [int(x) for x in value]
-        elif isinstance(value, str):
-            text = value.strip()
-            if text == "*":
-                return []
-            parts = [x.strip() for x in value.split(",") if x.strip()]
-            items = [int(x) for x in parts]
-        else:
-            raise ValueError("TG_ALLOWED_USER_IDS 格式错误，需为逗号分隔数字或 *")
-
+        if cls._is_star_user_list(value):
+            return []
+        items = cls._parse_user_id_list(value, field_name="TG_ALLOWED_USER_IDS", allow_star=False)
         if not items:
             raise ValueError("TG_ALLOWED_USER_IDS 不能为空（或使用 * 代表允许所有用户）")
         return items
+
+    @field_validator("unbound_permission_notify_user_ids", mode="before")
+    @classmethod
+    def parse_unbound_permission_notify_user_ids(cls, value: Any) -> list[int]:
+        return cls._parse_user_id_list(value, field_name="UNBOUND_PERMISSION_NOTIFY_USER_IDS", allow_star=False)
+
+    @staticmethod
+    def _parse_user_id_list(value: Any, *, field_name: str, allow_star: bool) -> list[int]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            raw_items = [str(x).strip() for x in value if str(x).strip()]
+        elif isinstance(value, str):
+            raw_items = [x.strip() for x in value.split(",") if x.strip()]
+        else:
+            raise ValueError(f"{field_name} 格式错误，需为逗号分隔数字")
+
+        if allow_star and any(x == "*" for x in raw_items):
+            return []
+        if any(x == "*" for x in raw_items):
+            raise ValueError(f"{field_name} 不支持 *，需配置明确的用户 ID")
+        return [int(x) for x in raw_items]
+
+    @staticmethod
+    def _is_star_user_list(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip() == "*"
+        if isinstance(value, list):
+            return any(str(x).strip() == "*" for x in value)
+        return False
 
     @field_validator("tg_proxy_url", "claude_config_dir", "admin_password", mode="before")
     @classmethod
@@ -392,9 +416,15 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def validate_rate_limit_bucket_ttl(self) -> Settings:
+    def validate_cross_field_constraints(self) -> Settings:
         if self.rate_limit_bucket_ttl_sec is not None and self.rate_limit_bucket_ttl_sec < self.rate_limit_window_sec:
             raise ValueError("RATE_LIMIT_BUCKET_TTL_SEC 必须大于等于 RATE_LIMIT_WINDOW_SEC")
+        notify_user_ids = self.unbound_permission_notify_user_id_set
+        if notify_user_ids and not self.allow_all_users:
+            unknown_user_ids = notify_user_ids - self.allowed_user_id_set
+            if unknown_user_ids:
+                ids = ",".join(str(user_id) for user_id in sorted(unknown_user_ids))
+                raise ValueError(f"UNBOUND_PERMISSION_NOTIFY_USER_IDS 必须包含在 TG_ALLOWED_USER_IDS 中，未知用户：{ids}")
         return self
 
     @property
@@ -404,6 +434,15 @@ class Settings(BaseSettings):
     @property
     def allowed_user_id_set(self) -> set[int]:
         return set(self.tg_allowed_user_ids)
+
+    @property
+    def unbound_permission_notify_user_id_set(self) -> set[int]:
+        return set(self.unbound_permission_notify_user_ids)
+
+    @property
+    def effective_unbound_permission_notify_user_id_set(self) -> set[int]:
+        notify_user_ids = self.unbound_permission_notify_user_id_set
+        return notify_user_ids if notify_user_ids else self.allowed_user_id_set
 
     @property
     def default_workdir(self) -> str:

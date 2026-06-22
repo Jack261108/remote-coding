@@ -54,6 +54,25 @@ def test_settings_allow_all_users_star() -> None:
 
     assert settings.allow_all_users is True
     assert settings.allowed_user_id_set == set()
+    assert settings.effective_unbound_permission_notify_user_id_set == set()
+
+
+def test_settings_parses_unbound_permission_notify_user_ids() -> None:
+    settings = Settings.model_validate({**_BASE_PAYLOAD, "UNBOUND_PERMISSION_NOTIFY_USER_IDS": "1"})
+
+    assert settings.unbound_permission_notify_user_ids == [1]
+    assert settings.unbound_permission_notify_user_id_set == {1}
+    assert settings.effective_unbound_permission_notify_user_id_set == {1}
+
+
+def test_settings_rejects_unbound_permission_notify_star() -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({**_BASE_PAYLOAD, "UNBOUND_PERMISSION_NOTIFY_USER_IDS": "*"})
+
+
+def test_settings_rejects_unbound_permission_notify_user_outside_whitelist() -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({**_BASE_PAYLOAD, "UNBOUND_PERMISSION_NOTIFY_USER_IDS": "2"})
 
 
 def test_auth_middleware_allow_all_flag() -> None:
@@ -160,6 +179,8 @@ def test_settings_new_fields_defaults() -> None:
     assert settings.upload_queue_max_files_per_user == 5
     assert settings.upload_queue_max_bytes_per_user is None
     assert settings.effective_upload_queue_max_bytes_per_user == 5 * 20 * 1024 * 1024
+    assert settings.unbound_permission_notify_user_ids == []
+    assert settings.effective_unbound_permission_notify_user_id_set == {1}
 
 
 def test_settings_derived_defaults() -> None:
@@ -259,6 +280,7 @@ def test_env_example_contains_new_entries() -> None:
     assert "UPLOAD_MAX_FILE_SIZE_MB=20" in content
     assert "UPLOAD_QUEUE_MAX_FILES_PER_USER=5" in content
     assert "UPLOAD_QUEUE_MAX_BYTES_PER_USER=" in content
+    assert "UNBOUND_PERMISSION_NOTIFY_USER_IDS=" in content
 
 
 @pytest.mark.asyncio

@@ -299,6 +299,7 @@ tmux attach -t <tmux_session>
 ### 访问控制
 
 - 默认仅白名单用户（`TG_ALLOWED_USER_IDS`）可执行；设置为 `*` 可放开所有用户（仅建议本地调试）
+- `TG_ALLOWED_USER_IDS=*` 时，未绑定外部权限请求可通过 `UNBOUND_PERMISSION_NOTIFY_USER_IDS` 指定通知用户；留空则通知已知会话/绑定用户
 - 工作目录必须在 `ALLOWED_WORKDIRS` 内
 - 管理员密码验证机制
 
