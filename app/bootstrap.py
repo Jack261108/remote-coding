@@ -399,77 +399,83 @@ class AppContainer(
     async def start(self) -> None:
         if self._started:
             return
-        # Register command menu (best-effort)
         try:
-            from app.bot.commands import BOT_COMMANDS
+            # Register command menu (best-effort)
+            try:
+                from app.bot.commands import BOT_COMMANDS
 
-            await self.bot.set_my_commands(BOT_COMMANDS)
-        except Exception as exc:
-            logger.warning("Failed to register bot commands: %s", exc)
-        if self.settings.claude_install_hooks:
-            self.hook_installer.install()
-        await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
-        if self.settings.claude_tmux_mode:
-            await self.session_registry.reconcile_terminal_lifecycle()
-        await self._restore_session_bindings()
+                await self.bot.set_my_commands(BOT_COMMANDS)
+            except Exception as exc:
+                logger.warning("Failed to register bot commands: %s", exc)
+            if self.settings.claude_install_hooks:
+                self.hook_installer.install()
+            await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
+            if self.settings.claude_tmux_mode:
+                await self.session_registry.reconcile_terminal_lifecycle()
+            await self._restore_session_bindings()
 
-        # Initial cleanup passes (before periodic loop starts)
-        await self.external_binding_cleanup_service.run_cleanup()
-        await self.upload_cleanup.run_cleanup()
+            # Initial cleanup passes (before periodic loop starts)
+            await self.external_binding_cleanup_service.run_cleanup()
+            await self.upload_cleanup.run_cleanup()
 
-        # Register periodic jobs
-        self._janitor.register(
-            "upload_queue_cleanup",
-            self.settings.upload_queue_cleanup_interval_sec,
-            self.upload_queue.prune_expired,
-        )
-        self._janitor.register(
-            "upload_file_cleanup",
-            self.settings.upload_cleanup_interval_min * 60,
-            self.upload_cleanup.run_cleanup,
-        )
-        self._janitor.register(
-            "external_discovery_cleanup",
-            self.settings.session_health_check_interval_sec,
-            self._prune_unbound_external_sessions,
-        )
-        self._janitor.register(
-            "session_health_check",
-            self.settings.session_health_check_interval_sec,
-            self.session_registry.reconcile_terminal_lifecycle,
-        )
-
-        async def _cleanup_stale_sessions() -> None:
-            await asyncio.to_thread(
-                self.file_session_store.cleanup_stale_sessions,
-                self.settings.session_cleanup_max_age_hours,
+            # Register periodic jobs
+            self._janitor.register(
+                "upload_queue_cleanup",
+                self.settings.upload_queue_cleanup_interval_sec,
+                self.upload_queue.prune_expired,
+            )
+            self._janitor.register(
+                "upload_file_cleanup",
+                self.settings.upload_cleanup_interval_min * 60,
+                self.upload_cleanup.run_cleanup,
+            )
+            self._janitor.register(
+                "external_discovery_cleanup",
+                self.settings.session_health_check_interval_sec,
+                self._prune_unbound_external_sessions,
+            )
+            self._janitor.register(
+                "session_health_check",
+                self.settings.session_health_check_interval_sec,
+                self.session_registry.reconcile_terminal_lifecycle,
             )
 
-        self._janitor.register(
-            "periodic_recheck",
-            self.settings.claude_periodic_recheck_ms / 1000,
-            self._recheck_active_claude_sessions,
-        )
-        self._janitor.register(
-            "session_cleanup",
-            self.settings.session_cleanup_interval_sec,
-            _cleanup_stale_sessions,
-        )
-        self._external_binding_cleanup_task.start()
-        self._janitor_task.start()
-        self._started = True
+            async def _cleanup_stale_sessions() -> None:
+                await asyncio.to_thread(
+                    self.file_session_store.cleanup_stale_sessions,
+                    self.settings.session_cleanup_max_age_hours,
+                )
+
+            self._janitor.register(
+                "periodic_recheck",
+                self.settings.claude_periodic_recheck_ms / 1000,
+                self._recheck_active_claude_sessions,
+            )
+            self._janitor.register(
+                "session_cleanup",
+                self.settings.session_cleanup_interval_sec,
+                _cleanup_stale_sessions,
+            )
+            self._external_binding_cleanup_task.start()
+            self._janitor_task.start()
+            self._started = True
+        except BaseException:
+            try:
+                await self.stop()
+            except Exception:
+                logger.exception("cleanup after startup failure failed")
+            raise
 
     async def stop(self) -> None:
-        if not self._started:
+        try:
+            await self._janitor_task.stop()
+            await self._external_binding_cleanup_task.stop()
+            await self.session_supervisor.stop_all()
+            await self.hook_socket_server.stop()
+            await self._stop_background_tasks()
+        finally:
             await self.bot.session.close()
-            return
-        await self._janitor_task.stop()
-        await self._external_binding_cleanup_task.stop()
-        await self.session_supervisor.stop_all()
-        await self.hook_socket_server.stop()
-        await self._stop_background_tasks()
-        await self.bot.session.close()
-        self._started = False
+            self._started = False
 
     def wire(self) -> None:
         auth_middleware = AuthMiddleware(

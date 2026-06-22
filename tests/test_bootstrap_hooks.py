@@ -236,6 +236,29 @@ async def test_app_container_start_skips_install_when_disabled(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_app_container_start_failure_runs_partial_cleanup(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    hook_start = AsyncMock()
+    hook_stop = AsyncMock()
+    close = AsyncMock()
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock())
+    monkeypatch.setattr(container.hook_socket_server, "start", hook_start)
+    monkeypatch.setattr(container.hook_socket_server, "stop", hook_stop)
+    monkeypatch.setattr(container.bot.session, "close", close)
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock())
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(side_effect=RuntimeError("cleanup failed")))
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await container.start()
+
+    hook_start.assert_awaited_once()
+    hook_stop.assert_awaited_once()
+    close.assert_awaited_once()
+    assert container._started is False
+
+
+@pytest.mark.asyncio
 async def test_prune_unbound_external_sessions_reuses_discovery_pruners(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     calls: list[str] = []
