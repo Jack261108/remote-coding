@@ -64,6 +64,7 @@ from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.session_supervisor import SessionSupervisor
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
@@ -199,6 +200,7 @@ class AppContainer(
         self.context_builder = ContextBuilderService(upload_store=self.upload_store)
         self.result_exporter = ResultExporterService(settings=settings)
         self.diff_generator = DiffGeneratorService()
+        self.status_display = StatusDisplayService(bot=self.bot)
         self.upload_cleanup = UploadCleanupService(
             upload_store=self.upload_store,
             interval_minutes=settings.upload_cleanup_interval_min,
@@ -503,6 +505,7 @@ class AppContainer(
             upload_queue=self.upload_queue,
             result_exporter=self.result_exporter,
             diff_generator=self.diff_generator,
+            status_display=self.status_display,
             external_discovery=self.external_discovery,
             external_binder=self.external_binder,
             structured_session_store=self.structured_session_store,

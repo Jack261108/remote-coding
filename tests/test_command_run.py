@@ -721,16 +721,18 @@ async def test_run_prompt_and_stream_reports_create_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, float] = {}
+    captured: dict[str, object] = {}
     original_init = command_run_module.RunEventStreamer.__init__
 
     def capture_init(self, *args, **kwargs):
         captured["structured_reply_pump_interval_sec"] = kwargs["structured_reply_pump_interval_sec"]
         captured["spinner_initial_delay_sec"] = kwargs["spinner_initial_delay_sec"]
         captured["spinner_interval_sec"] = kwargs["spinner_interval_sec"]
+        captured["status_display"] = kwargs["status_display"]
         original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(command_run_module.RunEventStreamer, "__init__", capture_init)
+    status_display = SimpleNamespace(start=AsyncMock(), clear=AsyncMock(), update_for_tool=AsyncMock())
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -748,6 +750,7 @@ async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypa
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        status_display=status_display,
         structured_reply_pump_interval_sec=0.77,
         spinner_initial_delay_sec=0.88,
         spinner_interval_sec=0.99,
@@ -759,6 +762,7 @@ async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypa
         "structured_reply_pump_interval_sec": 0.77,
         "spinner_initial_delay_sec": 0.88,
         "spinner_interval_sec": 0.99,
+        "status_display": status_display,
     }
 
 

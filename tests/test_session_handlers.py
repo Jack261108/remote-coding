@@ -794,7 +794,13 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
         SPINNER_INITIAL_DELAY_SEC=0.88,
         SPINNER_INTERVAL_SEC=0.99,
     )
-    router = create_router(settings=settings, task_service=service, session_service=session_service)
+    status_display = object()
+    router = create_router(
+        settings=settings,
+        task_service=service,
+        session_service=session_service,
+        status_display=status_display,
+    )
     text_handler = _find_handler_by_name(router, "command_claude_chat_text")
     assert text_handler is not None, "command_claude_chat_text handler not found"
     message = DummyMessage("你好")
@@ -802,6 +808,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     await text_handler(message, session=session)
 
     run_mock.assert_awaited_once()
+    assert run_mock.await_args.kwargs["status_display"] is status_display
     assert run_mock.await_args.kwargs["structured_reply_pump_interval_sec"] == 0.77
     assert run_mock.await_args.kwargs["spinner_initial_delay_sec"] == 0.88
     assert run_mock.await_args.kwargs["spinner_interval_sec"] == 0.99

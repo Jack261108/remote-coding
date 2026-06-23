@@ -21,6 +21,7 @@ from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.session_supervisor import SessionSupervisor
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
@@ -57,3 +58,4 @@ class AppContainerBase:
     _background_tasks: BackgroundTaskRegistry
     _started: bool
     message_sender: AiogramMessageSender
+    status_display: StatusDisplayService

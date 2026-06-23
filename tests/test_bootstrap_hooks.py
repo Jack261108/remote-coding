@@ -20,6 +20,7 @@ from app.domain.user_question_models import UserQuestionPrompt
 from app.services.auto_approve_service import ActivationSlot
 from app.services.external_user_question_state import PendingExternalUserQuestion
 from app.services.permission_callback_registry import AuthorizationMode, SessionOrigin
+from app.services.status_display import StatusDisplayService
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
@@ -165,6 +166,28 @@ async def test_wire_passes_admin_password_service_to_router(tmp_path, monkeypatc
 
     assert captured["admin_password_service"] is container.admin_password_service
     assert container.admin_password_service.is_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_wire_passes_status_display_to_router(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    captured: dict[str, object] = {}
+
+    def fake_create_router(**kwargs):
+        captured.update(kwargs)
+        return Router()
+
+    from aiogram import Router
+
+    monkeypatch.setattr("app.bootstrap.create_router", fake_create_router)
+
+    try:
+        container.wire()
+    finally:
+        await container.bot.session.close()
+
+    assert isinstance(container.status_display, StatusDisplayService)
+    assert captured["status_display"] is container.status_display
 
 
 @pytest.mark.asyncio

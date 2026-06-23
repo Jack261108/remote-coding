@@ -46,6 +46,7 @@ from app.services.session_registry import SessionRegistryService
 from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 from app.services.upload_queue import UploadQueueManager
 
@@ -216,6 +217,7 @@ def _create_chat_text_router(
     sender_factory: Callable[[], ChunkSender],
     diff_generator: DiffGeneratorService | None,
     result_exporter: ResultExporterService | None,
+    status_display: StatusDisplayService | None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None,
     pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None,
     permission_gateway: PermissionGateway | None,
@@ -265,6 +267,7 @@ def _create_chat_text_router(
             workdir=session.workdir,
             diff_generator=diff_generator,
             result_exporter=result_exporter,
+            status_display=status_display,
             queued_upload_scheduler=queued_upload_scheduler,
             pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
@@ -295,6 +298,7 @@ def create_router(
     upload_queue: UploadQueueManager | None = None,
     result_exporter: ResultExporterService | None = None,
     diff_generator: DiffGeneratorService | None = None,
+    status_display: StatusDisplayService | None = None,
     external_discovery: ExternalSessionDiscoveryService | None = None,
     external_binder: ExternalSessionBinder | None = None,
     structured_session_store: SessionStore | None = None,
@@ -399,6 +403,7 @@ def create_router(
         sender_factory=sender_factory,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        status_display=status_display,
         queued_upload_scheduler=queued_upload_scheduler,
         pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
@@ -475,6 +480,7 @@ def create_router(
         sender_factory=sender_factory,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        status_display=status_display,
         queued_upload_scheduler=queued_upload_scheduler,
         pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,

@@ -32,6 +32,7 @@ from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.models import EventType
 from app.services.diff_generator import DiffGeneratorService
 from app.services.result_exporter import ResultExporterService
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
@@ -93,6 +94,7 @@ async def _create_streaming_components(
     permission_gateway: PermissionGateway | None,
     diff_generator: DiffGeneratorService | None,
     result_exporter: ResultExporterService | None,
+    status_display: StatusDisplayService | None,
     schedule_uploads_fn: Callable[[], None] | None,
     structured_reply_pump_interval_sec: float,
     spinner_initial_delay_sec: float,
@@ -146,6 +148,7 @@ async def _create_streaming_components(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         queued_upload_scheduler=schedule_uploads_fn,
+        status_display=status_display,
         structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
         spinner_initial_delay_sec=spinner_initial_delay_sec,
         spinner_interval_sec=spinner_interval_sec,
@@ -446,6 +449,7 @@ async def run_prompt_and_stream(
     workdir: str | None = None,
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
+    status_display: StatusDisplayService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None = None,
     permission_gateway: PermissionGateway | None = None,
@@ -512,6 +516,7 @@ async def run_prompt_and_stream(
         permission_gateway=permission_gateway,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        status_display=status_display,
         schedule_uploads_fn=schedule_uploads_fn,
         structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
         spinner_initial_delay_sec=spinner_initial_delay_sec,
@@ -562,6 +567,7 @@ def register_run_handler(
     sender_factory,
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
+    status_display: StatusDisplayService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None = None,
     permission_gateway: PermissionGateway | None = None,
@@ -583,6 +589,7 @@ def register_run_handler(
             prompt=prompt,
             diff_generator=diff_generator,
             result_exporter=result_exporter,
+            status_display=status_display,
             queued_upload_scheduler=queued_upload_scheduler,
             pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
