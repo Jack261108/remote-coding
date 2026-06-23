@@ -1,7 +1,6 @@
-"""Tests for PeriodicBackgroundTask and BaseSessionWatcher.
+"""Tests for PeriodicBackgroundTask.
 
-Covers: start, stop, is_running, _periodic_loop, _on_error, and
-BaseSessionWatcher.watch, forget, stop_all.
+Covers: start, stop, is_running, _periodic_loop, and _on_error.
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ import asyncio
 import pytest
 
 from app.infra.periodic_task import PeriodicBackgroundTask
-from app.services.session_watcher_base import BaseSessionWatcher
 
 # ---------------------------------------------------------------------------
 # PeriodicBackgroundTask
@@ -95,72 +93,6 @@ class TestPeriodicBackgroundTask:
         assert task.is_running
         await task.stop()
         assert not task.is_running
-
-
-# ---------------------------------------------------------------------------
-# BaseSessionWatcher
-# ---------------------------------------------------------------------------
-
-
-class ConcreteWatcher(BaseSessionWatcher):
-    def __init__(self) -> None:
-        super().__init__()
-        self.watched: list[tuple[str, str]] = []
-
-    async def _watch_session(self, *, session_id: str, workdir: str) -> None:
-        self.watched.append((session_id, workdir))
-        try:
-            while self._active:
-                await asyncio.sleep(0.01)
-        except asyncio.CancelledError:
-            raise
-
-
-class TestBaseSessionWatcher:
-    @pytest.mark.asyncio
-    async def test_watch_starts_task(self):
-        watcher = ConcreteWatcher()
-        watcher.watch(session_id="s1", workdir="/tmp")
-        await asyncio.sleep(0.02)
-        assert "s1" in watcher._tasks
-        assert not watcher._tasks["s1"].done()
-        await watcher.stop_all()
-
-    @pytest.mark.asyncio
-    async def test_watch_skips_existing_active_task(self):
-        watcher = ConcreteWatcher()
-        watcher.watch(session_id="s1", workdir="/tmp")
-        task1 = watcher._tasks["s1"]
-        watcher.watch(session_id="s1", workdir="/tmp")
-        task2 = watcher._tasks["s1"]
-        assert task1 is task2
-        await watcher.stop_all()
-
-    @pytest.mark.asyncio
-    async def test_forget_cancels_task(self):
-        watcher = ConcreteWatcher()
-        watcher.watch(session_id="s1", workdir="/tmp")
-        await asyncio.sleep(0.02)
-        task = watcher._tasks["s1"]
-        watcher.forget(session_id="s1")
-        assert "s1" not in watcher._tasks
-        await asyncio.sleep(0.02)
-        assert task.done()
-
-    @pytest.mark.asyncio
-    async def test_forget_handles_missing_session(self):
-        watcher = ConcreteWatcher()
-        watcher.forget(session_id="nonexistent")  # should not raise
-
-    @pytest.mark.asyncio
-    async def test_stop_all_cancels_everything(self):
-        watcher = ConcreteWatcher()
-        watcher.watch(session_id="s1", workdir="/tmp1")
-        watcher.watch(session_id="s2", workdir="/tmp2")
-        await asyncio.sleep(0.02)
-        await watcher.stop_all()
-        assert len(watcher._tasks) == 0
-        assert not watcher._active
 
 
 if __name__ == "__main__":  # pragma: no cover
