@@ -17,7 +17,7 @@ def parse_callback_prefix(
     expected_parts: int,
     prefix: str,
 ) -> tuple[str, ...] | None:
-    """解析 callback data 前缀。"""
+    """解析 callback data 前缀"""
     parts = data.split(":")
     if len(parts) != expected_parts:
         return None
@@ -31,7 +31,7 @@ async def safe_edit_keyboard(
     keyboard: Any | None,
     log_prefix: str,
 ) -> bool:
-    """安全地编辑键盘。"""
+    """安全地编辑键盘"""
     try:
         await message.edit_reply_markup(reply_markup=keyboard)
         return True
