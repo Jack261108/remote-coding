@@ -86,35 +86,3 @@ class SessionContextStore(Protocol):
     async def delete(self, user_id: int) -> bool: ...
 
     async def get_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None: ...
-
-
-class MemorySessionStore:
-    def __init__(self) -> None:
-        self._sessions: dict[int, SessionContext] = {}
-        self._lock = asyncio.Lock()
-
-    async def get(self, user_id: int) -> SessionContext | None:
-        async with self._lock:
-            return self._sessions.get(user_id)
-
-    async def list_all(self) -> list[SessionContext]:
-        async with self._lock:
-            return list(self._sessions.values())
-
-    async def get_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None:
-        async with self._lock:
-            for session in self._sessions.values():
-                if session.claude_session_id == claude_session_id:
-                    return session
-            return None
-
-    async def save(self, session: SessionContext) -> None:
-        async with self._lock:
-            self._sessions[session.user_id] = session
-
-    async def delete(self, user_id: int) -> bool:
-        async with self._lock:
-            if user_id in self._sessions:
-                del self._sessions[user_id]
-                return True
-            return False

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 from aiogram import F
 
-from app.adapters.storage.memory import MemorySessionStore
+from app.adapters.storage.file_session_context_store import FileSessionContextStore
+from app.adapters.storage.file_session_store import FileSessionStore
 from app.bot.handlers.command_run import _MARKER_LINE_RE, parse_run_args
 from app.services.session_service import SessionService
 
@@ -47,14 +48,18 @@ class DummyMessage:
         self.answers.append(text)
 
 
+def _session_service(tmp_path) -> SessionService:
+    return SessionService(FileSessionContextStore(FileSessionStore(str(tmp_path))))
+
+
 def test_non_command_text_filter_match() -> None:
     assert (F.text & ~F.text.startswith("/")).resolve(SimpleNamespace(text="hello")) is True
     assert (F.text & ~F.text.startswith("/")).resolve(SimpleNamespace(text="/run hi")) is False
 
 
 @pytest.mark.asyncio
-async def test_non_command_text_requires_claude_session() -> None:
-    session_service = SessionService(MemorySessionStore())
+async def test_non_command_text_requires_claude_session(tmp_path) -> None:
+    session_service = _session_service(tmp_path)
     task_service = DummyTaskService()
     message = DummyMessage("hello")
 
@@ -74,8 +79,8 @@ async def test_non_command_text_requires_claude_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_command_text_routes_to_claude_provider() -> None:
-    session_service = SessionService(MemorySessionStore())
+async def test_non_command_text_routes_to_claude_provider(tmp_path) -> None:
+    session_service = _session_service(tmp_path)
     task_service = DummyTaskService()
     message = DummyMessage("help me")
 

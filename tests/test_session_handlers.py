@@ -7,8 +7,9 @@ import pytest
 from aiogram.types import InaccessibleMessage
 
 from app.adapters.process.tmux_runner import TmuxRunner
+from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
+from app.adapters.storage.memory import MemoryTaskStore
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
@@ -85,6 +86,10 @@ def _tmux_runner_with_session_store(tmp_path) -> TmuxRunner:
     return TmuxRunner(data_dir=str(tmp_path), file_store=file_store, session_store=SessionStore(file_store))
 
 
+def _session_service(tmp_path) -> SessionService:
+    return SessionService(FileSessionContextStore(FileSessionStore(str(tmp_path))))
+
+
 def test_is_accessible_message_rejects_inaccessible_message() -> None:
     inaccessible = InaccessibleMessage.model_construct(chat=None, message_id=1, date=0)
 
@@ -102,7 +107,7 @@ async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
@@ -154,7 +159,7 @@ async def test_session_handler_cleans_orphaned_terminal_resources(tmp_path) -> N
     service = TaskService(
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
     )
@@ -201,7 +206,7 @@ async def test_session_handler_rejects_missing_workdir(tmp_path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
     )
@@ -229,7 +234,7 @@ async def test_status_handler_renders_structured_snapshot(tmp_path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
@@ -478,7 +483,7 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
@@ -549,7 +554,7 @@ async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
@@ -622,7 +627,7 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
@@ -699,7 +704,7 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
-    session_service = SessionService(MemorySessionStore())
+    session_service = _session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -765,7 +770,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
-    session_service = SessionService(MemorySessionStore())
+    session_service = _session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
