@@ -10,6 +10,22 @@ from aiogram.types import CallbackQuery, Message
 logger = logging.getLogger(__name__)
 
 
+def _extract_event_context(event: Any) -> dict[str, Any]:
+    """提取事件日志上下文。"""
+    context: dict[str, Any] = {"event_type": type(event).__name__}
+    user = getattr(event, "from_user", None)
+    if user is None:
+        return context
+
+    user_id = getattr(user, "id", None)
+    username = getattr(user, "username", None)
+    if user_id is not None:
+        context["user_id"] = user_id
+    if username is not None:
+        context["username"] = username
+    return context
+
+
 class ErrorHandlingMiddleware(BaseMiddleware):
     """统一错误处理中间件"""
 
@@ -28,8 +44,8 @@ class ErrorHandlingMiddleware(BaseMiddleware):
             elif isinstance(event, CallbackQuery):
                 await event.answer(f"操作失败: {exc}", show_alert=True)
         except Exception:
-            logger.exception("Handler exception")
+            logger.exception("Handler exception", extra=_extract_event_context(event))
             if isinstance(event, Message):
                 await event.answer("发生内部错误，请稍后重试")
             elif isinstance(event, CallbackQuery):
-                await event.answer("发生内部错误", show_alert=True)
+                await event.answer("发生内部错误，请稍后重试", show_alert=True)
