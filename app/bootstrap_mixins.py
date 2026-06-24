@@ -25,7 +25,7 @@ def _is_session_end_event(event: HookEvent) -> bool:
     return event.event == "SessionEnd" or event.status == "ended"
 
 
-class _StageShortCircuit(Exception):
+class _StageShortCircuitError(Exception):
     """Raised by a pipeline stage to terminate the rest of the stage list.
 
     The orchestration loop catches this, logs at INFO level, closes unawaited
@@ -89,14 +89,14 @@ class HookHandlingMixin(AppContainerBase):
             return
 
         # Stages 2+: each wrapped independently in error boundaries.
-        # A stage may raise _StageShortCircuit to terminate the pipeline early.
+        # A stage may raise _StageShortCircuitError to terminate the pipeline early.
         stages = self._build_stage_list(event, ownership)
         executed_up_to = -1
         for i, (stage_name, stage_coro) in enumerate(stages):
             try:
                 await stage_coro
                 executed_up_to = i
-            except _StageShortCircuit as sc:
+            except _StageShortCircuitError as sc:
                 logger.info(
                     "hook pipeline short-circuited",
                     extra={
@@ -387,7 +387,7 @@ class HookHandlingMixin(AppContainerBase):
             tool_input=event.tool_input,
         )
         if outcome in {AutoApproveOutcome.APPROVED, AutoApproveOutcome.APPROVAL_UNKNOWN}:
-            raise _StageShortCircuit(reason="auto-approved")
+            raise _StageShortCircuitError(reason="auto-approved")
         return outcome
 
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
