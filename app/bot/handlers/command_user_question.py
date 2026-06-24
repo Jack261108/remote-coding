@@ -6,7 +6,7 @@ from typing import TypeGuard
 from aiogram import F
 from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.bot.handlers.callback_utils import safe_edit_keyboard
+from app.bot.handlers.callback_utils import parse_callback_prefix, safe_edit_keyboard
 from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.structured_reply_presenter import UserQuestionOutput, build_user_question_prompt
 from app.domain.user_question_models import UserQuestionPrompt
@@ -46,11 +46,10 @@ def build_multi_select_submit_callback_data(*, tool_use_id: str, question_index:
 def parse_user_question_callback_data(data: str | tuple[str, ...] | None) -> ParsedUserQuestionCallback | None:
     if not data:
         return None
-    parts = list(data) if isinstance(data, tuple) else data.split(":")
-    if not parts or parts[0] != _QUESTION_CALLBACK_PREFIX:
-        return None
-    if len(parts) == 5 and parts[1] == _QUESTION_CALLBACK_ACTION_TOGGLE:
-        _, _, tool_use_id, question_index_text, option_index_text = parts
+    raw_data = ":".join(data) if isinstance(data, tuple) else data
+    toggle_parts = parse_callback_prefix(raw_data, 5, _QUESTION_CALLBACK_PREFIX)
+    if toggle_parts is not None and toggle_parts[1] == _QUESTION_CALLBACK_ACTION_TOGGLE:
+        _, _, tool_use_id, question_index_text, option_index_text = toggle_parts
         try:
             return ParsedUserQuestionCallback(
                 action=_QUESTION_CALLBACK_ACTION_TOGGLE,
@@ -60,8 +59,9 @@ def parse_user_question_callback_data(data: str | tuple[str, ...] | None) -> Par
             )
         except ValueError:
             return None
-    if len(parts) == 4 and parts[1] == _QUESTION_CALLBACK_ACTION_SUBMIT:
-        _, _, tool_use_id, question_index_text = parts
+    submit_parts = parse_callback_prefix(raw_data, 4, _QUESTION_CALLBACK_PREFIX)
+    if submit_parts is not None and submit_parts[1] == _QUESTION_CALLBACK_ACTION_SUBMIT:
+        _, _, tool_use_id, question_index_text = submit_parts
         try:
             return ParsedUserQuestionCallback(
                 action=_QUESTION_CALLBACK_ACTION_SUBMIT,
@@ -70,8 +70,9 @@ def parse_user_question_callback_data(data: str | tuple[str, ...] | None) -> Par
             )
         except ValueError:
             return None
-    if len(parts) == 4:
-        _, tool_use_id, question_index_text, option_index_text = parts
+    select_parts = parse_callback_prefix(raw_data, 4, _QUESTION_CALLBACK_PREFIX)
+    if select_parts is not None:
+        _, tool_use_id, question_index_text, option_index_text = select_parts
         # 验证 tool_use_id 格式（至少应为非空字符串）
         if not tool_use_id:
             return None

@@ -31,6 +31,8 @@ from typing import Any
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, TelegramObject
 
+from app.bot.handlers.callback_utils import parse_callback_prefix
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,17 +107,26 @@ class CallbackValidatorMiddleware(BaseMiddleware):
             await event.answer("无效的回调数据", show_alert=True)
             return None
 
-        parts = event.data.split(":")
+        parts: tuple[str, ...] | None = None
+        expected_parts = self._expected_parts or (len(event.data.split(":")),)
+        prefixes = (self._prefix,) if isinstance(self._prefix, str) else self._prefix
 
-        if self._expected_parts is not None and len(parts) not in self._expected_parts:
+        if prefixes:
+            for expected_part in expected_parts:
+                for prefix in prefixes:
+                    parts = parse_callback_prefix(event.data, expected_part, prefix)
+                    if parts is not None:
+                        break
+                if parts is not None:
+                    break
+        else:
+            candidate_parts = tuple(event.data.split(":"))
+            if len(candidate_parts) in expected_parts:
+                parts = candidate_parts
+
+        if parts is None:
             await event.answer("无效的回调数据", show_alert=True)
             return None
 
-        if self._prefix:
-            prefixes = (self._prefix,) if isinstance(self._prefix, str) else self._prefix
-            if not any(parts[0].startswith(p) for p in prefixes):
-                await event.answer("无效的回调数据", show_alert=True)
-                return None
-
-        data["callback_parts"] = tuple(parts)
+        data["callback_parts"] = parts
         return await handler(event, data)
