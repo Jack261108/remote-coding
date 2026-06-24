@@ -123,6 +123,7 @@ def _register_optional_handlers(
     if session_scanner is not None and claude_paths is not None:
         resume_active_router = Router()
         resume_active_router.message.middleware(guard_active)
+        resume_active_router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=2, prefix="resume"))
         resume_active_router.callback_query.middleware(guard_active)
         register_resume_handler(
             resume_active_router,
@@ -133,8 +134,10 @@ def _register_optional_handlers(
         router.include_router(resume_active_router)
 
     if registry_service is not None:
+        list_router = Router()
+        list_router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=(2, 3), prefix="sess"))
         register_list_handler(
-            router,
+            list_router,
             registry_service=registry_service,
             external_discovery=external_discovery,
             external_binder=external_binder,
@@ -143,6 +146,7 @@ def _register_optional_handlers(
             title_resolver=title_resolver,
             dead_unbound_cleanup=dead_unbound_cleanup,
         )
+        router.include_router(list_router)
         register_attach_handler(router, registry_service=registry_service)
 
     if external_discovery is not None and external_binder is not None:
@@ -423,6 +427,7 @@ def create_router(
     # 子路由器：需要活跃会话的命令
     cmds_active_router = Router()
     cmds_active_router.message.middleware(guard_active)
+    cmds_active_router.callback_query.middleware(CallbackValidatorMiddleware(prefix="clcmd"))
     cmds_active_router.callback_query.middleware(guard_active)
     register_cmds_handler(cmds_active_router, task_service=task_service)
     router.include_router(cmds_active_router)

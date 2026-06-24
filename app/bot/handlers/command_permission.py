@@ -22,7 +22,7 @@ def register_permission_handlers(
     *,
     permission_gateway: PermissionGateway,
 ):
-    router.callback_query.middleware(CallbackValidatorMiddleware(prefix=_PERMISSION_CALLBACK_PREFIX))
+    router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=3, prefix=_PERMISSION_CALLBACK_PREFIX))
 
     @router.message(Command("approve"))
     async def command_approve(message: Message) -> None:
