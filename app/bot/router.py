@@ -86,26 +86,15 @@ def _register_middleware(
     router.message.middleware(error_handling_middleware)
     router.callback_query.middleware(error_handling_middleware)
 
-    guard_basic = SessionGuardMiddleware(
-        session_service,
-        require_active=False,
-        skip_commands=("/start", "/session", "/claude", "/exit", "/quit", "/approve", "/deny"),
-        skip_callback_prefixes=("perm:", "ext_perm:", "ext_uq:", "sess:", "ask:"),
-        admin_password_service=admin_password_service,
-    )
-    guard_active = SessionGuardMiddleware(
-        session_service,
-        require_active=True,
-        admin_password_service=admin_password_service,
-    )
-    router.message.middleware(guard_basic)
-    router.callback_query.middleware(guard_basic)
+    guard_basic = SessionGuardMiddleware(session_service, require_active=False)
+    guard_active = SessionGuardMiddleware(session_service, require_active=True)
     return guard_basic, guard_active
 
 
 def _register_optional_handlers(
     router: Router,
     *,
+    guard_basic: SessionGuardMiddleware,
     guard_active: SessionGuardMiddleware,
     session_callbacks: CallbackValidatorMiddleware,
     permission_callbacks: CallbackValidatorMiddleware,
@@ -189,6 +178,7 @@ def _register_optional_handlers(
 
     if file_receiver is not None and upload_queue is not None:
         upload_guard_router = Router()
+        upload_guard_router.message.middleware(guard_basic)
         register_file_upload_handler(
             upload_guard_router,
             file_receiver=file_receiver,
@@ -317,7 +307,7 @@ def create_router(
     router = Router()
 
     # 注册中间件
-    _, guard_active = _register_middleware(router, session_service, admin_password_service=admin_password_service)
+    guard_basic, guard_active = _register_middleware(router, session_service, admin_password_service=admin_password_service)
 
     # 回调数据验证中间件
     session_callbacks = CallbackValidatorMiddleware(expected_parts=3, prefix="sess")
@@ -437,6 +427,7 @@ def create_router(
     # 可选处理器（依赖服务可用性）
     _register_optional_handlers(
         router,
+        guard_basic=guard_basic,
         guard_active=guard_active,
         session_callbacks=session_callbacks,
         permission_callbacks=permission_callbacks,

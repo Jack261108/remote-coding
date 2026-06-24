@@ -27,4 +27,5 @@ class AuthMiddleware(BaseMiddleware):
             await event.answer("未授权用户，拒绝访问。")
             return None
 
+        data["user_id"] = user.id
         return await handler(event, data)

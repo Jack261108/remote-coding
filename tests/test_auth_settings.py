@@ -305,7 +305,7 @@ async def test_auth_middleware_allows_callback_query_user() -> None:
     result = await middleware(_passing_handler, callback, data)
 
     assert result == "ok"
-    assert data == {"called": True}
+    assert data == {"user_id": 1, "called": True}
     assert callback.answers == []
 
 
