@@ -63,9 +63,9 @@ def register_session_action_handlers(
         if callback.message:
             await callback.message.answer(detail_text, reply_markup=keyboard)
 
-    async def _handle_bind_unbind_action(callback: CallbackQuery, action_type: str, callback_parts: tuple[str, ...]) -> None:
+    async def _handle_bind_unbind_action(callback: CallbackQuery, action_type: str) -> None:
         user_id = extract_user_id(callback)
-        session_id_prefix = callback_parts[2]
+        session_id_prefix = callback.data.split(":", 2)[2] if callback.data else ""
 
         result: BindResult | UnbindResult
         if action_type == "bind":
@@ -86,11 +86,11 @@ def register_session_action_handlers(
 
     @router.callback_query(F.data.startswith("sess:bind:"))
     async def handle_session_bind(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
-        await _handle_bind_unbind_action(callback, "bind", callback_parts)
+        await _handle_bind_unbind_action(callback, "bind")
 
     @router.callback_query(F.data.startswith("sess:unbind:"))
     async def handle_session_unbind(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
-        await _handle_bind_unbind_action(callback, "unbind", callback_parts)
+        await _handle_bind_unbind_action(callback, "unbind")
 
     # ── tmux session actions ─────────────────────────────────────────────────
 
