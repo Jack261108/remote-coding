@@ -8,7 +8,6 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardButt
 
 from app.bot.handlers.callback_utils import safe_edit_keyboard
 from app.bot.handlers.user_utils import extract_user_id
-from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.bot.presenters.structured_reply_presenter import UserQuestionOutput, build_user_question_prompt
 from app.domain.user_question_models import UserQuestionPrompt
 from app.services.task_service import TaskService
@@ -175,8 +174,6 @@ async def maybe_handle_pending_user_question_text(
 
 
 def register_user_question_handlers(router, *, task_service: TaskService):
-    router.callback_query.middleware(CallbackValidatorMiddleware(prefix=_QUESTION_CALLBACK_PREFIX))
-
     @router.callback_query(F.data.startswith(f"{_QUESTION_CALLBACK_PREFIX}:"))
     async def callback_user_question(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         user_id = extract_user_id(callback)

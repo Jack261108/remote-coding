@@ -408,10 +408,13 @@ def create_router(
         router, task_service=task_service, session_service=session_service, admin_password_service=admin_password_service
     )
     if permission_gateway is not None:
+        permission_router = Router()
+        permission_router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=3, prefix="perm"))
         register_permission_handlers(
-            router,
+            permission_router,
             permission_gateway=permission_gateway,
         )
+        router.include_router(permission_router)
     uq_router = Router()
     uq_router.callback_query.middleware(user_question_callbacks)
     register_user_question_handlers(uq_router, task_service=task_service)
