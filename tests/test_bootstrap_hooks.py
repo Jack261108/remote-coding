@@ -819,7 +819,7 @@ async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_work
 async def test_handle_hook_event_binds_unowned_tmux_first_hook_with_active_task(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
