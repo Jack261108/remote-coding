@@ -777,9 +777,7 @@ async def test_handle_hook_event_does_not_bind_session_by_unique_workdir_when_cl
 
 
 @pytest.mark.asyncio
-async def test_handle_hook_event_does_not_bind_session_for_stale_processing_terminal_state(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_handle_hook_event_binds_session_for_empty_processing_terminal_state(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
     session = await container.session_service.switch(
@@ -817,8 +815,13 @@ async def test_handle_hook_event_does_not_bind_session_for_stale_processing_term
 
     updated = await container.session_service.get(1)
     assert updated is not None
-    assert updated.claude_session_id is None
+    assert updated.claude_session_id == "claude-session-1"
     assert updated.terminal_id == session.terminal_id
+
+    state = container.structured_session_store.get("claude-session-1")
+    assert state is not None
+    assert state.user_id == 1
+    assert state.terminal_id == session.terminal_id
 
 
 @pytest.mark.asyncio

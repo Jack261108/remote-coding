@@ -844,6 +844,9 @@ class SessionMatchingMixin(AppContainerBase):
         if terminal_state.phase in {SessionPhase.IDLE, SessionPhase.WAITING_FOR_INPUT}:
             return True, "terminal_waiting", terminal_state
 
+        if terminal_state.phase == SessionPhase.PROCESSING and terminal_state.session_id.startswith("tgcli_"):
+            return True, "terminal_empty_processing_fallback", terminal_state
+
         return False, "terminal_empty_not_waiting", terminal_state
 
 
