@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -10,7 +10,14 @@ from typing import TYPE_CHECKING, Any
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from app.bot.handlers.run_event_streamer import RunEventStreamer, _build_created_message
+from app.bot.handlers.command_utils import split_command_text
+from app.bot.handlers.run_event_streamer import (
+    _SPINNER_INITIAL_DELAY_SEC,
+    _SPINNER_INTERVAL_SEC,
+    _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
+    RunEventStreamer,
+    _build_created_message,
+)
 from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.handlers.user_utils import extract_user_id
@@ -25,6 +32,7 @@ from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.models import EventType
 from app.services.diff_generator import DiffGeneratorService
 from app.services.result_exporter import ResultExporterService
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
@@ -52,7 +60,7 @@ def parse_run_args(text: str | None) -> tuple[str | None, str]:
     if not text:
         raise ValueError("用法: /run <provider> <task text>")
 
-    parts = text.strip().split(maxsplit=1)
+    parts = split_command_text(text, maxsplit=1)
     if len(parts) < 2:
         raise ValueError("用法: /run <provider> <task text>")
 
@@ -86,7 +94,11 @@ async def _create_streaming_components(
     permission_gateway: PermissionGateway | None,
     diff_generator: DiffGeneratorService | None,
     result_exporter: ResultExporterService | None,
+    status_display: StatusDisplayService | None,
     schedule_uploads_fn: Callable[[], None] | None,
+    structured_reply_pump_interval_sec: float,
+    spinner_initial_delay_sec: float,
+    spinner_interval_sec: float,
 ) -> _StreamingComponents:
     """Create and wire all streaming components for a task run."""
     messenger = RunTelegramMessenger(
@@ -136,6 +148,10 @@ async def _create_streaming_components(
         diff_generator=diff_generator,
         result_exporter=result_exporter,
         queued_upload_scheduler=schedule_uploads_fn,
+        status_display=status_display,
+        structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
+        spinner_initial_delay_sec=spinner_initial_delay_sec,
+        spinner_interval_sec=spinner_interval_sec,
     )
     await presenter.prime(baseline_current_snapshot=True)
 
@@ -433,8 +449,13 @@ async def run_prompt_and_stream(
     workdir: str | None = None,
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
+    status_display: StatusDisplayService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
+    pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
+    spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
+    spinner_interval_sec: float = _SPINNER_INTERVAL_SEC,
 ) -> asyncio.Task | None:
     logger.info(
         "run prompt requested",
@@ -445,12 +466,22 @@ async def run_prompt_and_stream(
             "workdir": workdir,
         },
     )
-    start = await task_service.create_and_run(
-        user_id=user_id,
-        provider=provider,
-        prompt=prompt,
-        workdir=workdir,
-    )
+    try:
+        if pending_upload_finalizer is not None:
+            await pending_upload_finalizer(message, user_id)
+        start = await task_service.create_and_run(
+            user_id=user_id,
+            provider=provider,
+            prompt=prompt,
+            workdir=workdir,
+        )
+    except ValueError as exc:
+        await message.answer(f"参数错误: {exc}")
+        return None
+    except Exception:
+        logger.exception("failed to create task", extra={"user_id": user_id, "provider": provider})
+        await message.answer("创建任务失败，请稍后重试")
+        return None
 
     logger.info(
         "run prompt created task",
@@ -485,7 +516,11 @@ async def run_prompt_and_stream(
         permission_gateway=permission_gateway,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        status_display=status_display,
         schedule_uploads_fn=schedule_uploads_fn,
+        structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
+        spinner_initial_delay_sec=spinner_initial_delay_sec,
+        spinner_interval_sec=spinner_interval_sec,
     )
 
     start.events = _wrap_events_with_progress(start.events, state)
@@ -532,8 +567,13 @@ def register_run_handler(
     sender_factory,
     diff_generator: DiffGeneratorService | None = None,
     result_exporter: ResultExporterService | None = None,
+    status_display: StatusDisplayService | None = None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
+    pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
+    spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
+    spinner_interval_sec: float = _SPINNER_INTERVAL_SEC,
 ):
     @router.message(Command("run"))
     async def command_run(message: Message, command: CommandObject) -> None:
@@ -549,6 +589,11 @@ def register_run_handler(
             prompt=prompt,
             diff_generator=diff_generator,
             result_exporter=result_exporter,
+            status_display=status_display,
             queued_upload_scheduler=queued_upload_scheduler,
+            pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
+            structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
+            spinner_initial_delay_sec=spinner_initial_delay_sec,
+            spinner_interval_sec=spinner_interval_sec,
         )

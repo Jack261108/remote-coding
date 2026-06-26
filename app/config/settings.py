@@ -61,6 +61,10 @@ class Settings(BaseSettings):
 
     tg_bot_token: str = Field(..., alias="TG_BOT_TOKEN", min_length=1)
     tg_allowed_user_ids: Annotated[list[int], NoDecode] = Field(..., alias="TG_ALLOWED_USER_IDS")
+    unbound_permission_notify_user_ids: Annotated[list[int], NoDecode] = Field(
+        default_factory=list,
+        alias="UNBOUND_PERMISSION_NOTIFY_USER_IDS",
+    )
     tg_proxy_url: str | None = Field(None, alias="TG_PROXY_URL")
     tg_request_timeout_sec: int = Field(30, alias="TG_REQUEST_TIMEOUT_SEC")
     tg_polling_retry_delay_sec: int = Field(5, alias="TG_POLLING_RETRY_DELAY_SEC")
@@ -81,10 +85,22 @@ class Settings(BaseSettings):
     claude_hook_max_pending_permissions: int = Field(64, alias="CLAUDE_HOOK_MAX_PENDING_PERMISSIONS")
     claude_jsonl_sync_debounce_ms: int = Field(100, alias="CLAUDE_JSONL_SYNC_DEBOUNCE_MS")
     claude_periodic_recheck_ms: int = Field(500, alias="CLAUDE_PERIODIC_RECHECK_MS")
+
+    # Tmux runner timing
+    tmux_poll_interval_sec: float = Field(0.2, alias="TMUX_POLL_INTERVAL_SEC")
+    tmux_enter_delay_sec: float = Field(0.2, alias="TMUX_ENTER_DELAY_SEC")
+    tmux_partial_flush_sec: float = Field(0.5, alias="TMUX_PARTIAL_FLUSH_SEC")
+    tmux_completion_grace_sec: float = Field(0.1, alias="TMUX_COMPLETION_GRACE_SEC")
+
+    # UI timing
+    structured_reply_pump_interval_sec: float = Field(0.05, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
+    spinner_initial_delay_sec: float = Field(3.0, alias="SPINNER_INITIAL_DELAY_SEC")
+    spinner_interval_sec: float = Field(1.0, alias="SPINNER_INTERVAL_SEC")
     codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
     gemini_cli_bin: str = Field("gemini", alias="GEMINI_CLI_BIN")
 
     allowed_workdirs: Annotated[list[str], NoDecode] = Field(default_factory=lambda: [str(Path.cwd())], alias="ALLOWED_WORKDIRS")
+    admin_password: str | None = Field(None, alias="ADMIN_PASSWORD")
 
     rate_limit_max_requests: int = Field(6, alias="RATE_LIMIT_MAX_REQUESTS")
     rate_limit_window_sec: int = Field(20, alias="RATE_LIMIT_WINDOW_SEC")
@@ -129,6 +145,10 @@ class Settings(BaseSettings):
     tombstone_ttl_sec: int = Field(3600, alias="TOMBSTONE_TTL_SEC")
     push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
 
+    # Session cleanup settings
+    session_cleanup_interval_sec: int = Field(3600, alias="SESSION_CLEANUP_INTERVAL_SEC")  # 1 hour
+    session_cleanup_max_age_hours: int = Field(24, alias="SESSION_CLEANUP_MAX_AGE_HOURS")  # 24 hours
+
     # Auto file send settings
     auto_file_send_enabled: bool = Field(True, alias="AUTO_FILE_SEND_ENABLED")
     auto_file_send_extensions: Annotated[list[str], NoDecode] = Field(
@@ -154,27 +174,93 @@ class Settings(BaseSettings):
     auto_export_threshold_chars: int = Field(4096, alias="AUTO_EXPORT_THRESHOLD_CHARS")
     zip_max_size_mb: int = Field(50, alias="ZIP_MAX_SIZE_MB")
 
+    # Risk evaluation settings
+    risk_eval_enabled: bool = Field(True, alias="RISK_EVAL_ENABLED")
+    risk_eval_dangerous_commands: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "rm -rf",
+            "rm -r",
+            "rm -f",
+            "sudo rm",
+            "dd ",
+            "dd if=",
+            "mkfs",
+            "unlink",
+            "shred",
+            "git reset --hard",
+            "git clean -fd",
+            "git push --force",
+            "git push -f",
+            "DROP TABLE",
+            "DELETE FROM",
+            "TRUNCATE",
+            "chmod 777",
+            "chown root",
+        ],
+        alias="RISK_EVAL_DANGEROUS_COMMANDS",
+    )
+    risk_eval_dangerous_paths: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            ".env",
+            ".ssh",
+            "id_rsa",
+            "id_ed25519",
+            "token",
+            "credentials",
+            "private_key",
+            "secrets",
+            ".pem",
+            ".key",
+        ],
+        alias="RISK_EVAL_DANGEROUS_PATHS",
+    )
+    risk_eval_protected_paths: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["/etc", "/var", "/usr", "/root"],
+        alias="RISK_EVAL_PROTECTED_PATHS",
+    )
+    risk_eval_auto_approve_max_risk: str = Field("低", alias="RISK_EVAL_AUTO_APPROVE_MAX_RISK")
+
     @field_validator("tg_allowed_user_ids", mode="before")
     @classmethod
     def parse_user_ids(cls, value: Any) -> list[int]:
-        if isinstance(value, list):
-            if any(str(x).strip() == "*" for x in value):
-                return []
-            items = [int(x) for x in value]
-        elif isinstance(value, str):
-            text = value.strip()
-            if text == "*":
-                return []
-            parts = [x.strip() for x in value.split(",") if x.strip()]
-            items = [int(x) for x in parts]
-        else:
-            raise ValueError("TG_ALLOWED_USER_IDS 格式错误，需为逗号分隔数字或 *")
-
+        if cls._is_star_user_list(value):
+            return []
+        items = cls._parse_user_id_list(value, field_name="TG_ALLOWED_USER_IDS", allow_star=False)
         if not items:
             raise ValueError("TG_ALLOWED_USER_IDS 不能为空（或使用 * 代表允许所有用户）")
         return items
 
-    @field_validator("tg_proxy_url", "claude_config_dir", mode="before")
+    @field_validator("unbound_permission_notify_user_ids", mode="before")
+    @classmethod
+    def parse_unbound_permission_notify_user_ids(cls, value: Any) -> list[int]:
+        return cls._parse_user_id_list(value, field_name="UNBOUND_PERMISSION_NOTIFY_USER_IDS", allow_star=False)
+
+    @staticmethod
+    def _parse_user_id_list(value: Any, *, field_name: str, allow_star: bool) -> list[int]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            raw_items = [str(x).strip() for x in value if str(x).strip()]
+        elif isinstance(value, str):
+            raw_items = [x.strip() for x in value.split(",") if x.strip()]
+        else:
+            raise ValueError(f"{field_name} 格式错误，需为逗号分隔数字")
+
+        if allow_star and any(x == "*" for x in raw_items):
+            return []
+        if any(x == "*" for x in raw_items):
+            raise ValueError(f"{field_name} 不支持 *，需配置明确的用户 ID")
+        return [int(x) for x in raw_items]
+
+    @staticmethod
+    def _is_star_user_list(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip() == "*"
+        if isinstance(value, list):
+            return any(str(x).strip() == "*" for x in value)
+        return False
+
+    @field_validator("tg_proxy_url", "claude_config_dir", "admin_password", mode="before")
     @classmethod
     def parse_optional_text(cls, value: Any) -> str | None:
         if value is None:
@@ -205,6 +291,30 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [ext.strip().lower() for ext in value.split(",") if ext.strip()]
         raise ValueError("ALLOWED_FILE_EXTENSIONS 格式错误，需为逗号分隔扩展名")
+
+    @field_validator(
+        "risk_eval_dangerous_commands",
+        "risk_eval_dangerous_paths",
+        "risk_eval_protected_paths",
+        mode="before",
+    )
+    @classmethod
+    def parse_risk_eval_lists(cls, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [item.strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        raise ValueError("风险评估配置格式错误，需为逗号分隔的字符串列表")
+
+    @field_validator("risk_eval_auto_approve_max_risk")
+    @classmethod
+    def validate_risk_eval_auto_approve_max_risk(cls, value: str) -> str:
+        # 取值必须与 RiskLevel 枚举一致（app/services/risk_evaluator.py），
+        # 否则 RiskLevel(value) 在 bootstrap 阶段抛出不可读的 ValueError 导致启动崩溃。
+        valid = {"低", "中", "高", "极高"}
+        if value not in valid:
+            raise ValueError(f"RISK_EVAL_AUTO_APPROVE_MAX_RISK 必须是 {'/'.join(valid)} 之一，当前为 {value!r}")
+        return value
 
     @field_validator("claude_tmux_mode", "claude_install_hooks", "auto_file_send_enabled", mode="before")
     @classmethod
@@ -277,6 +387,23 @@ class Settings(BaseSettings):
             raise ValueError("UPLOAD_QUEUE_MAX_FILES_PER_USER 必须大于等于 0")
         return value
 
+    @field_validator(
+        "tmux_poll_interval_sec",
+        "tmux_enter_delay_sec",
+        "tmux_partial_flush_sec",
+        "tmux_completion_grace_sec",
+        "structured_reply_pump_interval_sec",
+        "spinner_initial_delay_sec",
+        "spinner_interval_sec",
+        "session_health_check_interval_sec",
+        "external_session_stale_timeout_sec",
+    )
+    @classmethod
+    def validate_positive_float(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("配置值必须大于 0")
+        return value
+
     @field_validator("rate_limit_bucket_ttl_sec", "permission_lock_ttl_sec", "upload_queue_max_bytes_per_user", mode="before")
     @classmethod
     def validate_optional_positive_int(cls, value: Any) -> Any:
@@ -289,9 +416,15 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def validate_rate_limit_bucket_ttl(self) -> Settings:
+    def validate_cross_field_constraints(self) -> Settings:
         if self.rate_limit_bucket_ttl_sec is not None and self.rate_limit_bucket_ttl_sec < self.rate_limit_window_sec:
             raise ValueError("RATE_LIMIT_BUCKET_TTL_SEC 必须大于等于 RATE_LIMIT_WINDOW_SEC")
+        notify_user_ids = self.unbound_permission_notify_user_id_set
+        if notify_user_ids and not self.allow_all_users:
+            unknown_user_ids = notify_user_ids - self.allowed_user_id_set
+            if unknown_user_ids:
+                ids = ",".join(str(user_id) for user_id in sorted(unknown_user_ids))
+                raise ValueError(f"UNBOUND_PERMISSION_NOTIFY_USER_IDS 必须包含在 TG_ALLOWED_USER_IDS 中，未知用户：{ids}")
         return self
 
     @property
@@ -301,6 +434,15 @@ class Settings(BaseSettings):
     @property
     def allowed_user_id_set(self) -> set[int]:
         return set(self.tg_allowed_user_ids)
+
+    @property
+    def unbound_permission_notify_user_id_set(self) -> set[int]:
+        return set(self.unbound_permission_notify_user_ids)
+
+    @property
+    def effective_unbound_permission_notify_user_id_set(self) -> set[int]:
+        notify_user_ids = self.unbound_permission_notify_user_id_set
+        return notify_user_ids if notify_user_ids else self.allowed_user_id_set
 
     @property
     def default_workdir(self) -> str:

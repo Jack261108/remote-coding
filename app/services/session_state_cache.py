@@ -130,6 +130,18 @@ class SessionStateCache:
         self._touch(state.session_id)
         self._evict_if_needed()
 
+    def remove(self, session_id: str) -> bool:
+        """Remove a SessionState from the cache.
+
+        Returns:
+            True if the state was removed, False if it wasn't in the cache.
+        """
+        session_id = validate_session_id(session_id)
+        if session_id in self._states:
+            del self._states[session_id]
+            return True
+        return False
+
     def values(self) -> list[SessionState]:
         """Return all currently cached session states (snapshot)."""
         return list(self._states.values())

@@ -9,7 +9,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import FSInputFile, Message
 
 from app.bot.handlers.user_utils import extract_user_id
-from app.services.result_exporter import ResultExporterService
+from app.services.result_exporter import ResultExporterService, ZipSizeLimitError
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,9 @@ def register_export_handler(
             # Send as Telegram document
             doc = FSInputFile(path=export_result.file_path, filename=export_result.filename)
             await message.answer_document(doc)
+        except ZipSizeLimitError as exc:
+            await message.answer(f"导出失败: {exc}")
+            return
         finally:
             # Clean up temp files
             try:

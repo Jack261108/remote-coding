@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.bot.handlers.command_export import parse_export_args
+from app.bot.handlers.command_export import parse_export_args, register_export_handler
 from app.domain.file_models import ExportResult
 from app.domain.models import TaskRecord, TaskStatus  # noqa: F401
 from app.services.result_exporter import ZipSizeLimitError
@@ -46,6 +46,19 @@ def test_parse_export_args_zip_flag_with_extra_spaces():
 
 
 # --- Handler tests ---
+
+
+class DummyRouter:
+    def __init__(self) -> None:
+        self.handlers = []
+        self.message = self
+
+    def __call__(self, *_filters):
+        def decorator(fn):
+            self.handlers.append(fn)
+            return fn
+
+        return decorator
 
 
 def _make_record(
@@ -217,3 +230,18 @@ async def test_export_zip_size_limit_error(task_service, result_exporter):
             started_at=fetched.started_at,
             ended_at=fetched.ended_at,
         )
+
+
+@pytest.mark.asyncio
+async def test_export_handler_reports_zip_size_limit_error(task_service, result_exporter):
+    record = _make_record()
+    task_service.get_status.return_value = record
+    result_exporter.export_zip.side_effect = ZipSizeLimitError("ZIP archive exceeds 50 MB limit")
+    router = DummyRouter()
+    register_export_handler(router, task_service=task_service, result_exporter=result_exporter)
+    message, command = _make_message("task-1 --zip")
+
+    await router.handlers[0](message, command)
+
+    assert message.answer.await_args_list[-1].args == ("导出失败: ZIP archive exceeds 50 MB limit",)
+    message.answer_document.assert_not_awaited()

@@ -327,6 +327,63 @@ def test_mark_structured_user_question_emitted_does_not_regress_same_tool_cursor
     assert updated.structured_user_question_key == "tool-ask-key:2"
 
 
+def test_session_store_find_by_terminal_id_strong_cached_hit_returns_without_repository_scan(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    state = store.get_or_create(
+        session_id="claude-session-strong-cache",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    state.pending_permission = PendingPermission(
+        tool_use_id="tool-strong",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    state.turns.append(ConversationTurn(turn_id="turn-strong", role="assistant", text="等待授权", is_complete=True))
+
+    def fail_if_repository_scanned():
+        raise AssertionError("repository should not be scanned for strong cached hit")
+
+    store._lookup._repository.list_states = fail_if_repository_scanned
+
+    matched = store.find_by_terminal_id("user_1_8c393341f536")
+
+    assert matched is state
+    assert matched.session_id == "claude-session-strong-cache"
+
+
+def test_session_store_find_by_terminal_id_scans_repository_for_non_strong_cached_hit(tmp_path) -> None:
+    file_store = FileSessionStore(str(tmp_path))
+    disk_store = SessionStore(file_store)
+    persisted = disk_store.get_or_create(
+        session_id="claude-session-persisted-pending",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    persisted.phase = SessionPhase.WAITING_FOR_APPROVAL
+    persisted.pending_permission = PendingPermission(
+        tool_use_id="tool-persisted",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    persisted.turns.append(ConversationTurn(turn_id="turn-persisted", role="assistant", text="等待授权", is_complete=True))
+    disk_store._persist(persisted)
+
+    store = SessionStore(file_store)
+    cached = store.get_or_create(
+        session_id="claude-session-cached-idle",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    cached.phase = SessionPhase.WAITING_FOR_INPUT
+
+    matched = store.find_by_terminal_id("user_1_8c393341f536")
+
+    assert matched is not None
+    assert matched.session_id == "claude-session-persisted-pending"
+
+
 def test_session_store_find_by_terminal_id_prefers_pending_active_state_over_newer_idle_state(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
     now = utc_now()
@@ -712,7 +769,7 @@ async def test_session_service_switch_rebuilds_terminal_id_when_workdir_changes(
     store = _Store()
     service = SessionService(store)
 
-    first = await service.switch(
+    first, _ = await service.switch(
         user_id=1,
         provider="claude_code",
         workdir=old_workdir,
@@ -720,7 +777,7 @@ async def test_session_service_switch_rebuilds_terminal_id_when_workdir_changes(
         claude_chat_active=True,
     )
     first_terminal_id = first.terminal_id
-    second = await service.switch(user_id=1, workdir=new_workdir)
+    second, _ = await service.switch(user_id=1, workdir=new_workdir)
 
     assert second.workdir == new_workdir
     assert first_terminal_id != second.terminal_id
@@ -732,7 +789,7 @@ async def test_session_service_clear_terminal_group_resets_owner_and_attached_co
     from app.services.session_service import SessionService
 
     service = SessionService(FileSessionContextStore(FileSessionStore(str(tmp_path))))
-    owner = await service.switch(
+    owner, _ = await service.switch(
         user_id=1,
         provider="claude_code",
         workdir="/proj",
@@ -744,7 +801,7 @@ async def test_session_service_clear_terminal_group_resets_owner_and_attached_co
     owner.attached_user_ids = [2]
     await service.save_session_context(owner)
 
-    attached = await service.switch(
+    attached, _ = await service.switch(
         user_id=2,
         provider="claude_code",
         workdir="/proj",
@@ -756,7 +813,7 @@ async def test_session_service_clear_terminal_group_resets_owner_and_attached_co
     attached.is_owner = False
     await service.save_session_context(attached)
 
-    other = await service.switch(
+    other, _ = await service.switch(
         user_id=3,
         provider="claude_code",
         workdir="/other",

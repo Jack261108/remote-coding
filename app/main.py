@@ -118,12 +118,12 @@ def parse_cli(argv: list[str] | None = None) -> CliOptions:
 async def run(settings: Settings) -> None:
     configure_logging()
     container = AppContainer(settings=settings)
-    container.wire()
-    await container.start()
-
-    logger.info("bot starting with polling")
-
     try:
+        container.wire()
+        await container.start()
+
+        logger.info("bot starting with polling")
+
         while True:
             try:
                 await container.dispatcher.start_polling(container.bot)

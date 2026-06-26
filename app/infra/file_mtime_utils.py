@@ -1,21 +1,4 @@
-"""文件修改时间追踪工具。
-
-提供文件修改时间（mtime）的缓存与变更检测功能，
-用于高效判断文件是否被修改（例如触发会话同步或清理过期上传）。
-
-核心功能：
-- ``refresh_seen_mtimes()``：批量检查文件 mtime，返回变更的文件集合。
-- ``clear_seen_mtimes_for_session()``：按会话 ID 清理 mtime 缓存。
-
-使用方式::
-
-    from app.infra.file_mtime_utils import refresh_seen_mtimes
-
-    seen: dict[str, float] = {}
-    changed = refresh_seen_mtimes(file_paths, seen)
-    for path, mtime in changed.items():
-        print(f"File changed: {path}")
-"""
+"""文件修改时间缓存工具。"""
 
 from __future__ import annotations
 
@@ -25,27 +8,23 @@ import os
 logger = logging.getLogger(__name__)
 
 
-def refresh_seen_mtimes(
+async def refresh_seen_mtimes(
     paths: set[str],
     seen_mtimes: dict[str, float],
 ) -> dict[str, float]:
-    """刷新文件修改时间缓存，返回变更的文件集合。
+    """刷新文件修改时间缓存并返回发生变化的条目。
 
-    遍历 ``paths`` 中的每个文件，获取其当前 mtime 与缓存比较。
-    新文件或 mtime 发生变化的文件会被记录到返回值中，并更新缓存。
-    不存在或无法访问的文件会被静默跳过。
+    遍历 ``paths`` 中的文件路径，读取当前文件修改时间（mtime），并与
+    ``seen_mtimes`` 中已缓存的值比较。新文件或 mtime 发生变化的文件会被
+    写入 ``seen_mtimes``，同时以 ``{path: mtime}`` 形式返回。无法访问或
+    不存在的文件会被跳过。
 
-    Parameters
-    ----------
-    paths:
-        需要检查的文件路径集合。
-    seen_mtimes:
-        当前 mtime 缓存字典（会被就地修改）。
+    Args:
+        paths: 需要检查的文件路径集合。
+        seen_mtimes: 已缓存的文件修改时间字典，会被就地更新。
 
-    Returns
-    -------
-    dict[str, float]
-        mtime 发生变更的文件路径到新 mtime 的映射。
+    Returns:
+        mtime 发生变化的文件路径到新 mtime 的映射。
     """
     updated: dict[str, float] = {}
     for path in paths:
@@ -59,22 +38,40 @@ def refresh_seen_mtimes(
     return updated
 
 
-def clear_seen_mtimes_for_session(
+async def clear_seen_mtimes(
+    paths: set[str],
+    seen_mtimes: dict[str, float],
+) -> dict[str, float]:
+    """按文件路径集合清除修改时间缓存并返回被清除的条目。
+
+    遍历 ``paths`` 中的文件路径，删除 ``seen_mtimes`` 中已存在的对应缓存。
+    该函数只处理明确给出的路径，不会按前缀或子串匹配额外条目。
+
+    Args:
+        paths: 需要从缓存中清除的文件路径集合。
+        seen_mtimes: 已缓存的文件修改时间字典，会被就地修改。
+
+    Returns:
+        被清除的文件路径到原 mtime 的映射。
+    """
+    removed: dict[str, float] = {path: seen_mtimes[path] for path in paths if path in seen_mtimes}
+    for path in removed:
+        del seen_mtimes[path]
+    return removed
+
+
+async def clear_seen_mtimes_for_session(
     session_id: str,
     seen_mtimes: dict[str, float],
 ) -> None:
-    """清除指定会话的所有 mtime 缓存条目。
+    """清除指定会话关联的文件修改时间缓存。
 
-    遍历缓存字典，删除所有键中包含 ``session_id`` 的条目。
-    用于会话结束时清理相关的文件监控缓存。
+    删除 ``seen_mtimes`` 中键名包含 ``session_id`` 的所有条目，用于会话结束
+    或停止监控时释放该会话的 mtime 缓存。
 
-    Parameters
-    ----------
-    session_id:
-        会话标识符，用作子串匹配过滤条件。
-    seen_mtimes:
-        需要清理的 mtime 缓存字典（会被就地修改）。
+    Args:
+        session_id: 需要清理缓存的会话 ID。
+        seen_mtimes: 已缓存的文件修改时间字典，会被就地修改。
     """
-    keys_to_remove = [k for k in seen_mtimes if session_id in k]
-    for key in keys_to_remove:
-        del seen_mtimes[key]
+    keys_to_remove = {key for key in seen_mtimes if session_id in key}
+    await clear_seen_mtimes(keys_to_remove, seen_mtimes)

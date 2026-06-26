@@ -187,6 +187,43 @@ class TestConcurrentFirstResponderWins:
 # ---------------------------------------------------------------------------
 
 
+class TestDynamicNotificationRecipients:
+    """Unbound notifications can resolve recipients lazily."""
+
+    @pytest.mark.asyncio
+    async def test_empty_static_recipients_fall_back_to_resolver(self):
+        async def resolve_user_ids() -> set[int]:
+            return {222, 111}
+
+        message_sender = MagicMock()
+        message_sender.send_message = AsyncMock()
+        hook_socket_server = MagicMock()
+        hook_socket_server.respond_to_permission = AsyncMock()
+        handler = UnboundPermissionHandler(
+            message_sender=message_sender,
+            hook_socket_server=hook_socket_server,
+            allowed_user_ids=set(),
+            notify_user_ids_resolver=resolve_user_ids,
+        )
+        handler.set_permission_gateway(FakePermissionGateway())
+
+        await handler.handle_unbound_permission(_make_event("tuid-dynamic"))
+
+        assert [call.kwargs["chat_id"] for call in message_sender.send_message.call_args_list] == [111, 222]
+        assert handler._pending["tuid-dynamic"].notified_user_ids == [111, 222]
+
+    @pytest.mark.asyncio
+    async def test_static_recipients_do_not_call_resolver(self):
+        resolver = AsyncMock(return_value={222})
+        handler, message_sender, _ = _make_handler(allowed_user_ids={111})
+        handler._notify_user_ids_resolver = resolver
+
+        await handler.handle_unbound_permission(_make_event("tuid-static"))
+
+        resolver.assert_not_awaited()
+        assert [call.kwargs["chat_id"] for call in message_sender.send_message.call_args_list] == [111]
+
+
 class TestDifferentPermissionsDontSerialize:
     """Responses to different tool_use_ids run concurrently, not serialized."""
 

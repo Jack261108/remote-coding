@@ -31,7 +31,7 @@ class RecordingAutoApproveService:
 @pytest.mark.asyncio
 async def test_resolve_for_task_enables_interactive_only_for_active_claude_chat(tmp_path: Path) -> None:
     service, session_service, _, _ = make_terminal_service(tmp_path, claude_tmux_mode=True)
-    session = await session_service.get_or_create(
+    session, _ = await session_service.get_or_create(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -306,7 +306,7 @@ async def test_open_claude_chat_session_rejects_explicit_workdir_outside_allowli
 
 
 async def _seed_terminal_group(session_service, terminal_id: str = "user_1_abc123") -> None:
-    owner = await session_service.switch(
+    owner, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir="/proj",
@@ -318,7 +318,7 @@ async def _seed_terminal_group(session_service, terminal_id: str = "user_1_abc12
     owner.attached_user_ids = [2]
     await session_service.save_session_context(owner)
 
-    attached = await session_service.switch(
+    attached, _ = await session_service.switch(
         user_id=2,
         provider="claude_code",
         workdir="/proj",
@@ -348,6 +348,65 @@ async def _assert_terminal_group_cleared(session_service) -> None:
     assert attached.claude_session_id is None
     assert attached.attached_user_ids == []
     assert attached.is_owner is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_orphaned_terminal_clears_group_auto_approve_and_questions(tmp_path: Path) -> None:
+    auto_approve = RecordingAutoApproveService()
+    service, session_service, factory, cleared_users = make_terminal_service(tmp_path)
+    service._auto_approve_service = auto_approve
+    await _seed_terminal_group(session_service)
+
+    await service.cleanup_orphaned_terminal(
+        "user_1_abc123",
+        claude_session_id="claude-owner",
+        user_id=1,
+    )
+
+    assert factory._closed_terminal_key == "user_1_abc123"
+    await _assert_terminal_group_cleared(session_service)
+    assert set(auto_approve.cleared_session_ids) == {"claude-owner", "claude-attached"}
+    assert set(cleared_users) == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_orphaned_terminal_clears_owner_questions_after_owner_moves(tmp_path: Path) -> None:
+    auto_approve = RecordingAutoApproveService()
+    service, session_service, factory, cleared_users = make_terminal_service(tmp_path)
+    service._auto_approve_service = auto_approve
+    await _seed_terminal_group(session_service)
+    owner, _ = await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir="/new",
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    owner.terminal_id = "user_1_new"
+    owner.claude_session_id = "claude-new"
+    await session_service.save_session_context(owner)
+
+    await service.cleanup_orphaned_terminal(
+        "user_1_abc123",
+        claude_session_id="claude-owner",
+        user_id=1,
+    )
+
+    assert factory._closed_terminal_key == "user_1_abc123"
+    assert set(auto_approve.cleared_session_ids) == {"claude-owner", "claude-attached"}
+    assert set(cleared_users) == {1, 2}
+    current_owner = await session_service.get(1)
+    attached = await session_service.get(2)
+    assert current_owner is not None
+    assert current_owner.terminal_mode is True
+    assert current_owner.terminal_id == "user_1_new"
+    assert current_owner.claude_chat_active is True
+    assert current_owner.claude_session_id == "claude-new"
+    assert attached is not None
+    assert attached.terminal_mode is False
+    assert attached.terminal_id is None
+    assert attached.claude_chat_active is False
+    assert attached.claude_session_id is None
 
 
 @pytest.mark.asyncio

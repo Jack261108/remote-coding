@@ -1,9 +1,41 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from app.bot.presenters.telegram_formatting import (
     render_markdownish_to_telegram_html,
     split_markdownish_for_telegram,
 )
+from app.infra.text_formatting import html_escape, relative_time_compact_en, relative_time_zh, short_cwd, truncate_text
+
+
+class TestCommonTextFormatting:
+    def test_short_cwd_returns_last_two_segments(self) -> None:
+        assert short_cwd("/Users/jack/project") == "jack/project"
+        assert short_cwd("") == "unknown"
+        assert short_cwd("", fallback="") == ""
+
+    def test_html_escape_matches_telegram_html_escaping(self) -> None:
+        assert html_escape("<a&b>") == "&lt;a&amp;b&gt;"
+        assert html_escape('a "quote"') == 'a "quote"'
+
+    def test_truncate_text_uses_suffix(self) -> None:
+        assert truncate_text("abcdef", 4) == "abc…"
+        assert truncate_text("abc", 4) == "abc"
+
+    def test_relative_time_zh(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        assert relative_time_zh(now - timedelta(seconds=5), now) == "刚刚"
+        assert relative_time_zh(now - timedelta(minutes=3), now) == "3 分钟前"
+        assert relative_time_zh(now - timedelta(hours=2), now) == "2 小时前"
+        assert relative_time_zh(now - timedelta(days=1), now) == "昨天"
+
+    def test_relative_time_compact_en(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        assert relative_time_compact_en(now - timedelta(seconds=5), now=now) == "5s ago"
+        assert relative_time_compact_en(now - timedelta(minutes=3), now=now) == "3m ago"
+        assert relative_time_compact_en(now - timedelta(hours=2), now=now) == "2h ago"
+        assert relative_time_compact_en(now - timedelta(days=2), now=now) == "2d ago"
 
 
 class TestTableRendering:

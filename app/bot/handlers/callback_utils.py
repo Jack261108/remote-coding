@@ -12,20 +12,31 @@ _INSTRUCTION_LINE = "请点击下方按钮选择允许或拒绝。"
 logger = logging.getLogger(__name__)
 
 
+def parse_callback_prefix(
+    data: str,
+    expected_parts: int,
+    prefix: str,
+) -> tuple[str, ...] | None:
+    """解析 callback data 前缀"""
+    parts = data.split(":")
+    if len(parts) != expected_parts:
+        return None
+    if not parts[0].startswith(prefix):
+        return None
+    return tuple(parts)
+
+
 async def safe_edit_keyboard(
     message: Any,
     keyboard: Any | None,
     log_prefix: str,
 ) -> bool:
-    """安全地编辑消息的内联键盘。
-
-    失败时记录异常并返回 ``False``，成功返回 ``True``。
-    """
+    """安全地编辑键盘"""
     try:
         await message.edit_reply_markup(reply_markup=keyboard)
         return True
     except Exception:
-        logger.exception("%s failed", log_prefix)
+        logger.exception(f"{log_prefix} failed")
         return False
 
 

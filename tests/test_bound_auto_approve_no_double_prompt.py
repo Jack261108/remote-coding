@@ -7,7 +7,7 @@ unconditionally. When auto-approve was active, the user got both the silent
 "🟢 Auto-approved" message AND the redundant "🔐 请求权限: ..." button
 prompt.
 
-Fix: `_run_auto_approve_check` raises `_StageShortCircuit` which terminates
+Fix: `_run_auto_approve_check` raises `_StageShortCircuitError` which terminates
 the pipeline loop before the push_notification stage runs.
 """
 
@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.bootstrap_mixins import HookHandlingMixin, _StageShortCircuit
+from app.bootstrap_mixins import HookHandlingMixin, _StageShortCircuitError
 from app.domain.hook_models import HookEvent
 from app.services.auto_approve_service import AutoApproveService
 from app.services.permission_callback_registry import AutoApproveOutcome
@@ -122,12 +122,12 @@ async def _make_container(*, auto_approve_active: bool) -> _Container:
 
 @pytest.mark.asyncio
 async def test_auto_approve_check_raises_short_circuit() -> None:
-    """_run_auto_approve_check must raise _StageShortCircuit when auto-approve
+    """_run_auto_approve_check must raise _StageShortCircuitError when auto-approve
     is active, terminating the pipeline before push_notification runs."""
     container = await _make_container(auto_approve_active=True)
     event = _make_event(tool="Edit")
 
-    with pytest.raises(_StageShortCircuit, match="auto-approved"):
+    with pytest.raises(_StageShortCircuitError, match="auto-approved"):
         await container._run_auto_approve_check(event)
 
 
@@ -172,7 +172,7 @@ async def test_pipeline_bound_auto_approve_skips_push_notification() -> None:
         try:
             await stage_coro
             executed_stages.append(stage_name)
-        except _StageShortCircuit:
+        except _StageShortCircuitError:
             executed_stages.append(f"{stage_name}:short-circuit")
             short_circuited_at = i
             break
@@ -209,7 +209,7 @@ async def test_pipeline_bound_no_auto_approve_sends_push_notification() -> None:
         try:
             await stage_coro
             executed_stages.append(stage_name)
-        except _StageShortCircuit:
+        except _StageShortCircuitError:
             executed_stages.append(f"{stage_name}:short-circuit")
             # Close remaining
             for j in range(i + 1, len(stages)):
@@ -238,7 +238,7 @@ async def test_pipeline_owned_auto_approve_short_circuits() -> None:
         try:
             await stage_coro
             executed_stages.append(stage_name)
-        except _StageShortCircuit:
+        except _StageShortCircuitError:
             executed_stages.append(f"{stage_name}:short-circuit")
             short_circuited_at = i
             break

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeGuard
 
 from aiogram import F
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.bot.handlers.callback_utils import safe_edit_keyboard
+from app.bot.handlers.callback_utils import parse_callback_prefix, safe_edit_keyboard
 from app.bot.handlers.user_utils import extract_user_id
 from app.bot.presenters.structured_reply_presenter import UserQuestionOutput, build_user_question_prompt
 from app.domain.user_question_models import UserQuestionPrompt
@@ -24,6 +25,12 @@ class ParsedUserQuestionCallback:
     option_index: int | None = None
 
 
+def _is_accessible_message(message: object) -> TypeGuard[Message]:
+    if message is None or isinstance(message, InaccessibleMessage):
+        return False
+    return callable(getattr(message, "answer", None)) and callable(getattr(message, "edit_reply_markup", None))
+
+
 def build_user_question_callback_data(*, tool_use_id: str, question_index: int, option_index: int) -> str:
     return f"{_QUESTION_CALLBACK_PREFIX}:{tool_use_id}:{question_index}:{option_index}"
 
@@ -39,11 +46,10 @@ def build_multi_select_submit_callback_data(*, tool_use_id: str, question_index:
 def parse_user_question_callback_data(data: str | tuple[str, ...] | None) -> ParsedUserQuestionCallback | None:
     if not data:
         return None
-    parts = list(data) if isinstance(data, tuple) else data.split(":")
-    if not parts or parts[0] != _QUESTION_CALLBACK_PREFIX:
-        return None
-    if len(parts) == 5 and parts[1] == _QUESTION_CALLBACK_ACTION_TOGGLE:
-        _, _, tool_use_id, question_index_text, option_index_text = parts
+    raw_data = ":".join(data) if isinstance(data, tuple) else data
+    toggle_parts = parse_callback_prefix(raw_data, 5, _QUESTION_CALLBACK_PREFIX)
+    if toggle_parts is not None and toggle_parts[1] == _QUESTION_CALLBACK_ACTION_TOGGLE:
+        _, _, tool_use_id, question_index_text, option_index_text = toggle_parts
         try:
             return ParsedUserQuestionCallback(
                 action=_QUESTION_CALLBACK_ACTION_TOGGLE,
@@ -53,8 +59,9 @@ def parse_user_question_callback_data(data: str | tuple[str, ...] | None) -> Par
             )
         except ValueError:
             return None
-    if len(parts) == 4 and parts[1] == _QUESTION_CALLBACK_ACTION_SUBMIT:
-        _, _, tool_use_id, question_index_text = parts
+    submit_parts = parse_callback_prefix(raw_data, 4, _QUESTION_CALLBACK_PREFIX)
+    if submit_parts is not None and submit_parts[1] == _QUESTION_CALLBACK_ACTION_SUBMIT:
+        _, _, tool_use_id, question_index_text = submit_parts
         try:
             return ParsedUserQuestionCallback(
                 action=_QUESTION_CALLBACK_ACTION_SUBMIT,
@@ -63,8 +70,9 @@ def parse_user_question_callback_data(data: str | tuple[str, ...] | None) -> Par
             )
         except ValueError:
             return None
-    if len(parts) == 4:
-        _, tool_use_id, question_index_text, option_index_text = parts
+    select_parts = parse_callback_prefix(raw_data, 4, _QUESTION_CALLBACK_PREFIX)
+    if select_parts is not None:
+        _, tool_use_id, question_index_text, option_index_text = select_parts
         # 验证 tool_use_id 格式（至少应为非空字符串）
         if not tool_use_id:
             return None
@@ -175,6 +183,8 @@ def register_user_question_handlers(router, *, task_service: TaskService):
             await callback.answer("无效的选择操作", show_alert=True)
             return
 
+        callback_message = callback.message if _is_accessible_message(callback.message) else None
+
         if parsed.action == _QUESTION_CALLBACK_ACTION_TOGGLE:
             ok, text, prompt, selected_option_indexes = await task_service.toggle_pending_user_question_multi_select_option(
                 user_id=user_id,
@@ -182,9 +192,9 @@ def register_user_question_handlers(router, *, task_service: TaskService):
                 question_index=parsed.question_index,
                 option_index=parsed.option_index if parsed.option_index is not None else -1,
             )
-            if callback.message is not None and ok and prompt is not None:
+            if callback_message is not None and ok and prompt is not None:
                 await safe_edit_keyboard(
-                    callback.message,
+                    callback_message,
                     build_user_question_keyboard(prompt, selected_option_indexes=selected_option_indexes),
                     "refresh multi-select inline keyboard",
                 )
@@ -197,17 +207,17 @@ def register_user_question_handlers(router, *, task_service: TaskService):
                 tool_use_id=parsed.tool_use_id,
                 question_index=parsed.question_index,
             )
-            if callback.message is not None and ok:
-                await safe_edit_keyboard(callback.message, None, "clear multi-select inline keyboard")
-                await callback.message.answer(text)
+            if callback_message is not None and ok:
+                await safe_edit_keyboard(callback_message, None, "clear multi-select inline keyboard")
+                await callback_message.answer(text)
                 await _acknowledge_and_send_next_prompt(
-                    message=callback.message,  # type: ignore[arg-type]
+                    message=callback_message,
                     task_service=task_service,
                     user_id=user_id,
                     next_prompt=next_prompt,
                 )
-            elif callback.message is not None and not ok:
-                await callback.message.answer(f"选择失败: {text}")
+            elif callback_message is not None and not ok:
+                await callback_message.answer(f"选择失败: {text}")
             await callback.answer(text, show_alert=not ok)
             return
 
@@ -217,16 +227,16 @@ def register_user_question_handlers(router, *, task_service: TaskService):
             question_index=parsed.question_index,
             option_index=parsed.option_index if parsed.option_index is not None else -1,
         )
-        if callback.message is not None:
+        if callback_message is not None:
             if ok:
-                await safe_edit_keyboard(callback.message, None, "clear user question inline keyboard")
-                await callback.message.answer(text)
+                await safe_edit_keyboard(callback_message, None, "clear user question inline keyboard")
+                await callback_message.answer(text)
                 await _acknowledge_and_send_next_prompt(
-                    message=callback.message,  # type: ignore[arg-type]
+                    message=callback_message,
                     task_service=task_service,
                     user_id=user_id,
                     next_prompt=next_prompt,
                 )
             else:
-                await callback.message.answer(f"选择失败: {text}")
+                await callback_message.answer(f"选择失败: {text}")
         await callback.answer(text, show_alert=not ok)

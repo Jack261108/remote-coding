@@ -61,8 +61,17 @@ class ExternalUserQuestionState:
             self._pending.pop(key, None)
         return len(keys)
 
-    def _prune_stale(self) -> None:
+    def prune_stale(self) -> int:
+        """Public method to prune stale entries. Can be called periodically.
+
+        Returns:
+            Number of entries pruned.
+        """
         now = utc_now()
         stale_keys = [key for key, pending in self._pending.items() if (now - pending.created_at).total_seconds() > self._ttl_sec]
         for key in stale_keys:
             self._pending.pop(key, None)
+        return len(stale_keys)
+
+    def _prune_stale(self) -> None:
+        self.prune_stale()

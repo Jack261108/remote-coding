@@ -6,12 +6,19 @@ from pathlib import Path
 import pytest
 
 from app.adapters.process.tmux_runner import TmuxRunner, _TmuxTaskMeta
+from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
+from app.services.session_store import SessionStore
 
 
 async def _collect_events(stream):
     return [event async for event in stream]
+
+
+def _runner_with_session_store(tmp_path: Path, **kwargs) -> TmuxRunner:
+    file_store = FileSessionStore(str(tmp_path))
+    return TmuxRunner(data_dir=str(tmp_path), file_store=file_store, session_store=SessionStore(file_store), **kwargs)
 
 
 def test_build_shell_command_writes_script_file(tmp_path: Path) -> None:
@@ -199,6 +206,77 @@ async def test_send_command_uses_ctrl_m_in_interactive(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_send_command_reloads_buffer_after_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    paste_calls = 0
+    load_calls = 0
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        nonlocal paste_calls, load_calls
+        if args and args[0] == "load-buffer":
+            load_calls += 1
+            return 0, "", ""
+        if args and args[0] == "paste-buffer":
+            paste_calls += 1
+            if paste_calls == 1:
+                return 1, "", "lost buffer"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_force_rebuild_session(session_name: str, *, workdir: str, env, interactive: bool = False):
+        assert interactive is True
+        return True, ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(runner, "_force_rebuild_session", fake_force_rebuild_session)
+
+    ok, err = await runner._send_command("tgcli_user_1", "hello", workdir="/tmp", env=None, interactive=True)
+
+    assert ok is True
+    assert err == ""
+    assert load_calls == 2
+    assert paste_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_send_interactive_input_waits_for_pane_io_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    entered = asyncio.Event()
+    allow_finish = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str, workdir: str, env):
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_send(session_name: str, command: str, *, workdir: str, env, interactive: bool = False):
+        calls.append("send")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_claude_interactive_session", fake_ensure)
+    monkeypatch.setattr(runner, "_send_command", fake_send)
+
+    async def hold_lock() -> None:
+        async with runner._pane_io_lock("tgcli_user_1"):
+            entered.set()
+            await allow_finish.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task = asyncio.create_task(runner.send_interactive_input(terminal_key="user_1", workdir="/tmp", text="hello"))
+    await asyncio.sleep(0)
+    assert calls == []
+    allow_finish.set()
+
+    ok, err = await task
+    await holder
+
+    assert ok is True
+    assert err == ""
+    assert calls == ["ensure", "send"]
+
+
+@pytest.mark.asyncio
 async def test_select_user_question_option_sends_expected_tmux_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = TmuxRunner()
     key_calls: list[tuple[str, ...]] = []
@@ -334,7 +412,7 @@ def test_selected_user_question_option_index_uses_latest_tui_block() -> None:
 
 @pytest.mark.asyncio
 async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     seen_pipe_calls: list[tuple[str, ...]] = []
 
     async def fake_ensure(*, session_name: str, workdir: str, env=None):
@@ -343,7 +421,7 @@ async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: p
     async def fake_send(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
 
     async def fake_run_tmux(*args: str, input_data: bytes | None = None):
@@ -369,18 +447,20 @@ async def test_interactive_run_rebinds_pipe_to_session_transcript(monkeypatch: p
     ]
 
     assert [e.type for e in events] == [EventType.STARTED, EventType.EXITED]
-    assert len(seen_pipe_calls) == 2
+    # 3 calls: _bind clears old pipe, _bind sets new FIFO pipe, finally clears pipe before FIFO cleanup
+    assert len(seen_pipe_calls) == 3
     assert seen_pipe_calls[0] == ("pipe-pane", "-t", "tgcli_user_1")
     assert seen_pipe_calls[1][0:3] == ("pipe-pane", "-t", "tgcli_user_1")
-    assert "cat >>" in seen_pipe_calls[1][3]
-    assert "sessions/tgcli_user_1/transcript.raw.log" in seen_pipe_calls[1][3]
+    assert "cat >" in seen_pipe_calls[1][3]
+    assert ".fifo" in seen_pipe_calls[1][3]
+    assert seen_pipe_calls[2] == ("pipe-pane", "-t", "tgcli_user_1")
 
 
 @pytest.mark.asyncio
 async def test_interactive_run_rebuilds_and_retries_pipe_when_tmux_server_is_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     ensure_calls: list[str] = []
     pipe_bind_calls: list[tuple[str, ...]] = []
 
@@ -391,7 +471,7 @@ async def test_interactive_run_rebuilds_and_retries_pipe_when_tmux_server_is_mis
     async def fake_send(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
 
     async def fake_run_tmux(*args: str, input_data: bytes | None = None):
@@ -425,7 +505,7 @@ async def test_interactive_run_rebuilds_and_retries_pipe_when_tmux_server_is_mis
 
 @pytest.mark.asyncio
 async def test_watch_task_flushes_partial_content(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     task_id = "t1"
     log_file = tmp_path / f"{task_id}.log"
     exit_file = tmp_path / f"{task_id}.exit"
@@ -468,7 +548,7 @@ def test_read_new_text_recovers_after_log_truncation(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_process_interactive_chunk_does_not_overwrite_structured_checkpoint(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01)
     meta = _TmuxTaskMeta(
         session_name="tgcli_user_1",
         log_file=runner._file_store.raw_transcript_path("tgcli_user_1"),
@@ -513,7 +593,7 @@ async def test_process_interactive_chunk_does_not_overwrite_structured_checkpoin
 
 @pytest.mark.asyncio
 async def test_interactive_watch_starts_from_current_transcript_end(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     session_name = "tgcli_user_1"
     claude_session = "claude-session-1"
     log_file = runner._file_store.raw_transcript_path(session_name)
@@ -579,7 +659,7 @@ async def test_interactive_watch_starts_from_current_transcript_end(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_interactive_timeout_keeps_session_alive(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="app.adapters.process.tmux_runner")
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     session_name = "tgcli_user_1"
     state = runner._session_store.get_or_create(session_id=session_name, workdir=str(tmp_path), terminal_id="user_1")
     state.phase = SessionPhase.PROCESSING
@@ -609,7 +689,7 @@ async def test_interactive_timeout_keeps_session_alive(tmp_path: Path, caplog: p
 
 @pytest.mark.asyncio
 async def test_interactive_timeout_resets_after_structured_progress(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
     runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
@@ -658,7 +738,7 @@ async def test_interactive_timeout_resets_after_structured_progress(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_interactive_completion_does_not_end_terminal_session_state(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
     runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
@@ -700,7 +780,7 @@ async def test_interactive_completion_does_not_end_terminal_session_state(tmp_pa
 
 @pytest.mark.asyncio
 async def test_watch_task_follows_late_bound_claude_session_on_first_turn(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
 
@@ -744,7 +824,7 @@ async def test_watch_task_follows_late_bound_claude_session_on_first_turn(tmp_pa
 
 @pytest.mark.asyncio
 async def test_watch_task_follows_late_bound_uuid_claude_session_on_first_turn(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "2185ae1c-14e5-4423-8f0d-1b76fcd893d6"
 
@@ -787,7 +867,7 @@ async def test_watch_task_follows_late_bound_uuid_claude_session_on_first_turn(t
 
 
 def test_capture_interactive_baseline_does_not_mark_captured_without_real_claude_session(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
     meta = _TmuxTaskMeta(
@@ -810,7 +890,7 @@ def test_capture_interactive_baseline_does_not_mark_captured_without_real_claude
 
 @pytest.mark.asyncio
 async def test_watch_task_late_bound_existing_history_does_not_exit_until_new_turn(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
 
@@ -868,7 +948,7 @@ async def test_watch_task_late_bound_existing_history_does_not_exit_until_new_tu
 
 @pytest.mark.asyncio
 async def test_watch_task_late_bound_completed_first_turn_exits_without_waiting_for_another_turn(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
 
@@ -908,8 +988,8 @@ async def test_watch_task_late_bound_completed_first_turn_exits_without_waiting_
 
 @pytest.mark.asyncio
 async def test_watch_task_waits_for_stable_completion_candidate_before_exit(tmp_path: Path) -> None:
-    runner = TmuxRunner(
-        data_dir=str(tmp_path),
+    runner = _runner_with_session_store(
+        tmp_path,
         poll_interval_sec=0.01,
         partial_flush_sec=0.01,
         interactive_completion_grace_sec=0.5,
@@ -988,7 +1068,7 @@ async def test_watch_task_waits_for_stable_completion_candidate_before_exit(tmp_
 
 @pytest.mark.asyncio
 async def test_watch_task_does_not_finish_on_progress_turn_followed_by_tool(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
     command_started_at = utc_now() - timedelta(seconds=1)
@@ -1059,7 +1139,7 @@ async def test_watch_task_does_not_finish_on_progress_turn_followed_by_tool(tmp_
 
 @pytest.mark.asyncio
 async def test_watch_task_does_not_finish_while_permission_is_pending(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01, interactive_completion_grace_sec=0)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01, interactive_completion_grace_sec=0)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
     command_started_at = utc_now() - timedelta(seconds=1)
@@ -1133,7 +1213,7 @@ async def test_watch_task_does_not_finish_while_permission_is_pending(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_watch_task_ignores_delayed_old_completed_turn_after_captured_baseline(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
     command_started_at = utc_now()
@@ -1199,7 +1279,7 @@ async def test_watch_task_ignores_delayed_old_completed_turn_after_captured_base
 
 @pytest.mark.asyncio
 async def test_watch_task_bound_completed_turn_started_after_command_before_watch_exits(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
     command_started_at = utc_now() - timedelta(seconds=1)
@@ -1240,7 +1320,7 @@ async def test_watch_task_bound_completed_turn_started_after_command_before_watc
 
 @pytest.mark.asyncio
 async def test_watch_task_late_bound_completed_turn_started_after_command_before_watch_exits(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
     command_started_at = utc_now() - timedelta(seconds=1)
@@ -1283,7 +1363,7 @@ async def test_watch_task_late_bound_completed_turn_started_after_command_before
 
 @pytest.mark.asyncio
 async def test_watch_task_switches_from_stale_explicit_session_to_newer_bound_session(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     old_session = "2185ae1c-14e5-4423-8f0d-1b76fcd893d6"
     new_session = "f5bc22fa-0e77-42f6-a2d3-e422037296f6"
@@ -1329,7 +1409,7 @@ async def test_watch_task_switches_from_stale_explicit_session_to_newer_bound_se
 
 @pytest.mark.asyncio
 async def test_watch_task_uses_bound_claude_session_for_second_turn(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
 
@@ -1386,7 +1466,7 @@ async def test_watch_task_uses_bound_claude_session_for_second_turn(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_watch_task_exits_when_fast_reply_arrives_before_watch_baseline(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
 
@@ -1427,7 +1507,7 @@ async def test_watch_task_exits_when_fast_reply_arrives_before_watch_baseline(tm
 
 @pytest.mark.asyncio
 async def test_watch_task_does_not_exit_on_stale_waiting_phase_without_new_progress(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
 
@@ -1489,7 +1569,7 @@ async def test_watch_task_does_not_exit_on_stale_waiting_phase_without_new_progr
 
 @pytest.mark.asyncio
 async def test_watch_task_exits_when_new_completed_turn_arrives_without_waiting_hook(tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
     claude_session = "claude-session-1"
 
@@ -1541,13 +1621,13 @@ async def test_cancel_returns_false_for_unknown_task() -> None:
 
 @pytest.mark.asyncio
 async def test_run_task_terminates_ephemeral_session_when_watch_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), cancel_grace_sec=0)
+    runner = _runner_with_session_store(tmp_path, cancel_grace_sec=0)
     terminated: list[str] = []
 
     async def fake_start(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         raise RuntimeError("watch failed")
         yield
 
@@ -1577,13 +1657,13 @@ async def test_run_task_terminates_ephemeral_session_when_watch_raises(monkeypat
 
 @pytest.mark.asyncio
 async def test_run_task_terminates_ephemeral_session_when_generator_is_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), cancel_grace_sec=0)
+    runner = _runner_with_session_store(tmp_path, cancel_grace_sec=0)
     terminated: list[str] = []
 
     async def fake_start(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         await asyncio.sleep(10)
         yield CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
 
@@ -1615,7 +1695,7 @@ async def test_run_task_terminates_ephemeral_session_when_generator_is_closed(mo
 
 @pytest.mark.asyncio
 async def test_run_task_does_not_terminate_persistent_session_when_watch_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    runner = TmuxRunner(data_dir=str(tmp_path), cancel_grace_sec=0)
+    runner = _runner_with_session_store(tmp_path, cancel_grace_sec=0)
     terminated: list[str] = []
 
     async def fake_ensure(*args, **kwargs):
@@ -1624,7 +1704,7 @@ async def test_run_task_does_not_terminate_persistent_session_when_watch_raises(
     async def fake_send(*args, **kwargs):
         return True, ""
 
-    async def fake_watch(*, meta, timeout_sec: int):
+    async def fake_watch(*, meta, timeout_sec: int, fifo_reader=None):
         raise RuntimeError("watch failed")
         yield
 
@@ -1668,6 +1748,171 @@ async def test_reveal_terminal_reports_session_check_failure(monkeypatch: pytest
 
     assert opened is False
     assert text == "终端状态检查失败: permission denied"
+
+
+@pytest.mark.asyncio
+async def test_persistent_run_registers_before_ensure_so_close_can_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _runner_with_session_store(tmp_path, cancel_grace_sec=0)
+    ensure_entered = asyncio.Event()
+    release_ensure = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_ensure(*args, **kwargs):
+        calls.append("ensure")
+        ensure_entered.set()
+        await release_ensure.wait()
+        return True, ""
+
+    async def fake_send(*args, **kwargs):
+        calls.append("send")
+        return True, ""
+
+    async def fake_session_exists(session_name: str) -> bool:
+        calls.append("exists")
+        return True
+
+    async def fake_terminate(session_name: str) -> bool:
+        calls.append("terminate")
+        return True
+
+    monkeypatch.setattr(runner, "_ensure_persistent_session", fake_ensure)
+    monkeypatch.setattr(runner, "_send_command", fake_send)
+    monkeypatch.setattr(runner, "session_exists", fake_session_exists)
+    monkeypatch.setattr(runner, "_terminate_session", fake_terminate)
+
+    run_task = asyncio.create_task(
+        _collect_events(
+            runner.run(
+                task_id="task-close-race",
+                argv=["echo", "ok"],
+                workdir=str(tmp_path),
+                timeout_sec=10,
+                terminal_key="user_1",
+            )
+        )
+    )
+    await asyncio.wait_for(ensure_entered.wait(), timeout=1)
+
+    close_task = asyncio.create_task(runner.close_terminal("user_1"))
+    await asyncio.sleep(0)
+
+    meta = runner._tasks["task-close-race"]
+    assert meta.cancel_requested is True
+    assert "exists" not in calls
+    assert "terminate" not in calls
+
+    release_ensure.set()
+    events = await asyncio.wait_for(run_task, timeout=1)
+    closed, text = await asyncio.wait_for(close_task, timeout=1)
+
+    assert [event.type for event in events] == [EventType.CANCELED]
+    assert closed is True
+    assert text == ""
+    assert "send" not in calls
+    assert calls == ["ensure", "exists", "terminate"]
+
+
+@pytest.mark.asyncio
+async def test_close_terminal_waits_for_session_lock_after_marking_cancel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+    session_name = runner.build_session_name("user_1")
+    meta = _TmuxTaskMeta(
+        session_name=session_name,
+        log_file=tmp_path / "close.log",
+        exit_file=tmp_path / "close.exit",
+        task_id="task-close",
+        workdir=str(tmp_path),
+        persistent_terminal=True,
+    )
+    runner._tasks[meta.task_id] = meta
+    calls: list[str] = []
+
+    async def fake_session_exists(name: str) -> bool:
+        calls.append(f"exists:{name}")
+        return True
+
+    async def fake_terminate(name: str) -> bool:
+        calls.append(f"terminate:{name}")
+        return True
+
+    monkeypatch.setattr(runner, "session_exists", fake_session_exists)
+    monkeypatch.setattr(runner, "_terminate_session", fake_terminate)
+
+    held = runner._session_lock(session_name)
+    await held.__aenter__()
+    try:
+        task = asyncio.create_task(runner.close_terminal("user_1"))
+        await asyncio.sleep(0)
+        assert meta.cancel_requested is True
+        assert calls == []
+
+        await held.__aexit__(None, None, None)
+        closed, text = await asyncio.wait_for(task, timeout=1)
+    finally:
+        try:
+            await held.__aexit__(None, None, None)
+        except RuntimeError:
+            pass
+
+    assert closed is True
+    assert text == ""
+    assert calls == [f"exists:{session_name}", f"terminate:{session_name}"]
+
+
+@pytest.mark.asyncio
+async def test_send_interactive_input_waits_for_session_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str, workdir: str, env=None) -> tuple[bool, str]:
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_send(session_name: str, prompt: str, *, workdir: str, env, interactive: bool) -> tuple[bool, str]:
+        calls.append("send")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_claude_interactive_session", fake_ensure)
+    monkeypatch.setattr(runner, "_send_command", fake_send)
+
+    session_name = runner.build_session_name("user_1")
+    held = runner._session_lock(session_name)
+    await held.__aenter__()
+    try:
+        task = asyncio.create_task(runner.send_interactive_input(terminal_key="user_1", workdir="/tmp", text="hello"))
+        await asyncio.sleep(0)
+        assert calls == []
+
+        await held.__aexit__(None, None, None)
+        ok, err = await asyncio.wait_for(task, timeout=1)
+    finally:
+        try:
+            await held.__aexit__(None, None, None)
+        except RuntimeError:
+            pass
+
+    assert ok is True
+    assert err == ""
+    assert calls == ["ensure", "send"]
+
+
+@pytest.mark.asyncio
+async def test_run_requires_session_store_for_session_tracking(tmp_path: Path) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="session_store is required"):
+        await _collect_events(
+            runner.run(
+                task_id="task-no-store",
+                argv=["echo", "ok"],
+                workdir=str(tmp_path),
+                timeout_sec=1,
+                terminal_key="user_1",
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -1800,8 +2045,8 @@ async def test_persistent_session_locks_are_ref_counted_and_cleaned(monkeypatch:
     def advance(seconds: float) -> None:
         current["now"] += seconds
 
-    runner = TmuxRunner(
-        data_dir=str(tmp_path),
+    runner = _runner_with_session_store(
+        tmp_path,
         session_lock_ttl_sec=1,
         lock_cleanup_interval_sec=1,
         lock_cleanup_batch_size=10,
@@ -1828,3 +2073,277 @@ async def test_persistent_session_locks_are_ref_counted_and_cleaned(monkeypatch:
         advance(2.0)
 
     assert len(runner._session_locks) <= 1
+
+
+@pytest.mark.asyncio
+async def test_select_user_question_option_waits_for_pane_io_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner()
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str) -> tuple[bool, str]:
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_move(*, session_name: str, target_index: int) -> tuple[bool, str]:
+        calls.append(f"move:{target_index}")
+        return True, ""
+
+    async def fake_send_keys(session_name: str, *keys: str) -> tuple[bool, str]:
+        calls.append(f"keys:{keys}")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_live_claude_session_for_user_question", fake_ensure)
+    monkeypatch.setattr(runner, "_move_user_question_cursor_to_option", fake_move)
+    monkeypatch.setattr(runner, "_send_keys", fake_send_keys)
+
+    held = runner._pane_io_lock("tgcli_user_1")
+    await held.__aenter__()
+    try:
+        task = asyncio.create_task(
+            runner.select_user_question_option(terminal_key="user_1", workdir="/tmp", option_index=2, submit_after=True)
+        )
+        await asyncio.sleep(0)
+        assert calls == []
+
+        await held.__aexit__(None, None, None)
+        ok, err = await task
+    finally:
+        # Ensure lock released even on assertion failure above
+        try:
+            await held.__aexit__(None, None, None)
+        except RuntimeError:
+            pass
+
+    assert ok is True
+    assert err == ""
+    assert calls == ["ensure", "move:2", "keys:('C-m',)", "keys:('C-m',)"]
+
+
+@pytest.mark.asyncio
+async def test_answer_user_question_with_text_waits_for_pane_io_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(enter_delay_sec=0.0)
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str) -> tuple[bool, str]:
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_move(*, session_name: str, target_index: int) -> tuple[bool, str]:
+        calls.append(f"move:{target_index}")
+        return True, ""
+
+    async def fake_send_keys(session_name: str, *keys: str) -> tuple[bool, str]:
+        calls.append(f"keys:{keys}")
+        return True, ""
+
+    async def fake_paste_text(session_name: str, text: str) -> tuple[bool, str]:
+        calls.append(f"paste:{text}")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_live_claude_session_for_user_question", fake_ensure)
+    monkeypatch.setattr(runner, "_move_user_question_cursor_to_option", fake_move)
+    monkeypatch.setattr(runner, "_send_keys", fake_send_keys)
+    monkeypatch.setattr(runner, "_paste_text", fake_paste_text)
+
+    held = runner._pane_io_lock("tgcli_user_1")
+    await held.__aenter__()
+    try:
+        task = asyncio.create_task(
+            runner.answer_user_question_with_text(
+                terminal_key="user_1",
+                workdir="/tmp",
+                option_count=3,
+                text="2026-05-01",
+                submit_after=False,
+            )
+        )
+        await asyncio.sleep(0)
+        assert calls == []
+
+        await held.__aexit__(None, None, None)
+        ok, err = await task
+    finally:
+        try:
+            await held.__aexit__(None, None, None)
+        except RuntimeError:
+            pass
+
+    assert ok is True
+    assert err == ""
+    assert calls == [
+        "ensure",
+        "move:3",
+        "keys:('C-m',)",
+        "paste:2026-05-01",
+        "keys:('C-m',)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_advance_user_question_after_multi_select_waits_for_pane_io_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = TmuxRunner(enter_delay_sec=0.0)
+    calls: list[str] = []
+
+    async def fake_ensure(*, session_name: str) -> tuple[bool, str]:
+        calls.append("ensure")
+        return True, ""
+
+    async def fake_send_keys(session_name: str, *keys: str) -> tuple[bool, str]:
+        calls.append(f"keys:{keys}")
+        return True, ""
+
+    monkeypatch.setattr(runner, "_ensure_live_claude_session_for_user_question", fake_ensure)
+    monkeypatch.setattr(runner, "_send_keys", fake_send_keys)
+
+    held = runner._pane_io_lock("tgcli_user_1")
+    await held.__aenter__()
+    try:
+        task = asyncio.create_task(
+            runner.advance_user_question_after_multi_select(terminal_key="user_1", workdir="/tmp", final_question=True)
+        )
+        await asyncio.sleep(0)
+        assert calls == []
+
+        await held.__aexit__(None, None, None)
+        ok, err = await task
+    finally:
+        try:
+            await held.__aexit__(None, None, None)
+        except RuntimeError:
+            pass
+
+    assert ok is True
+    assert err == ""
+    assert calls == ["ensure", "keys:('Right',)", "keys:('C-m',)"]
+
+
+@pytest.mark.asyncio
+async def test_send_command_rebuilds_and_retries_when_ctrl_u_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """路径A：send-keys C-u 返回非0 → _force_rebuild_session → 重试 C-u。"""
+    runner = TmuxRunner()
+    cu_calls: list[tuple[str, ...]] = []
+    rebuild_calls: list[dict] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        if args and args[0] == "send-keys" and len(args) >= 4 and args[3] == "C-u":
+            cu_calls.append(args)
+            if len(cu_calls) == 1:
+                return 1, "", "session not found"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_force_rebuild_session(session_name: str, *, workdir: str, env, interactive: bool = False):
+        rebuild_calls.append({"session_name": session_name, "interactive": interactive})
+        return True, ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(runner, "_force_rebuild_session", fake_force_rebuild_session)
+
+    ok, err = await runner._send_command("tgcli_user_1", "hello", workdir="/tmp", env=None, interactive=True)
+
+    assert ok is True
+    assert err == ""
+    # C-u sent twice: first failed, retry after rebuild succeeded
+    assert len(cu_calls) == 2
+    assert rebuild_calls == [{"session_name": "tgcli_user_1", "interactive": True}]
+
+
+@pytest.mark.asyncio
+async def test_send_command_reloads_buffer_and_retries_when_enter_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """路径C：send-keys Enter/C-m 返回非0 → rebuild → 重新 _load_and_paste_text + 重新 send-keys。"""
+    runner = TmuxRunner(enter_delay_sec=0.0)
+    load_calls = 0
+    paste_calls = 0
+    enter_calls: list[tuple[str, ...]] = []
+    rebuild_calls: list[dict] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        nonlocal load_calls, paste_calls
+        if args and args[0] == "load-buffer":
+            load_calls += 1
+            return 0, "", ""
+        if args and args[0] == "paste-buffer":
+            paste_calls += 1
+            return 0, "", ""
+        if args and args[0] == "send-keys" and len(args) >= 4 and args[1] == "-t" and args[3] in {"Enter", "C-m"}:
+            enter_calls.append(args)
+            if len(enter_calls) == 1:
+                return 1, "", "no such session"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_force_rebuild_session(session_name: str, *, workdir: str, env, interactive: bool = False):
+        rebuild_calls.append({"session_name": session_name, "interactive": interactive})
+        return True, ""
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(runner, "_force_rebuild_session", fake_force_rebuild_session)
+
+    ok, err = await runner._send_command("tgcli_user_1", "hello", workdir="/tmp", env=None, interactive=True)
+
+    assert ok is True
+    assert err == ""
+    assert rebuild_calls == [{"session_name": "tgcli_user_1", "interactive": True}]
+    # Buffer reloaded and pasted twice: once before Enter failure, once after rebuild
+    assert load_calls == 2
+    assert paste_calls == 2
+    # C-m sent twice: first failed, retry after rebuild+reload succeeded
+    assert len(enter_calls) == 2
+    assert all(call[3] == "C-m" for call in enter_calls)
+
+
+@pytest.mark.asyncio
+async def test_send_command_force_rebuild_uses_persistent_session_when_not_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """interactive=False 分支：paste 失败 → _force_rebuild_session(interactive=False) 走 _ensure_persistent_session。"""
+    runner = TmuxRunner()
+    ensure_persistent_calls: list[str] = []
+    ensure_interactive_calls: list[str] = []
+    rebuild_interactive_args: list[bool] = []
+    paste_calls = 0
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        nonlocal paste_calls
+        # load-buffer succeeds; paste-buffer fails first time, succeeds on retry.
+        if args and args[0] == "paste-buffer":
+            paste_calls += 1
+            if paste_calls == 1:
+                return 1, "", "no such pane"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_terminate_session(session_name: str) -> bool:
+        return True
+
+    async def fake_ensure_persistent_session(session_name: str, *, workdir: str, env):
+        ensure_persistent_calls.append(session_name)
+        return True, ""
+
+    async def fake_ensure_claude_interactive_session(*, session_name: str, workdir: str, env):
+        ensure_interactive_calls.append(session_name)
+        return True, ""
+
+    real_force = runner._force_rebuild_session
+
+    async def spy_force_rebuild_session(session_name: str, *, workdir: str, env, interactive: bool = False):
+        rebuild_interactive_args.append(interactive)
+        # Delegate to the real method so _terminate_session + the interactive-branch
+        # dispatch are exercised (both terminate and ensure methods are monkeypatched).
+        return await real_force(session_name, workdir=workdir, env=env, interactive=interactive)
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(runner, "_terminate_session", fake_terminate_session)
+    monkeypatch.setattr(runner, "_ensure_persistent_session", fake_ensure_persistent_session)
+    monkeypatch.setattr(runner, "_ensure_claude_interactive_session", fake_ensure_claude_interactive_session)
+    monkeypatch.setattr(runner, "_force_rebuild_session", spy_force_rebuild_session)
+
+    ok, err = await runner._send_command("tgcli_user_1", "hello", workdir="/tmp", env=None, interactive=False)
+
+    assert ok is True
+    assert err == ""
+    assert rebuild_interactive_args == [False]
+    assert ensure_persistent_calls == ["tgcli_user_1"]
+    assert ensure_interactive_calls == []

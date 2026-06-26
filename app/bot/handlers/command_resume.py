@@ -47,10 +47,9 @@ def register_resume_handler(
         await message.answer("选择要恢复的会话:", reply_markup=keyboard)
 
     @router.callback_query(lambda cb: cb.data and cb.data.startswith(CALLBACK_PREFIX))
-    async def callback_resume(callback: CallbackQuery, session: SessionContext) -> None:
+    async def callback_resume(callback: CallbackQuery, session: SessionContext, callback_parts: tuple[str, ...]) -> None:
         user_id = extract_user_id(callback)
-        data = callback.data or ""
-        session_id = data[len(CALLBACK_PREFIX) :]
+        session_id = callback_parts[1]
 
         if not session_id:
             await callback.answer("无效的会话 ID", show_alert=True)

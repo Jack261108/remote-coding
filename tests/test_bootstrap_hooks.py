@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import warnings
+from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.bootstrap import AppContainer
+from app.bootstrap_base import AppContainerBase
 from app.config.settings import Settings
 from app.domain.hook_models import HookEvent
 from app.domain.models import TaskRecord, TaskStatus
@@ -15,6 +20,7 @@ from app.domain.user_question_models import UserQuestionPrompt
 from app.services.auto_approve_service import ActivationSlot
 from app.services.external_user_question_state import PendingExternalUserQuestion
 from app.services.permission_callback_registry import AuthorizationMode, SessionOrigin
+from app.services.status_display import StatusDisplayService
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 
 
@@ -25,31 +31,98 @@ async def wait_for_jsonl_sync_idle(container: AppContainer, session_id: str) -> 
     await asyncio.sleep(0.2 + debounce + 0.1)
 
 
-def make_settings(tmp_path, *, install_hooks: bool = True, tmux_mode: bool = False) -> Settings:
-    return Settings.model_validate(
-        {
-            "TG_BOT_TOKEN": "123456:TESTTOKEN",
-            "TG_ALLOWED_USER_IDS": "1",
-            "DEFAULT_PROVIDER": "claude_code",
-            "DEFAULT_TIMEOUT_SEC": 10,
-            "MAX_CONCURRENT_TASKS": 1,
-            "CLAUDE_TMUX_MODE": tmux_mode,
-            "TMUX_DATA_DIR": str(tmp_path),
-            "CLAUDE_CLI_BIN": "claude",
-            "CLAUDE_INSTALL_HOOKS": install_hooks,
-            "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
-            "CLAUDE_HOOK_SOCKET_PATH": str(tmp_path / "hook.sock"),
-            "CLAUDE_JSONL_SYNC_DEBOUNCE_MS": 10,
-            "CLAUDE_PERIODIC_RECHECK_MS": 10,
-            "CODEX_CLI_BIN": "codex",
-            "GEMINI_CLI_BIN": "gemini",
-            "ALLOWED_WORKDIRS": str(tmp_path),
-        }
-    )
+def make_settings(tmp_path, *, install_hooks: bool = True, tmux_mode: bool = False, **overrides: object) -> Settings:
+    data = {
+        "TG_BOT_TOKEN": "123456:TESTTOKEN",
+        "TG_ALLOWED_USER_IDS": "1",
+        "DEFAULT_PROVIDER": "claude_code",
+        "DEFAULT_TIMEOUT_SEC": 10,
+        "MAX_CONCURRENT_TASKS": 1,
+        "CLAUDE_TMUX_MODE": tmux_mode,
+        "TMUX_DATA_DIR": str(tmp_path),
+        "CLAUDE_CLI_BIN": "claude",
+        "CLAUDE_INSTALL_HOOKS": install_hooks,
+        "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
+        "CLAUDE_HOOK_SOCKET_PATH": str(tmp_path / "hook.sock"),
+        "CLAUDE_JSONL_SYNC_DEBOUNCE_MS": 10,
+        "CLAUDE_PERIODIC_RECHECK_MS": 10,
+        "CODEX_CLI_BIN": "codex",
+        "GEMINI_CLI_BIN": "gemini",
+        "ALLOWED_WORKDIRS": str(tmp_path),
+    }
+    data.update(overrides)
+    return Settings.model_validate(data)
 
 
 def use_legacy_hook_binding_path(container: AppContainer) -> None:
     delattr(container, "ownership_resolver")
+
+
+@pytest.fixture(autouse=True)
+async def cleanup_app_containers() -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        # Per-container try/except: a single container's cleanup failure must not
+        # abort cleanup of the others (which would mask resource leaks behind an
+        # unrelated exception). Collect failures and surface them after best-effort
+        # cleanup so no container is left dangling.
+        containers = [obj for obj in gc.get_objects() if isinstance(obj, AppContainerBase)]
+        cleanup_errors: list[tuple[Any, BaseException]] = []
+        for container in containers:
+            try:
+                await container.session_supervisor.stop_all()
+            except BaseException as exc:  # noqa: BLE001 - cleanup must be best-effort
+                cleanup_errors.append((container, exc))
+            try:
+                await container.bot.session.close()
+            except BaseException as exc:  # noqa: BLE001 - cleanup must be best-effort
+                cleanup_errors.append((container, exc))
+
+        # Verify no *uncleaned* AppContainerBase instances leak past cleanup. We count
+        # containers whose supervisor is still active (the reliable teardown signal) rather
+        # than merely-reachable ones: a container referenced only by a still-live test frame
+        # is not a leak. This is a soft check (warning, not hard assertion) so a flaky gc
+        # snapshot does not turn a green test red while still surfacing genuine leaks.
+        gc.collect()
+        leaked = [
+            obj
+            for obj in gc.get_objects()
+            if isinstance(obj, AppContainerBase) and getattr(getattr(obj, "session_supervisor", None), "_active", False)
+        ]
+        if leaked:
+            warnings.warn(
+                f"{len(leaked)} AppContainerBase instance(s) still have an active session supervisor after cleanup",
+                stacklevel=1,
+            )
+
+        if cleanup_errors:
+            # Re-raise the first error so genuine failures are not silenced, but only
+            # after every container has had a chance to be cleaned up.
+            container, exc = cleanup_errors[0]
+            raise RuntimeError(f"cleanup failed for {container!r}: {exc!r}") from exc
+
+
+@pytest.mark.asyncio
+async def test_container_wires_tmux_timing_settings(tmp_path) -> None:
+    container = AppContainer(
+        make_settings(
+            tmp_path,
+            install_hooks=False,
+            TMUX_POLL_INTERVAL_SEC=1.25,
+            TMUX_ENTER_DELAY_SEC=0.75,
+            TMUX_PARTIAL_FLUSH_SEC=0.5,
+            TMUX_COMPLETION_GRACE_SEC=0.33,
+        )
+    )
+
+    try:
+        assert container.tmux_runner._poll_interval_sec == 1.25
+        assert container.tmux_runner._enter_delay_sec == 0.75
+        assert container.tmux_runner._partial_flush_sec == 0.5
+        assert container.tmux_runner._interactive_completion_grace_sec == 0.33
+    finally:
+        await container.bot.session.close()
 
 
 @pytest.mark.asyncio
@@ -71,6 +144,59 @@ async def test_wire_passes_dead_unbound_cleanup_to_list_router(tmp_path, monkeyp
         await container.bot.session.close()
 
     assert captured["dead_unbound_cleanup"] == container._cleanup_dead_unbound_external_session
+
+
+@pytest.mark.asyncio
+async def test_wire_passes_admin_password_service_to_router(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, ADMIN_PASSWORD="secret"))
+    captured: dict[str, object] = {}
+
+    def fake_create_router(**kwargs):
+        captured.update(kwargs)
+        return Router()
+
+    from aiogram import Router
+
+    monkeypatch.setattr("app.bootstrap.create_router", fake_create_router)
+
+    try:
+        container.wire()
+    finally:
+        await container.bot.session.close()
+
+    assert captured["admin_password_service"] is container.admin_password_service
+    assert container.admin_password_service.is_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_wire_passes_status_display_to_router(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    captured: dict[str, object] = {}
+
+    def fake_create_router(**kwargs):
+        captured.update(kwargs)
+        return Router()
+
+    from aiogram import Router
+
+    monkeypatch.setattr("app.bootstrap.create_router", fake_create_router)
+
+    try:
+        container.wire()
+    finally:
+        await container.bot.session.close()
+
+    assert isinstance(container.status_display, StatusDisplayService)
+    assert captured["status_display"] is container.status_display
+
+
+@pytest.mark.asyncio
+async def test_permission_gateway_receives_risk_evaluator(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, RISK_EVAL_AUTO_APPROVE_MAX_RISK="中"))
+    try:
+        assert container.permission_gateway._risk_evaluator is container.risk_evaluator
+    finally:
+        await container.bot.session.close()
 
 
 @pytest.mark.asyncio
@@ -130,6 +256,29 @@ async def test_app_container_start_skips_install_when_disabled(tmp_path, monkeyp
     await container.stop()
 
     assert seen == {"install": 0, "start": 1, "stop": 1}
+
+
+@pytest.mark.asyncio
+async def test_app_container_start_failure_runs_partial_cleanup(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    hook_start = AsyncMock()
+    hook_stop = AsyncMock()
+    close = AsyncMock()
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock())
+    monkeypatch.setattr(container.hook_socket_server, "start", hook_start)
+    monkeypatch.setattr(container.hook_socket_server, "stop", hook_stop)
+    monkeypatch.setattr(container.bot.session, "close", close)
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock())
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(side_effect=RuntimeError("cleanup failed")))
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await container.start()
+
+    hook_start.assert_awaited_once()
+    hook_stop.assert_awaited_once()
+    close.assert_awaited_once()
+    assert container._started is False
 
 
 @pytest.mark.asyncio
@@ -440,7 +589,7 @@ async def test_start_runs_tmux_health_check_before_restore(tmp_path, monkeypatch
 async def test_start_clears_dead_tmux_binding_before_restoring_watchers(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = make_settings(tmp_path, install_hooks=False, tmux_mode=True)
     first = AppContainer(settings)
-    session = await first.session_service.switch(
+    session, _ = await first.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -524,7 +673,28 @@ async def test_start_registers_unbound_cleanup_without_replacing_existing_lifecy
         assert "external_binding_cleanup" not in jobs  # moved to ExternalBindingCleanupTask
         assert "session_health_check" in jobs
         assert "external_discovery_cleanup" in jobs
+        assert "session_cleanup" in jobs
         assert "session_lifecycle_reconcile" not in jobs
+
+        session_cleanup_interval, session_cleanup_callback = jobs["session_cleanup"]
+        assert session_cleanup_interval == container.settings.session_cleanup_interval_sec
+        cleanup_calls: list[int] = []
+        to_thread_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+        def fake_cleanup(max_age_hours: int) -> None:
+            cleanup_calls.append(max_age_hours)
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            to_thread_calls.append((func, args, kwargs))
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(container.file_session_store, "cleanup_stale_sessions", fake_cleanup)
+        monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+        await session_cleanup_callback()
+
+        assert cleanup_calls == [container.settings.session_cleanup_max_age_hours]
+        assert to_thread_calls == [(fake_cleanup, (container.settings.session_cleanup_max_age_hours,), {})]
 
         interval, callback = jobs["external_discovery_cleanup"]
         assert interval == container.settings.session_health_check_interval_sec
@@ -539,7 +709,7 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     use_legacy_hook_binding_path(container)
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -615,7 +785,7 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
 async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_workdir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -746,7 +916,7 @@ async def test_handle_hook_event_does_not_bind_session_by_unique_workdir_when_cl
 ) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -780,7 +950,7 @@ async def test_handle_hook_event_does_not_bind_session_by_unique_workdir_when_cl
 async def test_handle_hook_event_binds_session_for_empty_processing_terminal_state(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -831,7 +1001,7 @@ async def test_handle_hook_event_binds_session_when_terminal_state_has_content_w
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     use_legacy_hook_binding_path(container)
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -889,7 +1059,7 @@ async def test_handle_hook_event_binds_session_when_pending_interactive_task_mat
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     use_legacy_hook_binding_path(container)
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -937,7 +1107,7 @@ async def test_handle_hook_event_does_not_bind_session_when_only_final_task_matc
 ) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1280,7 +1450,7 @@ async def test_container_uses_independent_session_lock_registries(tmp_path) -> N
 async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
 
-    session_one = await container.session_service.switch(
+    session_one, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1312,7 +1482,7 @@ async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_
 @pytest.mark.asyncio
 async def test_match_session_context_prefers_terminal_binding(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1340,7 +1510,7 @@ async def test_match_session_context_prefers_terminal_binding(tmp_path, monkeypa
 @pytest.mark.asyncio
 async def test_restore_session_bindings_clears_empty_terminal_binding_when_snapshot_missing(tmp_path) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
-    session = await container.session_service.switch(
+    session, _ = await container.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1411,7 +1581,7 @@ async def test_periodic_recheck_syncs_processing_claude_session(tmp_path, monkey
 async def test_start_restores_persisted_claude_session_snapshot(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = make_settings(tmp_path, install_hooks=False)
     first = AppContainer(settings)
-    session = await first.session_service.switch(
+    session, _ = await first.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1555,7 +1725,7 @@ async def test_start_clears_stale_claude_session_binding_when_only_empty_termina
 ) -> None:
     settings = make_settings(tmp_path, install_hooks=False)
     first = AppContainer(settings)
-    session = await first.session_service.switch(
+    session, _ = await first.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1608,7 +1778,7 @@ async def test_start_clears_stale_claude_session_binding_when_only_empty_termina
 async def test_start_keeps_claude_session_binding_when_terminal_state_has_content(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = make_settings(tmp_path, install_hooks=False)
     first = AppContainer(settings)
-    session = await first.session_service.switch(
+    session, _ = await first.session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -1735,3 +1905,265 @@ async def test_session_end_runs_unified_permission_cleanup_in_order(tmp_path) ->
         "unbound:ended-session",
         "binding:ended-session",
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_end_dispatch_clears_active_session_context(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=True,
+            claude_chat_active=True,
+        )
+        session.terminal_id = "terminal-ended"
+        session.claude_session_id = "claude-session-ended"
+        await container.session_service.save_session_context(session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-session-ended",
+                type=SessionEventType.SESSION_ENDED,
+                payload={"cwd": str(tmp_path)},
+            )
+        )
+
+        state = container.structured_session_store.get("claude-session-ended")
+        assert state is not None
+        assert state.phase == SessionPhase.ENDED
+        current = await container.session_service.get(1)
+        assert current is not None
+        assert current.claude_chat_active is False
+        assert current.terminal_mode is False
+        assert current.terminal_id is None
+        assert current.claude_session_id is None
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_late_old_event_does_not_clear_new_session_context(tmp_path) -> None:
+    """A late SessionEnd carrying a stale session_id must not clear the active session.
+
+    This targets the ``session.claude_session_id != session_id`` guard in
+    ``_reconcile_session_context_after_session_end`` (bootstrap_mixins.py:943), NOT the
+    ``session is None`` early return. To hit the != guard we need
+    ``lookup_by_claude_session_id("claude-session-old")`` to return a non-None context
+    whose ``claude_session_id`` is the *new* id ("claude-session-new"). That is exactly the
+    stale-index state the guard defends against: the old event's id still resolves in the
+    index, but the resolved context has since been re-bound to a newer session.
+
+    The setup uses the terminal-less chat-active path so that the outer ``!=`` guard is the
+    *last* line of defence: the terminal branch has a second re-check guard
+    (bootstrap_mixins.py:949) that would independently catch this stale-id case, so a
+    terminal-mode setup would not actually fail when the outer ``!=`` clause is removed.
+    The terminal-less path (lines 954-964) has no such second check, so removing the outer
+    ``!=`` clause lets reconcile proceed and wrongly switch+clear the new session -> test
+    fails. With the guard intact the reconcile early-returns and the new session survives.
+
+    We build the stale-index state by saving the active context under the new id (registering
+    the new id in the index) and then injecting a stale index entry that maps the OLD id
+    onto that same (now re-bound) context.
+    """
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        active_session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=False,
+            claude_chat_active=True,
+        )
+        active_session.claude_session_id = "claude-session-new"
+        await container.session_service.save_session_context(active_session)
+        assert active_session.terminal_id is None
+        assert active_session.claude_chat_active is True
+
+        # Inject the stale-index state: the OLD session id still resolves in the index,
+        # but to the context that is now bound to the NEW session id. This is the precise
+        # condition the ``session.claude_session_id != session_id`` guard exists for.
+        store = container.session_service._store
+        store._claude_session_index["claude-session-old"] = active_session
+
+        # Spy: confirm lookup_by_claude_session_id("claude-session-old") returns non-None
+        # (i.e. we really are exercising the != guard, not the None early-return).
+        looked_up = await container.session_service.lookup_by_claude_session_id("claude-session-old")
+        assert looked_up is not None
+        assert looked_up.claude_session_id == "claude-session-new"
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-session-old",
+                type=SessionEventType.HOOK_RECEIVED,
+                payload={"session_id": "claude-session-old", "cwd": str(tmp_path), "event": "SessionEnd", "status": "ended"},
+            )
+        )
+
+        current = await container.session_service.get(1)
+        assert current is not None
+        # Guard intact: the new session context must survive untouched.
+        assert current.claude_chat_active is True
+        assert current.terminal_id is None
+        assert current.claude_session_id == "claude-session-new"
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_status_ended_branch_triggers_reconcile(tmp_path) -> None:
+    """Exercise the ``status == "ended"`` clause of ``_is_session_end_dispatch_event``
+    (bootstrap_mixins.py:939) independently of the ``event == "SessionEnd"`` clause.
+
+    We dispatch a HOOK_RECEIVED whose ``status`` is ``"ended"`` but whose ``event`` is a
+    non-SessionEnd value (``"Notification"``). The ``or`` short-circuits on the status
+    clause, ``is_session_end`` becomes True and reconcile clears the terminal group.
+
+    Note: HookEvent.from_dict (invoked by the HOOK_RECEIVED processor) requires both
+    ``event`` and ``status`` to be valid non-empty strings, so we cannot literally omit
+    the ``event`` key. We instead keep ``event`` at a valid non-SessionEnd value so only
+    the status clause is the trigger -- this is what isolates the branch under test.
+    If the ``event.payload.get("status") == "ended"`` clause were removed, the event would
+    not be treated as a session end and reconcile would not run -> terminal context would
+    remain active -> test fails.
+    """
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=True,
+            claude_chat_active=True,
+        )
+        session.terminal_id = "term-x"
+        session.claude_session_id = "claude-x"
+        await container.session_service.save_session_context(session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-x",
+                type=SessionEventType.HOOK_RECEIVED,
+                payload={
+                    "session_id": "claude-x",
+                    "cwd": str(tmp_path),
+                    "event": "Notification",  # valid, but NOT SessionEnd -> only status clause triggers
+                    "status": "ended",
+                },
+            )
+        )
+
+        current = await container.session_service.get(1)
+        assert current is not None
+        # Reconcile fired via the status clause -> terminal group cleared.
+        assert current.terminal_mode is False
+        assert current.terminal_id is None
+        assert current.claude_chat_active is False
+        assert current.claude_session_id is None
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_event_sessionend_branch_triggers_reconcile(tmp_path) -> None:
+    """Exercise the ``event == "SessionEnd"`` clause of ``_is_session_end_dispatch_event``
+    (bootstrap_mixins.py:939) independently of the ``status == "ended"`` clause.
+
+    We dispatch a HOOK_RECEIVED whose ``event`` is ``"SessionEnd"`` but whose ``status`` is
+    a non-ended value (``"running"``). The ``or`` short-circuits on the event clause,
+    ``is_session_end`` becomes True and reconcile clears the terminal group.
+
+    See the sibling test for why the ``event`` key cannot be literally omitted: HookEvent
+    validation requires a valid non-empty ``event``/``status``. Keeping ``status`` at a
+    non-ended value isolates the event clause as the sole trigger. If the
+    ``event.payload.get("event") == "SessionEnd"`` clause were removed, this event would
+    not be treated as a session end -> terminal context would remain active -> test fails.
+    """
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=True,
+            claude_chat_active=True,
+        )
+        session.terminal_id = "term-x"
+        session.claude_session_id = "claude-x"
+        await container.session_service.save_session_context(session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-x",
+                type=SessionEventType.HOOK_RECEIVED,
+                payload={
+                    "session_id": "claude-x",
+                    "cwd": str(tmp_path),
+                    "event": "SessionEnd",
+                    "status": "running",  # valid, but NOT ended -> only event clause triggers
+                },
+            )
+        )
+
+        current = await container.session_service.get(1)
+        assert current is not None
+        # Reconcile fired via the event clause -> terminal group cleared.
+        assert current.terminal_mode is False
+        assert current.terminal_id is None
+        assert current.claude_chat_active is False
+        assert current.claude_session_id is None
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_end_reconcile_terminal_less_path_clears_chat_active_and_session_id(tmp_path) -> None:
+    """End-to-end cover for the terminal-less reconcile branch
+    (bootstrap_mixins.py:954-964): no ``terminal_id`` but ``claude_chat_active`` is True ->
+    ``switch(terminal_mode=False, claude_chat_active=False)`` then clear
+    ``claude_session_id`` and persist.
+
+    Constructed via ``switch(terminal_mode=False, claude_chat_active=True)`` so the
+    resulting context has ``terminal_id is None`` and an active chat, then bind a claude
+    session id and dispatch SESSION_ENDED. If the ``current.claude_session_id = None``
+    line (bootstrap_mixins.py:962) were removed, the session id would survive -> test fails.
+    """
+    container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
+    try:
+        session, _ = await container.session_service.switch(
+            user_id=1,
+            provider="claude_code",
+            workdir=str(tmp_path),
+            terminal_mode=False,
+            claude_chat_active=True,
+        )
+        # terminal-less chat-active context: no terminal_id, chat active.
+        assert session.terminal_id is None
+        assert session.claude_chat_active is True
+
+        session.claude_session_id = "claude-x"
+        await container.session_service.save_session_context(session)
+
+        await container._dispatch_session_event(
+            SessionEvent(
+                session_id="claude-x",
+                type=SessionEventType.SESSION_ENDED,
+                payload={"cwd": str(tmp_path)},
+            )
+        )
+
+        current = await container.session_service.get(1)
+        assert current is not None
+        # Path C: switch clears terminal_mode + claude_chat_active, then clears claude_session_id.
+        assert current.terminal_mode is False
+        assert current.claude_chat_active is False
+        assert current.claude_session_id is None
+        assert current.terminal_id is None
+    finally:
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()

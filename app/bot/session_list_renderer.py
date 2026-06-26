@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
-from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.infra.text_formatting import ensure_aware_utc, html_escape, relative_time_zh, short_cwd, truncate_text
 from app.services.session_id_resolver import unique_prefixes
 
 _RECENT_LIMIT = 3
@@ -45,7 +45,7 @@ def build_session_list_message(
     has_invalid_sessions: bool = False,
     external_token_ids: Sequence[str] = (),
 ) -> SessionListRenderResult:
-    now_utc = _ensure_aware_utc(now)
+    now_utc = ensure_aware_utc(now)
     all_items = list(items)
     if not all_items:
         keyboard = None
@@ -86,9 +86,9 @@ def build_session_list_message(
         parts.extend(["", "🚀 <b>最近可继续</b>"])
         recent_buttons: list[InlineKeyboardButton] = []
         for index, item in enumerate(recent, start=1):
-            title = _html(_truncate(_display_title(item), _TITLE_MAX_CHARS))
-            cwd = _html(_short_cwd(item.cwd))
-            relative = _relative_time(item.activity_at, now_utc)
+            title = html_escape(truncate_text(_display_title(item), _TITLE_MAX_CHARS))
+            cwd = html_escape(short_cwd(item.cwd))
+            relative = relative_time_zh(item.activity_at, now_utc)
             parts.append(f"{index}. 🔗 {title}")
             parts.append(f"   {cwd} · {relative} · 已绑定")
             recent_buttons.append(
@@ -104,9 +104,9 @@ def build_session_list_message(
         for item in attention:
             label = _attention_label(item)
             icon = _attention_icon(item)
-            cwd = _html(_short_cwd(item.cwd))
-            sid = _html(_display_sid(item))
-            relative = _relative_time(item.activity_at, now_utc)
+            cwd = html_escape(short_cwd(item.cwd))
+            sid = html_escape(_display_sid(item))
+            relative = relative_time_zh(item.activity_at, now_utc)
             parts.append(f"{icon} {label} · {cwd} · <code>{sid}</code> · {relative}")
             buttons.append(
                 [
@@ -198,47 +198,11 @@ def _attention_callback_data(
 
 def _display_title(item: ListSessionView) -> str:
     title = (item.title or "").strip()
-    return title or _short_cwd(item.cwd)
-
-
-def _short_cwd(cwd: str) -> str:
-    stripped = cwd.rstrip("/")
-    if not stripped:
-        return "unknown"
-    parts = stripped.split("/")
-    return "/".join(parts[-2:]) if len(parts) >= 2 else stripped
-
-
-def _truncate(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 1] + "…"
-
-
-def _relative_time(activity_at: datetime, now: datetime) -> str:
-    delta_sec = max(0, int((now - _ensure_aware_utc(activity_at)).total_seconds()))
-    if delta_sec < 60:
-        return "刚刚"
-    minutes = delta_sec // 60
-    if minutes < 60:
-        return f"{minutes} 分钟前"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours} 小时前"
-    days = hours // 24
-    if days == 1:
-        return "昨天"
-    return f"{days} 天前"
+    return title or short_cwd(item.cwd)
 
 
 def _activity_timestamp(value: datetime) -> float:
-    return _ensure_aware_utc(value).timestamp()
-
-
-def _ensure_aware_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+    return ensure_aware_utc(value).timestamp()
 
 
 def _sid_prefix(item: ListSessionView) -> str:
@@ -247,7 +211,3 @@ def _sid_prefix(item: ListSessionView) -> str:
 
 def _display_sid(item: ListSessionView) -> str:
     return item.session_id[:_DISPLAY_ID_LEN]
-
-
-def _html(text: str) -> str:
-    return escape(text, quote=False)

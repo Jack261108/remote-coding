@@ -5,10 +5,11 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import BaseFilter, Command
 from aiogram.types import Message
 
 from app.adapters.claude.paths import ClaudePaths
+from app.bot.handlers.admin_challenge import maybe_handle_admin_password_text
 from app.bot.handlers.command_attach import register_attach_handler
 from app.bot.handlers.command_cancel import register_cancel_handler
 from app.bot.handlers.command_claude import register_claude_handler
@@ -24,7 +25,11 @@ from app.bot.handlers.command_status import register_status_handler
 from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
 from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.handlers.external_session import register_external_session_handler
-from app.bot.handlers.file_upload import register_file_upload_handler, schedule_pending_upload_processing
+from app.bot.handlers.file_upload import (
+    flush_pending_uploads_for_task_start,
+    register_file_upload_handler,
+    schedule_pending_upload_processing,
+)
 from app.bot.handlers.session_actions import register_session_action_handlers
 from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.bot.middleware.error_handling import ErrorHandlingMiddleware
@@ -41,11 +46,13 @@ from app.services.session_registry import SessionRegistryService
 from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 from app.services.upload_queue import UploadQueueManager
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
+    from app.services.admin_password_service import AdminPasswordService
     from app.services.external_binding_reaper import ExternalBindingReaper
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_gateway import PermissionGateway
@@ -54,33 +61,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class PendingAdminPasswordFilter(BaseFilter):
+    def __init__(self, admin_password_service: AdminPasswordService | None) -> None:
+        self._admin_password_service = admin_password_service
+
+    async def __call__(self, message: Message) -> bool:
+        user_id = message.from_user.id if message.from_user else 0
+        return bool(
+            user_id
+            and self._admin_password_service is not None
+            and self._admin_password_service.is_enabled
+            and self._admin_password_service.has_pending(user_id)
+        )
+
+
 def _register_middleware(
     router: Router,
     session_service: SessionService,
+    *,
+    admin_password_service: AdminPasswordService | None = None,
 ) -> tuple[SessionGuardMiddleware, SessionGuardMiddleware]:
     """Register global middleware (error handling, session guards). Returns guard instances."""
     error_handling_middleware = ErrorHandlingMiddleware()
     router.message.middleware(error_handling_middleware)
     router.callback_query.middleware(error_handling_middleware)
 
-    guard_basic = SessionGuardMiddleware(
-        session_service,
-        require_active=False,
-        skip_commands=("/start", "/session", "/claude", "/exit", "/quit"),
-        skip_callback_prefixes=("ext_perm:", "ext_uq:", "sess:", "ask:"),
-    )
-    guard_active = SessionGuardMiddleware(
-        session_service,
-        require_active=True,
-    )
-    router.message.middleware(guard_basic)
-    router.callback_query.middleware(guard_basic)
+    guard_basic = SessionGuardMiddleware(session_service, require_active=False)
+    guard_active = SessionGuardMiddleware(session_service, require_active=True)
     return guard_basic, guard_active
 
 
 def _register_optional_handlers(
     router: Router,
     *,
+    guard_basic: SessionGuardMiddleware,
     guard_active: SessionGuardMiddleware,
     session_callbacks: CallbackValidatorMiddleware,
     permission_callbacks: CallbackValidatorMiddleware,
@@ -109,6 +123,7 @@ def _register_optional_handlers(
     if session_scanner is not None and claude_paths is not None:
         resume_active_router = Router()
         resume_active_router.message.middleware(guard_active)
+        resume_active_router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=2, prefix="resume"))
         resume_active_router.callback_query.middleware(guard_active)
         register_resume_handler(
             resume_active_router,
@@ -119,8 +134,10 @@ def _register_optional_handlers(
         router.include_router(resume_active_router)
 
     if registry_service is not None:
+        list_router = Router()
+        list_router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=(2, 3), prefix="sess"))
         register_list_handler(
-            router,
+            list_router,
             registry_service=registry_service,
             external_discovery=external_discovery,
             external_binder=external_binder,
@@ -129,6 +146,7 @@ def _register_optional_handlers(
             title_resolver=title_resolver,
             dead_unbound_cleanup=dead_unbound_cleanup,
         )
+        router.include_router(list_router)
         register_attach_handler(router, registry_service=registry_service)
 
     if external_discovery is not None and external_binder is not None:
@@ -164,6 +182,7 @@ def _register_optional_handlers(
 
     if file_receiver is not None and upload_queue is not None:
         upload_guard_router = Router()
+        upload_guard_router.message.middleware(guard_basic)
         register_file_upload_handler(
             upload_guard_router,
             file_receiver=file_receiver,
@@ -192,8 +211,13 @@ def _create_chat_text_router(
     sender_factory: Callable[[], ChunkSender],
     diff_generator: DiffGeneratorService | None,
     result_exporter: ResultExporterService | None,
+    status_display: StatusDisplayService | None,
     queued_upload_scheduler: Callable[[Message, int, str], None] | None,
+    pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None,
     permission_gateway: PermissionGateway | None,
+    structured_reply_pump_interval_sec: float,
+    spinner_initial_delay_sec: float,
+    spinner_interval_sec: float,
 ) -> Router:
     """Create a sub-router for Claude chat text messages (requires active session)."""
     chat_text_router = Router()
@@ -237,8 +261,13 @@ def _create_chat_text_router(
             workdir=session.workdir,
             diff_generator=diff_generator,
             result_exporter=result_exporter,
+            status_display=status_display,
             queued_upload_scheduler=queued_upload_scheduler,
+            pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
+            structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
+            spinner_initial_delay_sec=spinner_initial_delay_sec,
+            spinner_interval_sec=spinner_interval_sec,
         )
         logger.info(
             "claude chat stream spawned",
@@ -263,6 +292,7 @@ def create_router(
     upload_queue: UploadQueueManager | None = None,
     result_exporter: ResultExporterService | None = None,
     diff_generator: DiffGeneratorService | None = None,
+    status_display: StatusDisplayService | None = None,
     external_discovery: ExternalSessionDiscoveryService | None = None,
     external_binder: ExternalSessionBinder | None = None,
     structured_session_store: SessionStore | None = None,
@@ -276,11 +306,12 @@ def create_router(
     external_binding_reaper: ExternalBindingReaper | None = None,
     title_resolver: Callable[[str, str], str | None] | None = None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
+    admin_password_service: AdminPasswordService | None = None,
 ) -> Router:
     router = Router()
 
     # 注册中间件
-    _, guard_active = _register_middleware(router, session_service)
+    guard_basic, guard_active = _register_middleware(router, session_service, admin_password_service=admin_password_service)
 
     # 回调数据验证中间件
     session_callbacks = CallbackValidatorMiddleware(expected_parts=3, prefix="sess")
@@ -332,6 +363,7 @@ def create_router(
     )
 
     queued_upload_scheduler = None
+    pending_upload_finalizer = None
     if file_receiver is not None and upload_queue is not None:
 
         def _queued_upload_scheduler(message: Message, user_id: int, completed_task_id: str) -> None:
@@ -345,7 +377,18 @@ def create_router(
                 completed_task_id=completed_task_id,
             )
 
+        async def _pending_upload_finalizer(message: Message, user_id: int) -> None:
+            await flush_pending_uploads_for_task_start(
+                message,
+                file_receiver=file_receiver,
+                session_service=session_service,
+                upload_queue=upload_queue,
+                user_id=user_id,
+                task_service=task_service,
+            )
+
         queued_upload_scheduler = _queued_upload_scheduler
+        pending_upload_finalizer = _pending_upload_finalizer
 
     # 核心命令处理器
     register_run_handler(
@@ -354,18 +397,28 @@ def create_router(
         sender_factory=sender_factory,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        status_display=status_display,
         queued_upload_scheduler=queued_upload_scheduler,
+        pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
+        structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
+        spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
+        spinner_interval_sec=settings.spinner_interval_sec,
     )
     register_claude_handler(router, task_service=task_service)
-    register_cancel_handler(router, task_service=task_service)
+    register_cancel_handler(router, task_service=task_service, admin_password_service=admin_password_service)
     register_status_handler(router, task_service=task_service)
-    register_session_handler(router, task_service=task_service, session_service=session_service)
+    register_session_handler(
+        router, task_service=task_service, session_service=session_service, admin_password_service=admin_password_service
+    )
     if permission_gateway is not None:
+        permission_router = Router()
+        permission_router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=3, prefix="perm"))
         register_permission_handlers(
-            router,
+            permission_router,
             permission_gateway=permission_gateway,
         )
+        router.include_router(permission_router)
     uq_router = Router()
     uq_router.callback_query.middleware(user_question_callbacks)
     register_user_question_handlers(uq_router, task_service=task_service)
@@ -374,6 +427,7 @@ def create_router(
     # 子路由器：需要活跃会话的命令
     cmds_active_router = Router()
     cmds_active_router.message.middleware(guard_active)
+    cmds_active_router.callback_query.middleware(CallbackValidatorMiddleware(prefix="clcmd"))
     cmds_active_router.callback_query.middleware(guard_active)
     register_cmds_handler(cmds_active_router, task_service=task_service)
     router.include_router(cmds_active_router)
@@ -381,6 +435,7 @@ def create_router(
     # 可选处理器（依赖服务可用性）
     _register_optional_handlers(
         router,
+        guard_basic=guard_basic,
         guard_active=guard_active,
         session_callbacks=session_callbacks,
         permission_callbacks=permission_callbacks,
@@ -406,6 +461,15 @@ def create_router(
         dead_unbound_cleanup=dead_unbound_cleanup,
     )
 
+    @router.message(PendingAdminPasswordFilter(admin_password_service), F.text & ~F.text.startswith("/"))
+    async def admin_password_text(message: Message) -> None:
+        await maybe_handle_admin_password_text(
+            message,
+            task_service=task_service,
+            session_service=session_service,
+            admin_password_service=admin_password_service,
+        )
+
     # Claude 聊天文本子路由器
     chat_text_router = _create_chat_text_router(
         guard_active=guard_active,
@@ -415,8 +479,13 @@ def create_router(
         sender_factory=sender_factory,
         diff_generator=diff_generator,
         result_exporter=result_exporter,
+        status_display=status_display,
         queued_upload_scheduler=queued_upload_scheduler,
+        pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
+        structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
+        spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
+        spinner_interval_sec=settings.spinner_interval_sec,
     )
     router.include_router(chat_text_router)
 

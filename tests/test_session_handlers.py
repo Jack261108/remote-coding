@@ -4,13 +4,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import InaccessibleMessage
 
 from app.adapters.process.tmux_runner import TmuxRunner
-from app.adapters.storage.memory import MemorySessionStore, MemoryTaskStore
+from app.adapters.storage.file_session_context_store import FileSessionContextStore
+from app.adapters.storage.file_session_store import FileSessionStore
+from app.adapters.storage.memory import MemoryTaskStore
 from app.bot.handlers.command_permission import register_permission_handlers
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
-from app.bot.handlers.command_user_question import register_user_question_handlers
+from app.bot.handlers.command_user_question import _is_accessible_message, register_user_question_handlers
 from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.router import create_router
 from app.domain.models import TaskRecord, TaskStatus
@@ -25,6 +28,7 @@ from app.domain.session_models import (
 from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
 from app.services.external_user_question_state import ExternalUserQuestionState, PendingExternalUserQuestion
 from app.services.session_service import SessionService
+from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 from tests.fakes.cli import StubAdapter, StubFactory, make_settings
 from tests.fakes.telegram import DummyCallbackQuery, DummyMessage
@@ -42,24 +46,28 @@ def _find_handler_by_name(router, name: str):
     return None
 
 
+class _DummyEventObserver:
+    def __init__(self, handlers: list) -> None:
+        self._handlers = handlers
+        self.middlewares = []
+
+    def __call__(self, *args, **kwargs):
+        def decorator(fn):
+            self._handlers.append(fn)
+            return fn
+
+        return decorator
+
+    def middleware(self, middleware) -> None:
+        self.middlewares.append(middleware)
+
+
 class DummyRouter:
     def __init__(self) -> None:
         self.handlers = []
         self.callback_handlers = []
-
-    def message(self, *args, **kwargs):
-        def decorator(fn):
-            self.handlers.append(fn)
-            return fn
-
-        return decorator
-
-    def callback_query(self, *args, **kwargs):
-        def decorator(fn):
-            self.callback_handlers.append(fn)
-            return fn
-
-        return decorator
+        self.message = _DummyEventObserver(self.handlers)
+        self.callback_query = _DummyEventObserver(self.callback_handlers)
 
 
 async def _call_callback(router: DummyRouter, index: int, callback) -> None:
@@ -73,9 +81,25 @@ async def _call_callback(router: DummyRouter, index: int, callback) -> None:
     await handler(callback, **kwargs)
 
 
+def _tmux_runner_with_session_store(tmp_path) -> TmuxRunner:
+    file_store = FileSessionStore(str(tmp_path))
+    return TmuxRunner(data_dir=str(tmp_path), file_store=file_store, session_store=SessionStore(file_store))
+
+
+def _session_service(tmp_path) -> SessionService:
+    return SessionService(FileSessionContextStore(FileSessionStore(str(tmp_path))))
+
+
+def test_is_accessible_message_rejects_inaccessible_message() -> None:
+    inaccessible = InaccessibleMessage.model_construct(chat=None, message_id=1, date=0)
+
+    assert _is_accessible_message(inaccessible) is False
+    assert _is_accessible_message(DummyMessage("Question")) is True
+
+
 @pytest.mark.asyncio
 async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -83,13 +107,13 @@ async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
     session_service = service._session_service
-    session = await session_service.switch(
+    session, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -130,12 +154,59 @@ async def test_session_handler_renders_structured_snapshot(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_handler_cleans_orphaned_terminal_resources(tmp_path) -> None:
+    factory = StubFactory(StubAdapter(events=[]))
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=_session_service(tmp_path),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(1),
+    )
+    session_service = service._session_service
+    old_workdir = tmp_path / "old"
+    new_workdir = tmp_path / "new"
+    old_workdir.mkdir()
+    new_workdir.mkdir()
+    original, _ = await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(old_workdir),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="claude-session-old",
+    )
+    assert original.terminal_id is not None
+    old_terminal_id = original.terminal_id
+    cleanup = AsyncMock()
+    service.cleanup_orphaned_terminal = cleanup
+
+    router = DummyRouter()
+    register_session_handler(router, task_service=service, session_service=session_service)
+    handler = router.handlers[0]
+    message = DummyMessage(f"/session claude_code {new_workdir}")
+
+    await handler(message)
+
+    cleanup.assert_awaited_once_with(
+        old_terminal_id,
+        claude_session_id="claude-session-old",
+        user_id=1,
+    )
+    assert message.answers
+    assert "session 已更新" in message.answers[0]
+
+
+@pytest.mark.asyncio
 async def test_session_handler_rejects_missing_workdir(tmp_path) -> None:
     factory = StubFactory(StubAdapter(events=[]))
     service = TaskService(
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
     )
@@ -155,7 +226,7 @@ async def test_session_handler_rejects_missing_workdir(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_status_handler_renders_structured_snapshot(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -163,7 +234,7 @@ async def test_status_handler_renders_structured_snapshot(tmp_path) -> None:
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
@@ -404,7 +475,7 @@ async def test_external_user_question_callback_rejects_invalidated_session(monke
 
 @pytest.mark.asyncio
 async def test_user_question_callback_handler_records_choice_and_prompts_next_question(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -412,7 +483,7 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
@@ -475,7 +546,7 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
 
 @pytest.mark.asyncio
 async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -483,7 +554,7 @@ async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
@@ -548,7 +619,7 @@ async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path
 
 @pytest.mark.asyncio
 async def test_user_question_callback_handler_toggles_multi_select_and_submits(tmp_path) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
@@ -556,12 +627,12 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
-        session_service=SessionService(MemorySessionStore()),
+        session_service=_session_service(tmp_path),
         cli_factory=factory,
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    session = await service._session_service.switch(
+    session, _ = await service._session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -628,12 +699,12 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
 async def test_router_text_chat_answers_pending_user_question_instead_of_creating_new_task(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
-    session_service = SessionService(MemorySessionStore())
+    session_service = _session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -642,7 +713,7 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    session = await session_service.switch(
+    session, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -694,12 +765,12 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
 
 @pytest.mark.asyncio
 async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tmux_runner = TmuxRunner(data_dir=str(tmp_path))
+    tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
     factory._claude_tmux_enabled = True
     factory.get_claude_session_state = lambda session_id: tmux_runner.get_session_state(session_id)
-    session_service = SessionService(MemorySessionStore())
+    session_service = _session_service(tmp_path)
     service = TaskService(
         settings=make_settings(tmp_path, claude_tmux_mode=True),
         task_store=MemoryTaskStore(),
@@ -708,7 +779,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
         semaphore=asyncio.Semaphore(1),
         structured_session_store=tmux_runner._session_store,
     )
-    session = await session_service.switch(
+    session, _ = await session_service.switch(
         user_id=1,
         provider="claude_code",
         workdir=str(tmp_path),
@@ -721,7 +792,20 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     run_mock = AsyncMock(return_value=task)
     monkeypatch.setattr("app.bot.router.run_prompt_and_stream", run_mock)
 
-    router = create_router(settings=make_settings(tmp_path, claude_tmux_mode=True), task_service=service, session_service=session_service)
+    settings = make_settings(
+        tmp_path,
+        claude_tmux_mode=True,
+        STRUCTURED_REPLY_PUMP_INTERVAL_SEC=0.77,
+        SPINNER_INITIAL_DELAY_SEC=0.88,
+        SPINNER_INTERVAL_SEC=0.99,
+    )
+    status_display = object()
+    router = create_router(
+        settings=settings,
+        task_service=service,
+        session_service=session_service,
+        status_display=status_display,
+    )
     text_handler = _find_handler_by_name(router, "command_claude_chat_text")
     assert text_handler is not None, "command_claude_chat_text handler not found"
     message = DummyMessage("你好")
@@ -729,3 +813,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     await text_handler(message, session=session)
 
     run_mock.assert_awaited_once()
+    assert run_mock.await_args.kwargs["status_display"] is status_display
+    assert run_mock.await_args.kwargs["structured_reply_pump_interval_sec"] == 0.77
+    assert run_mock.await_args.kwargs["spinner_initial_delay_sec"] == 0.88
+    assert run_mock.await_args.kwargs["spinner_interval_sec"] == 0.99

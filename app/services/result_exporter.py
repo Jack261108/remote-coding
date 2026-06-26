@@ -117,11 +117,11 @@ class ResultExporterService:
                                 "ZIP size limit exceeded (%d MB), stopping file collection",
                                 self._settings.zip_max_size_mb,
                             )
-                            raise _ZipSizeLimitExceeded()
+                            raise _ZipSizeLimitExceededError()
                         # Use relative path from workdir as archive name
                         arcname = str(file_path.relative_to(workdir_path))
                         zf.write(file_path, arcname=arcname)
-                    except _ZipSizeLimitExceeded:
+                    except _ZipSizeLimitExceededError:
                         raise
                     except Exception:
                         logger.warning("Failed to add file to ZIP: %s", file_path, exc_info=True)
@@ -216,5 +216,5 @@ class ZipSizeLimitError(Exception):
     """Raised when ZIP archive exceeds the configured size limit."""
 
 
-class _ZipSizeLimitExceeded(Exception):
+class _ZipSizeLimitExceededError(Exception):
     """Internal signal for ZIP size limit during construction."""

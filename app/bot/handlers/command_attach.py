@@ -6,6 +6,7 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
+from app.bot.handlers.command_utils import command_args
 from app.bot.handlers.user_utils import extract_user_id
 from app.services.session_registry import SessionRegistryService
 
@@ -16,7 +17,7 @@ def register_attach_handler(router: Router, *, registry_service: SessionRegistry
     @router.message(Command("attach"))
     async def command_attach(message: Message, command: CommandObject) -> None:
         user_id = extract_user_id(message)
-        terminal_id = (command.args or "").strip()
+        terminal_id = command_args(command)
 
         if not terminal_id:
             # Show the session list instead

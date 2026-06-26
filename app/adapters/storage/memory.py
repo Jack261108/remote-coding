@@ -65,6 +65,11 @@ class MemoryTaskStore:
         items.sort(key=lambda x: x.created_at, reverse=True)
         return items[:limit]
 
+    async def list_active_by_user(self, user_id: int) -> list[TaskRecord]:
+        async with self._lock:
+            self._evict_expired_and_overflow_locked()
+            return [x for x in self._tasks.values() if x.user_id == user_id and not x.is_final]
+
     async def iter_all(self) -> Iterable[TaskRecord]:
         async with self._lock:
             self._evict_expired_and_overflow_locked()
@@ -78,29 +83,6 @@ class SessionContextStore(Protocol):
 
     async def save(self, session: SessionContext) -> None: ...
 
+    async def delete(self, user_id: int) -> bool: ...
+
     async def get_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None: ...
-
-
-class MemorySessionStore:
-    def __init__(self) -> None:
-        self._sessions: dict[int, SessionContext] = {}
-        self._lock = asyncio.Lock()
-
-    async def get(self, user_id: int) -> SessionContext | None:
-        async with self._lock:
-            return self._sessions.get(user_id)
-
-    async def list_all(self) -> list[SessionContext]:
-        async with self._lock:
-            return list(self._sessions.values())
-
-    async def get_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None:
-        async with self._lock:
-            for session in self._sessions.values():
-                if session.claude_session_id == claude_session_id:
-                    return session
-            return None
-
-    async def save(self, session: SessionContext) -> None:
-        async with self._lock:
-            self._sessions[session.user_id] = session

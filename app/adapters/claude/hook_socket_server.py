@@ -410,26 +410,48 @@ class HookSocketServer:
             await self._close_writer(pending.writer)
         return success
 
-    async def _emit_event(self, event: HookEvent) -> None:
-        if self._event_handler is None:
+    async def _invoke_handler_safely(
+        self,
+        *,
+        kind: str,
+        handler: Callable[..., Awaitable[None] | None] | None,
+        args: tuple[object, ...],
+        extra: dict[str, object],
+    ) -> None:
+        if handler is None:
             return
-        result = self._event_handler(event)
-        if inspect.isawaitable(result):
-            await result
+        try:
+            result = handler(*args)
+            if inspect.isawaitable(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("hook socket callback failed", extra={"callback": kind, **extra})
+
+    async def _emit_event(self, event: HookEvent) -> None:
+        await self._invoke_handler_safely(
+            kind="event",
+            handler=self._event_handler,
+            args=(event,),
+            extra={"session_id": event.session_id, "event": event.event, "tool_use_id": event.tool_use_id or ""},
+        )
 
     async def _emit_permission_failure(self, session_id: str, tool_use_id: str) -> None:
-        if self._permission_failure_handler is None:
-            return
-        result = self._permission_failure_handler(session_id, tool_use_id)
-        if inspect.isawaitable(result):
-            await result
+        await self._invoke_handler_safely(
+            kind="permission_failure",
+            handler=self._permission_failure_handler,
+            args=(session_id, tool_use_id),
+            extra={"session_id": session_id, "tool_use_id": tool_use_id},
+        )
 
     async def _emit_permission_resolved(self, session_id: str, tool_use_id: str, reason: str) -> None:
-        if self._permission_resolved_handler is None:
-            return
-        result = self._permission_resolved_handler(session_id, tool_use_id, reason)
-        if inspect.isawaitable(result):
-            await result
+        await self._invoke_handler_safely(
+            kind="permission_resolved",
+            handler=self._permission_resolved_handler,
+            args=(session_id, tool_use_id, reason),
+            extra={"session_id": session_id, "tool_use_id": tool_use_id, "reason": reason},
+        )
 
     async def _has_resolvable_permission(self, tool_use_id: str | None) -> bool:
         if tool_use_id is None:

@@ -37,6 +37,7 @@ from app.bot.router import create_router
 from app.config.settings import Settings
 from app.domain.session_tombstone import SessionTombstoneStore
 from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.admin_password_service import AdminPasswordService
 from app.services.auto_approve_service import AutoApproveService
 from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
@@ -56,12 +57,14 @@ from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
 from app.services.result_exporter import ResultExporterService
+from app.services.risk_evaluator import RiskEvaluator
 from app.services.session_ownership_resolver import SessionOwnershipResolver
 from app.services.session_registry import SessionRegistryService
 from app.services.session_scanner import SessionScanner
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.session_supervisor import SessionSupervisor
+from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 from app.services.unbound_permission_handler import UnboundPermissionHandler
 from app.services.upload_cleanup import UploadCleanupService
@@ -135,6 +138,7 @@ class AppContainer(
         )
         self.tombstone_store = SessionTombstoneStore(ttl_seconds=settings.tombstone_ttl_sec)
         self.auto_approve_service = AutoApproveService(tombstone=self.tombstone_store)
+        self.admin_password_service = AdminPasswordService(settings.admin_password or "")
         self.permission_message_builder = PermissionMessageBuilder()
         self.file_session_store = FileSessionStore(settings.tmux_data_dir)
         self.session_context_store = FileSessionContextStore(self.file_session_store)
@@ -150,6 +154,10 @@ class AppContainer(
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
             data_dir=settings.tmux_data_dir,
+            poll_interval_sec=settings.tmux_poll_interval_sec,
+            enter_delay_sec=settings.tmux_enter_delay_sec,
+            partial_flush_sec=settings.tmux_partial_flush_sec,
+            interactive_completion_grace_sec=settings.tmux_completion_grace_sec,
             claude_cli_bin=settings.claude_cli_bin,
             file_store=self.file_session_store,
             session_store=self.structured_session_store,
@@ -192,6 +200,7 @@ class AppContainer(
         self.context_builder = ContextBuilderService(upload_store=self.upload_store)
         self.result_exporter = ResultExporterService(settings=settings)
         self.diff_generator = DiffGeneratorService()
+        self.status_display = StatusDisplayService(bot=self.bot)
         self.upload_cleanup = UploadCleanupService(
             upload_store=self.upload_store,
             interval_minutes=settings.upload_cleanup_interval_min,
@@ -246,9 +255,17 @@ class AppContainer(
         self.unbound_permission_handler = UnboundPermissionHandler(
             message_sender=self.message_sender,
             hook_socket_server=self.hook_socket_server,
-            allowed_user_ids=settings.allowed_user_id_set,
+            allowed_user_ids=settings.effective_unbound_permission_notify_user_id_set,
             permission_ttl_sec=settings.claude_hook_pending_permission_ttl_sec,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
+            notify_user_ids_resolver=self._resolve_unbound_permission_notify_user_ids,
+        )
+        self.risk_evaluator = RiskEvaluator(
+            enabled=settings.risk_eval_enabled,
+            dangerous_commands=settings.risk_eval_dangerous_commands,
+            dangerous_paths=settings.risk_eval_dangerous_paths,
+            protected_paths=settings.risk_eval_protected_paths,
+            auto_approve_max_risk=settings.risk_eval_auto_approve_max_risk,
         )
         self.permission_gateway = PermissionGateway(
             registry=self.permission_callback_registry,
@@ -259,6 +276,7 @@ class AppContainer(
             settings=settings,
             message_sender=self.message_sender,
             message_builder=self.permission_message_builder,
+            risk_evaluator=self.risk_evaluator,
         )
         self.unbound_permission_handler.set_permission_gateway(self.permission_gateway)
         self.push_notifier = ExternalSessionPushNotifier(
@@ -291,6 +309,19 @@ class AppContainer(
             ttl=timedelta(hours=settings.external_binding_idle_ttl_hours),
             interval_sec=settings.session_health_check_interval_sec,
         )
+
+    async def _resolve_unbound_permission_notify_user_ids(self) -> set[int]:
+        configured_user_ids = self.settings.unbound_permission_notify_user_id_set
+        if configured_user_ids:
+            return configured_user_ids
+
+        user_ids = {session.user_id for session in await self.session_service.list_all()}
+        user_ids.update(binding.user_id for binding in self.external_binding_store.list_all())
+        if not user_ids:
+            logger.warning(
+                "unbound permission notification has no recipients; set UNBOUND_PERMISSION_NOTIFY_USER_IDS when TG_ALLOWED_USER_IDS=*"
+            )
+        return user_ids
 
     def _init_infrastructure(self) -> None:
         """Initialize lock registries, background tasks, and janitor."""
@@ -370,65 +401,83 @@ class AppContainer(
     async def start(self) -> None:
         if self._started:
             return
-        # Register command menu (best-effort)
         try:
-            from app.bot.commands import BOT_COMMANDS
+            # Register command menu (best-effort)
+            try:
+                from app.bot.commands import BOT_COMMANDS
 
-            await self.bot.set_my_commands(BOT_COMMANDS)
-        except Exception as exc:
-            logger.warning("Failed to register bot commands: %s", exc)
-        if self.settings.claude_install_hooks:
-            self.hook_installer.install()
-        await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
-        if self.settings.claude_tmux_mode:
-            await self.session_registry.reconcile_terminal_lifecycle()
-        await self._restore_session_bindings()
+                await self.bot.set_my_commands(BOT_COMMANDS)
+            except Exception as exc:
+                logger.warning("Failed to register bot commands: %s", exc)
+            if self.settings.claude_install_hooks:
+                self.hook_installer.install()
+            await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
+            if self.settings.claude_tmux_mode:
+                await self.session_registry.reconcile_terminal_lifecycle()
+            await self._restore_session_bindings()
 
-        # Initial cleanup passes (before periodic loop starts)
-        await self.external_binding_cleanup_service.run_cleanup()
-        await self.upload_cleanup.run_cleanup()
+            # Initial cleanup passes (before periodic loop starts)
+            await self.external_binding_cleanup_service.run_cleanup()
+            await self.upload_cleanup.run_cleanup()
 
-        # Register periodic jobs
-        self._janitor.register(
-            "upload_queue_cleanup",
-            self.settings.upload_queue_cleanup_interval_sec,
-            self.upload_queue.prune_expired,
-        )
-        self._janitor.register(
-            "upload_file_cleanup",
-            self.settings.upload_cleanup_interval_min * 60,
-            self.upload_cleanup.run_cleanup,
-        )
-        self._janitor.register(
-            "external_discovery_cleanup",
-            self.settings.session_health_check_interval_sec,
-            self._prune_unbound_external_sessions,
-        )
-        self._janitor.register(
-            "session_health_check",
-            self.settings.session_health_check_interval_sec,
-            self.session_registry.reconcile_terminal_lifecycle,
-        )
-        self._janitor.register(
-            "periodic_recheck",
-            self.settings.claude_periodic_recheck_ms / 1000,
-            self._recheck_active_claude_sessions,
-        )
-        self._external_binding_cleanup_task.start()
-        self._janitor_task.start()
-        self._started = True
+            # Register periodic jobs
+            self._janitor.register(
+                "upload_queue_cleanup",
+                self.settings.upload_queue_cleanup_interval_sec,
+                self.upload_queue.prune_expired,
+            )
+            self._janitor.register(
+                "upload_file_cleanup",
+                self.settings.upload_cleanup_interval_min * 60,
+                self.upload_cleanup.run_cleanup,
+            )
+            self._janitor.register(
+                "external_discovery_cleanup",
+                self.settings.session_health_check_interval_sec,
+                self._prune_unbound_external_sessions,
+            )
+            self._janitor.register(
+                "session_health_check",
+                self.settings.session_health_check_interval_sec,
+                self.session_registry.reconcile_terminal_lifecycle,
+            )
+
+            async def _cleanup_stale_sessions() -> None:
+                await asyncio.to_thread(
+                    self.file_session_store.cleanup_stale_sessions,
+                    self.settings.session_cleanup_max_age_hours,
+                )
+
+            self._janitor.register(
+                "periodic_recheck",
+                self.settings.claude_periodic_recheck_ms / 1000,
+                self._recheck_active_claude_sessions,
+            )
+            self._janitor.register(
+                "session_cleanup",
+                self.settings.session_cleanup_interval_sec,
+                _cleanup_stale_sessions,
+            )
+            self._external_binding_cleanup_task.start()
+            self._janitor_task.start()
+            self._started = True
+        except BaseException:
+            try:
+                await self.stop()
+            except Exception:
+                logger.exception("cleanup after startup failure failed")
+            raise
 
     async def stop(self) -> None:
-        if not self._started:
+        try:
+            await self._janitor_task.stop()
+            await self._external_binding_cleanup_task.stop()
+            await self.session_supervisor.stop_all()
+            await self.hook_socket_server.stop()
+            await self._stop_background_tasks()
+        finally:
             await self.bot.session.close()
-            return
-        await self._janitor_task.stop()
-        await self._external_binding_cleanup_task.stop()
-        await self.session_supervisor.stop_all()
-        await self.hook_socket_server.stop()
-        await self._stop_background_tasks()
-        await self.bot.session.close()
-        self._started = False
+            self._started = False
 
     def wire(self) -> None:
         auth_middleware = AuthMiddleware(
@@ -456,6 +505,7 @@ class AppContainer(
             upload_queue=self.upload_queue,
             result_exporter=self.result_exporter,
             diff_generator=self.diff_generator,
+            status_display=self.status_display,
             external_discovery=self.external_discovery,
             external_binder=self.external_binder,
             structured_session_store=self.structured_session_store,
@@ -469,5 +519,6 @@ class AppContainer(
             external_binding_reaper=self.external_binding_reaper,
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
             dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
+            admin_password_service=self.admin_password_service,
         )
         self.dispatcher.include_router(router)

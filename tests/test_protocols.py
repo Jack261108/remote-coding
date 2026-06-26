@@ -5,10 +5,16 @@ Covers: runtime_checkable protocol conformance.
 
 from __future__ import annotations
 
+from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.protocols import SessionStoreProtocol
+from app.services.session_store import SessionStore
 
 
 class TestSessionStoreProtocol:
+    def test_real_session_store_is_instance(self, tmp_path):
+        store = SessionStore(FileSessionStore(str(tmp_path)))
+        assert isinstance(store, SessionStoreProtocol)
+
     def test_conforming_class_is_instance(self):
         """A class with all required methods satisfies the protocol."""
 
