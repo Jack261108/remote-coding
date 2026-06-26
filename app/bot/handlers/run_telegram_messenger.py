@@ -59,6 +59,19 @@ class RunTelegramMessenger:
             )
             return False
 
+    async def delete_message_safely(self, target_message: Message | None) -> bool:
+        if target_message is None:
+            return False
+        try:
+            await target_message.delete()
+            return True
+        except Exception:
+            logger.exception(
+                "telegram delete failed",
+                extra={"task_id": self._task_id, "user_id": self._user_id, "provider": self._provider},
+            )
+            return False
+
     async def set_reaction(self, emoji: str | None) -> None:
         """Set or clear an emoji reaction on the original user message."""
         bot = getattr(self._root_message, "bot", None)

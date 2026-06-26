@@ -394,17 +394,18 @@ class RunEventStreamer:
                 duration, truncated = await _load_status_summary(self._task_service, self._start.task.task_id, self._user_id)
 
                 if event.type == EventType.EXITED:
-                    success_msg = _build_success_message(
-                        task_id=self._start.task.task_id,
-                        exit_code=event.exit_code,
-                        duration=duration,
-                        truncated=truncated,
-                    )
-                    if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
-                        await self._messenger.answer_safely(success_msg)
-                    # Clear status display
                     if self._status_display and self._lifecycle_message:
+                        await self._messenger.delete_message_safely(self._lifecycle_message)
                         await self._status_display.clear(chat_id=self._lifecycle_message.chat.id, task_id=self._start.task.task_id)
+                    else:
+                        success_msg = _build_success_message(
+                            task_id=self._start.task.task_id,
+                            exit_code=event.exit_code,
+                            duration=duration,
+                            truncated=truncated,
+                        )
+                        if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
+                            await self._messenger.answer_safely(success_msg)
                     await self._maybe_auto_export()
                     # Generate and send diff on successful completion
                     await self._generate_and_send_diff()

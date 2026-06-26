@@ -13,6 +13,7 @@ class DummyAnswerMessage:
         self.edits: list[str] = []
         self.edit_parse_modes: list[ParseMode | None] = []
         self.fail_next_edit = fail_next_edit
+        self.deleted = False
         self.chat = SimpleNamespace(id=1)
         self.message_id = 1
 
@@ -25,6 +26,10 @@ class DummyAnswerMessage:
         self.edits.append(text)
         self.edit_parse_modes.append(parse_mode)
         return self
+
+    async def delete(self) -> bool:
+        self.deleted = True
+        return True
 
 
 class DummyMessage:

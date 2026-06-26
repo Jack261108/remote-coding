@@ -764,6 +764,10 @@ async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypa
         "spinner_interval_sec": 0.99,
         "status_display": status_display,
     }
+    lifecycle = message.sent_messages[0]
+    assert lifecycle.deleted is True
+    assert not any("✅ 完成" in edit for edit in lifecycle.edits)
+    status_display.clear.assert_awaited()
 
 
 @pytest.mark.asyncio
