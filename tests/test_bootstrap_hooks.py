@@ -614,7 +614,6 @@ async def test_handle_hook_event_binds_session_and_syncs_jsonl(tmp_path, monkeyp
 @pytest.mark.asyncio
 async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_workdir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
-    use_legacy_hook_binding_path(container)
 
     session = await container.session_service.switch(
         user_id=1,
@@ -644,6 +643,101 @@ async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_work
     assert updated is not None
     assert updated.claude_session_id == "claude-session-1"
     assert updated.terminal_id == session.terminal_id
+
+
+@pytest.mark.asyncio
+async def test_handle_hook_event_binds_unowned_tmux_first_hook_with_active_task(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    session = await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    terminal_state = container.structured_session_store.get_or_create(
+        session_id=f"tgcli_{session.terminal_id}",
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id=session.terminal_id,
+        user_id=1,
+    )
+    terminal_state.phase = SessionPhase.PROCESSING
+    container.structured_session_store._persist(terminal_state)
+    await container.task_store.add(
+        TaskRecord(
+            task_id="task-1",
+            session_id=session.session_id,
+            user_id=1,
+            provider="claude_code",
+            prompt="hello",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            status=TaskStatus.RUNNING,
+        )
+    )
+
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        return None
+
+    monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="claude-session-1",
+            cwd=str(tmp_path),
+            event="UserPromptSubmit",
+            status="processing",
+        )
+    )
+    await wait_for_jsonl_sync_idle(container, "claude-session-1")
+
+    updated = await container.session_service.get(1)
+    assert updated is not None
+    assert updated.claude_session_id == "claude-session-1"
+    assert updated.terminal_id == session.terminal_id
+
+    state = container.structured_session_store.get("claude-session-1")
+    assert state is not None
+    assert state.user_id == 1
+    assert state.terminal_id == session.terminal_id
+
+
+@pytest.mark.asyncio
+async def test_handle_hook_event_does_not_bind_unowned_workdir_without_terminal_id(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session_workdir = str(tmp_path)
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=session_workdir,
+        terminal_mode=False,
+        claude_chat_active=True,
+    )
+
+    async def fake_sync(session_id: str, cwd: str) -> None:
+        return None
+
+    monkeypatch.setattr(container, "sync_claude_session", fake_sync)
+    monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="claude-session-1",
+            cwd=session_workdir,
+            event="SessionStart",
+            status="starting",
+        )
+    )
+    await wait_for_jsonl_sync_idle(container, "claude-session-1")
+
+    updated = await container.session_service.get(1)
+    assert updated is not None
+    assert updated.claude_session_id is None
+    assert updated.terminal_id is None
 
 
 @pytest.mark.asyncio

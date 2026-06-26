@@ -2,21 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, cast
 
 from app.bootstrap_base import AppContainerBase
 from app.config.settings import is_workdir_allowed
+from app.domain.external_session_models import OwnershipResult
 from app.domain.external_session_models import SessionOrigin as ExternalSessionOrigin
 from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus, utc_now
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
 from app.domain.user_question_models import extract_user_question_prompts
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
-
-if TYPE_CHECKING:
-    from app.domain.external_session_models import OwnershipResult
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +177,34 @@ class HookHandlingMixin(AppContainerBase):
                     if event.expects_response and hasattr(self, "hook_socket_server"):
                         await self.hook_socket_server.cancel_pending_permissions(session_id=event.session_id)
                     return None
+
+            if (
+                not is_session_end
+                and ownership.origin == ExternalSessionOrigin.EXTERNAL
+                and ownership.ownership_state == "unbound"
+                and hasattr(self, "session_service")
+            ):
+                match_session_context = cast(
+                    Callable[[HookEvent], Awaitable[SessionContext | None]] | None,
+                    getattr(cast(Any, self), "_match_session_context", None),
+                )
+                if match_session_context is not None:
+                    matched = await match_session_context(event)
+                    if matched is not None and matched.terminal_id is not None:
+                        ownership = OwnershipResult(
+                            owner_user_id=matched.user_id,
+                            origin=ExternalSessionOrigin.TMUX,
+                            ownership_state="owned",
+                        )
+                        logger.info(
+                            "unbound hook event matched active tmux session",
+                            extra={
+                                "session_id": event.session_id,
+                                "owner_user_id": matched.user_id,
+                                "terminal_id": matched.terminal_id,
+                                "workdir": matched.workdir,
+                            },
+                        )
 
             # Remove external binding on session end so /list doesn't show stale entries.
             if is_session_end and ownership.origin == ExternalSessionOrigin.EXTERNAL:

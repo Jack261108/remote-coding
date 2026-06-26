@@ -209,6 +209,19 @@ def _normalize_tool_input(value: object | None) -> dict[str, object] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
+def _normalize_pid(value: object | None) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 def _status_for_event(event: str, payload: dict[str, object]) -> str:
     explicit = _pick(payload, "status")
     if explicit is not None:
@@ -251,7 +264,7 @@ def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
         "cwd": str(cwd or os.getcwd()),
         "event": event_name,
         "status": _status_for_event(event_name, payload),
-        "pid": int(pid) if pid is not None else None,
+        "pid": _normalize_pid(pid),
         "tty": str(tty) if tty is not None else None,
         "tool": str(tool) if tool is not None else None,
         "tool_input": _normalize_tool_input(tool_input),
@@ -260,6 +273,10 @@ def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
         "message": _normalize_message(message),
     }}
     return normalized
+
+
+def _expects_response(payload: dict[str, object]) -> bool:
+    return payload.get("event") == "PermissionRequest" and payload.get("status") == "waiting_for_approval"
 
 
 def main() -> int:
@@ -275,6 +292,7 @@ def main() -> int:
         return 0
 
     normalized_payload = normalize_payload(raw_payload)
+    expects_response = _expects_response(normalized_payload)
 
     socket_path = os.environ.get("REMOTE_CODING_HOOK_SOCKET_PATH", DEFAULT_SOCKET_PATH)
     response = b""
@@ -282,6 +300,8 @@ def main() -> int:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(socket_path)
             client.sendall(json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8") + b"\\n")
+            if not expects_response:
+                return 0
             while True:
                 chunk = client.recv(65536)
                 if not chunk:

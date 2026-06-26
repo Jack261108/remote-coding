@@ -5,6 +5,7 @@ import os
 import socket
 import subprocess
 import threading
+import time
 import uuid
 from contextlib import suppress
 
@@ -126,6 +127,65 @@ def test_hook_script_normalizes_claude_payload(tmp_path) -> None:
             "message": None,
         }
     ]
+
+
+def test_hook_script_does_not_wait_for_non_permission_response(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    socket_path = f"/tmp/rc-hi-{uuid.uuid4().hex}.sock"
+    installer = HookInstaller(
+        paths=paths,
+        socket_path=socket_path,
+        python_bin="python3",
+    )
+    script_path = installer.install(version=ClaudeCodeVersion(2, 1, 88))
+
+    received: list[dict] = []
+    release = threading.Event()
+
+    def serve_once() -> None:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(socket_path)
+            server.listen(1)
+            conn, _ = server.accept()
+            with conn:
+                chunks: list[bytes] = []
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if b"\n" in chunk:
+                        break
+                received.append(json.loads(b"".join(chunks).split(b"\n", 1)[0].decode("utf-8")))
+                release.wait(timeout=2)
+
+    thread = threading.Thread(target=serve_once)
+    thread.start()
+
+    raw_payload = {
+        "session_id": "claude-session-123",
+        "cwd": "/tmp/project",
+        "hook_event_name": "Stop",
+    }
+    start = time.monotonic()
+    completed = subprocess.run(
+        ["python3", str(script_path)],
+        input=json.dumps(raw_payload),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=1,
+    )
+    elapsed = time.monotonic() - start
+    release.set()
+    thread.join(timeout=5)
+    with suppress(FileNotFoundError):
+        os.unlink(socket_path)
+
+    assert completed.returncode == 0
+    assert completed.stdout == ""
+    assert elapsed < 1
+    assert received[0]["event"] == "Stop"
 
 
 def test_parse_claude_code_version() -> None:
