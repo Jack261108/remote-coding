@@ -1613,6 +1613,104 @@ async def test_watch_task_exits_when_new_completed_turn_arrives_without_waiting_
 
 
 @pytest.mark.asyncio
+async def test_interactive_idle_pane_does_not_cancel_without_interrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
+    runner._interactive_idle_check_sec = 0.01
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    idle_checks = 0
+
+    async def fake_idle(session_name: str) -> bool:
+        nonlocal idle_checks
+        assert session_name == terminal_session
+        idle_checks += 1
+        return True
+
+    monkeypatch.setattr(runner, "_is_claude_idle_in_pane", fake_idle)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "idle.exit",
+        task_id="t-idle",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=claude_session,
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.04)
+    assert task.done() is False
+    assert meta.cancel_requested is False
+
+    state = runner._session_store.get(claude_session)
+    assert state is not None
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-new",
+            role="assistant",
+            text="正常完成后的回复",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    state.checkpoint.last_offset = 20
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    events = await task
+
+    assert idle_checks > 0
+    assert meta.cancel_requested is False
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_interactive_interrupted_state_marks_task_canceled(tmp_path: Path) -> None:
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "interrupted.exit",
+        task_id="t-interrupted",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=claude_session,
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    task = asyncio.create_task(_collect_events(runner._watch_task(meta=meta, timeout_sec=1)))
+    await asyncio.sleep(0.03)
+    state = runner._session_store.get(claude_session)
+    assert state is not None
+    state.interrupted = True
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+    runner._session_store._persist(state)
+
+    events = await task
+
+    assert meta.cancel_requested is True
+    assert [event.type for event in events] == [EventType.CANCELED]
+
+
+@pytest.mark.asyncio
 async def test_cancel_returns_false_for_unknown_task() -> None:
     runner = TmuxRunner()
     canceled = await runner.cancel("not-found")
