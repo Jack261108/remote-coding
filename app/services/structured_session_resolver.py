@@ -93,16 +93,17 @@ class StructuredSessionResolver:
             if task.claude_session_id != prompt_matched_state.session_id:
                 task.claude_session_id = prompt_matched_state.session_id
                 await self._task_store.save(task)
-            logger.info(
-                "structured session lookup hit prompt turn",
-                extra={
-                    "user_id": user_id,
-                    "task_id": task_id,
-                    "session_id": prompt_matched_state.session_id,
-                    "claude_session_id": prompt_matched_state.claude_session_id,
-                    "turn_count": len(prompt_matched_state.turns),
-                },
-            )
+            if log_missing:
+                logger.info(
+                    "structured session lookup hit prompt turn",
+                    extra={
+                        "user_id": user_id,
+                        "task_id": task_id,
+                        "session_id": prompt_matched_state.session_id,
+                        "claude_session_id": prompt_matched_state.claude_session_id,
+                        "turn_count": len(prompt_matched_state.turns),
+                    },
+                )
             return prompt_matched_state
 
         return self._lookup_structured_session(
@@ -179,17 +180,18 @@ class StructuredSessionResolver:
                             },
                         )
             if state is not None:
-                logger.info(
-                    "structured session lookup hit store",
-                    extra={
-                        "user_id": user_id,
-                        "matched_by": matched_by,
-                        "claude_session_id": state.claude_session_id,
-                        "session_id": state.session_id,
-                        "phase": state.phase.value,
-                        "turn_count": len(state.turns),
-                    },
-                )
+                if log_missing:
+                    logger.info(
+                        "structured session lookup hit store",
+                        extra={
+                            "user_id": user_id,
+                            "matched_by": matched_by,
+                            "claude_session_id": state.claude_session_id,
+                            "session_id": state.session_id,
+                            "phase": state.phase.value,
+                            "turn_count": len(state.turns),
+                        },
+                    )
                 return state
 
         if explicit_claude_session_id is None:
@@ -229,16 +231,17 @@ class StructuredSessionResolver:
                     },
                 )
             return None
-        logger.info(
-            "structured session lookup fallback",
-            extra={
-                "user_id": user_id,
-                "claude_session_id": explicit_claude_session_id,
-                "state_found": state is not None,
-                "phase": state.phase.value if state is not None else None,
-                "turn_count": len(state.turns) if state is not None else 0,
-            },
-        )
+        if log_missing:
+            logger.info(
+                "structured session lookup fallback",
+                extra={
+                    "user_id": user_id,
+                    "claude_session_id": explicit_claude_session_id,
+                    "state_found": state is not None,
+                    "phase": state.phase.value if state is not None else None,
+                    "turn_count": len(state.turns) if state is not None else 0,
+                },
+            )
         return state
 
     async def is_state_owned_by_user(self, *, state: SessionState | None, user_id: int) -> bool:
@@ -317,7 +320,16 @@ class StructuredSessionResolver:
         state = await self.get_structured_session_for_scope(user_id=user_id, task_id=task_id, log_missing=False)
         if state is None:
             return False
-        return await self._notifier.wait_for_publish(state.session_id, since_cursor=since_cursor, timeout_sec=timeout_sec)
+        return await self.wait_for_structured_session_update_by_id(
+            session_id=state.session_id,
+            since_cursor=since_cursor,
+            timeout_sec=timeout_sec,
+        )
+
+    async def wait_for_structured_session_update_by_id(self, *, session_id: str, since_cursor: int, timeout_sec: float) -> bool:
+        if self._notifier is None:
+            return False
+        return await self._notifier.wait_for_publish(session_id, since_cursor=since_cursor, timeout_sec=timeout_sec)
 
     async def wait_for_structured_session_change(self, *, user_id: int, since_revision: int, timeout_sec: float) -> bool:
         return await self.wait_for_structured_session_update(user_id=user_id, since_cursor=since_revision, timeout_sec=timeout_sec)

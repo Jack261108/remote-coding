@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     tmux_completion_grace_sec: float = Field(0.1, alias="TMUX_COMPLETION_GRACE_SEC")
 
     # UI timing
-    structured_reply_pump_interval_sec: float = Field(0.05, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
+    structured_reply_pump_interval_sec: float = Field(1.0, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
     spinner_initial_delay_sec: float = Field(3.0, alias="SPINNER_INITIAL_DELAY_SEC")
     spinner_interval_sec: float = Field(1.0, alias="SPINNER_INTERVAL_SEC")
     codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")

@@ -167,6 +167,7 @@ def test_env_example_matches_supported_claude_settings() -> None:
     assert "JSONL_FILE_WATCHER_ENABLED=true" in content
     assert "SESSION_SUPERVISOR_POLL_INTERVAL_SEC=0.2" in content
     assert "SESSION_SUPERVISOR_IDLE_POLL_INTERVAL_SEC=10.0" in content
+    assert "STRUCTURED_REPLY_PUMP_INTERVAL_SEC=1.0" in content
 
 
 _BASE_PAYLOAD = {

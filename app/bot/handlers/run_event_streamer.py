@@ -67,7 +67,7 @@ def _build_error_message(*, event_type: EventType, task_id: str, error_text: str
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _SPINNER_INTERVAL_SEC = 1.0
 _SPINNER_INITIAL_DELAY_SEC = 3.0
-_STRUCTURED_REPLY_PUMP_INTERVAL_SEC = 0.05
+_STRUCTURED_REPLY_PUMP_INTERVAL_SEC = 1.0
 _INTERACTIVE_PUMP_CANCEL_GRACE_SEC = 5.0
 _SNAPSHOT_CAPTURE_TIMEOUT_SEC = 10.0
 _ABANDONED_INTERACTIVE_PUMP_TASKS: set[asyncio.Task] = set()
@@ -221,7 +221,7 @@ class RunEventStreamer:
         try:
             while True:
                 try:
-                    changed = await self._presenter.wait_for_update(timeout_sec=self._structured_reply_pump_interval_sec)
+                    changed = await self._presenter.wait_for_initial_update(timeout_sec=self._structured_reply_pump_interval_sec)
                     if not changed:
                         continue
                     if self._status_display and self._lifecycle_message:
@@ -254,6 +254,15 @@ class RunEventStreamer:
                     await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
+
+    async def _drain_available_structured_replies(self, *, max_iterations: int = 10) -> None:
+        for _ in range(max_iterations):
+            changed = await self._presenter.wait_for_initial_update(timeout_sec=0)
+            if not changed:
+                return
+            async with self._emit_lock:
+                await self._dispatcher.emit_presenter_messages(log_missing=False)
+            await self._dispatcher.flush()
 
     async def _capture_diff_snapshot(self) -> None:
         """Capture pre-task filesystem snapshot for diff generation (non-blocking)."""
@@ -442,12 +451,13 @@ class RunEventStreamer:
                 await self._messenger.set_reaction(None)
                 if saw_terminal and self._start.interactive:
                     await asyncio.sleep(0.1)
-                    # Freeze the presenter's last turn ID to prevent emitting
-                    # new turns that arrive after task completion (e.g., idle greetings).
-                    self._presenter.freeze_reply_cursor()
+                    await self._drain_available_structured_replies()
                     async with self._emit_lock:
                         await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
                     await self._dispatcher.flush()
+                    # Freeze after the final emit so replies flushed shortly after
+                    # process exit are still delivered, while later idle greetings are not.
+                    self._presenter.freeze_reply_cursor()
             finally:
                 if self._status_display and self._lifecycle_message:
                     try:

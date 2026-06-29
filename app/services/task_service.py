@@ -181,6 +181,13 @@ class TaskService:
             user_id=user_id, since_cursor=since_cursor, timeout_sec=timeout_sec, task_id=task_id
         )
 
+    async def wait_for_structured_session_update_by_id(self, *, session_id: str, since_cursor: int, timeout_sec: float) -> bool:
+        return await self._structured_session_resolver.wait_for_structured_session_update_by_id(
+            session_id=session_id,
+            since_cursor=since_cursor,
+            timeout_sec=timeout_sec,
+        )
+
     async def wait_for_structured_session_change(self, *, user_id: int, since_revision: int, timeout_sec: float) -> bool:
         return await self._structured_session_resolver.wait_for_structured_session_change(
             user_id=user_id, since_revision=since_revision, timeout_sec=timeout_sec
