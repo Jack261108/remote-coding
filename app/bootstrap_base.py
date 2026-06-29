@@ -16,6 +16,7 @@ from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.admin_password_service import AdminPasswordService
 from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.claude_jsonl_parser import ClaudeJSONLParser
+from app.services.jsonl_file_watcher import JSONLFileWatcher
 from app.services.risk_evaluator import RiskEvaluator
 from app.services.session_registry import SessionRegistryService
 from app.services.session_service import SessionService
@@ -45,6 +46,7 @@ class AppContainerBase:
     session_context_store: FileSessionContextStore
     claude_jsonl_parser: ClaudeJSONLParser
     structured_session_store: SessionStore
+    jsonl_file_watcher: JSONLFileWatcher
     session_supervisor: SessionSupervisor
     admin_password_service: AdminPasswordService
     risk_evaluator: RiskEvaluator

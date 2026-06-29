@@ -115,7 +115,7 @@ app/
 │   ├── session_store.py                 # 会话存储
 │   ├── session_state_cache.py           # 会话状态缓存
 │   ├── session_state_repository.py      # 会话状态仓库
-│   ├── session_supervisor.py            # 会话监控器
+│   ├── session_supervisor.py            # 会话监控器（事件唤醒 + 低频兜底）
 │   ├── session_scanner.py               # 会话扫描器
 │   ├── session_notifier.py              # 会话通知器
 │   ├── session_lookup_service.py        # 会话查找服务
@@ -137,7 +137,7 @@ app/
 │   ├── process_liveness.py              # 进程存活检测
 │   ├── janitor_task.py                  # 清理任务
 │   ├── periodic_janitor.py              # 周期性清理
-│   ├── jsonl_file_watcher.py            # JSONL 文件监控
+│   ├── jsonl_file_watcher.py            # watchdog-based JSONL 文件监听
 │   ├── claude_command_discovery.py      # Claude 命令发现
 │   ├── claude_jsonl_parser.py           # Claude JSONL 解析器
 │   ├── context_builder.py               # 上下文构建器

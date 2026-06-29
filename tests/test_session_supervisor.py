@@ -26,6 +26,9 @@ class _FakeParser:
     def parse_incremental(self, *, session_id: str, cwd: str) -> _Snapshot:
         return _Snapshot(interrupt_detected=self._interrupt_detected)
 
+    def session_file_path(self, *, session_id: str, cwd: str) -> Path:
+        return Path(cwd) / f"{session_id}.jsonl"
+
     def subagent_file_path(self, *, session_id: str, agent_id: str, cwd: str) -> Path:
         assert self._subagent_file is not None
         return self._subagent_file
@@ -42,6 +45,28 @@ class _FakeStore:
         if self.state is not None and self.state.session_id == session_id:
             return self.state
         return None
+
+
+class _FakeJSONLFileWatcher:
+    def __init__(self, *, available: bool = True) -> None:
+        self.is_available = available
+        self.watched: dict[str, tuple[str, set[Path]]] = {}
+        self.unwatched: list[str] = []
+        self.cleared = False
+
+    def watch_files(self, *, session_id: str, cwd: str, paths) -> None:
+        self.watched[session_id] = (cwd, set(paths))
+
+    def replace_session_files(self, *, session_id: str, cwd: str, paths) -> None:
+        self.watched[session_id] = (cwd, set(paths))
+
+    def unwatch_session(self, session_id: str) -> None:
+        self.unwatched.append(session_id)
+        self.watched.pop(session_id, None)
+
+    def clear(self) -> None:
+        self.cleared = True
+        self.watched.clear()
 
 
 @pytest.mark.asyncio
@@ -177,6 +202,7 @@ async def test_session_supervisor_missing_state_exits_without_restart() -> None:
 @pytest.mark.asyncio
 async def test_session_supervisor_stop_all_cleans_state() -> None:
     state = SessionState(session_id="claude-session-1", workdir="/tmp")
+    file_watcher = _FakeJSONLFileWatcher()
     supervisor = SessionSupervisor(
         session_store=_FakeStore(state),
         claude_jsonl_parser=_FakeParser(),
@@ -184,6 +210,7 @@ async def test_session_supervisor_stop_all_cleans_state() -> None:
         on_dispatch_event=lambda event: asyncio.sleep(0),
         poll_interval_sec=0.01,
         debounce_sec=0.01,
+        jsonl_file_watcher=file_watcher,
     )
 
     supervisor.watch(session_id=state.session_id, workdir=state.workdir)
@@ -196,14 +223,17 @@ async def test_session_supervisor_stop_all_cleans_state() -> None:
     assert supervisor._active is False
     assert supervisor._tasks == {}
     assert supervisor._locks == {}
+    assert supervisor._wake_events == {}
     assert supervisor._jsonl_sync_requests == {}
     assert supervisor._seen_mtimes == {}
     assert supervisor._session_mtime_keys == {}
+    assert file_watcher.cleared is True
 
 
 @pytest.mark.asyncio
 async def test_session_supervisor_forget_cleans_session_state() -> None:
     state = SessionState(session_id="claude-session-1", workdir="/tmp")
+    file_watcher = _FakeJSONLFileWatcher()
     supervisor = SessionSupervisor(
         session_store=_FakeStore(state),
         claude_jsonl_parser=_FakeParser(),
@@ -211,6 +241,7 @@ async def test_session_supervisor_forget_cleans_session_state() -> None:
         on_dispatch_event=lambda event: asyncio.sleep(0),
         poll_interval_sec=0.01,
         debounce_sec=0.01,
+        jsonl_file_watcher=file_watcher,
     )
 
     supervisor.watch(session_id=state.session_id, workdir=state.workdir)
@@ -224,6 +255,133 @@ async def test_session_supervisor_forget_cleans_session_state() -> None:
 
     assert state.session_id not in supervisor._tasks
     assert state.session_id not in supervisor._locks
+    assert state.session_id not in supervisor._wake_events
     assert state.session_id not in supervisor._jsonl_sync_requests
     assert "file" not in supervisor._seen_mtimes
     assert state.session_id not in supervisor._session_mtime_keys
+    assert file_watcher.unwatched == [state.session_id]
+
+
+@pytest.mark.asyncio
+async def test_session_supervisor_schedule_jsonl_sync_wakes_idle_watcher() -> None:
+    state = SessionState(session_id="claude-session-1", workdir="/tmp", phase=SessionPhase.IDLE)
+    synced = asyncio.Event()
+    sync_calls = 0
+
+    async def on_jsonl_sync(session_id: str, cwd: str) -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        synced.set()
+
+    supervisor = SessionSupervisor(
+        session_store=_FakeStore(state),
+        claude_jsonl_parser=_FakeParser(),
+        on_jsonl_sync=on_jsonl_sync,
+        on_dispatch_event=lambda event: asyncio.sleep(0),
+        poll_interval_sec=1.0,
+        idle_poll_interval_sec=60.0,
+        debounce_sec=0.01,
+        jsonl_file_watcher=_FakeJSONLFileWatcher(available=True),
+    )
+
+    supervisor.watch(session_id=state.session_id, workdir=state.workdir)
+    await asyncio.sleep(0)
+    supervisor.schedule_jsonl_sync(state.session_id, state.workdir)
+    try:
+        await asyncio.wait_for(synced.wait(), timeout=0.5)
+    finally:
+        await supervisor.stop_all()
+
+    assert sync_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_session_supervisor_repeated_jsonl_sync_keeps_first_debounce_deadline() -> None:
+    state = SessionState(session_id="claude-session-1", workdir="/tmp", phase=SessionPhase.IDLE)
+    supervisor = SessionSupervisor(
+        session_store=_FakeStore(state),
+        claude_jsonl_parser=_FakeParser(),
+        on_jsonl_sync=lambda session_id, cwd: asyncio.sleep(0),
+        on_dispatch_event=lambda event: asyncio.sleep(0),
+        poll_interval_sec=1.0,
+        idle_poll_interval_sec=60.0,
+        debounce_sec=0.05,
+        jsonl_file_watcher=_FakeJSONLFileWatcher(available=True),
+    )
+
+    supervisor.schedule_jsonl_sync(state.session_id, state.workdir)
+    await asyncio.sleep(0.01)
+    remaining_before = supervisor._next_wait_timeout(session_id=state.session_id, active_state=False)
+    supervisor.schedule_jsonl_sync(state.session_id, f"{state.workdir}/next")
+    remaining_after = supervisor._next_wait_timeout(session_id=state.session_id, active_state=False)
+
+    assert remaining_after <= remaining_before
+    assert supervisor._jsonl_sync_requests[state.session_id][0] == f"{state.workdir}/next"
+
+
+@pytest.mark.asyncio
+async def test_session_supervisor_uses_idle_interval_when_file_watcher_available() -> None:
+    state = SessionState(session_id="claude-session-1", workdir="/tmp", phase=SessionPhase.IDLE)
+    supervisor = SessionSupervisor(
+        session_store=_FakeStore(state),
+        claude_jsonl_parser=_FakeParser(),
+        on_jsonl_sync=lambda session_id, cwd: asyncio.sleep(0),
+        on_dispatch_event=lambda event: asyncio.sleep(0),
+        poll_interval_sec=0.25,
+        idle_poll_interval_sec=11.0,
+        debounce_sec=0.1,
+        jsonl_file_watcher=_FakeJSONLFileWatcher(available=True),
+    )
+
+    assert supervisor._next_wait_timeout(session_id=state.session_id, active_state=False) == 11.0
+    assert supervisor._next_wait_timeout(session_id=state.session_id, active_state=True) == 0.25
+
+
+@pytest.mark.asyncio
+async def test_session_supervisor_falls_back_to_active_interval_when_file_watcher_unavailable() -> None:
+    state = SessionState(session_id="claude-session-1", workdir="/tmp", phase=SessionPhase.IDLE)
+    supervisor = SessionSupervisor(
+        session_store=_FakeStore(state),
+        claude_jsonl_parser=_FakeParser(),
+        on_jsonl_sync=lambda session_id, cwd: asyncio.sleep(0),
+        on_dispatch_event=lambda event: asyncio.sleep(0),
+        poll_interval_sec=0.25,
+        idle_poll_interval_sec=11.0,
+        debounce_sec=0.1,
+        jsonl_file_watcher=_FakeJSONLFileWatcher(available=False),
+    )
+
+    assert supervisor._next_wait_timeout(session_id=state.session_id, active_state=False) == 0.25
+
+
+@pytest.mark.asyncio
+async def test_session_supervisor_registers_main_and_subagent_jsonl_paths(tmp_path: Path) -> None:
+    subagent_file = tmp_path / "agent-agent-1.jsonl"
+    state = SessionState(session_id="claude-session-1", workdir=str(tmp_path), claude_session_id="real-session")
+    state.tool_calls["task-1"] = ToolCallRecord(
+        tool_use_id="task-1",
+        name="Task",
+        structured_result={"agentId": "agent-1"},
+    )
+    file_watcher = _FakeJSONLFileWatcher()
+    supervisor = SessionSupervisor(
+        session_store=_FakeStore(state),
+        claude_jsonl_parser=_FakeParser(subagent_file=subagent_file),
+        on_jsonl_sync=lambda session_id, cwd: asyncio.sleep(0),
+        on_dispatch_event=lambda event: asyncio.sleep(0),
+        poll_interval_sec=0.01,
+        debounce_sec=0.01,
+        jsonl_file_watcher=file_watcher,
+    )
+
+    supervisor.watch(session_id=state.session_id, workdir=state.workdir)
+    try:
+        await asyncio.sleep(0.02)
+        cwd, paths = file_watcher.watched[state.session_id]
+    finally:
+        await supervisor.stop_all()
+
+    assert cwd == state.workdir
+    assert tmp_path / "real-session.jsonl" in paths
+    assert subagent_file in paths
+    assert tmp_path / "real-session" / "subagents" / "agent-agent-1.jsonl" in paths

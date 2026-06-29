@@ -72,6 +72,7 @@ async def cleanup_app_containers() -> AsyncIterator[None]:
         for container in containers:
             try:
                 await container.session_supervisor.stop_all()
+                container.jsonl_file_watcher.stop()
             except BaseException as exc:  # noqa: BLE001 - cleanup must be best-effort
                 cleanup_errors.append((container, exc))
             try:
@@ -227,6 +228,121 @@ async def test_app_container_start_installs_hooks_and_starts_server(tmp_path, mo
     await container.stop()
 
     assert seen == {"install": 1, "start": 1, "stop": 1}
+
+
+@pytest.mark.asyncio
+async def test_app_container_start_stops_jsonl_file_watcher(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.jsonl_file_watcher, "start", lambda: calls.append("watcher_start") or True)
+    monkeypatch.setattr(container.jsonl_file_watcher, "stop", lambda: calls.append("watcher_stop"))
+
+    await container.start()
+    await container.stop()
+
+    assert calls == ["watcher_start", "watcher_stop"]
+
+
+@pytest.mark.asyncio
+async def test_app_container_starts_jsonl_file_watcher_before_restoring_sessions(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    async def fake_restore() -> None:
+        calls.append("restore")
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", fake_restore)
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.jsonl_file_watcher, "start", lambda: calls.append("watcher_start") or True)
+    monkeypatch.setattr(container.jsonl_file_watcher, "stop", lambda: None)
+
+    await container.start()
+    try:
+        assert calls == ["watcher_start", "restore"]
+    finally:
+        await container.stop()
+
+
+@pytest.mark.asyncio
+async def test_app_container_jsonl_file_watcher_failure_does_not_abort_start(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    container.claude_paths.projects_dir.mkdir(parents=True, exist_ok=True)
+
+    class FailingObserver:
+        def schedule(self, event_handler, path: str, *, recursive: bool) -> object:
+            return object()
+
+        def start(self) -> None:
+            raise RuntimeError("observer failed")
+
+        def stop(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(container.jsonl_file_watcher, "_observer_factory", lambda: FailingObserver())
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+
+    await container.start()
+    try:
+        assert container._started is True
+        assert container.jsonl_file_watcher.is_available is False
+    finally:
+        await container.stop()
+
+
+def test_app_container_wires_jsonl_file_watcher_settings(tmp_path) -> None:
+    container = AppContainer(
+        make_settings(
+            tmp_path,
+            install_hooks=False,
+            JSONL_FILE_WATCHER_ENABLED=False,
+            SESSION_SUPERVISOR_POLL_INTERVAL_SEC=0.4,
+            SESSION_SUPERVISOR_IDLE_POLL_INTERVAL_SEC=12.0,
+        )
+    )
+
+    try:
+        assert container.jsonl_file_watcher.is_enabled is False
+        assert container.session_supervisor._poll_interval_sec == 0.4
+        assert container.session_supervisor._idle_poll_interval_sec == 12.0
+    finally:
+        container.jsonl_file_watcher.stop()
 
 
 @pytest.mark.asyncio
