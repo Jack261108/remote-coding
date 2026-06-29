@@ -977,6 +977,12 @@ class EventDispatchMixin(AppContainerBase):
                 current = await self.session_service.lookup_by_claude_session_id(session_id)
                 if current is None or current.claude_session_id != session_id or current.terminal_id != terminal_id:
                     return
+                if current.claude_chat_active:
+                    logger.info(
+                        "active terminal chat context retained after session end",
+                        extra={"session_id": session_id, "terminal_id": terminal_id, "user_id": current.user_id},
+                    )
+                    return
                 await self.session_service.clear_terminal_group(terminal_id)
             logger.info("session context cleared after session end", extra={"session_id": session_id, "terminal_id": terminal_id})
             return

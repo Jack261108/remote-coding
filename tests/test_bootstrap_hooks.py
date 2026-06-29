@@ -2024,7 +2024,7 @@ async def test_session_end_runs_unified_permission_cleanup_in_order(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_session_end_dispatch_clears_active_session_context(tmp_path) -> None:
+async def test_session_end_dispatch_keeps_active_terminal_chat_context(tmp_path) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
     try:
         session, _ = await container.session_service.switch(
@@ -2051,10 +2051,10 @@ async def test_session_end_dispatch_clears_active_session_context(tmp_path) -> N
         assert state.phase == SessionPhase.ENDED
         current = await container.session_service.get(1)
         assert current is not None
-        assert current.claude_chat_active is False
-        assert current.terminal_mode is False
-        assert current.terminal_id is None
-        assert current.claude_session_id is None
+        assert current.claude_chat_active is True
+        assert current.terminal_mode is True
+        assert current.terminal_id == "terminal-ended"
+        assert current.claude_session_id == "claude-session-ended"
     finally:
         await container.session_supervisor.stop_all()
         await container.bot.session.close()
@@ -2132,19 +2132,19 @@ async def test_late_old_event_does_not_clear_new_session_context(tmp_path) -> No
 @pytest.mark.asyncio
 async def test_dispatch_status_ended_branch_triggers_reconcile(tmp_path) -> None:
     """Exercise the ``status == "ended"`` clause of ``_is_session_end_dispatch_event``
-    (bootstrap_mixins.py:939) independently of the ``event == "SessionEnd"`` clause.
+    independently of the ``event == "SessionEnd"`` clause.
 
     We dispatch a HOOK_RECEIVED whose ``status`` is ``"ended"`` but whose ``event`` is a
     non-SessionEnd value (``"Notification"``). The ``or`` short-circuits on the status
-    clause, ``is_session_end`` becomes True and reconcile clears the terminal group.
+    clause, ``is_session_end`` becomes True and reconcile runs. Active tmux chat context
+    must survive because a Claude turn's SessionEnd is not the same as closing /claude.
 
     Note: HookEvent.from_dict (invoked by the HOOK_RECEIVED processor) requires both
     ``event`` and ``status`` to be valid non-empty strings, so we cannot literally omit
     the ``event`` key. We instead keep ``event`` at a valid non-SessionEnd value so only
     the status clause is the trigger -- this is what isolates the branch under test.
     If the ``event.payload.get("status") == "ended"`` clause were removed, the event would
-    not be treated as a session end and reconcile would not run -> terminal context would
-    remain active -> test fails.
+    not be treated as a session end and the structured state would not move to ENDED.
     """
     container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
     try:
@@ -2172,13 +2172,15 @@ async def test_dispatch_status_ended_branch_triggers_reconcile(tmp_path) -> None
             )
         )
 
+        state = container.structured_session_store.get("claude-x")
+        assert state is not None
+        assert state.phase == SessionPhase.ENDED
         current = await container.session_service.get(1)
         assert current is not None
-        # Reconcile fired via the status clause -> terminal group cleared.
-        assert current.terminal_mode is False
-        assert current.terminal_id is None
-        assert current.claude_chat_active is False
-        assert current.claude_session_id is None
+        assert current.terminal_mode is True
+        assert current.terminal_id == "term-x"
+        assert current.claude_chat_active is True
+        assert current.claude_session_id == "claude-x"
     finally:
         await container.session_supervisor.stop_all()
         await container.bot.session.close()
@@ -2187,17 +2189,18 @@ async def test_dispatch_status_ended_branch_triggers_reconcile(tmp_path) -> None
 @pytest.mark.asyncio
 async def test_dispatch_event_sessionend_branch_triggers_reconcile(tmp_path) -> None:
     """Exercise the ``event == "SessionEnd"`` clause of ``_is_session_end_dispatch_event``
-    (bootstrap_mixins.py:939) independently of the ``status == "ended"`` clause.
+    independently of the ``status == "ended"`` clause.
 
     We dispatch a HOOK_RECEIVED whose ``event`` is ``"SessionEnd"`` but whose ``status`` is
     a non-ended value (``"running"``). The ``or`` short-circuits on the event clause,
-    ``is_session_end`` becomes True and reconcile clears the terminal group.
+    ``is_session_end`` becomes True and reconcile runs. Active tmux chat context must
+    survive because a Claude turn's SessionEnd is not the same as closing /claude.
 
     See the sibling test for why the ``event`` key cannot be literally omitted: HookEvent
     validation requires a valid non-empty ``event``/``status``. Keeping ``status`` at a
     non-ended value isolates the event clause as the sole trigger. If the
     ``event.payload.get("event") == "SessionEnd"`` clause were removed, this event would
-    not be treated as a session end -> terminal context would remain active -> test fails.
+    not be treated as a session end and the structured state would not move to ENDED.
     """
     container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
     try:
@@ -2225,13 +2228,15 @@ async def test_dispatch_event_sessionend_branch_triggers_reconcile(tmp_path) -> 
             )
         )
 
+        state = container.structured_session_store.get("claude-x")
+        assert state is not None
+        assert state.phase == SessionPhase.ENDED
         current = await container.session_service.get(1)
         assert current is not None
-        # Reconcile fired via the event clause -> terminal group cleared.
-        assert current.terminal_mode is False
-        assert current.terminal_id is None
-        assert current.claude_chat_active is False
-        assert current.claude_session_id is None
+        assert current.terminal_mode is True
+        assert current.terminal_id == "term-x"
+        assert current.claude_chat_active is True
+        assert current.claude_session_id == "claude-x"
     finally:
         await container.session_supervisor.stop_all()
         await container.bot.session.close()
