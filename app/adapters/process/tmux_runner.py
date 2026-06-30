@@ -1073,7 +1073,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             return None
         return (
             state.session_id,
-            state.revision,
             state.phase.value,
             state.checkpoint.last_offset,
             turn.turn_id,

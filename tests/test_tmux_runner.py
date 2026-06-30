@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.adapters.process.tmux_runner import TmuxRunner, _TmuxTaskMeta
+from app.adapters.process.tmux_runner import TmuxRunner, _InteractiveWatchState, _TmuxTaskMeta
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, ToolCallRecord, ToolStatus
@@ -1064,6 +1064,60 @@ async def test_watch_task_waits_for_stable_completion_candidate_before_exit(tmp_
 
     assert meta.claude_session_id == claude_session
     assert [event.type for event in events] == [EventType.EXITED]
+
+
+def test_interactive_completion_candidate_survives_revision_only_updates(tmp_path: Path) -> None:
+    runner = _runner_with_session_store(tmp_path, interactive_completion_grace_sec=0.1)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+    command_started_at = utc_now() - timedelta(seconds=1)
+    turn_started_at = command_started_at + timedelta(milliseconds=100)
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-current",
+            role="assistant",
+            text="\n你好！\n",
+            is_complete=True,
+            source="jsonl",
+            started_at=turn_started_at,
+            ended_at=turn_started_at,
+        )
+    )
+    state.checkpoint.last_offset = 10
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x-revision-only.exit",
+        task_id="t-revision-only",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        claude_session_id=claude_session,
+        persistent_terminal=True,
+        interactive=True,
+        baseline_captured=True,
+        baseline_offset=0,
+        baseline_completed_turn_id=None,
+        command_started_at=command_started_at,
+    )
+    watch_state = _InteractiveWatchState(
+        watch_started_at=command_started_at,
+        completion_started_after=command_started_at,
+        structured_offset_before_run=0,
+    )
+
+    exit_code, _ = runner._tick_interactive_watch(meta=meta, watch_state=watch_state, now=1.0)
+    assert exit_code is None
+
+    state.revision += 1
+    state.structured_reply_turn_id = "turn-current"
+    exit_code, _ = runner._tick_interactive_watch(meta=meta, watch_state=watch_state, now=1.2)
+
+    assert exit_code == 0
 
 
 @pytest.mark.asyncio
