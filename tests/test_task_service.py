@@ -2136,6 +2136,54 @@ async def test_permission_service_uses_configured_lock_registry(tmp_path: Path) 
     assert registry._cleanup_batch_size == 10
 
 
+@pytest.mark.parametrize("phase", [SessionPhase.WAITING_FOR_INPUT, SessionPhase.ENDED])
+@pytest.mark.asyncio
+async def test_get_pending_user_questions_ignores_stale_running_question_after_turn_finished(
+    tmp_path: Path,
+    phase: SessionPhase,
+) -> None:
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=MemoryTaskStore(),
+        session_service=session_service,
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(user_id=1, claude_session_id="claude-session-1", workdir=str(tmp_path))
+
+    state = structured_store.get_or_create(
+        session_id="claude-session-1",
+        workdir=str(tmp_path),
+        terminal_id=expected_terminal_id(user_id=1, workdir=str(tmp_path)),
+        claude_session_id="claude-session-1",
+    )
+    state.phase = phase
+    state.tool_calls["tool-ask-stale"] = ToolCallRecord(
+        tool_use_id="tool-ask-stale",
+        name="AskUserQuestion",
+        input={"questions": [{"question": "旧问题", "options": [{"label": "A"}], "multiSelect": False}]},
+        status=ToolStatus.RUNNING,
+    )
+    structured_store._persist(state)
+
+    prompts = await service.get_pending_user_questions(user_id=1)
+
+    assert prompts == ()
+
+
 @pytest.mark.asyncio
 async def test_answer_pending_user_question_option_collects_multi_question_answers_and_sends_to_tmux(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
