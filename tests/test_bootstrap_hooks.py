@@ -1596,6 +1596,106 @@ async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_
 
 
 @pytest.mark.asyncio
+async def test_match_session_context_uses_active_interactive_task_when_workdir_collides(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    session_one, _ = await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    session_two = type(session_one).from_dict(
+        {
+            **session_one.to_dict(),
+            "user_id": 2,
+            "session_id": "session-2",
+            "terminal_id": "user_2",
+            "claude_session_id": None,
+        }
+    )
+
+    async def fake_list_all():
+        return [session_one, session_two]
+
+    monkeypatch.setattr(container.session_service, "list_all", fake_list_all)
+    await container.task_store.add(
+        TaskRecord(
+            task_id="task-active",
+            session_id=session_two.session_id,
+            user_id=session_two.user_id,
+            provider="claude_code",
+            prompt="hello",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            status=TaskStatus.RUNNING,
+        )
+    )
+
+    matched = await container._match_session_context(
+        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionStart", status="starting")
+    )
+
+    assert matched is not None
+    assert matched.user_id == 2
+
+
+@pytest.mark.asyncio
+async def test_unbound_hook_ownership_uses_active_interactive_task_when_workdir_collides(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    session_one, _ = await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    session_two = type(session_one).from_dict(
+        {
+            **session_one.to_dict(),
+            "user_id": 2,
+            "session_id": "session-2",
+            "terminal_id": "user_2",
+            "claude_session_id": None,
+        }
+    )
+
+    async def fake_list_all():
+        return [session_one, session_two]
+
+    monkeypatch.setattr(container.session_service, "list_all", fake_list_all)
+    await container.task_store.add(
+        TaskRecord(
+            task_id="task-active",
+            session_id=session_two.session_id,
+            user_id=session_two.user_id,
+            provider="claude_code",
+            prompt="hello",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            status=TaskStatus.RUNNING,
+        )
+    )
+
+    ownership = await container._resolve_ownership_stage(
+        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionStart", status="starting")
+    )
+
+    assert ownership is not None
+    assert ownership.ownership_state == "owned"
+    assert ownership.origin.value == "tmux"
+    assert ownership.owner_user_id == 2
+
+
+@pytest.mark.asyncio
 async def test_match_session_context_prefers_terminal_binding(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     session, _ = await container.session_service.switch(

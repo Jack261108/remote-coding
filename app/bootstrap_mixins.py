@@ -731,10 +731,13 @@ class SessionMatchingMixin(AppContainerBase):
             if event_workdir and session_workdir == event_workdir:
                 workdir_matches.append(session)
 
-        if len(workdir_matches) == 1:
-            session = workdir_matches[0]
-            has_active_task = await self._has_active_interactive_task(user_id=session.user_id, workdir=session.workdir)
-            if has_active_task:
+        if workdir_matches:
+            active_task_matches: list[SessionContext] = []
+            for session in workdir_matches:
+                if await self._has_active_interactive_task(user_id=session.user_id, workdir=session.workdir):
+                    active_task_matches.append(session)
+            if len(active_task_matches) == 1:
+                session = active_task_matches[0]
                 logger.info(
                     "matched hook session by active interactive task",
                     extra={
@@ -745,6 +748,21 @@ class SessionMatchingMixin(AppContainerBase):
                     },
                 )
                 return session
+            if len(active_task_matches) > 1:
+                logger.warning(
+                    "failed to match hook session context",
+                    extra={
+                        "hook_session_id": event.session_id,
+                        "hook_cwd": event.cwd,
+                        "reason": "ambiguous_active_interactive_task",
+                        "candidate_user_ids": [session.user_id for session in active_task_matches],
+                        "resolved_event_workdir": event_workdir,
+                    },
+                )
+                return None
+
+        if len(workdir_matches) == 1:
+            session = workdir_matches[0]
             can_bind_chat, bind_reason, terminal_state = self._can_bind_unique_workdir_claude_chat(
                 session=session,
                 resolved_event_workdir=event_workdir,
@@ -772,7 +790,7 @@ class SessionMatchingMixin(AppContainerBase):
                     "candidate_user_ids": [session.user_id],
                     "resolved_event_workdir": event_workdir,
                     "terminal_id": session.terminal_id,
-                    "has_active_interactive_task": has_active_task,
+                    "has_active_interactive_task": False,
                     "claude_chat_bind_reason": bind_reason,
                     "terminal_state_id": terminal_state.session_id if terminal_state is not None else None,
                     "terminal_state_phase": terminal_state.phase.value if terminal_state is not None else None,
