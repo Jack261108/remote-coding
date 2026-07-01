@@ -737,6 +737,99 @@ async def test_interactive_timeout_resets_after_structured_progress(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_interactive_watch_uses_recent_explicit_session_over_stale_pending_terminal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _runner_with_session_store(
+        tmp_path,
+        poll_interval_sec=0.01,
+        partial_flush_sec=0.01,
+        interactive_completion_grace_sec=0,
+    )
+    terminal_session = "tgcli_user_1"
+    terminal_id = "user_1"
+    current_session = "4550fd41-474b-463e-8db8-2435c71c2f10"
+    stale_pending_session = "29766ba6-468c-484c-a759-7c440c2e2c75"
+    now = utc_now()
+
+    async def fake_interrupt(session_name: str) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_interrupt_session", fake_interrupt)
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id=terminal_id)
+
+    stale_pending = runner._session_store.get_or_create(
+        session_id=stale_pending_session,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+    )
+    stale_pending.phase = SessionPhase.WAITING_FOR_APPROVAL
+    stale_pending.last_activity = now - timedelta(days=1)
+    stale_pending.pending_permission = PendingPermission(
+        tool_use_id="tool-stale",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    stale_pending.turns.append(
+        ConversationTurn(
+            turn_id="turn-stale",
+            role="assistant",
+            text="旧授权请求",
+            is_complete=True,
+            source="jsonl",
+        )
+    )
+    runner._session_store._persist(stale_pending)
+
+    current = runner._session_store.get_or_create(
+        session_id=current_session,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+    )
+    current.phase = SessionPhase.WAITING_FOR_INPUT
+    current.last_activity = now
+    runner._session_store._persist(current)
+
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x-stale-pending.exit",
+        task_id="t-stale-pending",
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id=current_session,
+        persistent_terminal=True,
+        interactive=True,
+    )
+
+    async def complete_current_session() -> None:
+        await asyncio.sleep(0.03)
+        active = runner._session_store.get(current_session)
+        assert active is not None
+        active.turns.append(
+            ConversationTurn(
+                turn_id="turn-current",
+                role="assistant",
+                text="当前回复",
+                is_complete=True,
+                source="jsonl",
+            )
+        )
+        active.phase = SessionPhase.WAITING_FOR_INPUT
+        active.checkpoint.last_offset = 2
+        active.last_activity = utc_now()
+        runner._session_store._persist(active)
+
+    writer = asyncio.create_task(complete_current_session())
+    events = [event async for event in runner._watch_task(meta=meta, timeout_sec=0.3)]
+    await writer
+
+    assert [event.type for event in events] == [EventType.EXITED]
+    assert meta.claude_session_id == current_session
+
+
+@pytest.mark.asyncio
 async def test_interactive_completion_does_not_end_terminal_session_state(tmp_path: Path) -> None:
     runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
     terminal_session = "tgcli_user_1"
