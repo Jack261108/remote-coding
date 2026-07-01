@@ -74,16 +74,16 @@ class SessionLookupService:
         is_claude, has_pending_permission, has_content, _, is_active, _, _ = self._state_rank(state)
         return bool(is_claude and has_pending_permission and has_content and is_active)
 
-    def _explicit_resolution_rank(self, state: SessionState) -> tuple[int, int, float, float, int]:
+    def _explicit_resolution_rank(self, state: SessionState) -> tuple[float, float, int, int, int]:
         has_content = int(bool(state.turns or state.tool_calls or state.pending_permission is not None))
         has_pending_permission = int(state.pending_permission is not None or state.phase == SessionPhase.WAITING_FOR_APPROVAL)
         created_at = state.created_at.timestamp()
         last_activity = state.last_activity.timestamp()
         return (
-            has_pending_permission,
-            has_content,
             last_activity,
             created_at,
+            has_pending_permission,
+            has_content,
             state.revision,
         )
 
