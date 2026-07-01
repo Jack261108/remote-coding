@@ -1120,6 +1120,66 @@ def test_interactive_completion_candidate_survives_revision_only_updates(tmp_pat
     assert exit_code == 0
 
 
+def test_first_text_completion_survives_revision_only_updates_before_baseline_capture(tmp_path: Path) -> None:
+    runner = _runner_with_session_store(tmp_path, interactive_completion_grace_sec=0.1)
+    terminal_session = "tgcli_user_1"
+    claude_session = "claude-session-1"
+    command_started_at = utc_now() - timedelta(seconds=1)
+    turn_started_at = command_started_at + timedelta(milliseconds=100)
+
+    runner._session_store.get_or_create(session_id=terminal_session, workdir=str(tmp_path), terminal_id="user_1")
+    meta = _TmuxTaskMeta(
+        session_name=terminal_session,
+        log_file=runner._file_store.raw_transcript_path(terminal_session),
+        exit_file=tmp_path / "x-first-text-revision-only.exit",
+        task_id="t-first-text-revision-only",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        persistent_terminal=True,
+        interactive=True,
+        baseline_captured=False,
+        baseline_offset=0,
+        baseline_completed_turn_id=None,
+        command_started_at=command_started_at,
+    )
+    watch_state = _InteractiveWatchState(
+        watch_started_at=command_started_at,
+        completion_started_after=command_started_at,
+        structured_offset_before_run=0,
+    )
+
+    exit_code, active_state = runner._tick_interactive_watch(meta=meta, watch_state=watch_state, now=1.0)
+    assert exit_code is None
+    assert active_state is None
+
+    state = runner._session_store.get_or_create(session_id=claude_session, workdir=str(tmp_path), terminal_id="user_1")
+    state.turns.append(
+        ConversationTurn(
+            turn_id="turn-first-text",
+            role="assistant",
+            text="\n首条文字回复\n",
+            is_complete=True,
+            source="jsonl",
+            started_at=turn_started_at,
+            ended_at=turn_started_at,
+        )
+    )
+    state.checkpoint.last_offset = 10
+    state.phase = SessionPhase.WAITING_FOR_INPUT
+
+    exit_code, active_state = runner._tick_interactive_watch(meta=meta, watch_state=watch_state, now=1.1)
+    assert exit_code is None
+    assert active_state is state
+    assert meta.claude_session_id == claude_session
+    assert meta.baseline_captured is False
+
+    state.revision += 1
+    state.structured_reply_turn_id = "turn-first-text"
+    exit_code, _ = runner._tick_interactive_watch(meta=meta, watch_state=watch_state, now=1.3)
+
+    assert exit_code == 0
+
+
 @pytest.mark.asyncio
 async def test_watch_task_does_not_finish_on_progress_turn_followed_by_tool(tmp_path: Path) -> None:
     runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, partial_flush_sec=0.01)
