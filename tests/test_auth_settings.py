@@ -114,6 +114,21 @@ def test_settings_parse_claude_hook_fields() -> None:
     assert settings.claude_periodic_recheck_ms == 750
 
 
+def test_settings_parse_jsonl_watcher_fields() -> None:
+    settings = Settings.model_validate(
+        {
+            **_BASE_PAYLOAD,
+            "JSONL_FILE_WATCHER_ENABLED": "false",
+            "SESSION_SUPERVISOR_POLL_INTERVAL_SEC": 0.3,
+            "SESSION_SUPERVISOR_IDLE_POLL_INTERVAL_SEC": 12.5,
+        }
+    )
+
+    assert settings.jsonl_file_watcher_enabled is False
+    assert settings.session_supervisor_poll_interval_sec == 0.3
+    assert settings.session_supervisor_idle_poll_interval_sec == 12.5
+
+
 def test_settings_rejects_non_positive_claude_hook_limits() -> None:
     base_payload = {
         "TG_BOT_TOKEN": "token",
@@ -149,6 +164,10 @@ def test_env_example_matches_supported_claude_settings() -> None:
     assert "CLAUDE_HOOK_MAX_PENDING_PERMISSIONS=64" in content
     assert "CLAUDE_JSONL_SYNC_DEBOUNCE_MS=100" in content
     assert "CLAUDE_PERIODIC_RECHECK_MS=500" in content
+    assert "JSONL_FILE_WATCHER_ENABLED=true" in content
+    assert "SESSION_SUPERVISOR_POLL_INTERVAL_SEC=0.2" in content
+    assert "SESSION_SUPERVISOR_IDLE_POLL_INTERVAL_SEC=10.0" in content
+    assert "STRUCTURED_REPLY_PUMP_INTERVAL_SEC=1.0" in content
 
 
 _BASE_PAYLOAD = {
@@ -179,6 +198,9 @@ def test_settings_new_fields_defaults() -> None:
     assert settings.upload_queue_max_files_per_user == 5
     assert settings.upload_queue_max_bytes_per_user is None
     assert settings.effective_upload_queue_max_bytes_per_user == 5 * 20 * 1024 * 1024
+    assert settings.jsonl_file_watcher_enabled is True
+    assert settings.session_supervisor_poll_interval_sec == 0.2
+    assert settings.session_supervisor_idle_poll_interval_sec == 10.0
     assert settings.unbound_permission_notify_user_ids == []
     assert settings.effective_unbound_permission_notify_user_id_set == {1}
 
@@ -210,6 +232,9 @@ def test_settings_explicit_override_new_fields() -> None:
         "LOCK_CLEANUP_BATCH_SIZE": 25,
         "UPLOAD_QUEUE_MAX_FILES_PER_USER": 2,
         "UPLOAD_QUEUE_MAX_BYTES_PER_USER": 1234,
+        "JSONL_FILE_WATCHER_ENABLED": False,
+        "SESSION_SUPERVISOR_POLL_INTERVAL_SEC": 0.4,
+        "SESSION_SUPERVISOR_IDLE_POLL_INTERVAL_SEC": 15.0,
     }
     settings = Settings.model_validate(payload)
     assert settings.task_store_ttl_hours == 72
@@ -224,6 +249,9 @@ def test_settings_explicit_override_new_fields() -> None:
     assert settings.upload_queue_max_files_per_user == 2
     assert settings.upload_queue_max_bytes_per_user == 1234
     assert settings.effective_upload_queue_max_bytes_per_user == 1234
+    assert settings.jsonl_file_watcher_enabled is False
+    assert settings.session_supervisor_poll_interval_sec == 0.4
+    assert settings.session_supervisor_idle_poll_interval_sec == 15.0
     assert settings.effective_rate_limit_bucket_ttl_sec == 30
     assert settings.effective_permission_lock_ttl_sec == 120
 
@@ -255,6 +283,8 @@ def test_settings_rejects_non_positive_new_fields() -> None:
         "SESSION_LOCK_TTL_SEC",
         "LOCK_CLEANUP_INTERVAL_SEC",
         "LOCK_CLEANUP_BATCH_SIZE",
+        "SESSION_SUPERVISOR_POLL_INTERVAL_SEC",
+        "SESSION_SUPERVISOR_IDLE_POLL_INTERVAL_SEC",
     ):
         with pytest.raises(ValidationError):
             Settings.model_validate({**_BASE_PAYLOAD, field: 0})

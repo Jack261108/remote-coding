@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     claude_hook_max_pending_permissions: int = Field(64, alias="CLAUDE_HOOK_MAX_PENDING_PERMISSIONS")
     claude_jsonl_sync_debounce_ms: int = Field(100, alias="CLAUDE_JSONL_SYNC_DEBOUNCE_MS")
     claude_periodic_recheck_ms: int = Field(500, alias="CLAUDE_PERIODIC_RECHECK_MS")
+    jsonl_file_watcher_enabled: bool = Field(True, alias="JSONL_FILE_WATCHER_ENABLED")
+    session_supervisor_poll_interval_sec: float = Field(0.2, alias="SESSION_SUPERVISOR_POLL_INTERVAL_SEC")
+    session_supervisor_idle_poll_interval_sec: float = Field(10.0, alias="SESSION_SUPERVISOR_IDLE_POLL_INTERVAL_SEC")
 
     # Tmux runner timing
     tmux_poll_interval_sec: float = Field(0.2, alias="TMUX_POLL_INTERVAL_SEC")
@@ -93,7 +96,7 @@ class Settings(BaseSettings):
     tmux_completion_grace_sec: float = Field(0.1, alias="TMUX_COMPLETION_GRACE_SEC")
 
     # UI timing
-    structured_reply_pump_interval_sec: float = Field(0.05, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
+    structured_reply_pump_interval_sec: float = Field(1.0, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
     spinner_initial_delay_sec: float = Field(3.0, alias="SPINNER_INITIAL_DELAY_SEC")
     spinner_interval_sec: float = Field(1.0, alias="SPINNER_INTERVAL_SEC")
     codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
@@ -316,7 +319,13 @@ class Settings(BaseSettings):
             raise ValueError(f"RISK_EVAL_AUTO_APPROVE_MAX_RISK 必须是 {'/'.join(valid)} 之一，当前为 {value!r}")
         return value
 
-    @field_validator("claude_tmux_mode", "claude_install_hooks", "auto_file_send_enabled", mode="before")
+    @field_validator(
+        "claude_tmux_mode",
+        "claude_install_hooks",
+        "jsonl_file_watcher_enabled",
+        "auto_file_send_enabled",
+        mode="before",
+    )
     @classmethod
     def parse_bool_flag(cls, value: Any) -> bool:
         if isinstance(value, bool):
@@ -388,6 +397,8 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
+        "session_supervisor_poll_interval_sec",
+        "session_supervisor_idle_poll_interval_sec",
         "tmux_poll_interval_sec",
         "tmux_enter_delay_sec",
         "tmux_partial_flush_sec",

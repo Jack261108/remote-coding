@@ -83,6 +83,8 @@ class DummyTaskService:
 class PersistentTaskService:
     def __init__(self, store: SessionStore) -> None:
         self._store = store
+        self.scope_wait_calls = 0
+        self.id_wait_calls = 0
 
     async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
         return self._store.get("claude-session-1")
@@ -113,7 +115,12 @@ class PersistentTaskService:
     async def wait_for_structured_session_update(
         self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
     ) -> bool:
+        self.scope_wait_calls += 1
         return await self._store.wait_for_publish("claude-session-1", since_cursor=since_cursor, timeout_sec=timeout_sec)
+
+    async def wait_for_structured_session_update_by_id(self, *, session_id: str, since_cursor: int, timeout_sec: float) -> bool:
+        self.id_wait_calls += 1
+        return await self._store.wait_for_publish(session_id, since_cursor=since_cursor, timeout_sec=timeout_sec)
 
 
 @pytest.mark.asyncio
@@ -2209,3 +2216,18 @@ async def test_presenter_wait_for_update_ignores_checkpoint_only_persist(tmp_pat
     changed = await presenter.wait_for_update(timeout_sec=0.01)
     assert changed is False
     assert await presenter.poll(task_id="task-1") == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_wait_for_update_uses_session_id_wait_after_prime(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    store.get_or_create(session_id="claude-session-1", user_id=1, workdir="/tmp", terminal_id="term-1")
+    service = PersistentTaskService(store)
+    presenter = StructuredReplyPresenter(task_service=service, user_id=1)
+    await presenter.prime()
+
+    changed = await presenter.wait_for_update(timeout_sec=0.01)
+
+    assert changed is False
+    assert service.scope_wait_calls == 0
+    assert service.id_wait_calls == 1

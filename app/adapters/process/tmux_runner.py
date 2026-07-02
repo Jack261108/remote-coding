@@ -494,7 +494,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             yield event
 
         # Determine and yield final result
-        canceled = await self._is_cancel_requested(meta.task_id)
+        canceled = meta.cancel_requested or await self._is_cancel_requested(meta.task_id)
         if not meta.interactive and self._session_store.get(meta.session_name) is not None:
             self._session_store.process(SessionEvent(session_id=meta.session_name, type=SessionEventType.SESSION_ENDED))
 
@@ -595,7 +595,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 await self._handle_watch_cancel(meta=meta, started_at=started_at, now=now, position=fifo_offset)
                 break
 
-        canceled = await self._is_cancel_requested(meta.task_id)
+        canceled = meta.cancel_requested or await self._is_cancel_requested(meta.task_id)
         finished_at = asyncio.get_running_loop().time()
         yield self._finalize_watch_result(
             meta=meta,
@@ -619,11 +619,10 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
     ) -> tuple[int | None, float]:
         """Process one interactive watch tick. Returns (exit_code, updated_timeout_anchor)."""
         tick_result, active_state = self._tick_interactive_watch(meta=meta, watch_state=watch_state, now=now)
+        if active_state is not None and active_state.interrupted:
+            meta.cancel_requested = True
+            return 0, timeout_anchor
         if tick_result is not None:
-            # If session was interrupted (Esc), mark as canceled so the
-            # lifecycle message shows "中断" instead of "完成".
-            if active_state is not None and active_state.interrupted:
-                meta.cancel_requested = True
             return tick_result, timeout_anchor
         if active_state is not None:
             if watch_state.last_interactive_revision is None:
@@ -632,17 +631,14 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 watch_state.last_interactive_revision = active_state.revision
                 watch_state.last_progress_at = now
                 timeout_anchor = now
-        # Fallback: if we have been idle for a while, check pane content
-        # to detect manual Esc cancellation that did not produce a hook
-        # event (including fast Esc before any progress was observed).
-        # Skip the first few seconds to avoid false positives during
-        # initial prompt submission.
+        # Pane idle only means Claude is back at an input prompt. A normal
+        # completion has the same shape while JSONL/Stop-hook sync may still be
+        # catching up, so this check is observational only and must not mark the
+        # task as canceled.
         idle_anchor = watch_state.last_progress_at or started_at
         if (now - started_at) >= self._interactive_idle_check_sec and (now - idle_anchor) >= self._interactive_idle_check_sec:
             if await self._is_claude_idle_in_pane(meta.session_name):
-                meta.cancel_requested = True
-                return 0, timeout_anchor
-            # Don't check again for another interval
+                logger.debug("interactive pane idle observed; waiting for structured completion", extra=self._tmux_log_extra(meta))
             watch_state.last_progress_at = now
         return None, timeout_anchor
 
@@ -1077,7 +1073,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             return None
         return (
             state.session_id,
-            state.revision,
             state.phase.value,
             state.checkpoint.last_offset,
             turn.turn_id,
@@ -1253,17 +1248,6 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             and self._is_interactive_completion_turn_ready(active_state, latest_completed_turn, watch_state, observed_at=now)
         )
         if completion_phase is not None and watch_state.saw_interactive_progress and completion_ready:
-            return 0, active_state
-        # Detect manual cancellation (Esc in Claude Code): session returned to
-        # WAITING_FOR_INPUT after we observed processing activity, but no new
-        # completed turn was produced for the current run (i.e. the request was
-        # interrupted before producing a response).
-        if (
-            completion_phase == SessionPhase.WAITING_FOR_INPUT
-            and watch_state.saw_interactive_progress
-            and not latest_completed_turn_is_current
-        ):
-            meta.cancel_requested = True
             return 0, active_state
         if latest_completed_turn is not None and latest_completed_turn_is_current:
             if active_state is not None and self._is_interactive_completion_turn_ready(

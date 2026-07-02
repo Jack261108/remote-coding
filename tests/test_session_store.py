@@ -134,11 +134,13 @@ def test_session_store_mark_interactive_turn_processing_does_not_revive_ended_se
 
 def test_session_store_resolve_interactive_session_id_prefers_newer_bound_session_over_stale_explicit(tmp_path) -> None:
     store = SessionStore(FileSessionStore(str(tmp_path)))
+    now = utc_now()
     old_state = store.get_or_create(
         session_id="2185ae1c-14e5-4423-8f0d-1b76fcd893d6",
         workdir="/tmp",
         terminal_id="user_1_8c393341f536",
     )
+    old_state.last_activity = now - timedelta(days=1)
     store._persist(old_state)
 
     new_state = store.get_or_create(
@@ -146,6 +148,7 @@ def test_session_store_resolve_interactive_session_id_prefers_newer_bound_sessio
         workdir="/tmp",
         terminal_id="user_1_8c393341f536",
     )
+    new_state.last_activity = now
     store._persist(new_state)
 
     resolved = store.resolve_interactive_session_id(
@@ -156,6 +159,44 @@ def test_session_store_resolve_interactive_session_id_prefers_newer_bound_sessio
     )
 
     assert resolved == "f5bc22fa-0e77-42f6-a2d3-e422037296f6"
+
+
+def test_session_store_resolve_interactive_session_id_keeps_recent_explicit_over_stale_pending_bound(tmp_path) -> None:
+    store = SessionStore(FileSessionStore(str(tmp_path)))
+    now = utc_now()
+    stale_pending = store.get_or_create(
+        session_id="29766ba6-468c-484c-a759-7c440c2e2c75",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    stale_pending.phase = SessionPhase.WAITING_FOR_APPROVAL
+    stale_pending.last_activity = now - timedelta(days=1)
+    stale_pending.pending_permission = PendingPermission(
+        tool_use_id="tool-stale",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    stale_pending.turns.append(ConversationTurn(turn_id="turn-stale", role="assistant", text="旧授权", is_complete=True))
+    store._persist(stale_pending)
+
+    recent_explicit = store.get_or_create(
+        session_id="4550fd41-474b-463e-8db8-2435c71c2f10",
+        workdir="/tmp",
+        terminal_id="user_1_8c393341f536",
+    )
+    recent_explicit.phase = SessionPhase.WAITING_FOR_INPUT
+    recent_explicit.last_activity = now
+    recent_explicit.turns.append(ConversationTurn(turn_id="turn-current", role="assistant", text="新回复", is_complete=True))
+    store._persist(recent_explicit)
+
+    resolved = store.resolve_interactive_session_id(
+        terminal_id="user_1_8c393341f536",
+        claude_session_id="4550fd41-474b-463e-8db8-2435c71c2f10",
+        fallback_session_id="tgcli_user_1_8c393341f536",
+        require_claude_session=True,
+    )
+
+    assert resolved == "4550fd41-474b-463e-8db8-2435c71c2f10"
 
 
 def test_session_store_interactive_completion_waits_for_bound_claude_session(tmp_path) -> None:

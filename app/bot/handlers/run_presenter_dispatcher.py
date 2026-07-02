@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.handlers.command_user_question import build_user_question_keyboard
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
@@ -19,11 +21,23 @@ from app.bot.presenters.structured_reply_presenter import (
     normalize_stream_text,
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
+from app.services.message_sender import Keyboard
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
 
 if TYPE_CHECKING:
     from app.services.permission_gateway import PermissionGateway
+
+
+def _to_inline_keyboard_markup(keyboard: Keyboard | InlineKeyboardMarkup) -> InlineKeyboardMarkup:
+    if isinstance(keyboard, InlineKeyboardMarkup):
+        return keyboard
+    service_keyboard = cast(Keyboard, keyboard)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=button.text, callback_data=button.callback_data) for button in row] for row in service_keyboard.rows
+        ]
+    )
 
 
 class PresenterOutputDispatcher:
@@ -82,13 +96,16 @@ class PresenterOutputDispatcher:
                     candidate_user_id=output.user_id,
                 )
                 if isinstance(result, RegisterForButtonConflict):
-                    sent = await self._messenger.answer_safely(result.advisory_text, reply_markup=result.keyboard)
+                    sent = await self._messenger.answer_safely(
+                        result.advisory_text,
+                        reply_markup=_to_inline_keyboard_markup(result.keyboard),
+                    )
                     if sent:
                         await self._presenter.acknowledge_delivery(output)
                     continue
                 if not isinstance(result, RegisterForButtonOk):
                     raise RuntimeError("unexpected permission gateway registration result")
-                keyboard = result.keyboard
+                keyboard = _to_inline_keyboard_markup(result.keyboard)
                 text = self._permission_gateway.message_builder.build_permission_prompt(
                     PermissionPromptInput(
                         tool_name=output.tool_name or "unknown tool",

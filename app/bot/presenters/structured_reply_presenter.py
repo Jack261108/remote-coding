@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import cast
 
 from app.bot.presenters.structured_reply_messages import (
     build_compacting_progress_message,
@@ -94,6 +97,7 @@ class StructuredReplyPresenter:
         self._revision = 0
         self._current_session_id: str | None = None
         self._last_phase: str | None = None
+        self._initial_update_pending = False
         self._user_question_tracker = UserQuestionTracker()
         self._flat_tool_tracker = FlatToolTracker()
         self._task_list_tracker = TaskListTracker()
@@ -128,6 +132,7 @@ class StructuredReplyPresenter:
         self._structured_session_available = snapshot.session_available
         self._current_session_id = snapshot.session_id
         self._last_phase = snapshot.phase
+        self._initial_update_pending = baseline_current_snapshot and snapshot.session_id is not None
 
         persisted_turn_id, persisted_permission_key = await self._task_service.get_structured_reply_cursor(
             self._user_id, task_id=self._task_id
@@ -152,29 +157,76 @@ class StructuredReplyPresenter:
         self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
 
     async def wait_for_update(self, *, timeout_sec: float) -> bool:
+        wait_by_id = cast(
+            Callable[..., Awaitable[bool]] | None,
+            getattr(self._task_service, "wait_for_structured_session_update_by_id", None),
+        )
+        if wait_by_id is not None and self._current_session_id is not None:
+            changed = await wait_by_id(
+                session_id=self._current_session_id,
+                since_cursor=self._revision,
+                timeout_sec=timeout_sec,
+            )
+        else:
+            changed = await self._task_service.wait_for_structured_session_update(
+                user_id=self._user_id,
+                since_cursor=self._revision,
+                timeout_sec=timeout_sec,
+                task_id=self._task_id,
+            )
+        if not changed:
+            if await self._detect_session_switch():
+                return True
+            return False
+
+        snapshot = await self._snapshot_loader.load_snapshot(log_missing=False)
+        self._handle_session_snapshot(snapshot)
+        self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
+        return True
+
+    async def wait_for_initial_update(self, *, timeout_sec: float) -> bool:
+        """Wait for the first structured session to become available without busy polling."""
+        if self._current_session_id is not None:
+            if self._initial_update_pending:
+                self._initial_update_pending = False
+                return True
+            return await self.wait_for_update(timeout_sec=timeout_sec)
+
         current_session = await self._snapshot_loader.load_session(log_missing=False)
         current_session_id = current_session.session_id if current_session is not None else None
         if current_session_id != self._current_session_id:
             self._current_session_id = current_session_id
             self._last_phase = None
             self._last_pending_permission_key = None
-            # Re-baseline trackers against the new session's current state so that
-            # pre-existing tools aren't replayed as "new" updates.
-            # The reply cursor is left untouched: if the user already acknowledged
-            # a turn it stays acknowledged; genuinely new turns will still emit.
             snapshot = await self._snapshot_loader.load_snapshot(log_missing=False)
             self._baseline_trackers(snapshot)
             self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
             return True
-        changed = await self._task_service.wait_for_structured_session_update(
-            user_id=self._user_id,
-            since_cursor=self._revision,
-            timeout_sec=timeout_sec,
-            task_id=self._task_id,
-        )
-        if changed:
-            self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
-        return changed
+        await asyncio.sleep(timeout_sec)
+        return False
+
+    async def _detect_session_switch(self) -> bool:
+        current_session = await self._snapshot_loader.load_session(log_missing=False)
+        current_session_id = current_session.session_id if current_session is not None else None
+        if current_session_id == self._current_session_id:
+            return False
+        snapshot = await self._snapshot_loader.load_snapshot(log_missing=False)
+        self._handle_session_snapshot(snapshot)
+        self._revision = await self._task_service.get_structured_session_cursor(self._user_id, task_id=self._task_id)
+        return True
+
+    def _handle_session_snapshot(self, snapshot: _StructuredSnapshot) -> None:
+        current_session_id = snapshot.session_id
+        if current_session_id == self._current_session_id:
+            return
+        self._current_session_id = current_session_id
+        self._last_phase = None
+        self._last_pending_permission_key = None
+        # Re-baseline trackers against the new session's current state so that
+        # pre-existing tools aren't replayed as "new" updates.
+        # The reply cursor is left untouched: if the user already acknowledged
+        # a turn it stays acknowledged; genuinely new turns will still emit.
+        self._baseline_trackers(snapshot)
 
     def _baseline_trackers(self, snapshot: _StructuredSnapshot) -> tuple[UserQuestionPrompt, ...]:
         """Baseline all tool/UI trackers against the given snapshot.

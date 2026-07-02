@@ -72,6 +72,7 @@ async def cleanup_app_containers() -> AsyncIterator[None]:
         for container in containers:
             try:
                 await container.session_supervisor.stop_all()
+                container.jsonl_file_watcher.stop()
             except BaseException as exc:  # noqa: BLE001 - cleanup must be best-effort
                 cleanup_errors.append((container, exc))
             try:
@@ -227,6 +228,121 @@ async def test_app_container_start_installs_hooks_and_starts_server(tmp_path, mo
     await container.stop()
 
     assert seen == {"install": 1, "start": 1, "stop": 1}
+
+
+@pytest.mark.asyncio
+async def test_app_container_start_stops_jsonl_file_watcher(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.jsonl_file_watcher, "start", lambda: calls.append("watcher_start") or True)
+    monkeypatch.setattr(container.jsonl_file_watcher, "stop", lambda: calls.append("watcher_stop"))
+
+    await container.start()
+    await container.stop()
+
+    assert calls == ["watcher_start", "watcher_stop"]
+
+
+@pytest.mark.asyncio
+async def test_app_container_starts_jsonl_file_watcher_before_restoring_sessions(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    calls: list[str] = []
+
+    async def fake_restore() -> None:
+        calls.append("restore")
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", fake_restore)
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.jsonl_file_watcher, "start", lambda: calls.append("watcher_start") or True)
+    monkeypatch.setattr(container.jsonl_file_watcher, "stop", lambda: None)
+
+    await container.start()
+    try:
+        assert calls == ["watcher_start", "restore"]
+    finally:
+        await container.stop()
+
+
+@pytest.mark.asyncio
+async def test_app_container_jsonl_file_watcher_failure_does_not_abort_start(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    container.claude_paths.projects_dir.mkdir(parents=True, exist_ok=True)
+
+    class FailingObserver:
+        def schedule(self, event_handler, path: str, *, recursive: bool) -> object:
+            return object()
+
+        def start(self) -> None:
+            raise RuntimeError("observer failed")
+
+        def stop(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(container.jsonl_file_watcher, "_observer_factory", lambda: FailingObserver())
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+
+    await container.start()
+    try:
+        assert container._started is True
+        assert container.jsonl_file_watcher.is_available is False
+    finally:
+        await container.stop()
+
+
+def test_app_container_wires_jsonl_file_watcher_settings(tmp_path) -> None:
+    container = AppContainer(
+        make_settings(
+            tmp_path,
+            install_hooks=False,
+            JSONL_FILE_WATCHER_ENABLED=False,
+            SESSION_SUPERVISOR_POLL_INTERVAL_SEC=0.4,
+            SESSION_SUPERVISOR_IDLE_POLL_INTERVAL_SEC=12.0,
+        )
+    )
+
+    try:
+        assert container.jsonl_file_watcher.is_enabled is False
+        assert container.session_supervisor._poll_interval_sec == 0.4
+        assert container.session_supervisor._idle_poll_interval_sec == 12.0
+    finally:
+        container.jsonl_file_watcher.stop()
 
 
 @pytest.mark.asyncio
@@ -1480,6 +1596,106 @@ async def test_match_session_context_does_not_fallback_on_workdir_collision(tmp_
 
 
 @pytest.mark.asyncio
+async def test_match_session_context_uses_active_interactive_task_when_workdir_collides(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    session_one, _ = await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    session_two = type(session_one).from_dict(
+        {
+            **session_one.to_dict(),
+            "user_id": 2,
+            "session_id": "session-2",
+            "terminal_id": "user_2",
+            "claude_session_id": None,
+        }
+    )
+
+    async def fake_list_all():
+        return [session_one, session_two]
+
+    monkeypatch.setattr(container.session_service, "list_all", fake_list_all)
+    await container.task_store.add(
+        TaskRecord(
+            task_id="task-active",
+            session_id=session_two.session_id,
+            user_id=session_two.user_id,
+            provider="claude_code",
+            prompt="hello",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            status=TaskStatus.RUNNING,
+        )
+    )
+
+    matched = await container._match_session_context(
+        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionStart", status="starting")
+    )
+
+    assert matched is not None
+    assert matched.user_id == 2
+
+
+@pytest.mark.asyncio
+async def test_unbound_hook_ownership_uses_active_interactive_task_when_workdir_collides(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+
+    session_one, _ = await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    session_two = type(session_one).from_dict(
+        {
+            **session_one.to_dict(),
+            "user_id": 2,
+            "session_id": "session-2",
+            "terminal_id": "user_2",
+            "claude_session_id": None,
+        }
+    )
+
+    async def fake_list_all():
+        return [session_one, session_two]
+
+    monkeypatch.setattr(container.session_service, "list_all", fake_list_all)
+    await container.task_store.add(
+        TaskRecord(
+            task_id="task-active",
+            session_id=session_two.session_id,
+            user_id=session_two.user_id,
+            provider="claude_code",
+            prompt="hello",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            status=TaskStatus.RUNNING,
+        )
+    )
+
+    ownership = await container._resolve_ownership_stage(
+        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionStart", status="starting")
+    )
+
+    assert ownership is not None
+    assert ownership.ownership_state == "owned"
+    assert ownership.origin.value == "tmux"
+    assert ownership.owner_user_id == 2
+
+
+@pytest.mark.asyncio
 async def test_match_session_context_prefers_terminal_binding(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     session, _ = await container.session_service.switch(
@@ -1908,7 +2124,7 @@ async def test_session_end_runs_unified_permission_cleanup_in_order(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_session_end_dispatch_clears_active_session_context(tmp_path) -> None:
+async def test_session_end_dispatch_keeps_active_terminal_chat_context(tmp_path) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
     try:
         session, _ = await container.session_service.switch(
@@ -1935,10 +2151,10 @@ async def test_session_end_dispatch_clears_active_session_context(tmp_path) -> N
         assert state.phase == SessionPhase.ENDED
         current = await container.session_service.get(1)
         assert current is not None
-        assert current.claude_chat_active is False
-        assert current.terminal_mode is False
-        assert current.terminal_id is None
-        assert current.claude_session_id is None
+        assert current.claude_chat_active is True
+        assert current.terminal_mode is True
+        assert current.terminal_id == "terminal-ended"
+        assert current.claude_session_id == "claude-session-ended"
     finally:
         await container.session_supervisor.stop_all()
         await container.bot.session.close()
@@ -2016,19 +2232,19 @@ async def test_late_old_event_does_not_clear_new_session_context(tmp_path) -> No
 @pytest.mark.asyncio
 async def test_dispatch_status_ended_branch_triggers_reconcile(tmp_path) -> None:
     """Exercise the ``status == "ended"`` clause of ``_is_session_end_dispatch_event``
-    (bootstrap_mixins.py:939) independently of the ``event == "SessionEnd"`` clause.
+    independently of the ``event == "SessionEnd"`` clause.
 
     We dispatch a HOOK_RECEIVED whose ``status`` is ``"ended"`` but whose ``event`` is a
     non-SessionEnd value (``"Notification"``). The ``or`` short-circuits on the status
-    clause, ``is_session_end`` becomes True and reconcile clears the terminal group.
+    clause, ``is_session_end`` becomes True and reconcile runs. Active tmux chat context
+    must survive because a Claude turn's SessionEnd is not the same as closing /claude.
 
     Note: HookEvent.from_dict (invoked by the HOOK_RECEIVED processor) requires both
     ``event`` and ``status`` to be valid non-empty strings, so we cannot literally omit
     the ``event`` key. We instead keep ``event`` at a valid non-SessionEnd value so only
     the status clause is the trigger -- this is what isolates the branch under test.
     If the ``event.payload.get("status") == "ended"`` clause were removed, the event would
-    not be treated as a session end and reconcile would not run -> terminal context would
-    remain active -> test fails.
+    not be treated as a session end and the structured state would not move to ENDED.
     """
     container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
     try:
@@ -2056,13 +2272,15 @@ async def test_dispatch_status_ended_branch_triggers_reconcile(tmp_path) -> None
             )
         )
 
+        state = container.structured_session_store.get("claude-x")
+        assert state is not None
+        assert state.phase == SessionPhase.ENDED
         current = await container.session_service.get(1)
         assert current is not None
-        # Reconcile fired via the status clause -> terminal group cleared.
-        assert current.terminal_mode is False
-        assert current.terminal_id is None
-        assert current.claude_chat_active is False
-        assert current.claude_session_id is None
+        assert current.terminal_mode is True
+        assert current.terminal_id == "term-x"
+        assert current.claude_chat_active is True
+        assert current.claude_session_id == "claude-x"
     finally:
         await container.session_supervisor.stop_all()
         await container.bot.session.close()
@@ -2071,17 +2289,18 @@ async def test_dispatch_status_ended_branch_triggers_reconcile(tmp_path) -> None
 @pytest.mark.asyncio
 async def test_dispatch_event_sessionend_branch_triggers_reconcile(tmp_path) -> None:
     """Exercise the ``event == "SessionEnd"`` clause of ``_is_session_end_dispatch_event``
-    (bootstrap_mixins.py:939) independently of the ``status == "ended"`` clause.
+    independently of the ``status == "ended"`` clause.
 
     We dispatch a HOOK_RECEIVED whose ``event`` is ``"SessionEnd"`` but whose ``status`` is
     a non-ended value (``"running"``). The ``or`` short-circuits on the event clause,
-    ``is_session_end`` becomes True and reconcile clears the terminal group.
+    ``is_session_end`` becomes True and reconcile runs. Active tmux chat context must
+    survive because a Claude turn's SessionEnd is not the same as closing /claude.
 
     See the sibling test for why the ``event`` key cannot be literally omitted: HookEvent
     validation requires a valid non-empty ``event``/``status``. Keeping ``status`` at a
     non-ended value isolates the event clause as the sole trigger. If the
     ``event.payload.get("event") == "SessionEnd"`` clause were removed, this event would
-    not be treated as a session end -> terminal context would remain active -> test fails.
+    not be treated as a session end and the structured state would not move to ENDED.
     """
     container = AppContainer(make_settings(tmp_path, install_hooks=False, tmux_mode=True))
     try:
@@ -2109,13 +2328,15 @@ async def test_dispatch_event_sessionend_branch_triggers_reconcile(tmp_path) -> 
             )
         )
 
+        state = container.structured_session_store.get("claude-x")
+        assert state is not None
+        assert state.phase == SessionPhase.ENDED
         current = await container.session_service.get(1)
         assert current is not None
-        # Reconcile fired via the event clause -> terminal group cleared.
-        assert current.terminal_mode is False
-        assert current.terminal_id is None
-        assert current.claude_chat_active is False
-        assert current.claude_session_id is None
+        assert current.terminal_mode is True
+        assert current.terminal_id == "term-x"
+        assert current.claude_chat_active is True
+        assert current.claude_session_id == "claude-x"
     finally:
         await container.session_supervisor.stop_all()
         await container.bot.session.close()

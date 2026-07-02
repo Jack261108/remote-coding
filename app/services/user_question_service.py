@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.adapters.cli.factory import CLIAdapterFactory
-from app.domain.session_models import SessionEvent, SessionEventType, SessionState, ToolStatus
+from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
 from app.domain.user_question_models import (
     UserQuestionPrompt,
     compose_user_question_answers,
@@ -291,10 +291,12 @@ class UserQuestionService:
         if waiting_prompts:
             return waiting_prompts
 
-        return self._extract_latest_user_question_prompts_from_tools(
-            state,
-            allowed_statuses={ToolStatus.RUNNING},
-        )
+        if state.phase in {SessionPhase.PROCESSING, SessionPhase.COMPACTING}:
+            return self._extract_latest_user_question_prompts_from_tools(
+                state,
+                allowed_statuses={ToolStatus.RUNNING},
+            )
+        return ()
 
     def _extract_latest_user_question_prompts_from_tools(
         self,

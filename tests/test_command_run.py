@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiogram.enums import ParseMode
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup
 
 from app.bot.handlers import command_run as command_run_module
 from app.bot.handlers import run_event_streamer as run_event_streamer_module
@@ -19,6 +19,7 @@ from app.bot.presenters.structured_reply_presenter import build_tool_progress_me
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
+from app.services.message_sender import Button, Keyboard
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 from app.services.permission_gateway import RegisterForButtonOk
 from tests.fakes.structured import make_structured_session as _structured_session
@@ -204,13 +205,13 @@ class FakePermissionGateway:
         self.registry = FakeRegistry()
         self.registrations: list[tuple[str, str, SessionOrigin, int | None]] = []
         self.auto_approve_calls: list[tuple[str, SessionOrigin, int | None, str]] = []
-        self.keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
+        self.keyboard = Keyboard(
+            rows=[
                 [
-                    InlineKeyboardButton(text="✅ Approve", callback_data="perm:tok12345:allow"),
-                    InlineKeyboardButton(text="❌ Deny", callback_data="perm:tok12345:deny"),
+                    Button(text="✅ Approve", callback_data="perm:tok12345:allow"),
+                    Button(text="❌ Deny", callback_data="perm:tok12345:deny"),
                 ],
-                [InlineKeyboardButton(text="🟢 Auto-approve", callback_data="perm:tok12345:auto_approve")],
+                [Button(text="🟢 Auto-approve", callback_data="perm:tok12345:auto_approve")],
             ]
         )
 
@@ -1956,8 +1957,9 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
     assert message.answers.count(expected_rendered) == 1
     permission_index = message.answers.index(expected_rendered)
     reply_markup = message.reply_markups[permission_index]
-    assert reply_markup is permission_gateway.keyboard
+    assert isinstance(reply_markup, InlineKeyboardMarkup)
     assert [button.text for button in reply_markup.inline_keyboard[0]] == ["✅ Approve", "❌ Deny"]
+    assert [button.callback_data for button in reply_markup.inline_keyboard[0]] == ["perm:tok12345:allow", "perm:tok12345:deny"]
     assert permission_gateway.auto_approve_calls == [("claude-session-1", SessionOrigin.OWNED, 1, "tool-1")]
     assert permission_gateway.registrations == [("tool-1", "claude-session-1", SessionOrigin.OWNED, 1)]
     assert task_service._structured_permission_key == "tool-1:Bash"

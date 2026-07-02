@@ -53,6 +53,7 @@ from app.services.external_session_push_notifier import ExternalSessionPushNotif
 from app.services.file_receiver import FileReceiverService
 from app.services.file_sender import FileSenderService
 from app.services.janitor_task import JanitorTask
+from app.services.jsonl_file_watcher import JSONLFileWatcher
 from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
@@ -144,12 +145,20 @@ class AppContainer(
         self.session_context_store = FileSessionContextStore(self.file_session_store)
         self.claude_jsonl_parser = ClaudeJSONLParser(self.claude_paths)
         self.structured_session_store = SessionStore(self.file_session_store)
+        self.jsonl_file_watcher = JSONLFileWatcher(
+            projects_dir=self.claude_paths.projects_dir,
+            on_change=lambda session_id, cwd: self.session_supervisor.schedule_jsonl_sync(session_id, cwd),
+            enabled=settings.jsonl_file_watcher_enabled,
+        )
         self.session_supervisor = SessionSupervisor(
             session_store=self.structured_session_store,
             claude_jsonl_parser=self.claude_jsonl_parser,
             on_jsonl_sync=self.sync_claude_session,
             on_dispatch_event=self._dispatch_session_event,
+            poll_interval_sec=settings.session_supervisor_poll_interval_sec,
+            idle_poll_interval_sec=settings.session_supervisor_idle_poll_interval_sec,
             debounce_sec=settings.claude_jsonl_sync_debounce_ms / 1000,
+            jsonl_file_watcher=self.jsonl_file_watcher,
         )
         self.tmux_runner = TmuxRunner(
             tmux_bin=settings.tmux_bin,
@@ -412,6 +421,7 @@ class AppContainer(
             if self.settings.claude_install_hooks:
                 self.hook_installer.install()
             await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
+            self.jsonl_file_watcher.start()
             if self.settings.claude_tmux_mode:
                 await self.session_registry.reconcile_terminal_lifecycle()
             await self._restore_session_bindings()
@@ -473,6 +483,7 @@ class AppContainer(
             await self._janitor_task.stop()
             await self._external_binding_cleanup_task.stop()
             await self.session_supervisor.stop_all()
+            self.jsonl_file_watcher.stop()
             await self.hook_socket_server.stop()
             await self._stop_background_tasks()
         finally:
