@@ -167,6 +167,20 @@ class HookSocketServer:
             return False
         return await self._write_response(pending=pending, decision=decision, reason=reason)
 
+    async def release_pending_permission(self, *, tool_use_id: str) -> bool:
+        async with self._lock:
+            pending = self._pending_permissions.pop(tool_use_id, None)
+            disconnected = self._disconnected_permissions.pop(tool_use_id, None)
+            if pending is not None:
+                self._cancel_pending_expiration_locked(tool_use_id)
+                self._cancel_pending_disconnect_watch_locked(tool_use_id)
+            if disconnected is not None:
+                self._cancel_disconnect_grace_locked(tool_use_id)
+        if pending is not None:
+            await self._close_writer(pending.writer)
+            return True
+        return disconnected is not None
+
     async def cancel_pending_permissions(self, *, session_id: str) -> None:
         async with self._lock:
             expired = self._pop_expired_pending_permissions_locked()

@@ -440,6 +440,78 @@ async def test_late_unbound_permission_after_session_end_is_not_notified(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_unbound_non_tmux_permission_is_not_notified(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    unbound_permissions = _RecordingUnboundPermissionHandler()
+    hook_socket_server = AsyncMock()
+    hook_socket_server.release_pending_permission = AsyncMock(return_value=True)
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+    vars(container)["unbound_permission_handler"] = unbound_permissions
+    vars(container)["hook_socket_server"] = hook_socket_server
+
+    async def no_tmux_pane(_pid: int, _tmux_bin: str = "tmux") -> str | None:
+        return None
+
+    monkeypatch.setattr("app.adapters.process.pty_injector.find_tmux_pane_for_pid", no_tmux_pane)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="unbound-non-tmux-permission",
+            cwd=str(tmp_path),
+            event="PermissionRequest",
+            status="waiting_for_approval",
+            pid=4242,
+            tool="AskUserQuestion",
+            tool_input={"questions": [{"question": "继续吗？", "options": [{"label": "继续"}]}]},
+            tool_use_id="tool-non-tmux",
+        )
+    )
+
+    assert discovery.recorded == ["unbound-non-tmux-permission"]
+    assert unbound_permissions.handled == []
+    hook_socket_server.release_pending_permission.assert_awaited_once_with(tool_use_id="tool-non-tmux")
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_unbound_tmux_permission_is_still_notified(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    unbound_permissions = _RecordingUnboundPermissionHandler()
+    hook_socket_server = AsyncMock()
+    hook_socket_server.release_pending_permission = AsyncMock(return_value=True)
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+    vars(container)["unbound_permission_handler"] = unbound_permissions
+    vars(container)["hook_socket_server"] = hook_socket_server
+
+    async def tmux_pane(_pid: int, _tmux_bin: str = "tmux") -> str:
+        return "%1"
+
+    monkeypatch.setattr("app.adapters.process.pty_injector.find_tmux_pane_for_pid", tmux_pane)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="unbound-tmux-permission",
+            cwd=str(tmp_path),
+            event="PermissionRequest",
+            status="waiting_for_approval",
+            pid=4242,
+            tool="Bash",
+            tool_input={"command": "pwd"},
+            tool_use_id="tool-tmux",
+        )
+    )
+
+    assert discovery.recorded == ["unbound-tmux-permission"]
+    assert unbound_permissions.handled == ["unbound-tmux-permission"]
+    hook_socket_server.release_pending_permission.assert_not_awaited()
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_tmux_owned_late_hook_after_external_tombstone_still_dispatches(tmp_path) -> None:
     seen: list[str] = []
     binding_store = ExternalBindingStore(data_dir=tmp_path)

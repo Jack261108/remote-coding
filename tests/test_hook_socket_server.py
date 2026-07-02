@@ -253,6 +253,50 @@ async def test_hook_socket_server_resolves_permission_tool_use_id_and_replies(tm
 
 
 @pytest.mark.asyncio
+async def test_hook_socket_server_release_pending_permission_closes_without_resolution(tmp_path) -> None:
+    delivered = asyncio.Event()
+    resolved = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path), permission_disconnect_grace_sec=0.05)
+
+    async def on_event(event: HookEvent) -> None:
+        if event.event == "PermissionRequest":
+            delivered.set()
+
+    async def on_permission_resolved(session_id: str, tool_use_id: str, reason: str) -> None:
+        resolved.set()
+
+    await server.start(on_event, on_permission_resolved=on_permission_resolved)
+    try:
+        reader, writer = await _send_framed_event(
+            socket_path,
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/project",
+                "event": "PermissionRequest",
+                "status": "waiting_for_approval",
+                "tool": "AskUserQuestion",
+                "tool_input": {"questions": [{"question": "继续吗？"}]},
+                "tool_use_id": "tool-release",
+            },
+        )
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+
+        released = await server.release_pending_permission(tool_use_id="tool-release")
+        response = await asyncio.wait_for(reader.read(), timeout=1)
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.sleep(0.1)
+
+        assert released is True
+        assert response == b""
+        assert await server.get_pending_permission(session_id="s1") is None
+        assert resolved.is_set() is False
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_hook_socket_server_falls_back_to_denied_when_framed_request_closes_without_terminal_event(tmp_path) -> None:
     delivered = asyncio.Event()
     resolved = asyncio.Event()
