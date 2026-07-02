@@ -371,6 +371,9 @@ class HookHandlingMixin(AppContainerBase):
             # Permission handling
             async def _permission_handling() -> None:
                 if event.expects_response and hasattr(self, "unbound_permission_handler"):
+                    if not await self._is_unbound_tmux_event(event):
+                        await self._release_unbound_non_tmux_permission(event)
+                        return
                     candidate_user_id = None
                     if hasattr(self, "auto_approve_service"):
                         candidate_user_id = self.auto_approve_service.get_active_user_for_session(event.session_id)
@@ -415,6 +418,43 @@ class HookHandlingMixin(AppContainerBase):
         if outcome in {AutoApproveOutcome.APPROVED, AutoApproveOutcome.APPROVAL_UNKNOWN}:
             raise _StageShortCircuitError(reason="auto-approved")
         return outcome
+
+    async def _is_unbound_tmux_event(self, event: HookEvent) -> bool:
+        if event.pid is None or event.pid <= 0:
+            return False
+        from app.adapters.process.pty_injector import find_tmux_pane_for_pid
+
+        settings = getattr(self, "settings", None)
+        tmux_bin = getattr(settings, "tmux_bin", "tmux")
+        try:
+            return await find_tmux_pane_for_pid(event.pid, tmux_bin) is not None
+        except Exception:
+            logger.debug(
+                "failed to detect tmux pane for unbound permission",
+                extra={"session_id": event.session_id, "tool_use_id": event.tool_use_id, "pid": event.pid},
+                exc_info=True,
+            )
+            return False
+
+    async def _release_unbound_non_tmux_permission(self, event: HookEvent) -> None:
+        logger.info(
+            "skip unbound non-tmux permission push",
+            extra={"session_id": event.session_id, "tool_use_id": event.tool_use_id, "tool": event.tool, "pid": event.pid},
+        )
+        if not event.tool_use_id:
+            return
+        hook_socket_server = getattr(self, "hook_socket_server", None)
+        release_pending_permission = getattr(hook_socket_server, "release_pending_permission", None)
+        if release_pending_permission is None:
+            return
+        try:
+            await release_pending_permission(tool_use_id=event.tool_use_id)
+        except Exception:
+            logger.warning(
+                "failed to release unbound non-tmux permission",
+                extra={"session_id": event.session_id, "tool_use_id": event.tool_use_id},
+                exc_info=True,
+            )
 
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
         if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
