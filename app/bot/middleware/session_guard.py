@@ -2,7 +2,7 @@ from collections.abc import Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 
 class SessionGuardMiddleware(BaseMiddleware):
@@ -15,8 +15,8 @@ class SessionGuardMiddleware(BaseMiddleware):
     async def __call__(
         self,
         handler: Callable,
-        event: Message | CallbackQuery,
-        data: dict,
+        event: TelegramObject,
+        data: dict[str, Any],
     ) -> Any:
         user_id = data.get("user_id")
         if not user_id:

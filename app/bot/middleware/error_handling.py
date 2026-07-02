@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,8 @@ class ErrorHandlingMiddleware(BaseMiddleware):
     async def __call__(
         self,
         handler: Callable,
-        event: Message | CallbackQuery,
-        data: dict,
+        event: TelegramObject,
+        data: dict[str, Any],
     ) -> Any:
         try:
             return await handler(event, data)
