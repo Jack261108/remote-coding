@@ -1917,6 +1917,173 @@ async def test_interactive_interrupted_state_marks_task_canceled(tmp_path: Path)
     assert [event.type for event in events] == [EventType.CANCELED]
 
 
+class _FakeFifoStdout:
+    def __init__(self, lines: list[bytes | None]) -> None:
+        self._lines = list(lines)
+
+    async def readline(self) -> bytes:
+        if not self._lines:
+            await asyncio.sleep(10)
+            return b""
+        line = self._lines.pop(0)
+        if line is None:
+            await asyncio.sleep(10)
+            return b""
+        return line
+
+
+class _FakeFifoReader:
+    _process = None
+
+    def __init__(self, lines: list[bytes | None]) -> None:
+        self._stdout = _FakeFifoStdout(lines)
+
+    async def readlines(self) -> _FakeFifoStdout:
+        return self._stdout
+
+
+@pytest.mark.asyncio
+async def test_watch_interactive_fifo_timeout_after_output_polls_tick_instead_of_eof(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _runner_with_session_store(tmp_path, interactive_completion_grace_sec=0)
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_user_1",
+        log_file=tmp_path / "fifo-timeout.log",
+        exit_file=tmp_path / "fifo-timeout.exit",
+        task_id="t-fifo-timeout",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        persistent_terminal=True,
+        interactive=True,
+    )
+    calls = 0
+
+    async def fake_tick(**kwargs):
+        nonlocal calls
+        calls += 1
+        return (0 if calls == 2 else None), kwargs["timeout_anchor"]
+
+    monkeypatch.setattr(runner, "_process_interactive_chunk", lambda **kwargs: None)
+    monkeypatch.setattr(runner, "_handle_interactive_tick", fake_tick)
+
+    events = await _collect_events(
+        runner._watch_interactive_fifo(meta=meta, timeout_sec=0.01, fifo_reader=_FakeFifoReader([b"output\n", None]))
+    )
+
+    assert calls == 2
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_watch_interactive_fifo_eof_runs_final_tick_before_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _runner_with_session_store(tmp_path, interactive_completion_grace_sec=0)
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_user_1",
+        log_file=tmp_path / "fifo-eof.log",
+        exit_file=tmp_path / "fifo-eof.exit",
+        task_id="t-fifo-eof",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        persistent_terminal=True,
+        interactive=True,
+    )
+    calls = 0
+
+    async def fake_tick(**kwargs):
+        nonlocal calls
+        calls += 1
+        return (0 if calls == 2 else None), kwargs["timeout_anchor"]
+
+    monkeypatch.setattr(runner, "_process_interactive_chunk", lambda **kwargs: None)
+    monkeypatch.setattr(runner, "_handle_interactive_tick", fake_tick)
+
+    events = await _collect_events(
+        runner._watch_interactive_fifo(meta=meta, timeout_sec=1, fifo_reader=_FakeFifoReader([b"output\n", b""]))
+    )
+
+    assert calls == 2
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+def test_finalize_watch_result_unknown_exit_code_message_does_not_render_none(tmp_path: Path) -> None:
+    runner = _runner_with_session_store(tmp_path)
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_user_1",
+        log_file=tmp_path / "unknown.log",
+        exit_file=tmp_path / "unknown.exit",
+        task_id="t-unknown-exit",
+        workdir=str(tmp_path),
+        persistent_terminal=False,
+    )
+
+    event = runner._finalize_watch_result(
+        meta=meta,
+        timed_out=False,
+        canceled=False,
+        exit_code=None,
+        timeout_sec=1,
+        started_at=1.0,
+        finished_at=1.1,
+        position=0,
+    )
+
+    assert event.type == EventType.FAILED
+    assert event.exit_code is None
+    assert event.error is not None
+    assert "None" not in event.error
+    assert "未能读取退出码" in event.error
+
+
+@pytest.mark.asyncio
+async def test_watch_task_retries_empty_exit_file_before_finalize(tmp_path: Path) -> None:
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, exit_file_read_grace_sec=0.5)
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_task_empty_exit",
+        log_file=tmp_path / "empty-exit.log",
+        exit_file=tmp_path / "empty-exit.exit",
+        task_id="t-empty-exit",
+        workdir=str(tmp_path),
+        persistent_terminal=False,
+    )
+    meta.exit_file.write_text("", encoding="utf-8")
+
+    async def writer() -> None:
+        await asyncio.sleep(0.03)
+        meta.exit_file.write_text("0", encoding="utf-8")
+
+    write_task = asyncio.create_task(writer())
+    events = await _collect_events(runner._watch_task(meta=meta, timeout_sec=1))
+    await write_task
+
+    assert events[-1].type == EventType.EXITED
+
+
+@pytest.mark.asyncio
+async def test_watch_task_invalid_exit_file_reports_unknown_exit_code_without_none(tmp_path: Path) -> None:
+    runner = _runner_with_session_store(tmp_path, poll_interval_sec=0.01, exit_file_read_grace_sec=0)
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_task_invalid_exit",
+        log_file=tmp_path / "invalid-exit.log",
+        exit_file=tmp_path / "invalid-exit.exit",
+        task_id="t-invalid-exit",
+        workdir=str(tmp_path),
+        persistent_terminal=False,
+    )
+    meta.exit_file.write_text("not-an-int", encoding="utf-8")
+
+    events = await _collect_events(runner._watch_task(meta=meta, timeout_sec=1))
+
+    assert events[-1].type == EventType.FAILED
+    assert events[-1].error is not None
+    assert "None" not in events[-1].error
+    assert "未能读取退出码" in events[-1].error
+
+
 @pytest.mark.asyncio
 async def test_cancel_returns_false_for_unknown_task() -> None:
     runner = TmuxRunner()

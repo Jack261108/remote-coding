@@ -77,6 +77,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         enter_delay_sec: float = 0.2,
         partial_flush_sec: float = 0.5,
         interactive_completion_grace_sec: float = 0.1,
+        exit_file_read_grace_sec: float = 1.0,
         claude_cli_bin: str = "claude",
         file_store: FileSessionStore | None = None,
         session_store: SessionStoreProtocol | None = None,
@@ -92,6 +93,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         self._enter_delay_sec = max(0.0, enter_delay_sec)
         self._partial_flush_sec = max(0.0, partial_flush_sec)
         self._interactive_completion_grace_sec = max(0.0, interactive_completion_grace_sec)
+        self._exit_file_read_grace_sec = max(0.0, exit_file_read_grace_sec)
         self._interactive_idle_check_sec = 5.0
         self._claude_cli_bin = claude_cli_bin
         self._tasks: dict[str, _TmuxTaskMeta] = {}
@@ -403,6 +405,31 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             return True, ""
         return False, err_text.strip() or "unknown error"
 
+    def _read_exit_code_with_grace(
+        self,
+        *,
+        meta: _TmuxTaskMeta,
+        now: float,
+        unreadable_since: float | None,
+    ) -> tuple[int | None, float | None, bool]:
+        if not meta.exit_file.exists():
+            return None, None, False
+
+        exit_code = self._read_exit_code(meta.exit_file)
+        if exit_code is not None:
+            return exit_code, None, True
+
+        if unreadable_since is None:
+            unreadable_since = now
+
+        extra = self._tmux_log_extra(meta, exit_file=str(meta.exit_file))
+        if (now - unreadable_since) >= self._exit_file_read_grace_sec:
+            logger.warning("tmux exit file unreadable", extra=extra)
+            return None, unreadable_since, True
+
+        logger.debug("tmux exit file not readable yet", extra=extra)
+        return None, unreadable_since, False
+
     async def _watch_task(self, *, meta: _TmuxTaskMeta, timeout_sec: int, fifo_reader: AsyncFifoReader | None = None):
         if meta.interactive and fifo_reader is not None:
             async for event in self._watch_interactive_fifo(meta=meta, timeout_sec=timeout_sec, fifo_reader=fifo_reader):
@@ -423,6 +450,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         started_at = asyncio.get_running_loop().time()
         timeout_anchor = started_at
         last_partial_emit = started_at
+        exit_code_unreadable_since: float | None = None
 
         if meta.interactive:
             exit_code = self._init_interactive_watch(meta=meta, watch_state=watch_state, now=started_at)
@@ -464,12 +492,17 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 if exit_code is not None:
                     break
 
-            if meta.exit_file.exists():
-                exit_code = self._read_exit_code(meta.exit_file)
+            exit_code, exit_code_unreadable_since, exit_file_done = self._read_exit_code_with_grace(
+                meta=meta,
+                now=now,
+                unreadable_since=exit_code_unreadable_since,
+            )
+            if exit_file_done:
                 break
+            exit_file_pending = exit_code_unreadable_since is not None
 
             timeout_started_at = timeout_anchor if meta.interactive else started_at
-            if (now - timeout_started_at) >= timeout_sec:
+            if not exit_file_pending and (now - timeout_started_at) >= timeout_sec:
                 timed_out = True
                 await self._handle_watch_timeout(
                     meta=meta,
@@ -523,6 +556,7 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         started_at = asyncio.get_running_loop().time()
         timeout_anchor = started_at
         fifo_offset = 0
+        exit_code_unreadable_since: float | None = None
 
         exit_code = self._init_interactive_watch(meta=meta, watch_state=watch_state, now=started_at)
         if watch_state.latest_completed_turn_id_before_run is None and not meta.baseline_captured:
@@ -539,10 +573,11 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         while exit_code is None:
             now = asyncio.get_running_loop().time()
             remaining = max(0.1, timeout_sec - (now - timeout_anchor))
+            eof_seen = False
             try:
                 line = await asyncio.wait_for(reader(), timeout=min(1.0, remaining))
             except TimeoutError:
-                line = b""
+                line = None
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -554,20 +589,23 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 timeout_anchor = asyncio.get_running_loop().time()
                 self._process_interactive_chunk(meta=meta, offset=fifo_offset)
             elif line == b"":
+                eof_seen = True
                 if fifo_offset > 0:
                     logger.debug("fifo reader EOF", extra={"session": meta.session_name})
-                    break
-                # No data received yet — check if the reader process has exited
-                if hasattr(fifo_reader, "_process") and fifo_reader._process is not None:
+                elif hasattr(fifo_reader, "_process") and fifo_reader._process is not None:
                     if fifo_reader._process.returncode is not None:
                         logger.debug("fifo reader process exited with no data", extra={"session": meta.session_name})
-                        break
-
-            if meta.exit_file.exists():
-                exit_code = self._read_exit_code(meta.exit_file)
-                break
 
             now = asyncio.get_running_loop().time()
+            exit_code, exit_code_unreadable_since, exit_file_done = self._read_exit_code_with_grace(
+                meta=meta,
+                now=now,
+                unreadable_since=exit_code_unreadable_since,
+            )
+            if exit_file_done:
+                break
+            exit_file_pending = exit_code_unreadable_since is not None
+
             exit_code, timeout_anchor = await self._handle_interactive_tick(
                 meta=meta,
                 watch_state=watch_state,
@@ -575,10 +613,10 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
                 timeout_anchor=timeout_anchor,
                 now=now,
             )
-            if exit_code is not None:
+            if exit_code is not None or (eof_seen and not exit_file_pending):
                 break
 
-            if (now - timeout_anchor) >= timeout_sec:
+            if not exit_file_pending and (now - timeout_anchor) >= timeout_sec:
                 timed_out = True
                 await self._handle_watch_timeout(
                     meta=meta,
@@ -594,6 +632,9 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             if await self._is_cancel_requested(meta.task_id):
                 await self._handle_watch_cancel(meta=meta, started_at=started_at, now=now, position=fifo_offset)
                 break
+
+            if eof_seen:
+                await asyncio.sleep(self._poll_interval_sec)
 
         canceled = meta.cancel_requested or await self._is_cancel_requested(meta.task_id)
         finished_at = asyncio.get_running_loop().time()
@@ -775,6 +816,18 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             )
             logger.info("tmux task finished", extra=finish_extra)
             return CLIEvent(type=EventType.EXITED, task_id=meta.task_id, exit_code=0)
+        elif exit_code is None:
+            finish_extra = self._tmux_log_extra(
+                meta,
+                result="failed",
+                exit_code=exit_code,
+                timeout_sec=timeout_sec,
+                elapsed_sec=round(finished_at - started_at, 3),
+                log_position=position,
+                canceled=False,
+            )
+            logger.error("tmux task finished", extra=finish_extra)
+            return CLIEvent(type=EventType.FAILED, task_id=meta.task_id, error="进程已结束，但未能读取退出码")
         else:
             finish_extra = self._tmux_log_extra(
                 meta,
