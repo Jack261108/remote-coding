@@ -679,6 +679,44 @@ async def test_presenter_reports_waiting_for_approval_ask_user_question_without_
     assert second == []
 
 
+@pytest.mark.asyncio
+async def test_presenter_reports_waiting_for_approval_tool_without_pending_permission_snapshot() -> None:
+    waiting_tool = ToolCallRecord(
+        tool_use_id="tool-mcp-waiting",
+        name="mcp_tavily_tavily_extract",
+        input={"url": "https://example.com"},
+        status=ToolStatus.WAITING_FOR_APPROVAL,
+    )
+    presenter = StructuredReplyPresenter(
+        task_service=DummyTaskService(
+            [
+                _session(phase=SessionPhase.WAITING_FOR_INPUT),
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-mcp-waiting": waiting_tool}),
+                _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-mcp-waiting": waiting_tool}),
+            ]
+        ),
+        user_id=1,
+    )
+
+    await presenter.prime()
+    first = await presenter.poll(task_id="task-1")
+    await presenter.acknowledge_delivery(first[0])
+    second = await presenter.poll(task_id="task-1")
+
+    assert first == [
+        PermissionRequestOutput(
+            text="",
+            tool_use_id="tool-mcp-waiting",
+            permission_key="tool-mcp-waiting:mcp_tavily_tavily_extract",
+            tool_name="mcp_tavily_tavily_extract",
+            session_id="claude-session-1",
+            tool_input={"url": "https://example.com"},
+            user_id=1,
+        )
+    ]
+    assert second == []
+
+
 def test_build_tool_progress_message_includes_specific_bash_command() -> None:
     message = build_tool_progress_message(tool_name="Bash", tool_input={"command": "pytest -q"})
 

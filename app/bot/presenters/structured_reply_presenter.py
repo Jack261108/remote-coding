@@ -300,29 +300,26 @@ class StructuredReplyPresenter:
             session_title=snapshot.session_title,
             cwd=snapshot.cwd,
         )
+        permission_request = self._pending_permission_request_output(
+            snapshot,
+            pending_question_prompts=pending_question_prompts,
+        )
+        pending_permission_tool_use_id = (
+            permission_request.tool_use_id if permission_request is not None else snapshot.pending_permission_tool_use_id
+        )
+
         messages.extend(question_updates)
-        messages.extend(self._collect_progress_updates(snapshot=snapshot, tool_question_prompts=tool_question_prompts))
-        if (
-            snapshot.phase == SessionPhase.WAITING_FOR_APPROVAL.value
-            and snapshot.pending_permission_key
-            and snapshot.pending_permission_key != self._last_pending_permission_key
-            and not pending_question_prompts
-        ):
-            messages.append(
-                PermissionRequestOutput(
-                    text="",
-                    tool_use_id=snapshot.pending_permission_tool_use_id,
-                    permission_key=snapshot.pending_permission_key,
-                    tool_name=snapshot.pending_permission_tool_name,
-                    session_id=snapshot.session_id,
-                    tool_input=snapshot.pending_permission_tool_input,
-                    cwd=snapshot.cwd,
-                    session_title=snapshot.session_title,
-                    user_id=snapshot.user_id,
-                )
-            )
-        elif snapshot.phase != SessionPhase.WAITING_FOR_APPROVAL.value:
+        if permission_request is not None and permission_request.permission_key != self._last_pending_permission_key:
+            messages.append(permission_request)
+        if snapshot.phase != SessionPhase.WAITING_FOR_APPROVAL.value:
             self._last_pending_permission_key = snapshot.pending_permission_key
+        messages.extend(
+            self._collect_progress_updates(
+                snapshot=snapshot,
+                tool_question_prompts=tool_question_prompts,
+                pending_permission_tool_use_id=pending_permission_tool_use_id,
+            )
+        )
 
         reply = await self._collect_reply(task_id=task_id, snapshot=snapshot, log_missing=log_missing)
         if reply:
@@ -408,11 +405,51 @@ class StructuredReplyPresenter:
         logger.info("[task %s][structured] %s", task_id, snapshot.reply.rstrip("\n"))
         return StructuredReplyOutput(text=snapshot.reply, turn_id=snapshot.turn_id)
 
+    def _pending_permission_request_output(
+        self,
+        snapshot: _StructuredSnapshot,
+        *,
+        pending_question_prompts: tuple[UserQuestionPrompt, ...],
+    ) -> PermissionRequestOutput | None:
+        if snapshot.phase != SessionPhase.WAITING_FOR_APPROVAL.value or pending_question_prompts:
+            return None
+        if snapshot.pending_permission_key:
+            return PermissionRequestOutput(
+                text="",
+                tool_use_id=snapshot.pending_permission_tool_use_id,
+                permission_key=snapshot.pending_permission_key,
+                tool_name=snapshot.pending_permission_tool_name,
+                session_id=snapshot.session_id,
+                tool_input=snapshot.pending_permission_tool_input,
+                cwd=snapshot.cwd,
+                session_title=snapshot.session_title,
+                user_id=snapshot.user_id,
+            )
+        for tool in snapshot.tool_states:
+            if tool.status != ToolStatus.WAITING_FOR_APPROVAL.value:
+                continue
+            if _extract_tool_question_prompts(tool):
+                continue
+            tool_name = tool.tool_name or "Tool"
+            return PermissionRequestOutput(
+                text="",
+                tool_use_id=tool.tool_use_id,
+                permission_key=f"{tool.tool_use_id}:{tool_name}",
+                tool_name=tool_name,
+                session_id=snapshot.session_id,
+                tool_input=tool.tool_input,
+                cwd=snapshot.cwd,
+                session_title=snapshot.session_title,
+                user_id=snapshot.user_id,
+            )
+        return None
+
     def _collect_progress_updates(
         self,
         *,
         snapshot: _StructuredSnapshot,
         tool_question_prompts: dict[str, tuple[UserQuestionPrompt, ...]],
+        pending_permission_tool_use_id: str | None,
     ) -> list[
         ProgressUpdateOutput | ToolStatusOutput | SubagentAggregateStatusOutput | TaskListStatusOutput | FileToolAggregateStatusOutput
     ]:
@@ -432,7 +469,7 @@ class StructuredReplyPresenter:
         subagent_containers: list[ToolStatusOutput] = []
         file_tools: list[ToolStatusOutput] = []
         flat_tools: list[_ToolStateSnapshot] = []
-        pending_tool_use_id = snapshot.pending_permission_tool_use_id
+        pending_tool_use_id = pending_permission_tool_use_id
         for tool in snapshot.tool_states:
             if tool.status is None:
                 continue
