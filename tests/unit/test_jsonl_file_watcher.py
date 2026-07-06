@@ -10,21 +10,36 @@ from app.services.jsonl_file_watcher import JSONLFileWatcher
 
 
 class _FakeObserver:
-    def __init__(self, *, fail_start: bool = False, alive_after_join: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_start: bool = False,
+        alive_after_join: bool = False,
+        fail_schedule_paths: set[str] | None = None,
+    ) -> None:
         self.fail_start = fail_start
         self.alive_after_join = alive_after_join
+        self.fail_schedule_paths = fail_schedule_paths or set()
         self.handler = None
         self.scheduled_path: str | None = None
         self.recursive: bool | None = None
+        self.scheduled: list[tuple[str, bool]] = []
+        self.unscheduled: list[object] = []
         self.started = 0
         self.stopped = 0
         self.join_timeout: float | None = None
 
     def schedule(self, event_handler, path: str, *, recursive: bool) -> object:
+        if path in self.fail_schedule_paths:
+            raise RuntimeError("schedule failed")
         self.handler = event_handler
         self.scheduled_path = path
         self.recursive = recursive
-        return object()
+        self.scheduled.append((path, recursive))
+        return f"watch:{path}"
+
+    def unschedule(self, watch: object) -> None:
+        self.unscheduled.append(watch)
 
     def start(self) -> None:
         if self.fail_start:
@@ -63,6 +78,7 @@ async def test_jsonl_file_watcher_triggers_only_registered_files(tmp_path: Path)
     )
     watched_file = projects_dir / "-tmp-work" / "claude-session-1.jsonl"
     other_file = projects_dir / "-tmp-work" / "other.jsonl"
+    watched_file.parent.mkdir(parents=True)
 
     assert watcher.start() is True
     watcher.watch_files(session_id="claude-session-1", cwd="/tmp/work", paths=(watched_file,))
@@ -73,8 +89,9 @@ async def test_jsonl_file_watcher_triggers_only_registered_files(tmp_path: Path)
     await asyncio.sleep(0)
 
     assert calls == [("claude-session-1", "/tmp/work")]
-    assert observer.scheduled_path == str(projects_dir)
-    assert observer.recursive is True
+    assert observer.scheduled_path == str(watched_file.parent)
+    assert observer.recursive is False
+    assert observer.scheduled == [(str(watched_file.parent), False)]
 
 
 @pytest.mark.asyncio
@@ -129,6 +146,135 @@ async def test_jsonl_file_watcher_replaces_and_clears_session_files(tmp_path: Pa
     watcher.handle_event(_event(str(new_file)))
     await asyncio.sleep(0)
     assert calls == [("sid", "/tmp/new")]
+
+
+@pytest.mark.asyncio
+async def test_jsonl_file_watcher_schedules_each_parent_directory_once(tmp_path: Path) -> None:
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    observer = _FakeObserver()
+    watcher = JSONLFileWatcher(
+        projects_dir=projects_dir,
+        on_change=_ignore_change,
+        loop=asyncio.get_running_loop(),
+        observer_factory=lambda: observer,
+    )
+    first_file = projects_dir / "-tmp-work" / "claude-session-1.jsonl"
+    second_file = projects_dir / "-tmp-work" / "agent-agent-1.jsonl"
+    other_dir_file = projects_dir / "-tmp-other" / "claude-session-2.jsonl"
+    first_file.parent.mkdir(parents=True)
+    other_dir_file.parent.mkdir(parents=True)
+
+    assert watcher.start() is True
+    watcher.watch_files(session_id="sid-1", cwd="/tmp/work", paths=(first_file, second_file))
+    watcher.replace_session_files(session_id="sid-1", cwd="/tmp/work", paths=(first_file, second_file, other_dir_file))
+
+    assert observer.scheduled == [(str(first_file.parent), False), (str(other_dir_file.parent), False)]
+
+
+@pytest.mark.asyncio
+async def test_jsonl_file_watcher_watches_existing_ancestor_until_parent_exists(tmp_path: Path) -> None:
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    observer = _FakeObserver()
+    calls: list[tuple[str, str]] = []
+    watcher = JSONLFileWatcher(
+        projects_dir=projects_dir,
+        on_change=lambda session_id, cwd: calls.append((session_id, cwd)),
+        loop=asyncio.get_running_loop(),
+        observer_factory=lambda: observer,
+    )
+    watched_file = projects_dir / "-tmp-work" / "claude-session-1.jsonl"
+
+    assert watcher.start() is True
+    watcher.watch_files(session_id="sid-1", cwd="/tmp/work", paths=(watched_file,))
+
+    assert watcher.is_available is True
+    assert observer.scheduled == [(str(projects_dir), False)]
+
+    watched_file.parent.mkdir(parents=True)
+    watched_file.write_text("{}\n", encoding="utf-8")
+    assert observer.handler is not None
+    observer.handler.dispatch(_event(str(watched_file.parent), event_type="created", is_directory=True))
+    await asyncio.sleep(0)
+
+    assert observer.scheduled == [(str(projects_dir), False), (str(watched_file.parent), False)]
+    assert observer.unscheduled == [f"watch:{projects_dir}"]
+    assert calls == [("sid-1", "/tmp/work")]
+
+
+@pytest.mark.asyncio
+async def test_jsonl_file_watcher_start_backfills_registered_files(tmp_path: Path) -> None:
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    observer = _FakeObserver()
+    watcher = JSONLFileWatcher(
+        projects_dir=projects_dir,
+        on_change=_ignore_change,
+        loop=asyncio.get_running_loop(),
+        observer_factory=lambda: observer,
+    )
+    watched_file = projects_dir / "-tmp-work" / "claude-session-1.jsonl"
+    watched_file.parent.mkdir(parents=True)
+
+    watcher.watch_files(session_id="sid-1", cwd="/tmp/work", paths=(watched_file,))
+    assert observer.scheduled == []
+
+    assert watcher.start() is True
+
+    assert observer.scheduled == [(str(watched_file.parent), False)]
+
+
+@pytest.mark.asyncio
+async def test_jsonl_file_watcher_releases_unused_parent_watches(tmp_path: Path) -> None:
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    observer = _FakeObserver()
+    watcher = JSONLFileWatcher(
+        projects_dir=projects_dir,
+        on_change=_ignore_change,
+        loop=asyncio.get_running_loop(),
+        observer_factory=lambda: observer,
+    )
+    old_file = projects_dir / "-tmp-old" / "claude-session-1.jsonl"
+    new_file = projects_dir / "-tmp-new" / "claude-session-1.jsonl"
+    old_file.parent.mkdir(parents=True)
+    new_file.parent.mkdir(parents=True)
+
+    assert watcher.start() is True
+    watcher.watch_files(session_id="sid-1", cwd="/tmp/old", paths=(old_file,))
+    watcher.replace_session_files(session_id="sid-1", cwd="/tmp/new", paths=(new_file,))
+
+    assert observer.unscheduled == [f"watch:{old_file.parent}"]
+
+    watcher.unwatch_session("sid-1")
+
+    assert observer.unscheduled == [f"watch:{old_file.parent}", f"watch:{new_file.parent}"]
+
+
+@pytest.mark.asyncio
+async def test_jsonl_file_watcher_clear_unschedules_active_watches(tmp_path: Path) -> None:
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    observer = _FakeObserver()
+    watcher = JSONLFileWatcher(
+        projects_dir=projects_dir,
+        on_change=_ignore_change,
+        loop=asyncio.get_running_loop(),
+        observer_factory=lambda: observer,
+    )
+    watched_file = projects_dir / "-tmp-work" / "claude-session-1.jsonl"
+    watched_file.parent.mkdir(parents=True)
+
+    assert watcher.start() is True
+    watcher.watch_files(session_id="sid-1", cwd="/tmp/work", paths=(watched_file,))
+    watcher.clear()
+
+    assert observer.unscheduled == [f"watch:{watched_file.parent}"]
+
+    watcher.watch_files(session_id="sid-1", cwd="/tmp/work", paths=(watched_file,))
+
+    assert observer.scheduled == [(str(watched_file.parent), False), (str(watched_file.parent), False)]
 
 
 @pytest.mark.asyncio

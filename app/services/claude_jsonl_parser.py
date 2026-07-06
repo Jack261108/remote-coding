@@ -82,6 +82,9 @@ class ClaudeJSONLParser:
         reset_detected = False
 
         if not session_file.exists():
+            if state.last_offset:
+                state = _ParserState()
+                reset_detected = True
             snapshot = self._snapshot(session_id=session_id, cwd=cwd, state=state, reset_detected=reset_detected)
             self._states[session_id] = state
             return snapshot
@@ -179,81 +182,76 @@ class ClaudeJSONLParser:
         if not agent_file.exists():
             return []
 
-        tools: list[SubagentToolCall] = []
-        seen_tool_ids: set[str] = set()
+        tool_order: list[str] = []
+        tool_uses: dict[str, tuple[str, dict[str, Any], datetime]] = {}
         completed_tool_ids: set[str] = set()
         error_tool_ids: set[str] = set()
         results_by_tool_id: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
 
-        for raw_line in agent_file.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or '"tool_result"' not in line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            message = payload.get("message")
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
+        with agent_file.open(encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line or ('"tool_use"' not in line and '"tool_result"' not in line):
                     continue
-                tool_use_id = str(block.get("tool_use_id") or "")
-                if not tool_use_id:
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
                     continue
-                completed_tool_ids.add(tool_use_id)
-                if block.get("is_error"):
-                    error_tool_ids.add(tool_use_id)
-                results_by_tool_id[tool_use_id] = (
-                    self._tool_result_text(block, payload),
-                    self._tool_result_payload(block, payload),
-                )
+                message = payload.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                timestamp = self._parse_timestamp(payload.get("timestamp"))
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "tool_result":
+                        tool_use_id = str(block.get("tool_use_id") or "")
+                        if not tool_use_id:
+                            continue
+                        completed_tool_ids.add(tool_use_id)
+                        if block.get("is_error"):
+                            error_tool_ids.add(tool_use_id)
+                        results_by_tool_id[tool_use_id] = (
+                            self._tool_result_text(block, payload),
+                            self._tool_result_payload(block, payload),
+                        )
+                    elif block_type == "tool_use":
+                        tool_id = str(block.get("id") or "")
+                        if not tool_id or tool_id in tool_uses:
+                            continue
+                        tool_order.append(tool_id)
+                        tool_uses[tool_id] = (
+                            str(block.get("name") or "Tool"),
+                            dict(block.get("input", {})) if isinstance(block.get("input"), dict) else {},
+                            timestamp,
+                        )
 
-        for raw_line in agent_file.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or '"tool_use"' not in line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            message = payload.get("message")
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            timestamp = self._parse_timestamp(payload.get("timestamp"))
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                tool_id = str(block.get("id") or "")
-                if not tool_id or tool_id in seen_tool_ids:
-                    continue
-                seen_tool_ids.add(tool_id)
-                result_text, structured_result = results_by_tool_id.get(tool_id, (None, None))
-                if tool_id in error_tool_ids:
-                    status = ToolStatus.ERROR
-                elif tool_id in completed_tool_ids:
-                    status = ToolStatus.SUCCESS
-                else:
-                    status = ToolStatus.RUNNING
-                tools.append(
-                    SubagentToolCall(
-                        tool_use_id=tool_id,
-                        name=str(block.get("name") or "Tool"),
-                        input=dict(block.get("input", {})) if isinstance(block.get("input"), dict) else {},
-                        status=status,
-                        result=result_text,
-                        structured_result=structured_result,
-                        started_at=timestamp,
-                        completed_at=timestamp if tool_id in completed_tool_ids else None,
-                    )
+        tools: list[SubagentToolCall] = []
+        for tool_id in tool_order:
+            name, input_payload, timestamp = tool_uses[tool_id]
+            result_text, structured_result = results_by_tool_id.get(tool_id, (None, None))
+            if tool_id in error_tool_ids:
+                status = ToolStatus.ERROR
+            elif tool_id in completed_tool_ids:
+                status = ToolStatus.SUCCESS
+            else:
+                status = ToolStatus.RUNNING
+            tools.append(
+                SubagentToolCall(
+                    tool_use_id=tool_id,
+                    name=name,
+                    input=input_payload,
+                    status=status,
+                    result=result_text,
+                    structured_result=structured_result,
+                    started_at=timestamp,
+                    completed_at=timestamp if tool_id in completed_tool_ids else None,
                 )
+            )
 
         return tools
 
@@ -323,7 +321,7 @@ class ClaudeJSONLParser:
             return
 
         assistant_texts: list[str] = []
-        for _index, block in enumerate(content):
+        for block in content:
             if not isinstance(block, dict):
                 continue
             block_type = str(block.get("type", ""))

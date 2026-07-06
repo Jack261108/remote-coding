@@ -60,7 +60,7 @@ class DummyTaskService:
             session_id="s1",
             workdir=workdir or "/tmp",
             started_at=None,
-            created_at="2025-01-01T00:00:00Z",
+            created_at=utc_now(),
         )
         return SimpleNamespace(task=task, events=self._stream(), interactive=self._interactive)
 
@@ -262,7 +262,7 @@ async def test_run_prompt_and_stream_interactive_pump_silences_missing_structure
     assert initial_call.kwargs == {"log_missing": True}
     assert repeated_calls
     assert any(call.kwargs.get("log_missing") is False for call in repeated_calls)
-    assert repeated_calls[-1].kwargs == {"log_missing": True}
+    assert any(call.kwargs == {"log_missing": True} for call in repeated_calls)
 
 
 def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
@@ -1737,7 +1737,8 @@ async def test_run_prompt_and_stream_interactive_ignores_old_turn_and_emits_new_
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn() -> None:
+async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.01)
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n半截回复\n", is_complete=False)]
     task_service = DummyTaskService(
@@ -1838,11 +1839,12 @@ async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_befo
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_event() -> None:
     message = DummyMessage()
+    terminal_at = utc_now() + timedelta(seconds=1)
     turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
     task_service = DummyTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0, at=terminal_at),
         ],
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
@@ -1852,7 +1854,16 @@ async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_
 
     async def append_new_turn() -> None:
         await asyncio.sleep(0.06)
-        turns.append(ConversationTurn(turn_id="turn-after-exit", role="assistant", text="\n退出后补到的回复\n", is_complete=True))
+        turns.append(
+            ConversationTurn(
+                turn_id="turn-after-exit",
+                role="assistant",
+                text="\n退出后补到的回复\n",
+                is_complete=True,
+                started_at=terminal_at - timedelta(milliseconds=1),
+                ended_at=terminal_at,
+            )
+        )
 
     updater = asyncio.create_task(append_new_turn())
     await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2)
@@ -1860,6 +1871,137 @@ async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_
 
     assert "旧回复" not in "\n".join(message.answers)
     assert "退出后补到的回复" in "\n".join(message.answers)
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_ignores_post_exit_unrelated_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.15)
+    monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_POLL_INTERVAL_SEC", 0.01)
+    message = DummyMessage()
+    terminal_at = utc_now()
+    turns: list[ConversationTurn] = []
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0, at=terminal_at),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.02],
+    )
+
+    async def append_unrelated_turn() -> None:
+        await asyncio.sleep(0.06)
+        turns.append(
+            ConversationTurn(
+                turn_id="turn-post-exit",
+                role="assistant",
+                text="\n任务后无关回复\n",
+                is_complete=True,
+                started_at=terminal_at + timedelta(milliseconds=1),
+                ended_at=terminal_at + timedelta(milliseconds=2),
+            )
+        )
+
+    updater = asyncio.create_task(append_unrelated_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.3)
+    await updater
+
+    assert "结构化回复暂不可用，已回退为原始输出。" in message.answers
+    assert "任务后无关回复" not in "\n".join(message.answers)
+    assert task_service._structured_reply_turn_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_edits_fallback_when_reply_arrives_after_final_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_POLL_INTERVAL_SEC", 0.01)
+    message = DummyMessage()
+    terminal_at = utc_now() + timedelta(seconds=1)
+    turns: list[ConversationTurn] = []
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0, at=terminal_at),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.02],
+    )
+
+    async def append_new_turn() -> None:
+        await asyncio.sleep(0.14)
+        turns.append(
+            ConversationTurn(
+                turn_id="turn-delayed",
+                role="assistant",
+                text="\n延迟结构化回复\n",
+                is_complete=True,
+                started_at=terminal_at - timedelta(milliseconds=1),
+                ended_at=terminal_at,
+            )
+        )
+
+    updater = asyncio.create_task(append_new_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.45)
+    await updater
+
+    assert "结构化回复暂不可用，已回退为原始输出。" in message.answers
+    assert message.sent_messages[1].text == "延迟结构化回复"
+    assert message.sent_messages[1].edits == ["延迟结构化回复"]
+    assert task_service._structured_reply_turn_id == "turn-delayed"
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_and_stream_interactive_deletes_fallback_when_delayed_reply_cannot_be_edited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_POLL_INTERVAL_SEC", 0.01)
+    message = DummyMessage()
+    terminal_at = utc_now() + timedelta(seconds=1)
+    long_reply = "延迟结构化回复" * 600
+    turns: list[ConversationTurn] = []
+    task_service = DummyTaskService(
+        [
+            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0, at=terminal_at),
+        ],
+        _status(task_status=TaskStatus.SUCCEEDED),
+        interactive=True,
+        structured_turns=turns,
+        event_delays=[0.0, 0.02],
+    )
+
+    async def append_new_turn() -> None:
+        await asyncio.sleep(0.14)
+        turns.append(
+            ConversationTurn(
+                turn_id="turn-delayed-long",
+                role="assistant",
+                text=f"\n{long_reply}\n",
+                is_complete=True,
+                started_at=terminal_at - timedelta(milliseconds=1),
+                ended_at=terminal_at,
+            )
+        )
+
+    updater = asyncio.create_task(append_new_turn())
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.45)
+    await updater
+
+    fallback_message = message.sent_messages[1]
+    assert fallback_message.text == "结构化回复暂不可用，已回退为原始输出。"
+    assert fallback_message.edits == []
+    assert fallback_message.deleted is True
+    assert long_reply in "".join(message.answers)
+    assert task_service._structured_reply_turn_id == "turn-delayed-long"
 
 
 @pytest.mark.asyncio

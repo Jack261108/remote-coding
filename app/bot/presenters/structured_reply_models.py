@@ -40,6 +40,7 @@ class _StructuredSnapshot:
     session_title: str | None = None
     user_id: int | None = None
     tool_states: tuple[_ToolStateSnapshot, ...] = ()
+    turn_started_at: datetime | None = None
     turn_ended_at: datetime | None = None
 
 
@@ -47,6 +48,11 @@ class _StructuredSnapshot:
 class StructuredReplyOutput:
     text: str
     turn_id: str
+
+
+@dataclass(frozen=True)
+class StructuredReplyFallbackOutput:
+    text: str
 
 
 @dataclass(frozen=True)

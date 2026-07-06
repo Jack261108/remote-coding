@@ -568,27 +568,26 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             )
 
         stdout = await fifo_reader.readlines()
-        reader = stdout.readline
 
         while exit_code is None:
             now = asyncio.get_running_loop().time()
             remaining = max(0.1, timeout_sec - (now - timeout_anchor))
             eof_seen = False
             try:
-                line = await asyncio.wait_for(reader(), timeout=min(1.0, remaining))
+                chunk = await asyncio.wait_for(stdout.read(65536), timeout=min(1.0, remaining))
             except TimeoutError:
-                line = None
+                chunk = None
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("fifo reader error", extra={"session": meta.session_name})
                 break
 
-            if line:
-                fifo_offset += len(line)
+            if chunk:
+                fifo_offset += len(chunk)
                 timeout_anchor = asyncio.get_running_loop().time()
                 self._process_interactive_chunk(meta=meta, offset=fifo_offset)
-            elif line == b"":
+            elif chunk == b"":
                 eof_seen = True
                 if fifo_offset > 0:
                     logger.debug("fifo reader EOF", extra={"session": meta.session_name})

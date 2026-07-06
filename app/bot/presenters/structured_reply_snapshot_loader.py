@@ -102,6 +102,7 @@ class StructuredReplySnapshotLoader:
                 session_title=session_title,
                 user_id=session_user_id,
                 tool_states=tool_states,
+                turn_started_at=turn.started_at,
                 turn_ended_at=turn.ended_at,
             )
 

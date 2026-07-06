@@ -1921,7 +1921,8 @@ class _FakeFifoStdout:
     def __init__(self, lines: list[bytes | None]) -> None:
         self._lines = list(lines)
 
-    async def readline(self) -> bytes:
+    async def read(self, size: int) -> bytes:
+        _ = size
         if not self._lines:
             await asyncio.sleep(10)
             return b""
@@ -1939,6 +1940,35 @@ class _FakeFifoReader:
         self._stdout = _FakeFifoStdout(lines)
 
     async def readlines(self) -> _FakeFifoStdout:
+        return self._stdout
+
+
+class _FakeChunkFifoStdout:
+    def __init__(self, chunks: list[bytes | None]) -> None:
+        self._chunks = list(chunks)
+
+    async def read(self, size: int) -> bytes:
+        _ = size
+        if not self._chunks:
+            await asyncio.sleep(10)
+            return b""
+        chunk = self._chunks.pop(0)
+        if chunk is None:
+            await asyncio.sleep(10)
+            return b""
+        return chunk
+
+    async def readline(self) -> bytes:
+        raise ValueError("Separator is not found, and chunk exceed the limit")
+
+
+class _FakeChunkFifoReader:
+    _process = None
+
+    def __init__(self, chunks: list[bytes | None]) -> None:
+        self._stdout = _FakeChunkFifoStdout(chunks)
+
+    async def readlines(self) -> _FakeChunkFifoStdout:
         return self._stdout
 
 
@@ -2007,6 +2037,37 @@ async def test_watch_interactive_fifo_eof_runs_final_tick_before_finalize(
     )
 
     assert calls == 2
+    assert [event.type for event in events] == [EventType.EXITED]
+
+
+@pytest.mark.asyncio
+async def test_watch_interactive_fifo_reads_long_chunk_without_line_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _runner_with_session_store(tmp_path, interactive_completion_grace_sec=0)
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_user_1",
+        log_file=tmp_path / "fifo-long-chunk.log",
+        exit_file=tmp_path / "fifo-long-chunk.exit",
+        task_id="t-fifo-long-chunk",
+        workdir=str(tmp_path),
+        terminal_id="user_1",
+        persistent_terminal=True,
+        interactive=True,
+    )
+    chunk = b"x" * 70_000
+    offsets: list[int] = []
+
+    async def fake_tick(**kwargs):
+        return 0, kwargs["timeout_anchor"]
+
+    monkeypatch.setattr(runner, "_process_interactive_chunk", lambda **kwargs: offsets.append(kwargs["offset"]))
+    monkeypatch.setattr(runner, "_handle_interactive_tick", fake_tick)
+
+    events = await _collect_events(runner._watch_interactive_fifo(meta=meta, timeout_sec=1, fifo_reader=_FakeChunkFifoReader([chunk])))
+
+    assert offsets == [len(chunk)]
     assert [event.type for event in events] == [EventType.EXITED]
 
 

@@ -20,6 +20,7 @@ from app.bot.presenters.structured_reply_models import (
     FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
+    StructuredReplyFallbackOutput,
     StructuredReplyOutput,
     SubagentAggregateStatusOutput,
     SubagentToolStatusOutput,  # noqa: F401
@@ -98,6 +99,7 @@ class StructuredReplyPresenter:
         self._current_session_id: str | None = None
         self._last_phase: str | None = None
         self._initial_update_pending = False
+        self._max_reply_started_at: datetime | None = None
         self._user_question_tracker = UserQuestionTracker()
         self._flat_tool_tracker = FlatToolTracker()
         self._task_list_tracker = TaskListTracker()
@@ -108,6 +110,17 @@ class StructuredReplyPresenter:
     @property
     def structured_session_available(self) -> bool:
         return self._structured_session_available
+
+    @property
+    def has_emitted_structured_reply(self) -> bool:
+        return self._structured_reply_emitted_in_run
+
+    def limit_reply_cursor(self, *, max_reply_started_at: datetime) -> None:
+        self._max_reply_started_at = max_reply_started_at
+
+    @property
+    def has_announced_fallback(self) -> bool:
+        return self._fallback_announced
 
     def freeze_reply_cursor(self) -> None:
         """Prevent _collect_reply from emitting any turn newer than what has already been seen.
@@ -265,6 +278,7 @@ class StructuredReplyPresenter:
     ) -> list[
         str
         | StructuredReplyOutput
+        | StructuredReplyFallbackOutput
         | PermissionRequestOutput
         | ProgressUpdateOutput
         | ToolStatusOutput
@@ -283,6 +297,7 @@ class StructuredReplyPresenter:
         messages: list[
             str
             | StructuredReplyOutput
+            | StructuredReplyFallbackOutput
             | PermissionRequestOutput
             | ProgressUpdateOutput
             | ToolStatusOutput
@@ -337,9 +352,17 @@ class StructuredReplyPresenter:
                 "structured reply fallback emitted",
                 extra={"task_id": task_id, "user_id": self._user_id, "phase": snapshot.phase},
             )
-            messages.append(_FALLBACK_PROMPT)
+            messages.append(StructuredReplyFallbackOutput(text=_FALLBACK_PROMPT))
 
         return messages
+
+    def mark_fallback_delivery_failed(self) -> None:
+        self._fallback_announced = False
+
+    async def poll_structured_reply(self, *, task_id: str, log_missing: bool = False) -> StructuredReplyOutput | None:
+        snapshot = await self._snapshot_loader.load_snapshot(log_missing=log_missing)
+        self._structured_session_available = self._structured_session_available or snapshot.session_available
+        return await self._collect_reply(task_id=task_id, snapshot=snapshot, log_missing=log_missing)
 
     async def acknowledge_delivery(self, output: StructuredReplyOutput | PermissionRequestOutput | UserQuestionOutput) -> None:
         if isinstance(output, StructuredReplyOutput):
@@ -392,6 +415,24 @@ class StructuredReplyPresenter:
                         "reason": "pre_task_turn",
                         "turn_ended_at": snapshot.turn_ended_at.isoformat(),
                         "task_started_at": self._task_started_at.isoformat(),
+                    },
+                )
+            return None
+        if (
+            self._max_reply_started_at is not None
+            and snapshot.turn_started_at is not None
+            and snapshot.turn_started_at > self._max_reply_started_at
+        ):
+            if log_missing:
+                logger.info(
+                    "structured reply skipped",
+                    extra={
+                        "task_id": task_id,
+                        "user_id": self._user_id,
+                        "turn_id": snapshot.turn_id,
+                        "reason": "post_task_turn",
+                        "turn_started_at": snapshot.turn_started_at.isoformat(),
+                        "max_reply_started_at": self._max_reply_started_at.isoformat(),
                     },
                 )
             return None

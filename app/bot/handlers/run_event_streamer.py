@@ -68,6 +68,8 @@ _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"
 _SPINNER_INTERVAL_SEC = 1.0
 _SPINNER_INITIAL_DELAY_SEC = 3.0
 _STRUCTURED_REPLY_PUMP_INTERVAL_SEC = 1.0
+_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC = 3.0
+_DELAYED_STRUCTURED_REPLY_POLL_INTERVAL_SEC = 0.25
 _INTERACTIVE_PUMP_CANCEL_GRACE_SEC = 5.0
 _SNAPSHOT_CAPTURE_TIMEOUT_SEC = 10.0
 _ABANDONED_INTERACTIVE_PUMP_TASKS: set[asyncio.Task] = set()
@@ -264,6 +266,37 @@ class RunEventStreamer:
                 await self._dispatcher.emit_presenter_messages(log_missing=False)
             await self._dispatcher.flush()
 
+    async def _emit_delayed_structured_reply(self) -> None:
+        if self._presenter.has_emitted_structured_reply or not self._presenter.has_announced_fallback:
+            return
+        deadline = asyncio.get_running_loop().time() + _DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC
+        while not self._presenter.has_emitted_structured_reply:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                logger.info(
+                    "delayed structured reply unavailable",
+                    extra={"task_id": self._start.task.task_id, "user_id": self._user_id},
+                )
+                return
+            try:
+                await self._presenter.wait_for_initial_update(timeout_sec=min(_DELAYED_STRUCTURED_REPLY_POLL_INTERVAL_SEC, remaining))
+                async with self._emit_lock:
+                    reply = await self._presenter.poll_structured_reply(
+                        task_id=self._start.task.task_id,
+                        log_missing=False,
+                    )
+                    if reply is not None:
+                        await self._dispatcher.emit_structured_reply(reply)
+                await self._dispatcher.flush()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "delayed structured reply check failed",
+                    extra={"task_id": self._start.task.task_id, "user_id": self._user_id},
+                    exc_info=True,
+                )
+
     async def _capture_diff_snapshot(self) -> None:
         """Capture pre-task filesystem snapshot for diff generation (non-blocking)."""
         diff_generator = self._diff_generator
@@ -343,6 +376,7 @@ class RunEventStreamer:
 
     async def stream_events(self) -> None:
         saw_terminal = False
+        terminal_at = None
         try:
             async for event in self._start.events:
                 if event.type in {EventType.STDOUT, EventType.STDERR}:
@@ -382,6 +416,7 @@ class RunEventStreamer:
 
                 if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
                     saw_terminal = True
+                    terminal_at = event.at
                     if self._snapshot_task is not None:
                         try:
                             await asyncio.wait_for(self._snapshot_task, timeout=_SNAPSHOT_CAPTURE_TIMEOUT_SEC)
@@ -450,13 +485,14 @@ class RunEventStreamer:
                 await self._stop_spinner()
                 await self._messenger.set_reaction(None)
                 if saw_terminal and self._start.interactive:
+                    if terminal_at is not None:
+                        self._presenter.limit_reply_cursor(max_reply_started_at=terminal_at)
                     await asyncio.sleep(0.1)
                     await self._drain_available_structured_replies()
                     async with self._emit_lock:
                         await self._dispatcher.emit_presenter_messages(final=True, log_missing=True)
                     await self._dispatcher.flush()
-                    # Freeze after the final emit so replies flushed shortly after
-                    # process exit are still delivered, while later idle greetings are not.
+                    await self._emit_delayed_structured_reply()
                     self._presenter.freeze_reply_cursor()
             finally:
                 if self._status_display and self._lifecycle_message:

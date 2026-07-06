@@ -7,6 +7,7 @@ from app.bot.presenters.structured_reply_presenter import (
     FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
+    StructuredReplyFallbackOutput,
     StructuredReplyOutput,
     StructuredReplyPresenter,
     SubagentAggregateStatusOutput,
@@ -2053,7 +2054,7 @@ async def test_presenter_final_poll_emits_fallback_once() -> None:
     first = await presenter.poll(task_id="task-1", final=True)
     second = await presenter.poll(task_id="task-1", final=True)
 
-    assert first == ["结构化回复暂不可用，已回退为原始输出。"]
+    assert first == [StructuredReplyFallbackOutput(text="结构化回复暂不可用，已回退为原始输出。")]
     assert second == []
 
 
@@ -2237,7 +2238,9 @@ async def test_presenter_final_poll_still_falls_back_when_only_old_reply_cursor_
     state.phase = SessionPhase.WAITING_FOR_INPUT
     store._persist(state)
 
-    assert await presenter.poll(task_id="task-1", final=True) == ["结构化回复暂不可用，已回退为原始输出。"]
+    assert await presenter.poll(task_id="task-1", final=True) == [
+        StructuredReplyFallbackOutput(text="结构化回复暂不可用，已回退为原始输出。")
+    ]
 
 
 @pytest.mark.asyncio

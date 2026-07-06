@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -179,6 +180,46 @@ def test_claude_jsonl_parser_skips_invalid_complete_line(tmp_path) -> None:
     assert snapshot.last_offset == session_file.stat().st_size
 
 
+def test_claude_jsonl_parser_reports_reset_when_file_is_deleted(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+    session_file = parser.session_file_path(session_id="session-1", cwd="/tmp/project")
+
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:00Z",
+                "message": {"id": "a1", "content": [{"type": "text", "text": "旧回复"}]},
+            }
+        ],
+    )
+    parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+    session_file.unlink()
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    assert snapshot.reset_detected is True
+    assert snapshot.turns == []
+    assert snapshot.last_offset == 0
+
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:01Z",
+                "message": {"id": "a2", "content": [{"type": "text", "text": "新回复"}]},
+            }
+        ],
+    )
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    assert [turn.text for turn in snapshot.turns] == ["\n新回复\n"]
+
+
 def test_claude_jsonl_parser_reports_reset_when_file_is_truncated(tmp_path) -> None:
     paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
     parser = ClaudeJSONLParser(paths)
@@ -261,7 +302,7 @@ def test_claude_jsonl_parser_detects_interrupt_from_user_message_and_tool_result
     assert snapshot.tool_calls["tool-1"].status.value == "interrupted"
 
 
-def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) -> None:
+def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
     parser = ClaudeJSONLParser(paths)
     cwd = "/tmp/project"
@@ -276,7 +317,11 @@ def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) 
                 "timestamp": "2026-04-16T10:00:01Z",
                 "message": {
                     "id": "a-tool-1",
-                    "content": [{"type": "tool_use", "id": "sub-tool-1", "name": "Read", "input": {"file_path": "/tmp/a.py"}}],
+                    "content": [
+                        {"type": "tool_use", "id": "sub-tool-1", "name": "Read", "input": {"file_path": "/tmp/a.py"}},
+                        {"type": "tool_use", "id": "sub-tool-2", "name": "Bash", "input": {"command": "false"}},
+                        {"type": "tool_use", "id": "sub-tool-3", "name": "Write", "input": {"file_path": "/tmp/b.py"}},
+                    ],
                 },
             },
             {
@@ -288,6 +333,15 @@ def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) 
                     "content": [{"type": "tool_result", "tool_use_id": "sub-tool-1", "content": "done", "is_error": False}],
                 },
             },
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:03Z",
+                "toolUseResult": {"stderr": "boom"},
+                "message": {
+                    "id": "a-tool-3",
+                    "content": [{"type": "tool_result", "tool_use_id": "sub-tool-2", "content": "boom", "is_error": True}],
+                },
+            },
         ],
     )
     _write_jsonl(
@@ -295,7 +349,7 @@ def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) 
         [
             {
                 "type": "assistant",
-                "timestamp": "2026-04-16T10:00:03Z",
+                "timestamp": "2026-04-16T10:00:04Z",
                 "toolUseResult": {"agentId": "agent-1", "status": "completed", "content": "subagent done"},
                 "message": {
                     "id": "a-main",
@@ -308,11 +362,24 @@ def test_claude_jsonl_parser_populates_subagent_tools_from_agent_file(tmp_path) 
         ],
     )
 
+    def fail_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        _ = (self, args, kwargs)
+        raise AssertionError("read_text should not be used")
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+
     snapshot = parser.parse_incremental(session_id="session-1", cwd=cwd)
 
     tool = snapshot.tool_calls["task-tool-1"]
     assert tool.structured_result == {"agentId": "agent-1", "status": "completed", "content": "subagent done"}
-    assert len(tool.subagent_tools) == 1
-    assert tool.subagent_tools[0].tool_use_id == "sub-tool-1"
+    assert [sub_tool.tool_use_id for sub_tool in tool.subagent_tools] == ["sub-tool-1", "sub-tool-2", "sub-tool-3"]
     assert tool.subagent_tools[0].name == "Read"
     assert tool.subagent_tools[0].status.value == "success"
+    assert tool.subagent_tools[0].result == "done"
+    assert tool.subagent_tools[0].structured_result == {"stdout": "done"}
+    assert tool.subagent_tools[1].name == "Bash"
+    assert tool.subagent_tools[1].status.value == "error"
+    assert tool.subagent_tools[1].result == "boom"
+    assert tool.subagent_tools[1].structured_result == {"stderr": "boom"}
+    assert tool.subagent_tools[2].name == "Write"
+    assert tool.subagent_tools[2].status.value == "running"

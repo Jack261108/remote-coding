@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.command_user_question import build_user_question_keyboard
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
@@ -12,6 +12,7 @@ from app.bot.presenters.structured_reply_presenter import (
     FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
+    StructuredReplyFallbackOutput,
     StructuredReplyOutput,
     StructuredReplyPresenter,
     SubagentAggregateStatusOutput,
@@ -57,6 +58,7 @@ class PresenterOutputDispatcher:
         self._tool_message_manager = tool_message_manager
         self._task_id = task_id
         self._permission_gateway = permission_gateway
+        self._fallback_message: Message | None = None
 
     async def send_text(self, text: str) -> bool:
         normalized = normalize_stream_text(text)
@@ -69,6 +71,33 @@ class PresenterOutputDispatcher:
 
     async def flush(self) -> bool:
         return await self._sender.flush(self.send_text)
+
+    async def emit_structured_reply(self, output: StructuredReplyOutput) -> None:
+        await self.flush()
+
+        async def send_structured_text(text: str) -> bool:
+            normalized = normalize_stream_text(text)
+            if not normalized:
+                return True
+            return await self._messenger.answer_safely(normalized)
+
+        if self._fallback_message is not None:
+            fallback_message = self._fallback_message
+            normalized = normalize_stream_text(output.text)
+            edited = await self._messenger.edit_message_safely(fallback_message, normalized)
+            if edited:
+                self._fallback_message = None
+                await self._presenter.acknowledge_delivery(output)
+                return
+            deleted = await self._messenger.delete_message_safely(fallback_message)
+            if not deleted:
+                return
+            self._fallback_message = None
+
+        push_ok = await self._sender.push(output.text, send_structured_text)
+        flush_ok = await self._sender.flush(send_structured_text)
+        if push_ok and flush_ok:
+            await self._presenter.acknowledge_delivery(output)
 
     async def emit_presenter_messages(self, *, final: bool = False, log_missing: bool) -> None:
         for output in await self._presenter.poll(task_id=self._task_id, final=final, log_missing=log_missing):
@@ -152,18 +181,7 @@ class PresenterOutputDispatcher:
                     await self._presenter.acknowledge_delivery(output)
                 continue
             if isinstance(output, StructuredReplyOutput):
-                await self.flush()
-
-                async def send_structured_text(text: str) -> bool:
-                    normalized = normalize_stream_text(text)
-                    if not normalized:
-                        return True
-                    return await self._messenger.answer_safely(normalized)
-
-                push_ok = await self._sender.push(output.text, send_structured_text)
-                flush_ok = await self._sender.flush(send_structured_text)
-                if push_ok and flush_ok:
-                    await self._presenter.acknowledge_delivery(output)
+                await self.emit_structured_reply(output)
                 continue
             if isinstance(
                 output,
@@ -175,5 +193,13 @@ class PresenterOutputDispatcher:
             if isinstance(output, ProgressUpdateOutput):
                 await self.flush()
                 await self._messenger.answer_safely(output.text)
+                continue
+            if isinstance(output, StructuredReplyFallbackOutput):
+                await self.flush()
+                sent_message = await self._messenger.send_message_safely(output.text)
+                if sent_message is not None:
+                    self._fallback_message = sent_message
+                else:
+                    self._presenter.mark_fallback_delivery_failed()
                 continue
             await self._sender.push(output, self.send_text)
