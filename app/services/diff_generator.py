@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import difflib
-import fnmatch
 import hashlib
 import os
 import stat
@@ -11,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.domain.file_models import DiffResult
+from app.infra.scan_filter import should_skip_scan_dir, should_skip_scan_file
 
 _PATCH_FILE_THRESHOLD = 4096
 _DEFAULT_MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024
@@ -35,14 +35,13 @@ class DiffGeneratorService:
 
         for root, dirs, files in os.walk(workdir_path, followlinks=False):
             root_path = Path(root)
-            # Filter out directories matching gitignore patterns
-            dirs[:] = [d for d in dirs if not self._matches_gitignore(root_path / d, workdir_path, gitignore_patterns)]
+            dirs[:] = [d for d in dirs if not should_skip_scan_dir(root_path / d, workdir_path, gitignore_patterns)]
 
             for fname in files:
                 file_path = root_path / fname
                 if not self.is_within_workdir(file_path, workdir):
                     continue
-                if self._matches_gitignore(file_path, workdir_path, gitignore_patterns):
+                if should_skip_scan_file(file_path, workdir_path, gitignore_patterns):
                     continue
                 try:
                     file_stat = file_path.lstat()
@@ -96,7 +95,7 @@ class DiffGeneratorService:
                 continue
             if not self.is_within_workdir(path, workdir):
                 continue
-            if self._matches_gitignore(path, Path(workdir).resolve(), gitignore_patterns):
+            if should_skip_scan_file(path, Path(workdir).resolve(), gitignore_patterns):
                 continue
             modified.append(path)
 
@@ -179,27 +178,3 @@ class DiffGeneratorService:
             or previous.digest != current.digest
             or previous.content != current.content
         )
-
-    def _matches_gitignore(self, path: Path, workdir_path: Path, patterns: list[str]) -> bool:
-        """Check if a path matches any gitignore pattern using fnmatch on relative path."""
-        try:
-            rel_path = path.relative_to(workdir_path)
-        except ValueError:
-            return False
-
-        rel_str = str(rel_path)
-        name = path.name
-
-        for pattern in patterns:
-            # Match against relative path and filename
-            if fnmatch.fnmatch(rel_str, pattern):
-                return True
-            if fnmatch.fnmatch(name, pattern):
-                return True
-            # Support patterns like "dir/" matching directories
-            if pattern.endswith("/") and fnmatch.fnmatch(rel_str, pattern.rstrip("/")):
-                return True
-            # Support patterns with leading slash (anchored to root)
-            if pattern.startswith("/") and fnmatch.fnmatch(rel_str, pattern.lstrip("/")):
-                return True
-        return False

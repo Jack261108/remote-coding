@@ -156,7 +156,7 @@ class TestCollectModifiedFiles:
         assert f not in result
 
     def test_excludes_gitignored_files(self, service: ResultExporterService, tmp_path: Path) -> None:
-        f = tmp_path / "node_modules" / "pkg.js"
+        f = tmp_path / "custom_modules" / "pkg.js"
         f.parent.mkdir()
         f.write_text("module")
         now = time.time()
@@ -169,9 +169,34 @@ class TestCollectModifiedFiles:
             workdir=str(tmp_path),
             started_at=started_at,
             ended_at=ended_at,
-            gitignore_patterns=["node_modules"],
+            gitignore_patterns=["custom_modules"],
         )
         assert f not in result
+
+    def test_excludes_default_scan_directories(self, service: ResultExporterService, tmp_path: Path) -> None:
+        now = time.time()
+        excluded_dirs = [".git", ".claude", ".tg-uploads", "node_modules", ".pytest_cache", "build", "dist"]
+        for dirname in excluded_dirs:
+            sub = tmp_path / dirname
+            sub.mkdir()
+            f = sub / f"{dirname.strip('.') or 'file'}.txt"
+            f.write_text("skip")
+            os.utime(f, (now, now))
+        included = tmp_path / "main.py"
+        included.write_text("keep")
+        os.utime(included, (now, now))
+
+        started_at = datetime.fromtimestamp(now - 10, tz=UTC)
+        ended_at = datetime.fromtimestamp(now + 10, tz=UTC)
+
+        result = service.collect_modified_files(
+            workdir=str(tmp_path),
+            started_at=started_at,
+            ended_at=ended_at,
+            gitignore_patterns=[],
+        )
+
+        assert result == [included]
 
     def test_excludes_by_extension_pattern(self, service: ResultExporterService, tmp_path: Path) -> None:
         f = tmp_path / "output.log"

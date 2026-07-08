@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import fnmatch
 import logging
+import os
 import tempfile
 import zipfile
 from datetime import datetime
@@ -13,6 +13,7 @@ from app.config.settings import Settings
 from app.domain.file_models import ExportResult
 from app.domain.models import TaskRecord
 from app.infra.gitignore_utils import load_gitignore_patterns
+from app.infra.scan_filter import should_skip_scan_dir, should_skip_scan_file
 
 logger = logging.getLogger(__name__)
 
@@ -169,47 +170,29 @@ class ResultExporterService:
 
         modified: list[Path] = []
 
-        for file_path in workdir_path.rglob("*"):
-            if not file_path.is_file():
-                continue
+        for root, dirs, files in os.walk(workdir_path, followlinks=False):
+            root_path = Path(root)
+            dirs[:] = [d for d in dirs if not should_skip_scan_dir(root_path / d, workdir_path, gitignore_patterns)]
 
-            # Check mtime is within task time range (strictly within)
-            try:
-                mtime = file_path.stat().st_mtime
-            except OSError:
-                continue
+            for fname in files:
+                file_path = root_path / fname
+                if should_skip_scan_file(file_path, workdir_path, gitignore_patterns):
+                    continue
+                if not file_path.is_file():
+                    continue
 
-            if mtime <= start_ts or mtime >= end_ts:
-                continue
+                # Check mtime is within task time range (strictly within)
+                try:
+                    mtime = file_path.stat().st_mtime
+                except OSError:
+                    continue
 
-            # Check gitignore patterns
-            rel_path = str(file_path.relative_to(workdir_path))
-            if self._matches_gitignore(rel_path, gitignore_patterns):
-                continue
+                if mtime <= start_ts or mtime >= end_ts:
+                    continue
 
-            modified.append(file_path)
+                modified.append(file_path)
 
         return sorted(modified)
-
-    def _matches_gitignore(self, rel_path: str, patterns: list[str]) -> bool:
-        """Check if a relative path matches any gitignore pattern."""
-        for pattern in patterns:
-            # Handle directory patterns (ending with /)
-            clean_pattern = pattern.rstrip("/")
-
-            # Match against full relative path
-            if fnmatch.fnmatch(rel_path, clean_pattern):
-                return True
-            # Match against filename only
-            if fnmatch.fnmatch(Path(rel_path).name, clean_pattern):
-                return True
-            # Match against any path component
-            parts = Path(rel_path).parts
-            for part in parts:
-                if fnmatch.fnmatch(part, clean_pattern):
-                    return True
-
-        return False
 
 
 class ZipSizeLimitError(Exception):

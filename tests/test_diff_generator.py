@@ -93,14 +93,26 @@ class TestCaptureSnapshot:
         assert "skip.log" not in paths
 
     def test_excludes_gitignored_directories(self, service: DiffGeneratorService, workdir: str) -> None:
-        sub = Path(workdir, "node_modules")
+        sub = Path(workdir, "custom_modules")
         sub.mkdir()
         (sub / "pkg.js").write_text("x")
         Path(workdir, "app.py").write_text("y")
-        snapshot = service.capture_snapshot(workdir, ["node_modules"])
+        snapshot = service.capture_snapshot(workdir, ["custom_modules"])
         paths = [p.name for p in snapshot]
         assert "app.py" in paths
         assert "pkg.js" not in paths
+
+    def test_excludes_default_scan_directories(self, service: DiffGeneratorService, workdir: str) -> None:
+        excluded_dirs = [".git", ".claude", ".tg-uploads", "node_modules", ".pytest_cache", "build", "dist"]
+        for dirname in excluded_dirs:
+            sub = Path(workdir, dirname)
+            sub.mkdir()
+            (sub / f"{dirname.strip('.') or 'file'}.txt").write_text("skip")
+        Path(workdir, "app.py").write_text("keep")
+
+        snapshot = service.capture_snapshot(workdir, [])
+
+        assert [p.name for p in snapshot] == ["app.py"]
 
     def test_empty_workdir(self, service: DiffGeneratorService, workdir: str) -> None:
         snapshot = service.capture_snapshot(workdir, [])
