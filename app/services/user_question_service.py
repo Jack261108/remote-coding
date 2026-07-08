@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
-from app.adapters.cli.factory import CLIAdapterFactory
+from app.domain.protocols import ClaudeTerminalRuntimeProtocol, ClaudeUserQuestionTransportProtocol
 from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
 from app.domain.user_question_models import (
     UserQuestionPrompt,
@@ -34,13 +34,15 @@ class UserQuestionService:
         self,
         *,
         session_service: SessionService,
-        cli_factory: CLIAdapterFactory,
+        terminal_runtime: ClaudeTerminalRuntimeProtocol,
+        user_question_transport: ClaudeUserQuestionTransportProtocol | None,
         structured_session_store: SessionStore | None,
         hook_socket_server: HookSocketServer | None,
         session_resolver: StructuredSessionResolver,
     ) -> None:
         self._session_service = session_service
-        self._cli_factory = cli_factory
+        self._terminal_runtime = terminal_runtime
+        self._user_question_transport = user_question_transport
         self._structured_session_store = structured_session_store
         self._hook_socket_server = hook_socket_server
         self._session_resolver = session_resolver
@@ -675,21 +677,18 @@ class UserQuestionService:
             return None, None, "当前没有可用的 Claude 持久终端"
         return session.terminal_id, session.workdir, None
 
-    async def _invoke_terminal_cli_method(
+    async def _resolve_user_question_transport_context(
         self,
         *,
         user_id: int,
         state: SessionState | None,
-        method_name: str,
-        **kwargs: object,
-    ) -> tuple[bool, str]:
+    ) -> tuple[ClaudeUserQuestionTransportProtocol | None, str | None, str | None, str | None]:
         terminal_id, workdir, err = await self._resolve_user_question_terminal(user_id=user_id, state=state)
         if err is not None or terminal_id is None or workdir is None:
-            return False, err or "当前没有可用的 Claude 持久终端"
-        method = getattr(self._cli_factory, method_name, None)
-        if method is None:
-            return False, USER_QUESTION_TUI_FALLBACK_ERROR
-        return await method(terminal_key=terminal_id, workdir=workdir, **kwargs)
+            return None, None, None, err or "当前没有可用的 Claude 持久终端"
+        if self._user_question_transport is None:
+            return None, None, None, USER_QUESTION_TUI_FALLBACK_ERROR
+        return self._user_question_transport, terminal_id, workdir, None
 
     async def _select_user_question_option_in_terminal(
         self,
@@ -699,10 +698,12 @@ class UserQuestionService:
         option_index: int,
         submit_after: bool,
     ) -> tuple[bool, str]:
-        return await self._invoke_terminal_cli_method(
-            user_id=user_id,
-            state=state,
-            method_name="select_claude_user_question_option",
+        transport, terminal_id, workdir, err = await self._resolve_user_question_transport_context(user_id=user_id, state=state)
+        if err is not None or transport is None or terminal_id is None or workdir is None:
+            return False, err or USER_QUESTION_TUI_FALLBACK_ERROR
+        return await transport.select_option(
+            terminal_key=terminal_id,
+            workdir=workdir,
             option_index=option_index,
             submit_after=submit_after,
         )
@@ -733,10 +734,12 @@ class UserQuestionService:
         text: str,
         submit_after: bool,
     ) -> tuple[bool, str]:
-        return await self._invoke_terminal_cli_method(
-            user_id=user_id,
-            state=state,
-            method_name="answer_claude_user_question_with_text",
+        transport, terminal_id, workdir, err = await self._resolve_user_question_transport_context(user_id=user_id, state=state)
+        if err is not None or transport is None or terminal_id is None or workdir is None:
+            return False, err or USER_QUESTION_TUI_FALLBACK_ERROR
+        return await transport.answer_with_text(
+            terminal_key=terminal_id,
+            workdir=workdir,
             option_count=option_count,
             text=text,
             submit_after=submit_after,
@@ -749,10 +752,12 @@ class UserQuestionService:
         state: SessionState | None,
         final_question: bool,
     ) -> tuple[bool, str]:
-        return await self._invoke_terminal_cli_method(
-            user_id=user_id,
-            state=state,
-            method_name="advance_claude_user_question_after_multi_select",
+        transport, terminal_id, workdir, err = await self._resolve_user_question_transport_context(user_id=user_id, state=state)
+        if err is not None or transport is None or terminal_id is None or workdir is None:
+            return False, err or USER_QUESTION_TUI_FALLBACK_ERROR
+        return await transport.advance_after_multi_select(
+            terminal_key=terminal_id,
+            workdir=workdir,
             final_question=final_question,
         )
 
@@ -774,10 +779,7 @@ class UserQuestionService:
                 return False, "当前没有可用的 Claude 持久终端"
             resolved_terminal_id = session.terminal_id
             resolved_workdir = session.workdir
-        send_input = getattr(self._cli_factory, "send_claude_interactive_input", None)
-        if send_input is None:
-            return False, "当前环境不支持 Claude 文本回答"
-        return await send_input(
+        return await self._terminal_runtime.send_interactive_input(
             terminal_key=resolved_terminal_id,
             workdir=resolved_workdir,
             text=text,

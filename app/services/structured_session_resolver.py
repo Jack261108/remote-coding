@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
-from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.storage.memory import MemoryTaskStore
+from app.domain.protocols import SessionStateReaderProtocol
 from app.domain.session_models import SessionState, is_claude_session_id
 from app.services.session_lookup_service import SessionLookupService, _same_workdir
 from app.services.session_notifier import SessionNotifier
@@ -21,7 +21,7 @@ class StructuredSessionResolver:
         *,
         session_service: SessionService,
         task_store: MemoryTaskStore,
-        cli_factory: CLIAdapterFactory,
+        session_state_reader: SessionStateReaderProtocol | None = None,
         lookup: SessionLookupService | None = None,
         tracker: StructuredReplyTracker | None = None,
         notifier: SessionNotifier | None = None,
@@ -30,7 +30,7 @@ class StructuredSessionResolver:
     ) -> None:
         self._session_service = session_service
         self._task_store = task_store
-        self._cli_factory = cli_factory
+        self._session_state_reader = session_state_reader
 
         # If new-style dependencies are provided, use them directly.
         # Otherwise, extract from the old SessionStore facade for backward compat.
@@ -209,15 +209,14 @@ class StructuredSessionResolver:
                 )
             return None
 
-        getter = getattr(self._cli_factory, "get_claude_session_state", None) or getattr(self._cli_factory, "get_session_state", None)
-        if getter is None:
+        if self._session_state_reader is None:
             if log_missing:
                 logger.info(
                     "structured session lookup failed",
                     extra={"user_id": user_id, "claude_session_id": explicit_claude_session_id, "reason": "no_getter"},
                 )
             return None
-        state = getter(explicit_claude_session_id)
+        state = self._session_state_reader.get_claude_session_state(explicit_claude_session_id)
         if state is not None and not _same_workdir(state.workdir, workdir):
             if log_missing:
                 logger.info(
