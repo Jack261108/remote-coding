@@ -2723,15 +2723,12 @@ async def test_answer_pending_user_question_option_falls_back_to_text_transport_
 
 @pytest.mark.asyncio
 async def test_answer_pending_user_question_option_falls_back_when_factory_lacks_terminal_option_method(tmp_path: Path) -> None:
-    class LegacyFactory:
-        def __init__(self) -> None:
-            self._interactive_inputs: list[tuple[str, str, str]] = []
+    class LegacyFactory(StubFactory):
+        @property
+        def claude_user_question_transport(self) -> None:
+            return None
 
-        async def send_claude_interactive_input(self, *, terminal_key: str, workdir: str, text: str) -> tuple[bool, str]:
-            self._interactive_inputs.append((terminal_key, workdir, text))
-            return True, ""
-
-    factory = LegacyFactory()
+    factory = LegacyFactory(StubAdapter(events=[]))
     session_service = make_file_backed_session_service(tmp_path)
     structured_store = SessionStore(FileSessionStore(str(tmp_path)))
     service = TaskService(

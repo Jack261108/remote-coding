@@ -5,9 +5,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.adapters.cli.factory import CLIAdapterFactory
 from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import SessionContext
+from app.domain.protocols import ClaudeTerminalRuntimeProtocol
 from app.services.auto_approve_service import AutoApproveService
 from app.services.session_service import SessionService
 
@@ -27,13 +27,17 @@ class TerminalSessionService:
         *,
         settings: Settings,
         session_service: SessionService,
-        cli_factory: CLIAdapterFactory,
         clear_user_questions: Callable[[int], None],
+        terminal_runtime: ClaudeTerminalRuntimeProtocol | None = None,
+        cli_factory: ClaudeTerminalRuntimeProtocol | None = None,
         auto_approve_service: AutoApproveService | None = None,
     ) -> None:
         self._settings = settings
         self._session_service = session_service
-        self._cli_factory = cli_factory
+        resolved_terminal_runtime = terminal_runtime or cli_factory
+        if resolved_terminal_runtime is None:
+            raise ValueError("terminal_runtime is required")
+        self._terminal_runtime = resolved_terminal_runtime
         self._clear_user_questions = clear_user_questions
         self._auto_approve_service = auto_approve_service
 
@@ -52,7 +56,7 @@ class TerminalSessionService:
             if claude_session_id:
                 claude_session_ids.append(claude_session_id)
 
-            closed, close_text = await self._cli_factory.close_terminal(orphaned_terminal_id)
+            closed, close_text = await self._terminal_runtime.close_terminal(orphaned_terminal_id)
             if not closed:
                 logger.warning(
                     "failed to close orphaned terminal",
@@ -121,7 +125,7 @@ class TerminalSessionService:
                 if current.terminal_id != terminal_id:
                     continue
 
-                close_result = await self._cli_factory.close_terminal(terminal_id)
+                close_result = await self._terminal_runtime.close_terminal(terminal_id)
                 if isinstance(close_result, tuple):
                     closed, close_text = close_result
                 else:
@@ -198,7 +202,7 @@ class TerminalSessionService:
         result = await self._prepare_claude_session(user_id, workdir)
         if isinstance(result, str):
             return False, result
-        session, selected_workdir, had_old_terminal = result
+        session, _, had_old_terminal = result
         assert session.terminal_id
 
         ensure_result = await self.ensure_and_reveal_terminal(
@@ -225,11 +229,11 @@ class TerminalSessionService:
         result = await self._prepare_claude_session(user_id, workdir)
         if isinstance(result, str):
             return False, result
-        session, selected_workdir, had_old_terminal = result
+        session, selected_workdir, _ = result
         assert session.terminal_id
 
         # Use the resume-specific ensure method
-        ensured, err = await self._cli_factory.ensure_claude_resume_session(
+        ensured, err = await self._terminal_runtime.ensure_resume_session(
             terminal_key=session.terminal_id,
             workdir=session.workdir,
             session_id=session_id,
@@ -239,7 +243,7 @@ class TerminalSessionService:
             return False, err
 
         # Reveal the terminal
-        revealed, reveal_text = await self._cli_factory.reveal_terminal(session.terminal_id)
+        revealed, reveal_text = await self._terminal_runtime.reveal_terminal(session.terminal_id)
 
         # Bind the claude_session_id to the resumed session
         await self._session_service.bind_claude_session(
@@ -264,12 +268,12 @@ class TerminalSessionService:
         interactive: bool = False,
     ) -> tuple[bool, str]:
         if interactive:
-            ensured, err = await self._cli_factory.ensure_claude_interactive_session(
+            ensured, err = await self._terminal_runtime.ensure_interactive_session(
                 terminal_key=terminal_id,
                 workdir=workdir,
             )
         else:
-            ensured, err = await self._cli_factory.ensure_terminal(terminal_key=terminal_id, workdir=workdir)
+            ensured, err = await self._terminal_runtime.ensure_terminal(terminal_key=terminal_id, workdir=workdir)
 
         if not ensured:
             return False, err
@@ -277,7 +281,7 @@ class TerminalSessionService:
         if not reveal:
             return True, ""
 
-        revealed, reveal_text = await self._cli_factory.reveal_terminal(terminal_id)
+        revealed, reveal_text = await self._terminal_runtime.reveal_terminal(terminal_id)
         if revealed:
             return True, reveal_text
         return True, f"未能自动打开桌面终端: {reveal_text}"

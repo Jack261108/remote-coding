@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
-from app.adapters.cli.factory import CLIAdapterFactory
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import (
@@ -20,6 +19,12 @@ from app.domain.models import (
     TaskRecord,
     TaskStatus,
     utc_now,
+)
+from app.domain.protocols import (
+    ClaudeTerminalRuntimeProtocol,
+    ClaudeUserQuestionTransportProtocol,
+    CLIInfrastructureProtocol,
+    SessionStateReaderProtocol,
 )
 from app.domain.session_models import SessionState, is_claude_session_id
 from app.domain.user_question_models import UserQuestionPrompt
@@ -54,29 +59,36 @@ class TaskService:
         settings: Settings,
         task_store: MemoryTaskStore,
         session_service: SessionService,
-        cli_factory: CLIAdapterFactory,
+        cli_factory: CLIInfrastructureProtocol,
         semaphore: asyncio.Semaphore,
         structured_session_store: SessionStore | None = None,
         hook_socket_server: HookSocketServer | None = None,
         context_builder: ContextBuilderService | None = None,
         auto_approve_service: AutoApproveService | None = None,
+        terminal_runtime: ClaudeTerminalRuntimeProtocol | None = None,
+        user_question_transport: ClaudeUserQuestionTransportProtocol | None = None,
+        session_state_reader: SessionStateReaderProtocol | None = None,
     ) -> None:
         self._settings = settings
         self._task_store = task_store
         self._session_service = session_service
         self._cli_factory = cli_factory
+        resolved_terminal_runtime = terminal_runtime or cli_factory.claude_terminal_runtime
+        resolved_user_question_transport = user_question_transport or cli_factory.claude_user_question_transport
+        resolved_session_state_reader = session_state_reader or cli_factory.session_state_reader
         self._semaphore = semaphore
         self._context_builder = context_builder
         self._task_lifecycle_locks: dict[str, asyncio.Lock] = {}
         self._structured_session_resolver = StructuredSessionResolver(
             session_service=session_service,
             task_store=task_store,
-            cli_factory=cli_factory,
+            session_state_reader=resolved_session_state_reader,
             structured_session_store=structured_session_store,
         )
         self._user_question_service = UserQuestionService(
             session_service=session_service,
-            cli_factory=cli_factory,
+            terminal_runtime=resolved_terminal_runtime,
+            user_question_transport=resolved_user_question_transport,
             structured_session_store=structured_session_store,
             hook_socket_server=hook_socket_server,
             session_resolver=self._structured_session_resolver,
@@ -94,7 +106,7 @@ class TaskService:
         self._terminal_session_service = TerminalSessionService(
             settings=settings,
             session_service=session_service,
-            cli_factory=cli_factory,
+            terminal_runtime=resolved_terminal_runtime,
             clear_user_questions=self._user_question_service.clear_user,
             auto_approve_service=auto_approve_service,
         )
