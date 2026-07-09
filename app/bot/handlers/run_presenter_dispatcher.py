@@ -5,19 +5,21 @@ from typing import TYPE_CHECKING, cast
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.command_user_question import build_user_question_keyboard
+from app.bot.handlers.run_display_models import (
+    RenderCommand,
+    RenderCommandKind,
+    ToolRenderOutput,
+    render_command_from_presenter_output,
+)
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.permission_message_builder import PermissionPromptInput
 from app.bot.presenters.structured_reply_presenter import (
-    FileToolAggregateStatusOutput,
     PermissionRequestOutput,
     ProgressUpdateOutput,
     StructuredReplyFallbackOutput,
     StructuredReplyOutput,
     StructuredReplyPresenter,
-    SubagentAggregateStatusOutput,
-    TaskListStatusOutput,
-    ToolStatusOutput,
     UserQuestionOutput,
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
@@ -72,8 +74,9 @@ class PresenterOutputDispatcher:
     async def flush(self) -> bool:
         return await self._sender.flush(self.send_text)
 
-    async def emit_structured_reply(self, output: StructuredReplyOutput) -> None:
-        await self.flush()
+    async def emit_structured_reply(self, output: StructuredReplyOutput, *, flush_before: bool = True) -> None:
+        if flush_before:
+            await self.flush()
 
         async def send_structured_text(text: str) -> bool:
             if not text.strip():
@@ -101,105 +104,121 @@ class PresenterOutputDispatcher:
 
     async def emit_presenter_messages(self, *, final: bool = False, log_missing: bool) -> None:
         for output in await self._presenter.poll(task_id=self._task_id, final=final, log_missing=log_missing):
-            if isinstance(output, PermissionRequestOutput):
-                await self.flush()
-                if self._permission_gateway is None or not output.tool_use_id or not output.session_id:
-                    raise RuntimeError("permission gateway is not configured")
+            await self._execute_render_command(render_command_from_presenter_output(output))
 
-                outcome = await self._permission_gateway.maybe_auto_approve(
-                    session_id=output.session_id,
-                    origin=SessionOrigin.OWNED,
-                    candidate_user_id=output.user_id,
-                    tool_use_id=output.tool_use_id,
-                    tool_name=output.tool_name or "unknown tool",
-                    tool_input=output.tool_input,
-                )
-                if outcome in {AutoApproveOutcome.APPROVED, AutoApproveOutcome.APPROVAL_UNKNOWN}:
-                    await self._presenter.acknowledge_delivery(output)
-                    continue
+    async def _execute_render_command(self, command: RenderCommand) -> None:
+        if command.flush_before:
+            await self.flush()
 
-                result = await self._permission_gateway.register_for_button(
-                    tool_use_id=output.tool_use_id,
-                    session_id=output.session_id,
-                    origin=SessionOrigin.OWNED,
-                    candidate_user_id=output.user_id,
-                )
-                if isinstance(result, RegisterForButtonConflict):
-                    sent = await self._messenger.answer_safely(
-                        result.advisory_text,
-                        reply_markup=_to_inline_keyboard_markup(result.keyboard),
-                    )
-                    if sent:
-                        await self._presenter.acknowledge_delivery(output)
-                    continue
-                if not isinstance(result, RegisterForButtonOk):
-                    raise RuntimeError("unexpected permission gateway registration result")
-                keyboard = _to_inline_keyboard_markup(result.keyboard)
-                text = self._permission_gateway.message_builder.build_permission_prompt(
-                    PermissionPromptInput(
-                        tool_name=output.tool_name or "unknown tool",
-                        tool_input=output.tool_input,
-                        cwd=output.cwd or "",
-                        session_id=output.session_id,
-                        session_title=output.session_title,
-                    )
-                )
-                # Try editing the existing tool status message into the permission prompt
-                edited, edited_message = await self._tool_message_manager.edit_with_keyboard(
-                    tool_use_id=output.tool_use_id,
-                    text=text,
-                    reply_markup=keyboard,
-                )
-                if edited and edited_message:
-                    # Store message info for terminal approval sync
-                    await self._permission_gateway.registry.update_telegram_message(
-                        token=result.token,
-                        chat_id=edited_message.chat.id,
-                        message_id=edited_message.message_id,
-                        message_text=text,
-                    )
-                    await self._presenter.acknowledge_delivery(output)
-                    continue
-                sent_message = await self._messenger.send_message_safely(text, reply_markup=keyboard)
-                if sent_message:
-                    # Store message info for terminal approval sync
-                    await self._permission_gateway.registry.update_telegram_message(
-                        token=result.token,
-                        chat_id=sent_message.chat.id,
-                        message_id=sent_message.message_id,
-                        message_text=text,
-                    )
-                    await self._presenter.acknowledge_delivery(output)
-                continue
-            if isinstance(output, UserQuestionOutput):
-                await self.flush()
-                sent = await self._messenger.answer_safely(
-                    output.text,
-                    reply_markup=build_user_question_keyboard(output),
-                )
-                if sent:
-                    await self._presenter.acknowledge_delivery(output)
-                continue
-            if isinstance(output, StructuredReplyOutput):
-                await self.emit_structured_reply(output)
-                continue
-            if isinstance(
-                output,
-                (ToolStatusOutput, SubagentAggregateStatusOutput, TaskListStatusOutput, FileToolAggregateStatusOutput),
-            ):
-                await self.flush()
-                await self._tool_message_manager.handle(output)
-                continue
-            if isinstance(output, ProgressUpdateOutput):
-                await self.flush()
-                await self._messenger.answer_safely(output.text)
-                continue
-            if isinstance(output, StructuredReplyFallbackOutput):
-                await self.flush()
-                sent_message = await self._messenger.send_message_safely(output.text)
-                if sent_message is not None:
-                    self._fallback_message = sent_message
-                else:
-                    self._presenter.mark_fallback_delivery_failed()
-                continue
-            await self._sender.push(output, self.send_text)
+        if command.kind == RenderCommandKind.BUFFER_TEXT:
+            await self._sender.push(cast(str, command.payload), self.send_text)
+            return
+        if command.kind == RenderCommandKind.EMIT_STRUCTURED_REPLY:
+            await self.emit_structured_reply(cast(StructuredReplyOutput, command.payload), flush_before=False)
+            return
+        if command.kind == RenderCommandKind.SEND_STRUCTURED_FALLBACK:
+            await self._send_structured_fallback(cast(StructuredReplyFallbackOutput, command.payload))
+            return
+        if command.kind == RenderCommandKind.REQUEST_PERMISSION:
+            await self._send_permission_request(cast(PermissionRequestOutput, command.payload))
+            return
+        if command.kind == RenderCommandKind.ASK_USER_QUESTION:
+            await self._send_user_question(cast(UserQuestionOutput, command.payload))
+            return
+        if command.kind == RenderCommandKind.HANDLE_TOOL_STATUS:
+            await self._handle_tool_status(cast(ToolRenderOutput, command.payload))
+            return
+        if command.kind == RenderCommandKind.SEND_PROGRESS_UPDATE:
+            await self._send_progress_update(cast(ProgressUpdateOutput, command.payload))
+            return
+        raise TypeError(f"unsupported render command kind: {command.kind}")
+
+    async def _send_permission_request(self, output: PermissionRequestOutput) -> None:
+        if self._permission_gateway is None or not output.tool_use_id or not output.session_id:
+            raise RuntimeError("permission gateway is not configured")
+
+        outcome = await self._permission_gateway.maybe_auto_approve(
+            session_id=output.session_id,
+            origin=SessionOrigin.OWNED,
+            candidate_user_id=output.user_id,
+            tool_use_id=output.tool_use_id,
+            tool_name=output.tool_name or "unknown tool",
+            tool_input=output.tool_input,
+        )
+        if outcome in {AutoApproveOutcome.APPROVED, AutoApproveOutcome.APPROVAL_UNKNOWN}:
+            await self._presenter.acknowledge_delivery(output)
+            return
+
+        result = await self._permission_gateway.register_for_button(
+            tool_use_id=output.tool_use_id,
+            session_id=output.session_id,
+            origin=SessionOrigin.OWNED,
+            candidate_user_id=output.user_id,
+        )
+        if isinstance(result, RegisterForButtonConflict):
+            sent = await self._messenger.answer_safely(
+                result.advisory_text,
+                reply_markup=_to_inline_keyboard_markup(result.keyboard),
+            )
+            if sent:
+                await self._presenter.acknowledge_delivery(output)
+            return
+        if not isinstance(result, RegisterForButtonOk):
+            raise RuntimeError("unexpected permission gateway registration result")
+        keyboard = _to_inline_keyboard_markup(result.keyboard)
+        text = self._permission_gateway.message_builder.build_permission_prompt(
+            PermissionPromptInput(
+                tool_name=output.tool_name or "unknown tool",
+                tool_input=output.tool_input,
+                cwd=output.cwd or "",
+                session_id=output.session_id,
+                session_title=output.session_title,
+            )
+        )
+        # Try editing the existing tool status message into the permission prompt
+        edited, edited_message = await self._tool_message_manager.edit_with_keyboard(
+            tool_use_id=output.tool_use_id,
+            text=text,
+            reply_markup=keyboard,
+        )
+        if edited and edited_message:
+            # Store message info for terminal approval sync
+            await self._permission_gateway.registry.update_telegram_message(
+                token=result.token,
+                chat_id=edited_message.chat.id,
+                message_id=edited_message.message_id,
+                message_text=text,
+            )
+            await self._presenter.acknowledge_delivery(output)
+            return
+        sent_message = await self._messenger.send_message_safely(text, reply_markup=keyboard)
+        if sent_message:
+            # Store message info for terminal approval sync
+            await self._permission_gateway.registry.update_telegram_message(
+                token=result.token,
+                chat_id=sent_message.chat.id,
+                message_id=sent_message.message_id,
+                message_text=text,
+            )
+            await self._presenter.acknowledge_delivery(output)
+
+    async def _send_user_question(self, output: UserQuestionOutput) -> None:
+        sent = await self._messenger.answer_safely(
+            output.text,
+            reply_markup=build_user_question_keyboard(output),
+        )
+        if sent:
+            await self._presenter.acknowledge_delivery(output)
+
+    async def _handle_tool_status(self, output: ToolRenderOutput) -> None:
+        await self._tool_message_manager.handle(output)
+
+    async def _send_progress_update(self, output: ProgressUpdateOutput) -> None:
+        await self._messenger.answer_safely(output.text)
+
+    async def _send_structured_fallback(self, output: StructuredReplyFallbackOutput) -> None:
+        sent_message = await self._messenger.send_message_safely(output.text)
+        if sent_message is not None:
+            self._fallback_message = sent_message
+        else:
+            self._presenter.mark_fallback_delivery_failed()
