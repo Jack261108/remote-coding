@@ -81,6 +81,79 @@ def test_claude_jsonl_parser_reads_turns_and_tool_results(tmp_path) -> None:
     assert snapshot.last_reply_role == "assistant"
 
 
+def test_claude_jsonl_parser_normalizes_source_text_without_changing_turn_shape(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+    session_file = parser.session_file_path(session_id="session-1", cwd="/tmp/project")
+
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-04-16T10:00:00Z",
+                "message": {"id": "u1", "content": "TGCLI_BEGIN\r\n\x1b[32m你好\x1b[0m  \rTGCLI_DONE"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:01Z",
+                "message": {
+                    "id": "a1",
+                    "content": [
+                        {"type": "text", "text": "\x1b[31m第一段\x1b[0m  \r\n\r\n\r\n"},
+                        {"type": "text", "text": "第二段\rTGCLI_DONE"},
+                    ],
+                },
+            },
+        ],
+    )
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    assert [turn.text for turn in snapshot.turns] == ["\n你好\n", "\n第一段\n\n第二段\n"]
+    assert snapshot.last_reply == "第一段\n\n第二段"
+    assert snapshot.last_reply_role == "assistant"
+
+
+def test_claude_jsonl_parser_normalizes_tool_result_text_but_keeps_structured_result_raw(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    parser = ClaudeJSONLParser(paths)
+    session_file = parser.session_file_path(session_id="session-1", cwd="/tmp/project")
+    raw_stdout = "\x1b[31mTGCLI_BEGIN\x1b[0m\nraw stdout\nTGCLI_DONE\n"
+
+    _write_jsonl(
+        session_file,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:00Z",
+                "message": {"id": "a1", "content": [{"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {}}]},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-16T10:00:01Z",
+                "toolUseResult": {"stdout": raw_stdout},
+                "message": {
+                    "id": "a2",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "TGCLI_BEGIN\ncleaned result\nTGCLI_DONE",
+                            "is_error": False,
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    snapshot = parser.parse_incremental(session_id="session-1", cwd="/tmp/project")
+
+    assert snapshot.tool_calls["tool-1"].result == "cleaned result"
+    assert snapshot.tool_calls["tool-1"].structured_result == {"stdout": raw_stdout}
+
+
 def test_claude_jsonl_parser_detects_clear_and_resets_state(tmp_path) -> None:
     paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
     parser = ClaudeJSONLParser(paths)

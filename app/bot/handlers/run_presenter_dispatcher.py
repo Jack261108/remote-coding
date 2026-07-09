@@ -19,9 +19,9 @@ from app.bot.presenters.structured_reply_presenter import (
     TaskListStatusOutput,
     ToolStatusOutput,
     UserQuestionOutput,
-    normalize_stream_text,
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
+from app.infra.source_text_normalization import normalize_source_text
 from app.services.message_sender import Keyboard
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
@@ -61,7 +61,7 @@ class PresenterOutputDispatcher:
         self._fallback_message: Message | None = None
 
     async def send_text(self, text: str) -> bool:
-        normalized = normalize_stream_text(text)
+        normalized = normalize_source_text(text)
         if not normalized:
             return True
         return await self._messenger.answer_safely(normalized)
@@ -76,15 +76,15 @@ class PresenterOutputDispatcher:
         await self.flush()
 
         async def send_structured_text(text: str) -> bool:
-            normalized = normalize_stream_text(text)
-            if not normalized:
+            if not text.strip():
                 return True
-            return await self._messenger.answer_safely(normalized)
+            return await self._messenger.answer_safely(text)
 
         if self._fallback_message is not None:
             fallback_message = self._fallback_message
-            normalized = normalize_stream_text(output.text)
-            edited = await self._messenger.edit_message_safely(fallback_message, normalized)
+            if not output.text.strip():
+                return
+            edited = await self._messenger.edit_message_safely(fallback_message, output.text)
             if edited:
                 self._fallback_message = None
                 await self._presenter.acknowledge_delivery(output)

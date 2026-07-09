@@ -77,7 +77,7 @@ class StructuredReplySnapshotLoader:
             normalized_reply = normalize_stream_text(turn.text)
             if not normalized_reply:
                 continue
-            preview = preview_stream_text(turn.text)
+            preview = preview_stream_text(normalized_reply)
             logger.info(
                 "structured reply loaded",
                 extra={

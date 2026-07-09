@@ -27,6 +27,7 @@ from app.bot.presenters.structured_reply_presenter import (
     preview_stream_text,
     strip_bridge_markers,
 )
+from app.bot.presenters.structured_reply_text import strip_ansi_escapes
 from app.domain.session_models import (
     ConversationTurn,
     ParserCheckpoint,
@@ -2098,10 +2099,12 @@ async def test_presenter_without_structured_session_emits_nothing() -> None:
 
 def test_stream_text_helpers_strip_and_preview() -> None:
     raw = "TGCLI_BEGIN\n正文\n\n\nTGCLI_DONE\n"
+    noisy = "\x1b[31mTGCLI_BEGIN\x1b[0m\r\n正文  \r\n\r\n\r\nTGCLI_DONE\n"
 
     assert strip_bridge_markers(raw) == "正文\n\n\n"
-    assert normalize_stream_text(raw) == "正文"
-    assert preview_stream_text(raw) == "正文"
+    assert strip_ansi_escapes("\x1b[31m正文\x1b[0m") == "正文"
+    assert normalize_stream_text(noisy) == "正文"
+    assert preview_stream_text(noisy) == "正文"
 
 
 class SwitchingTaskService:

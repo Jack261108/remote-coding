@@ -1585,7 +1585,7 @@ async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
-            CLIEvent(type=EventType.STDOUT, task_id="t1", content="TGCLI_BEGIN\n正文\nTGCLI_DONE\n"),
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="\x1b[32mTGCLI_BEGIN\x1b[0m\n正文\nTGCLI_DONE\n"),
             CLIEvent(type=EventType.STDERR, task_id="t1", content="boom\n"),
             CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
         ],
@@ -1596,6 +1596,7 @@ async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
 
     assert "TGCLI_BEGIN" not in "\n".join(message.answers)
     assert "TGCLI_DONE" not in "\n".join(message.answers)
+    assert "\x1b" not in "\n".join(message.answers)
     assert "正文" in message.answers[1]
     assert "[stderr] boom" in message.answers[1]
 

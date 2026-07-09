@@ -11,6 +11,7 @@ from app.adapters.claude.paths import ClaudePaths
 from app.domain.hook_models import validate_path_component, validate_session_id
 from app.domain.models import utc_now
 from app.domain.session_models import ConversationTurn, SubagentToolCall, ToolCallRecord, ToolStatus
+from app.infra.source_text_normalization import normalize_source_text
 
 logger = logging.getLogger(__name__)
 
@@ -514,7 +515,7 @@ class ClaudeJSONLParser:
             return utc_now()
 
     def _normalize_text(self, value: Any) -> str:
-        text = str(value or "").strip()
+        text = normalize_source_text(value)
         if not text:
             return ""
         return f"\n{text}\n"
@@ -529,14 +530,18 @@ class ClaudeJSONLParser:
 
     def _tool_result_text(self, block: dict[str, Any], payload: dict[str, Any]) -> str | None:
         content = block.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
+        if isinstance(content, str):
+            text = normalize_source_text(content)
+            if text:
+                return text
         result = payload.get("toolUseResult")
         if isinstance(result, dict):
             for key in ("stdout", "stderr", "output"):
                 value = result.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+                if isinstance(value, str):
+                    text = normalize_source_text(value)
+                    if text:
+                        return text
         return None
 
     def _tool_result_payload(self, block: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any] | None:

@@ -10,9 +10,10 @@ from aiogram.types import BufferedInputFile, FSInputFile, Message
 
 from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
-from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter, normalize_stream_text
+from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter
 from app.domain.models import EventType
 from app.infra.gitignore_utils import load_gitignore_patterns
+from app.infra.source_text_normalization import normalize_source_text
 from app.infra.text_formatting import short_id
 from app.services.diff_generator import DiffGeneratorService, SnapshotEntry
 from app.services.result_exporter import ResultExporterService
@@ -454,7 +455,7 @@ class RunEventStreamer:
                     # Generate and send diff on successful completion
                     await self._generate_and_send_diff()
                 elif event.type in {EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
-                    error_text = normalize_stream_text(event.error or "") or "-"
+                    error_text = normalize_source_text(event.error or "") or "-"
                     logger.error(
                         "task event error",
                         extra={

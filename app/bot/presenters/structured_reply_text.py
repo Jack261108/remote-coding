@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import re
+from app.infra import source_text_normalization as _source_text
 
-_MARKER_LINE_RE = re.compile(r"^\s*_*(?:TGCLI_BEGIN|TGCLI_DONE)_*(?:\s*[:：]?\s*[A-Za-z0-9_-]+)?\s*$", re.IGNORECASE)
-_BLANK_LINE_BURST_RE = re.compile(r"\n{3,}")
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_MARKER_LINE_RE = _source_text.BRIDGE_MARKER_LINE_RE
 _STREAM_PREVIEW_CHAR_LIMIT = 1800
 _STREAM_PREVIEW_LINE_LIMIT = 60
 _PERMISSION_INPUT_CHAR_LIMIT = 280
@@ -14,30 +12,15 @@ _QUESTION_TEXT_LINE_LIMIT = 10
 
 
 def strip_bridge_markers(text: str) -> str:
-    if not text:
-        return ""
-    lines = text.split("\n")
-    kept: list[str] = []
-    for raw_line in lines:
-        if _MARKER_LINE_RE.match(raw_line):
-            continue
-        kept.append(raw_line)
-    return "\n".join(kept)
+    return _source_text.strip_bridge_markers(text)
 
 
 def strip_ansi_escapes(text: str) -> str:
-    return _ANSI_ESCAPE_RE.sub("", text)
+    return _source_text.strip_ansi_escapes(text)
 
 
 def normalize_stream_text(text: str) -> str:
-    cleaned = strip_ansi_escapes(strip_bridge_markers(text)).replace("\r\n", "\n").replace("\r", "\n")
-    if not cleaned.strip():
-        return ""
-
-    normalized_lines = [line.rstrip() for line in cleaned.split("\n")]
-    normalized = "\n".join(normalized_lines).strip("\n")
-    normalized = _BLANK_LINE_BURST_RE.sub("\n\n", normalized)
-    return normalized.strip()
+    return _source_text.normalize_source_text(text)
 
 
 def _truncate_text(text: str, *, char_limit: int, line_limit: int, suffix: str) -> str:
