@@ -13,7 +13,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
+from app.domain.session_models import InterruptDetectedPayload, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
 from app.infra.file_mtime_utils import clear_seen_mtimes, refresh_seen_mtimes
 
 logger = logging.getLogger(__name__)
@@ -292,7 +292,7 @@ class SessionSupervisor:
             SessionEvent(
                 session_id=claude_session_id,
                 type=SessionEventType.INTERRUPT_DETECTED,
-                payload=snapshot.to_payload(),
+                payload=InterruptDetectedPayload.from_mapping(snapshot.to_payload()),
             )
         )
 

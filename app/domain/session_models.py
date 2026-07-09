@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 
 from app.domain.models import utc_now
 
@@ -352,18 +353,164 @@ class PendingPermission:
         )
 
 
+class TypedSessionEventPayload:
+    def to_dict(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.to_dict().get(key, default)
+
+
+SessionPayload = dict[str, Any] | TypedSessionEventPayload
+
+
+def _session_payload_value_to_dict(value: Any) -> Any:
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _session_payload_value_to_dict(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_session_payload_value_to_dict(item) for item in value]
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _session_payload_value_to_dict(to_dict())
+    return value
+
+
+def session_event_payload_to_dict(payload: SessionPayload | None) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    converted = _session_payload_value_to_dict(payload)
+    if isinstance(converted, Mapping):
+        return dict(converted)
+    return {}
+
+
+@dataclass(slots=True)
+class HookReceivedPayload(TypedSessionEventPayload):
+    hook: Any
+
+    @classmethod
+    def from_hook_event(cls, hook: Any) -> Self:
+        return cls(hook=hook)
+
+    def to_dict(self) -> dict[str, Any]:
+        converted = _session_payload_value_to_dict(self.hook)
+        if isinstance(converted, Mapping):
+            return dict(converted)
+        return {}
+
+
+_SESSION_SNAPSHOT_PAYLOAD_FIELDS = (
+    "cwd",
+    "claude_session_id",
+    "turns",
+    "tool_calls",
+    "summary",
+    "last_reply",
+    "last_reply_role",
+    "last_tool_name",
+    "clear_detected",
+    "interrupt_detected",
+    "reset_detected",
+    "last_offset",
+)
+
+
+@dataclass(slots=True)
+class SessionSnapshotPayload(TypedSessionEventPayload):
+    cwd: str | None = None
+    claude_session_id: str | None = None
+    turns: list[Any] | None = None
+    tool_calls: dict[str, Any] | None = None
+    summary: str | None = None
+    last_reply: str | None = None
+    last_reply_role: str | None = None
+    last_tool_name: str | None = None
+    clear_detected: bool | None = None
+    interrupt_detected: bool | None = None
+    reset_detected: bool | None = None
+    last_offset: int | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> Self:
+        return cls(
+            cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
+            claude_session_id=str(payload["claude_session_id"]) if payload.get("claude_session_id") is not None else None,
+            turns=list(payload["turns"]) if payload.get("turns") is not None else None,
+            tool_calls=dict(payload["tool_calls"]) if isinstance(payload.get("tool_calls"), Mapping) else None,
+            summary=str(payload["summary"]) if payload.get("summary") is not None else None,
+            last_reply=str(payload["last_reply"]) if payload.get("last_reply") is not None else None,
+            last_reply_role=str(payload["last_reply_role"]) if payload.get("last_reply_role") is not None else None,
+            last_tool_name=str(payload["last_tool_name"]) if payload.get("last_tool_name") is not None else None,
+            clear_detected=bool(payload["clear_detected"]) if payload.get("clear_detected") is not None else None,
+            interrupt_detected=bool(payload["interrupt_detected"]) if payload.get("interrupt_detected") is not None else None,
+            reset_detected=bool(payload["reset_detected"]) if payload.get("reset_detected") is not None else None,
+            last_offset=int(payload["last_offset"]) if payload.get("last_offset") is not None else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            field_name: _session_payload_value_to_dict(value)
+            for field_name in _SESSION_SNAPSHOT_PAYLOAD_FIELDS
+            if (value := getattr(self, field_name)) is not None
+        }
+
+
+@dataclass(slots=True)
+class FileSyncedPayload(SessionSnapshotPayload):
+    pass
+
+
+@dataclass(slots=True)
+class HistoryLoadedPayload(SessionSnapshotPayload):
+    pass
+
+
+@dataclass(slots=True)
+class InterruptDetectedPayload(SessionSnapshotPayload):
+    pass
+
+
+@dataclass(slots=True)
+class PermissionDecisionPayload(TypedSessionEventPayload):
+    tool_use_id: str
+    source: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"tool_use_id": self.tool_use_id}
+        if self.source is not None:
+            payload["source"] = self.source
+        return payload
+
+
+@dataclass(slots=True)
+class PermissionResponseFailedPayload(TypedSessionEventPayload):
+    tool_use_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.tool_use_id is None:
+            return {}
+        return {"tool_use_id": self.tool_use_id}
+
+
 @dataclass
 class SessionEvent:
     session_id: str
     type: SessionEventType
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: SessionPayload = field(default_factory=dict)
     at: datetime = field(default_factory=utc_now)
+
+    def payload_dict(self) -> dict[str, Any]:
+        return session_event_payload_to_dict(self.payload)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "type": self.type.value,
-            "payload": self.payload,
+            "payload": self.payload_dict(),
             "at": self.at.isoformat(),
         }
 

@@ -49,6 +49,7 @@ class SessionEventProcessor:
             state = self._cache.get_or_create(session_id=event.session_id)
         was_ended = state.phase == SessionPhase.ENDED
         state.last_activity = event.at
+        payload = event.payload_dict()
         if was_ended and event.type in {
             SessionEventType.SESSION_STARTED,
             SessionEventType.TURN_STARTED,
@@ -64,13 +65,13 @@ class SessionEventProcessor:
             state.phase = SessionPhase.PROCESSING
             state.interrupted = False
         elif event.type == SessionEventType.TURN_STARTED:
-            raw_turn_id = event.payload.get("turn_id")
+            raw_turn_id = payload.get("turn_id")
             if raw_turn_id is None:
                 if was_ended:
                     self._keep_ended_absorbed(state, event)
                 self._persist(state)
                 return state
-            turn = ConversationTurn(turn_id=str(raw_turn_id), role=str(event.payload.get("role", "assistant")))
+            turn = ConversationTurn(turn_id=str(raw_turn_id), role=str(payload.get("role", "assistant")))
             state.turns.append(turn)
             state.current_turn_id = turn.turn_id
             state.phase = SessionPhase.PROCESSING
@@ -78,8 +79,8 @@ class SessionEventProcessor:
         elif event.type == SessionEventType.PARSER_UPDATED:
             parser_turn = state.current_turn()
             if parser_turn is not None:
-                parser_turn.text = str(event.payload.get("text", parser_turn.text))
-                parser_turn.is_complete = bool(event.payload.get("is_complete", parser_turn.is_complete))
+                parser_turn.text = str(payload.get("text", parser_turn.text))
+                parser_turn.is_complete = bool(payload.get("is_complete", parser_turn.is_complete))
                 state.last_reply = parser_turn.text.strip() or None
                 state.last_reply_role = parser_turn.role
                 state.last_tool_name = None
@@ -119,7 +120,8 @@ class SessionEventProcessor:
         return state
 
     def _process_hook_event(self, state: SessionState, event: SessionEvent) -> None:
-        raw = event.payload.get("hook") if isinstance(event.payload.get("hook"), dict) else event.payload
+        payload = event.payload_dict()
+        raw = payload.get("hook") if isinstance(payload.get("hook"), dict) else payload
         if not isinstance(raw, dict):
             return
         hook = HookEvent.from_dict(raw)
@@ -218,7 +220,7 @@ class SessionEventProcessor:
             state.phase = SessionPhase.PROCESSING
 
     def _process_file_synced(self, state: SessionState, event: SessionEvent) -> None:
-        payload = event.payload
+        payload = event.payload_dict()
         state.workdir = str(payload.get("cwd", state.workdir))
         state.claude_session_id = str(payload.get("claude_session_id") or state.claude_session_id or state.session_id)
         try:
@@ -301,7 +303,8 @@ class SessionEventProcessor:
     def _process_permission_decision(self, state: SessionState, event: SessionEvent, *, approved: bool) -> None:
         if state.phase == SessionPhase.ENDED:
             return
-        tool_use_id = str(event.payload.get("tool_use_id", ""))
+        payload = event.payload_dict()
+        tool_use_id = str(payload.get("tool_use_id", ""))
         if not tool_use_id:
             return
         tool = state.tool_calls.get(tool_use_id)
@@ -315,7 +318,8 @@ class SessionEventProcessor:
         self._move_to_next_phase(state, default=SessionPhase.PROCESSING if approved else SessionPhase.IDLE)
 
     def _process_permission_response_failed(self, state: SessionState, event: SessionEvent) -> None:
-        tool_use_id = str(event.payload.get("tool_use_id", ""))
+        payload = event.payload_dict()
+        tool_use_id = str(payload.get("tool_use_id", ""))
         if not tool_use_id:
             state.interrupted = self._interrupt_session_tools(state, event.at)
             self._move_to_next_phase(state, default=SessionPhase.WAITING_FOR_INPUT)

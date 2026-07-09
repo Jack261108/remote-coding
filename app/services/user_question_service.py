@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.domain.protocols import ClaudeTerminalRuntimeProtocol, ClaudeUserQuestionTransportProtocol
-from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
+from app.domain.session_models import PermissionDecisionPayload, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
 from app.domain.user_question_models import (
     UserQuestionPrompt,
     compose_user_question_answers,
@@ -571,7 +571,7 @@ class UserQuestionService:
             SessionEvent(
                 session_id=target_state.session_id,
                 type=SessionEventType.PERMISSION_APPROVED,
-                payload={"tool_use_id": tool_use_id},
+                payload=PermissionDecisionPayload(tool_use_id=tool_use_id),
             )
         )
 

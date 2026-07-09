@@ -12,7 +12,16 @@ from app.domain.external_session_models import OwnershipResult
 from app.domain.external_session_models import SessionOrigin as ExternalSessionOrigin
 from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus, utc_now
-from app.domain.session_models import SessionEvent, SessionEventType, SessionPhase, SessionState
+from app.domain.session_models import (
+    FileSyncedPayload,
+    HookReceivedPayload,
+    PermissionDecisionPayload,
+    PermissionResponseFailedPayload,
+    SessionEvent,
+    SessionEventType,
+    SessionPhase,
+    SessionState,
+)
 from app.domain.user_question_models import extract_user_question_prompts
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 
@@ -58,7 +67,7 @@ class JsonlSyncMixin(AppContainerBase):
                 SessionEvent(
                     session_id=session_id,
                     type=SessionEventType.FILE_SYNCED,
-                    payload=snapshot.to_payload(),
+                    payload=FileSyncedPayload.from_mapping(snapshot.to_payload()),
                 )
             )
 
@@ -161,7 +170,7 @@ class HookHandlingMixin(AppContainerBase):
                     SessionEvent(
                         session_id=event.session_id,
                         type=SessionEventType.HOOK_RECEIVED,
-                        payload=event.to_dict(),
+                        payload=HookReceivedPayload.from_hook_event(event),
                     )
                 )
                 self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
@@ -281,7 +290,7 @@ class HookHandlingMixin(AppContainerBase):
                         SessionEvent(
                             session_id=event.session_id,
                             type=SessionEventType.HOOK_RECEIVED,
-                            payload=event.to_dict(),
+                            payload=HookReceivedPayload.from_hook_event(event),
                         )
                     ),
                 )
@@ -320,7 +329,7 @@ class HookHandlingMixin(AppContainerBase):
                         SessionEvent(
                             session_id=event.session_id,
                             type=SessionEventType.HOOK_RECEIVED,
-                            payload=event.to_dict(),
+                            payload=HookReceivedPayload.from_hook_event(event),
                         )
                     ),
                 )
@@ -547,7 +556,7 @@ class HookHandlingMixin(AppContainerBase):
             SessionEvent(
                 session_id=session_id,
                 type=SessionEventType.PERMISSION_RESPONSE_FAILED,
-                payload={"tool_use_id": tool_use_id},
+                payload=PermissionResponseFailedPayload(tool_use_id=tool_use_id),
             )
         )
         # Update permission callback registry and edit Telegram message
@@ -598,7 +607,7 @@ class HookHandlingMixin(AppContainerBase):
             SessionEvent(
                 session_id=session_id,
                 type=SessionEventType.PERMISSION_APPROVED if is_approved else SessionEventType.PERMISSION_DENIED,
-                payload={"tool_use_id": tool_use_id, "source": "terminal"},
+                payload=PermissionDecisionPayload(tool_use_id=tool_use_id, source="terminal"),
             )
         )
         # Update permission callback registry and edit Telegram message
@@ -1005,11 +1014,12 @@ class EventDispatchMixin(AppContainerBase):
 
     async def _dispatch_session_event(self, event: SessionEvent) -> None:
         is_session_end = self._is_session_end_dispatch_event(event)
+        payload = event.payload_dict()
         async with self._session_event_locks.lock(event.session_id):
             self.structured_session_store.get_or_create(
                 session_id=event.session_id,
                 provider="claude_code",
-                workdir=str(event.payload.get("cwd", ".")),
+                workdir=str(payload.get("cwd", ".")),
                 claude_session_id=event.session_id,
             )
             self.structured_session_store.process(event)
@@ -1023,7 +1033,8 @@ class EventDispatchMixin(AppContainerBase):
             return True
         if event.type != SessionEventType.HOOK_RECEIVED:
             return False
-        return event.payload.get("event") == "SessionEnd" or event.payload.get("status") == "ended"
+        payload = event.payload_dict()
+        return payload.get("event") == "SessionEnd" or payload.get("status") == "ended"
 
     async def _reconcile_session_context_after_session_end(self, session_id: str) -> None:
         session = await self.session_service.lookup_by_claude_session_id(session_id)

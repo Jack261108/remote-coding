@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
-from app.domain.session_models import SessionEvent, SessionEventType, SessionState
+from app.domain.session_models import PermissionDecisionPayload, SessionEvent, SessionEventType, SessionState
 from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
@@ -119,7 +119,7 @@ class PermissionService:
             SessionEvent(
                 session_id=state.session_id,  # type: ignore[union-attr]
                 type=event_type,
-                payload={"tool_use_id": tool_use_id},
+                payload=PermissionDecisionPayload(tool_use_id=tool_use_id),
             )
         )
         tool_name = updated.last_tool_name or pending.tool_name
