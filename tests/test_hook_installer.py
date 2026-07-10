@@ -118,7 +118,7 @@ def test_hook_script_normalizes_claude_payload(tmp_path) -> None:
             "cwd": "/tmp/project",
             "event": "PermissionRequest",
             "status": "waiting_for_approval",
-            "pid": None,
+            "pid": os.getpid(),
             "tty": None,
             "tool": "Bash",
             "tool_input": {"command": "pwd"},
@@ -127,6 +127,106 @@ def test_hook_script_normalizes_claude_payload(tmp_path) -> None:
             "message": None,
         }
     ]
+
+
+def test_hook_script_preserves_explicit_pid_for_standardized_payload(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    socket_path = f"/tmp/rc-hi-{uuid.uuid4().hex}.sock"
+    installer = HookInstaller(paths=paths, socket_path=socket_path, python_bin="python3")
+    script_path = installer.install(version=ClaudeCodeVersion(2, 1, 88))
+
+    received: list[dict] = []
+
+    def serve_once() -> None:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(socket_path)
+            server.listen(1)
+            conn, _ = server.accept()
+            with conn:
+                chunks: list[bytes] = []
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if b"\n" in chunk:
+                        break
+                received.append(json.loads(b"".join(chunks).split(b"\n", 1)[0].decode("utf-8")))
+
+    thread = threading.Thread(target=serve_once)
+    thread.start()
+    payload = {
+        "session_id": "claude-session-123",
+        "cwd": "/tmp/project",
+        "event": "Stop",
+        "status": "waiting_for_input",
+        "pid": 4242,
+    }
+
+    completed = subprocess.run(
+        ["python3", str(script_path)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    thread.join(timeout=5)
+    with suppress(FileNotFoundError):
+        os.unlink(socket_path)
+
+    assert completed.returncode == 0
+    assert received[0]["pid"] == 4242
+
+
+def test_hook_script_fills_parent_pid_for_standardized_payload(tmp_path) -> None:
+    paths = ClaudePaths.resolve(str(tmp_path / ".claude"))
+    socket_path = f"/tmp/rc-hi-{uuid.uuid4().hex}.sock"
+    installer = HookInstaller(paths=paths, socket_path=socket_path, python_bin="python3")
+    script_path = installer.install(version=ClaudeCodeVersion(2, 1, 88))
+
+    received: list[dict] = []
+
+    def serve_once() -> None:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(socket_path)
+            server.listen(1)
+            conn, _ = server.accept()
+            with conn:
+                chunks: list[bytes] = []
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if b"\n" in chunk:
+                        break
+                received.append(json.loads(b"".join(chunks).split(b"\n", 1)[0].decode("utf-8")))
+
+    thread = threading.Thread(target=serve_once)
+    thread.start()
+    payload = {
+        "session_id": "claude-session-123",
+        "cwd": "/tmp/project",
+        "event": "Stop",
+        "status": "waiting_for_input",
+        "pid": 0,
+    }
+
+    completed = subprocess.run(
+        ["python3", str(script_path)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    thread.join(timeout=5)
+    with suppress(FileNotFoundError):
+        os.unlink(socket_path)
+
+    assert completed.returncode == 0
+    assert received[0]["pid"] == os.getpid()
 
 
 def test_hook_script_does_not_wait_for_non_permission_response(tmp_path) -> None:

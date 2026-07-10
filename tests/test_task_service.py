@@ -1422,6 +1422,98 @@ async def test_get_structured_session_for_task_prefers_prompt_turn_over_stale_co
 
 
 @pytest.mark.asyncio
+async def test_get_structured_session_for_task_matches_skill_command_tags(tmp_path: Path) -> None:
+    adapter = StubAdapter(events=[])
+    session_service = make_file_backed_session_service(tmp_path)
+    structured_store = SessionStore(FileSessionStore(str(tmp_path)))
+    task_store = MemoryTaskStore()
+    service = TaskService(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_store=task_store,
+        session_service=session_service,
+        cli_factory=StubFactory(adapter),
+        semaphore=asyncio.Semaphore(2),
+        structured_session_store=structured_store,
+    )
+
+    now = utc_now()
+    terminal_id = expected_terminal_id(user_id=1, workdir=str(tmp_path))
+    await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    await session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id="claude-session-stale",
+        workdir=str(tmp_path),
+    )
+    await task_store.add(
+        TaskRecord(
+            task_id="task-skill-command",
+            session_id="session-1",
+            user_id=1,
+            provider="claude_code",
+            prompt="/permission-smoke",
+            workdir=str(tmp_path),
+            timeout_sec=10,
+            claude_session_id="claude-session-stale",
+            status=TaskStatus.RUNNING,
+            created_at=now,
+            started_at=now,
+        )
+    )
+
+    actual_state = structured_store.get_or_create(
+        session_id="claude-session-actual",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-actual",
+    )
+    actual_state.phase = SessionPhase.WAITING_FOR_INPUT
+    actual_state.turns.append(
+        ConversationTurn(
+            turn_id="user-skill",
+            role="user",
+            text=("<command-message>permission-smoke</command-message>\n<command-name>/permission-smoke</command-name>"),
+            is_complete=True,
+            started_at=now + timedelta(seconds=1),
+            ended_at=now + timedelta(seconds=1),
+        )
+    )
+    structured_store._persist(actual_state)
+
+    stale_state = structured_store.get_or_create(
+        session_id="claude-session-stale",
+        user_id=1,
+        workdir=str(tmp_path),
+        terminal_id=terminal_id,
+        claude_session_id="claude-session-stale",
+    )
+    stale_state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    stale_state.pending_permission = PendingPermission(
+        tool_use_id="tool-stale",
+        tool_name="Bash",
+        tool_input={"command": "pwd"},
+    )
+    structured_store._persist(stale_state)
+
+    structured = await service.get_structured_session_for_task(
+        task_id="task-skill-command",
+        user_id=1,
+    )
+    updated_task = await task_store.get("task-skill-command")
+
+    assert structured is not None
+    assert structured.session_id == "claude-session-actual"
+    assert updated_task is not None
+    assert updated_task.claude_session_id == "claude-session-actual"
+
+
+@pytest.mark.asyncio
 async def test_get_structured_session_for_task_keeps_final_task_bound_when_later_same_prompt_exists(tmp_path: Path) -> None:
     adapter = StubAdapter(events=[])
     factory = StubFactory(adapter)

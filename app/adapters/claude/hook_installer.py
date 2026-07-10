@@ -210,16 +210,28 @@ def _normalize_tool_input(value: object | None) -> dict[str, object] | None:
 
 
 def _normalize_pid(value: object | None) -> int | None:
+    if isinstance(value, bool):
+        return None
     if isinstance(value, int):
-        return value
+        return value if value > 0 else None
     if isinstance(value, float):
-        return int(value)
+        normalized = int(value)
+        return normalized if normalized > 0 else None
     if isinstance(value, str) and value.strip():
         try:
-            return int(value)
+            normalized = int(value)
         except ValueError:
             return None
+        return normalized if normalized > 0 else None
     return None
+
+
+def _resolve_pid(value: object | None) -> int | None:
+    normalized = _normalize_pid(value)
+    if normalized is not None:
+        return normalized
+    parent_pid = os.getppid()
+    return parent_pid if parent_pid > 0 else None
 
 
 def _status_for_event(event: str, payload: dict[str, object]) -> str:
@@ -241,6 +253,7 @@ def _status_for_event(event: str, payload: dict[str, object]) -> str:
 def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
     if all(key in payload for key in ("session_id", "cwd", "event", "status")):
         normalized = dict(payload)
+        normalized["pid"] = _resolve_pid(normalized.get("pid"))
         if "tool_input" in normalized:
             normalized["tool_input"] = _normalize_tool_input(normalized.get("tool_input"))
         if "message" in normalized:
@@ -264,7 +277,7 @@ def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
         "cwd": str(cwd or os.getcwd()),
         "event": event_name,
         "status": _status_for_event(event_name, payload),
-        "pid": _normalize_pid(pid),
+        "pid": _resolve_pid(pid),
         "tty": str(tty) if tty is not None else None,
         "tool": str(tool) if tool is not None else None,
         "tool_input": _normalize_tool_input(tool_input),

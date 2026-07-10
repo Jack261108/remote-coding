@@ -200,20 +200,58 @@ class HookHandlingMixin(AppContainerBase):
                 if match_session_context is not None:
                     matched = await match_session_context(event)
                     if matched is not None and matched.terminal_id is not None:
-                        ownership = OwnershipResult(
-                            owner_user_id=matched.user_id,
-                            origin=ExternalSessionOrigin.TMUX,
-                            ownership_state="owned",
-                        )
-                        logger.info(
-                            "unbound hook event matched active tmux session",
-                            extra={
-                                "session_id": event.session_id,
-                                "owner_user_id": matched.user_id,
-                                "terminal_id": matched.terminal_id,
-                                "workdir": matched.workdir,
-                            },
-                        )
+                        expected_tmux_session = None
+                        actual_tmux_session = None
+                        tmux_runner = getattr(self, "tmux_runner", None)
+                        if event.pid is not None and event.pid > 0 and tmux_runner is not None:
+                            from app.adapters.process.pty_injector import find_tmux_session_for_pid
+
+                            expected_tmux_session = tmux_runner.build_session_name(matched.terminal_id)
+                            settings = getattr(self, "settings", None)
+                            tmux_bin = getattr(settings, "tmux_bin", "tmux")
+                            try:
+                                actual_tmux_session = await find_tmux_session_for_pid(event.pid, tmux_bin)
+                            except Exception:
+                                logger.debug(
+                                    "failed to verify hook tmux session",
+                                    extra={
+                                        "session_id": event.session_id,
+                                        "pid": event.pid,
+                                        "terminal_id": matched.terminal_id,
+                                        "expected_tmux_session": expected_tmux_session,
+                                    },
+                                    exc_info=True,
+                                )
+                        if actual_tmux_session == expected_tmux_session and expected_tmux_session is not None:
+                            ownership = OwnershipResult(
+                                owner_user_id=matched.user_id,
+                                origin=ExternalSessionOrigin.TMUX,
+                                ownership_state="owned",
+                            )
+                            logger.info(
+                                "unbound hook event matched active tmux session",
+                                extra={
+                                    "session_id": event.session_id,
+                                    "owner_user_id": matched.user_id,
+                                    "terminal_id": matched.terminal_id,
+                                    "workdir": matched.workdir,
+                                    "pid": event.pid,
+                                    "tmux_session": actual_tmux_session,
+                                },
+                            )
+                        else:
+                            logger.info(
+                                "unbound hook event rejected by tmux identity check",
+                                extra={
+                                    "session_id": event.session_id,
+                                    "owner_user_id": matched.user_id,
+                                    "terminal_id": matched.terminal_id,
+                                    "workdir": matched.workdir,
+                                    "pid": event.pid,
+                                    "expected_tmux_session": expected_tmux_session,
+                                    "actual_tmux_session": actual_tmux_session,
+                                },
+                            )
 
             # Remove external binding on session end so /list doesn't show stale entries.
             if is_session_end and ownership.origin == ExternalSessionOrigin.EXTERNAL:

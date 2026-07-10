@@ -13,13 +13,9 @@ from app.domain.session_models import (
     parse_user_question_key,
 )
 from app.domain.user_question_models import extract_user_question_prompts
+from app.infra.source_text_normalization import normalize_prompt_match_text
 from app.services.session_state_cache import SessionStateCache
 from app.services.session_state_repository import SessionStateRepository
-
-
-def _normalize_turn_match_text(text: str) -> str:
-    """Normalize whitespace in turn text for comparison."""
-    return " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
 
 
 def _same_workdir(a: str | None, b: str | None) -> bool:
@@ -225,7 +221,7 @@ class SessionLookupService:
         until: datetime | None = None,
         terminal_id: str | None = None,
     ) -> SessionState | None:
-        normalized_text = _normalize_turn_match_text(text)
+        normalized_text = normalize_prompt_match_text(text)
         if not normalized_text:
             return None
 
@@ -266,7 +262,7 @@ class SessionLookupService:
                 continue
             if until is not None and turn.started_at > until:
                 continue
-            if _normalize_turn_match_text(turn.text) != normalized_text:
+            if normalize_prompt_match_text(turn.text) != normalized_text:
                 continue
             if matched_at is None or turn.started_at > matched_at:
                 matched_at = turn.started_at

@@ -58,6 +58,27 @@ def use_legacy_hook_binding_path(container: AppContainer) -> None:
     delattr(container, "ownership_resolver")
 
 
+def allow_target_tmux_pid(
+    container: AppContainer,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pid: int = 4242,
+    user_id: int = 1,
+) -> None:
+    async def find_tmux_session_for_pid(actual_pid: int, _tmux_bin: str = "tmux") -> str | None:
+        assert actual_pid == pid
+        sessions = await container.session_service.list_all()
+        session = next((item for item in sessions if item.user_id == user_id), None)
+        assert session is not None
+        assert session.terminal_id is not None
+        return container.tmux_runner.build_session_name(session.terminal_id)
+
+    monkeypatch.setattr(
+        "app.adapters.process.pty_injector.find_tmux_session_for_pid",
+        find_tmux_session_for_pid,
+    )
+
+
 @pytest.fixture(autouse=True)
 async def cleanup_app_containers() -> AsyncIterator[None]:
     try:
@@ -914,6 +935,7 @@ async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_work
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
     monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
+    allow_target_tmux_pid(container, monkeypatch)
 
     await container._handle_hook_event(
         HookEvent(
@@ -921,6 +943,7 @@ async def test_handle_hook_event_binds_session_by_unique_active_claude_chat_work
             cwd=str(tmp_path),
             event="SessionStart",
             status="starting",
+            pid=4242,
         )
     )
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
@@ -969,6 +992,7 @@ async def test_handle_hook_event_binds_unowned_tmux_first_hook_with_active_task(
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
     monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
+    allow_target_tmux_pid(container, monkeypatch)
 
     await container._handle_hook_event(
         HookEvent(
@@ -976,6 +1000,7 @@ async def test_handle_hook_event_binds_unowned_tmux_first_hook_with_active_task(
             cwd=str(tmp_path),
             event="UserPromptSubmit",
             status="processing",
+            pid=4242,
         )
     )
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
@@ -1088,6 +1113,7 @@ async def test_handle_hook_event_binds_session_for_empty_processing_terminal_sta
 
     monkeypatch.setattr(container, "sync_claude_session", fake_sync)
     monkeypatch.setattr(container.session_supervisor, "_on_jsonl_sync", fake_sync)
+    allow_target_tmux_pid(container, monkeypatch)
 
     await container._handle_hook_event(
         HookEvent(
@@ -1095,6 +1121,7 @@ async def test_handle_hook_event_binds_session_for_empty_processing_terminal_sta
             cwd=str(tmp_path),
             event="SessionStart",
             status="starting",
+            pid=4242,
         )
     )
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
@@ -1685,8 +1712,16 @@ async def test_unbound_hook_ownership_uses_active_interactive_task_when_workdir_
         )
     )
 
+    allow_target_tmux_pid(container, monkeypatch, user_id=2)
+
     ownership = await container._resolve_ownership_stage(
-        HookEvent(session_id="claude-session-1", cwd=str(tmp_path), event="SessionStart", status="starting")
+        HookEvent(
+            session_id="claude-session-1",
+            cwd=str(tmp_path),
+            event="SessionStart",
+            status="starting",
+            pid=4242,
+        )
     )
 
     assert ownership is not None

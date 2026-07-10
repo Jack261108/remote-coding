@@ -70,6 +70,9 @@ class _RecordingBindingStore:
 
 
 class _EmptySessionService:
+    async def lookup_by_claude_session_id(self, _session_id: str):
+        return None
+
     async def list_all(self) -> list:
         return []
 
@@ -128,8 +131,10 @@ def _make_lifecycle_container(tmp_path, binding_store, discovery, seen, session_
             self.settings = SimpleNamespace(allowed_workdirs=[str(tmp_path)])
             self.external_binding_store = binding_store
             self.external_discovery = discovery
+            self.session_service = session_service or _EmptySessionService()
+            self.structured_session_store = SimpleNamespace(get=lambda _session_id: None)
             self.ownership_resolver = SessionOwnershipResolver(
-                session_service=session_service or _EmptySessionService(),
+                session_service=self.session_service,
                 binding_store=binding_store,
             )
 
@@ -509,6 +514,108 @@ async def test_unbound_tmux_permission_is_still_notified(tmp_path, monkeypatch: 
     assert unbound_permissions.handled == ["unbound-tmux-permission"]
     hook_socket_server.release_pending_permission.assert_not_awaited()
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_same_workdir_external_hook_does_not_bind_when_pid_belongs_to_other_tmux_session(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+    candidate = SimpleNamespace(user_id=1, terminal_id="terminal-1", workdir=str(tmp_path))
+    vars(container)["_match_session_context"] = AsyncMock(return_value=candidate)
+    vars(container)["tmux_runner"] = SimpleNamespace(build_session_name=lambda terminal_id: f"tgcli_{terminal_id}")
+
+    async def other_tmux_session(_pid: int, _tmux_bin: str = "tmux") -> str:
+        return "developer-session"
+
+    monkeypatch.setattr(
+        "app.adapters.process.pty_injector.find_tmux_session_for_pid",
+        other_tmux_session,
+    )
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="developer-claude-session",
+            cwd=str(tmp_path),
+            event="SessionStart",
+            status="starting",
+            pid=4242,
+        )
+    )
+
+    assert discovery.recorded == ["developer-claude-session"]
+    assert seen == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pid", [None, 0])
+async def test_same_workdir_external_hook_does_not_bind_without_valid_pid(
+    tmp_path,
+    pid: int | None,
+) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+    candidate = SimpleNamespace(user_id=1, terminal_id="terminal-1", workdir=str(tmp_path))
+    vars(container)["_match_session_context"] = AsyncMock(return_value=candidate)
+    vars(container)["tmux_runner"] = SimpleNamespace(build_session_name=lambda terminal_id: f"tgcli_{terminal_id}")
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="developer-claude-session",
+            cwd=str(tmp_path),
+            event="SessionStart",
+            status="starting",
+            pid=pid,
+        )
+    )
+
+    assert discovery.recorded == ["developer-claude-session"]
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_same_workdir_tmux_hook_binds_when_pid_matches_target_session(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+    binding_store = ExternalBindingStore(data_dir=tmp_path)
+    discovery = _RecordingDiscovery()
+    container = _make_lifecycle_container(tmp_path, binding_store, discovery, seen)
+    candidate = SimpleNamespace(user_id=1, terminal_id="terminal-1", workdir=str(tmp_path))
+    vars(container)["_match_session_context"] = AsyncMock(return_value=candidate)
+    vars(container)["tmux_runner"] = SimpleNamespace(build_session_name=lambda terminal_id: f"tgcli_{terminal_id}")
+
+    async def target_tmux_session(_pid: int, _tmux_bin: str = "tmux") -> str:
+        return "tgcli_terminal-1"
+
+    monkeypatch.setattr(
+        "app.adapters.process.pty_injector.find_tmux_session_for_pid",
+        target_tmux_session,
+    )
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id="telegram-claude-session",
+            cwd=str(tmp_path),
+            event="SessionStart",
+            status="starting",
+            pid=4242,
+        )
+    )
+
+    assert discovery.recorded == []
+    assert seen == [
+        "bind:telegram-claude-session",
+        "dispatch:telegram-claude-session",
+        "sync:telegram-claude-session",
+    ]
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from app.infra.source_text_normalization import normalize_source_text, strip_ansi_escapes, strip_bridge_markers
+from app.infra.source_text_normalization import (
+    normalize_prompt_match_text,
+    normalize_source_text,
+    strip_ansi_escapes,
+    strip_bridge_markers,
+)
 
 
 def test_strip_bridge_markers_removes_only_marker_lines() -> None:
@@ -36,3 +41,21 @@ def test_normalize_source_text_is_idempotent() -> None:
     normalized = normalize_source_text(raw)
 
     assert normalize_source_text(normalized) == normalized
+
+
+def test_normalize_prompt_match_text_preserves_plain_slash_command() -> None:
+    assert normalize_prompt_match_text(" /permission-smoke \n") == "/permission-smoke"
+
+
+def test_normalize_prompt_match_text_extracts_command_name() -> None:
+    assert normalize_prompt_match_text("<command-name> /permission-smoke </command-name>") == "/permission-smoke"
+
+
+def test_normalize_prompt_match_text_prefers_command_name_over_command_message() -> None:
+    raw = "<command-message>permission-smoke</command-message>\n<command-name>/permission-smoke</command-name>"
+
+    assert normalize_prompt_match_text(raw) == "/permission-smoke"
+
+
+def test_normalize_prompt_match_text_preserves_plain_text_whitespace_semantics() -> None:
+    assert normalize_prompt_match_text("第一行\r\n  第二行") == "第一行 第二行"

@@ -10,28 +10,31 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TMUX_BIN = "tmux"
 
 
-async def find_tmux_pane_for_pid(pid: int, tmux_bin: str = _DEFAULT_TMUX_BIN) -> str | None:
-    """Walk the process tree from *pid* upward, looking for a tmux pane whose
-    shell PID matches an ancestor. Returns the pane ID (e.g. ``%3``) or None.
-    """
+@dataclass(frozen=True, slots=True)
+class _TmuxTarget:
+    pane_id: str
+    session_name: str
+
+
+async def _find_tmux_target_for_pid(pid: int, tmux_bin: str) -> _TmuxTarget | None:
     resolved = shutil.which(tmux_bin)
     if resolved is None:
         return None
 
-    # Get all tmux panes and their shell PIDs
     try:
         proc = await asyncio.create_subprocess_exec(
             resolved,
             "list-panes",
             "-a",
             "-F",
-            "#{pane_id} #{pane_pid}",
+            "#{session_name} #{pane_id} #{pane_pid}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -41,22 +44,26 @@ async def find_tmux_pane_for_pid(pid: int, tmux_bin: str = _DEFAULT_TMUX_BIN) ->
     except (FileNotFoundError, OSError):
         return None
 
-    pane_pids: dict[int, str] = {}
+    pane_pids: dict[int, _TmuxTarget] = {}
     for line in stdout.decode(errors="replace").splitlines():
         parts = line.split()
-        if len(parts) == 2:
-            try:
-                pane_pids[int(parts[1])] = parts[0]
-            except ValueError:
-                continue
+        if len(parts) != 3:
+            continue
+        session_name, pane_id, pane_pid = parts
+        try:
+            pane_pids[int(pane_pid)] = _TmuxTarget(
+                pane_id=pane_id,
+                session_name=session_name,
+            )
+        except ValueError:
+            continue
 
     if not pane_pids:
         return None
 
-    # Walk up the process tree from pid
     current = pid
     visited: set[int] = set()
-    for _ in range(30):  # max depth
+    for _ in range(30):
         if current in pane_pids:
             return pane_pids[current]
         if current in visited or current <= 1:
@@ -68,6 +75,18 @@ async def find_tmux_pane_for_pid(pid: int, tmux_bin: str = _DEFAULT_TMUX_BIN) ->
         current = parent
 
     return None
+
+
+async def find_tmux_pane_for_pid(pid: int, tmux_bin: str = _DEFAULT_TMUX_BIN) -> str | None:
+    """Return the tmux pane ID containing *pid* or one of its ancestors."""
+    target = await _find_tmux_target_for_pid(pid, tmux_bin)
+    return target.pane_id if target is not None else None
+
+
+async def find_tmux_session_for_pid(pid: int, tmux_bin: str = _DEFAULT_TMUX_BIN) -> str | None:
+    """Return the tmux session name containing *pid* or one of its ancestors."""
+    target = await _find_tmux_target_for_pid(pid, tmux_bin)
+    return target.session_name if target is not None else None
 
 
 async def inject_keys_via_tmux(pane_id: str, *keys: str, tmux_bin: str = _DEFAULT_TMUX_BIN) -> tuple[bool, str]:
@@ -109,12 +128,9 @@ async def inject_option_selection(
     Assumes cursor starts at the first option (index 0). Sends Down arrow
     *option_index* times, then Enter.
     """
-    # Resolve once; inject_keys_via_tmux will skip re-resolving when given an
-    # absolute path (shutil.which returns it as-is).
     resolved = shutil.which(tmux_bin)
     if resolved is None:
         return False, "tmux not found"
-    # Move cursor to the target option
     if option_index > 0:
         for _ in range(option_index):
             ok, err = await inject_keys_via_tmux(pane_id, "Down", tmux_bin=resolved)
@@ -122,12 +138,10 @@ async def inject_option_selection(
                 return False, err
             await asyncio.sleep(0.05)
 
-    # Select the option
     ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=resolved)
     if not ok:
         return False, err
 
-    # Submit if this is the final question
     if submit_after:
         await asyncio.sleep(enter_delay_sec)
         ok, err = await inject_keys_via_tmux(pane_id, "C-m", tmux_bin=resolved)
