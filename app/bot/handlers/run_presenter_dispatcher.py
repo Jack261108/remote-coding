@@ -6,9 +6,16 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.command_user_question import build_user_question_keyboard
 from app.bot.handlers.run_display_models import (
+    DisplayEvent,
     RenderCommand,
     RenderCommandKind,
+    StreamTextDisplayPayload,
+    TaskFailedDisplayPayload,
+    TaskSucceededDisplayPayload,
     ToolRenderOutput,
+    format_task_failed_text,
+    format_task_succeeded_text,
+    render_command_from_display_event,
     render_command_from_presenter_output,
 )
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
@@ -106,7 +113,10 @@ class PresenterOutputDispatcher:
         for output in await self._presenter.poll(task_id=self._task_id, final=final, log_missing=log_missing):
             await self._execute_render_command(render_command_from_presenter_output(output))
 
-    async def _execute_render_command(self, command: RenderCommand) -> None:
+    async def execute_display_event(self, event: DisplayEvent, *, lifecycle_message: Message | None = None) -> None:
+        await self._execute_render_command(render_command_from_display_event(event), lifecycle_message=lifecycle_message)
+
+    async def _execute_render_command(self, command: RenderCommand, *, lifecycle_message: Message | None = None) -> None:
         if command.flush_before:
             await self.flush()
 
@@ -131,7 +141,30 @@ class PresenterOutputDispatcher:
         if command.kind == RenderCommandKind.SEND_PROGRESS_UPDATE:
             await self._send_progress_update(cast(ProgressUpdateOutput, command.payload))
             return
+        if command.kind == RenderCommandKind.BUFFER_STREAM_TEXT:
+            await self._buffer_stream_text(cast(StreamTextDisplayPayload, command.payload))
+            return
+        if command.kind == RenderCommandKind.COMPLETE_LIFECYCLE:
+            await self._complete_lifecycle(cast(TaskSucceededDisplayPayload, command.payload), lifecycle_message)
+            return
+        if command.kind == RenderCommandKind.FAIL_LIFECYCLE:
+            await self._fail_lifecycle(cast(TaskFailedDisplayPayload, command.payload), lifecycle_message)
+            return
         raise TypeError(f"unsupported render command kind: {command.kind}")
+
+    async def _buffer_stream_text(self, payload: StreamTextDisplayPayload) -> None:
+        prefix = "[stderr] " if payload.is_stderr else ""
+        await self.push_text(f"{prefix}{payload.text}")
+
+    async def _complete_lifecycle(self, payload: TaskSucceededDisplayPayload, lifecycle_message: Message | None) -> None:
+        text = format_task_succeeded_text(payload)
+        if not await self._messenger.edit_message_safely(lifecycle_message, text):
+            await self._messenger.answer_safely(text)
+
+    async def _fail_lifecycle(self, payload: TaskFailedDisplayPayload, lifecycle_message: Message | None) -> None:
+        text = format_task_failed_text(payload)
+        if not await self._messenger.edit_message_safely(lifecycle_message, text):
+            await self._messenger.answer_safely(text)
 
     async def _send_permission_request(self, output: PermissionRequestOutput) -> None:
         if self._permission_gateway is None or not output.tool_use_id or not output.session_id:

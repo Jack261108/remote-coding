@@ -4,7 +4,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.bot.handlers.run_display_models import RenderCommand, RenderCommandKind
+from app.bot.handlers.run_display_models import (
+    DisplayEvent,
+    DisplayEventKind,
+    RenderCommand,
+    RenderCommandKind,
+    StreamTextDisplayPayload,
+    TaskFailedDisplayPayload,
+    TaskSucceededDisplayPayload,
+)
 from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.presenters.structured_reply_models import (
     FileToolAggregateStatusOutput,
@@ -17,6 +25,7 @@ from app.bot.presenters.structured_reply_models import (
     ToolStatusOutput,
     UserQuestionOutput,
 )
+from app.domain.models import EventType
 from app.domain.user_question_models import UserQuestionPrompt
 from app.services.permission_callback_registry import AutoApproveOutcome
 
@@ -41,6 +50,8 @@ class _RecordingMessenger:
     def __init__(self) -> None:
         self.answers: list[str] = []
         self.sent_messages: list[str] = []
+        self.edits: list[tuple[object | None, str]] = []
+        self.edit_result = True
 
     async def answer_safely(self, text: str, reply_markup: object = None) -> bool:
         self.answers.append(text)
@@ -49,6 +60,10 @@ class _RecordingMessenger:
     async def send_message_safely(self, text: str, reply_markup: object = None):
         self.sent_messages.append(text)
         return MagicMock()
+
+    async def edit_message_safely(self, message: object | None, text: str) -> bool:
+        self.edits.append((message, text))
+        return self.edit_result
 
 
 class _RecordingToolManager:
@@ -77,6 +92,124 @@ def _build_dispatcher() -> tuple[PresenterOutputDispatcher, _RecordingSender, _R
         permission_gateway=permission_gateway,
     )
     return dispatcher, sender, messenger, tool_manager, presenter
+
+
+async def test_stream_text_display_event_pushes_without_flush() -> None:
+    dispatcher, sender, messenger, _, _ = _build_dispatcher()
+
+    await dispatcher.execute_display_event(
+        DisplayEvent(
+            kind=DisplayEventKind.STREAM_TEXT,
+            payload=StreamTextDisplayPayload(text="  raw text  "),
+        )
+    )
+
+    assert sender.events == ["push"]
+    assert sender.pushed_texts == ["  raw text  "]
+    assert messenger.answers == ["raw text"]
+
+
+async def test_stderr_display_event_adds_prefix_without_flush() -> None:
+    dispatcher, sender, messenger, _, _ = _build_dispatcher()
+
+    await dispatcher.execute_display_event(
+        DisplayEvent(
+            kind=DisplayEventKind.STREAM_TEXT,
+            payload=StreamTextDisplayPayload(text="boom", is_stderr=True),
+        )
+    )
+
+    assert sender.events == ["push"]
+    assert sender.pushed_texts == ["[stderr] boom"]
+    assert messenger.answers == ["[stderr] boom"]
+
+
+async def test_task_succeeded_display_event_edits_lifecycle_after_flush() -> None:
+    dispatcher, sender, messenger, _, _ = _build_dispatcher()
+    lifecycle_message = MagicMock()
+
+    await dispatcher.execute_display_event(
+        DisplayEvent(
+            kind=DisplayEventKind.TASK_SUCCEEDED,
+            payload=TaskSucceededDisplayPayload(task_id="task-123456", duration="1.25s", truncated=True, exit_code=0),
+        ),
+        lifecycle_message=lifecycle_message,
+    )
+
+    assert sender.events == ["flush"]
+    assert messenger.edits == [(lifecycle_message, "✅ 完成 [task-123] 1.25s （输出已截断）")]
+    assert messenger.answers == []
+
+
+async def test_task_succeeded_display_event_falls_back_to_answer_when_edit_fails() -> None:
+    dispatcher, sender, messenger, _, _ = _build_dispatcher()
+    lifecycle_message = MagicMock()
+    messenger.edit_result = False
+
+    await dispatcher.execute_display_event(
+        DisplayEvent(
+            kind=DisplayEventKind.TASK_SUCCEEDED,
+            payload=TaskSucceededDisplayPayload(task_id="task-123456", duration="1.25s", truncated=False, exit_code=7),
+        ),
+        lifecycle_message=lifecycle_message,
+    )
+
+    assert sender.events == ["flush"]
+    assert messenger.edits == [(lifecycle_message, "✅ 完成 [task-123] 1.25s")]
+    assert messenger.answers == ["✅ 完成 [task-123] 1.25s"]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "expected"),
+    [
+        (EventType.FAILED, "❌ 失败 [task-123] 2.00s\nboom（输出已截断）"),
+        (EventType.TIMEOUT, "⏰ 超时 [task-123] 2.00s\nboom（输出已截断）"),
+        (EventType.CANCELED, "🚫 已取消 [task-123] 2.00s\nboom（输出已截断）"),
+    ],
+)
+async def test_task_failed_display_events_render_existing_text(event_type: EventType, expected: str) -> None:
+    dispatcher, sender, messenger, _, _ = _build_dispatcher()
+    lifecycle_message = MagicMock()
+
+    await dispatcher.execute_display_event(
+        DisplayEvent(
+            kind=DisplayEventKind.TASK_FAILED,
+            payload=TaskFailedDisplayPayload(
+                event_type=event_type,
+                task_id="task-123456",
+                error_text="boom",
+                duration="2.00s",
+                truncated=True,
+            ),
+        ),
+        lifecycle_message=lifecycle_message,
+    )
+
+    assert sender.events == ["flush"]
+    assert messenger.edits == [(lifecycle_message, expected)]
+    assert messenger.answers == []
+
+
+async def test_task_failed_display_event_without_message_falls_back_and_hides_dash_error() -> None:
+    dispatcher, sender, messenger, _, _ = _build_dispatcher()
+    messenger.edit_result = False
+
+    await dispatcher.execute_display_event(
+        DisplayEvent(
+            kind=DisplayEventKind.TASK_FAILED,
+            payload=TaskFailedDisplayPayload(
+                event_type=EventType.FAILED,
+                task_id="task-123456",
+                error_text="-",
+                duration="2.00s",
+                truncated=False,
+            ),
+        )
+    )
+
+    assert sender.events == ["flush"]
+    assert messenger.edits == [(None, "❌ 失败 [task-123] 2.00s")]
+    assert messenger.answers == ["❌ 失败 [task-123] 2.00s"]
 
 
 async def test_buffer_text_pushes_without_flush() -> None:

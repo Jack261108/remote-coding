@@ -9,6 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 from app.bot.handlers import run_event_streamer as run_event_streamer_module
+from app.bot.handlers.run_display_models import (
+    DisplayEvent,
+    DisplayEventKind,
+    StreamTextDisplayPayload,
+    TaskFailedDisplayPayload,
+    TaskSucceededDisplayPayload,
+)
 from app.bot.handlers.run_event_streamer import RunEventStreamer
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus
 
@@ -23,18 +30,20 @@ class DummyTaskService:
 
 class DummyDispatcher:
     def __init__(self) -> None:
-        self.pushed: list[str] = []
+        self.display_events: list[tuple[DisplayEvent, object | None]] = []
         self.flushed = 0
 
-    async def push_text(self, text: str) -> bool:
-        self.pushed.append(text)
-        return True
+    async def execute_display_event(self, event: DisplayEvent, *, lifecycle_message: object | None = None) -> None:
+        self.display_events.append((event, lifecycle_message))
 
     async def flush(self) -> bool:
         self.flushed += 1
         return True
 
     async def emit_presenter_messages(self, **kwargs) -> None:
+        return None
+
+    async def emit_structured_reply(self, reply) -> None:
         return None
 
 
@@ -57,6 +66,15 @@ class DummyMessenger:
 
 
 class DummyPresenter:
+    has_emitted_structured_reply = False
+    has_announced_fallback = False
+
+    def limit_reply_cursor(self, *, max_reply_started_at: datetime) -> None:
+        return None
+
+    async def wait_for_initial_update(self, *, timeout_sec: float) -> bool:
+        return False
+
     def freeze_reply_cursor(self) -> None:
         return None
 
@@ -81,13 +99,18 @@ def _status() -> TaskRecord:
     )
 
 
-def _streamer(events: list[CLIEvent]) -> tuple[RunEventStreamer, DummyDispatcher]:
+def _streamer(
+    events: list[CLIEvent],
+    *,
+    interactive: bool = False,
+    status: TaskRecord | None = None,
+) -> tuple[RunEventStreamer, DummyDispatcher]:
     task = SimpleNamespace(task_id="t1", provider="claude_code", session_id="s1", workdir="/tmp")
-    start = SimpleNamespace(task=task, events=_events(events), interactive=False)
+    start = SimpleNamespace(task=task, events=_events(events), interactive=interactive)
     dispatcher = DummyDispatcher()
     streamer = RunEventStreamer(
         start=start,
-        task_service=DummyTaskService(_status()),
+        task_service=DummyTaskService(status or _status()),
         user_id=42,
         presenter=DummyPresenter(),
         dispatcher=dispatcher,
@@ -112,7 +135,66 @@ async def test_stream_events_does_not_log_raw_stdout_or_stderr_at_info(caplog) -
     await streamer.stream_events()
 
     assert secret not in caplog.text
-    assert dispatcher.pushed == [f"stdout {secret}\n", f"[stderr] stderr {secret}\n"]
+    assert [event.kind for event, _ in dispatcher.display_events] == [
+        DisplayEventKind.STREAM_TEXT,
+        DisplayEventKind.STREAM_TEXT,
+        DisplayEventKind.TASK_SUCCEEDED,
+    ]
+    stdout_payload = dispatcher.display_events[0][0].payload
+    stderr_payload = dispatcher.display_events[1][0].payload
+    success_payload = dispatcher.display_events[2][0].payload
+    assert stdout_payload == StreamTextDisplayPayload(text=f"stdout {secret}\n")
+    assert stderr_payload == StreamTextDisplayPayload(text=f"stderr {secret}\n", is_stderr=True)
+    assert success_payload == TaskSucceededDisplayPayload(task_id="t1", duration="-", truncated=False, exit_code=0)
+    assert dispatcher.flushed == 0
+
+
+@pytest.mark.asyncio
+async def test_interactive_stream_skips_raw_stdout_and_stderr() -> None:
+    streamer, dispatcher = _streamer(
+        [
+            CLIEvent(type=EventType.STDOUT, task_id="t1", content="stdout"),
+            CLIEvent(type=EventType.STDERR, task_id="t1", content="stderr"),
+            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
+        ],
+        interactive=True,
+    )
+
+    await streamer.stream_events()
+
+    assert [event.kind for event, _ in dispatcher.display_events] == [DisplayEventKind.TASK_SUCCEEDED]
+
+
+@pytest.mark.parametrize("event_type", [EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED])
+@pytest.mark.asyncio
+async def test_terminal_errors_emit_normalized_task_failed_display_event(event_type: EventType) -> None:
+    status = _status()
+    status.output_truncated = True
+    streamer, dispatcher = _streamer(
+        [
+            CLIEvent(
+                type=event_type,
+                task_id="t1",
+                error="TGCLI_BEGIN\r\n\x1b[31mboom\x1b[0m  \r\nTGCLI_DONE",
+            )
+        ],
+        status=status,
+    )
+
+    await streamer.stream_events()
+
+    assert len(dispatcher.display_events) == 1
+    event, lifecycle_message = dispatcher.display_events[0]
+    assert event.kind == DisplayEventKind.TASK_FAILED
+    assert event.payload == TaskFailedDisplayPayload(
+        event_type=event_type,
+        task_id="t1",
+        error_text="boom",
+        duration="-",
+        truncated=True,
+    )
+    assert lifecycle_message is None
+    assert dispatcher.flushed == 0
 
 
 @pytest.mark.asyncio

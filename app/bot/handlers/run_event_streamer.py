@@ -8,6 +8,13 @@ from typing import Any
 
 from aiogram.types import BufferedInputFile, FSInputFile, Message
 
+from app.bot.handlers.run_display_models import (
+    DisplayEvent,
+    DisplayEventKind,
+    StreamTextDisplayPayload,
+    TaskFailedDisplayPayload,
+    TaskSucceededDisplayPayload,
+)
 from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter
@@ -33,36 +40,6 @@ async def _load_status_summary(task_service: TaskService, task_id: str, user_id:
 def _build_created_message(*, task_id: str, provider: str, session_id: str) -> str:
     display_task_id = short_id(task_id)
     return f"⏳ 处理中… [{display_task_id}]"
-
-
-def _build_success_message(*, task_id: str, exit_code: int | None, duration: str, truncated: bool) -> str:
-    display_task_id = short_id(task_id)
-    parts = [f"✅ 完成 [{display_task_id}] {duration}"]
-    if truncated:
-        parts.append("（输出已截断）")
-    return " ".join(parts)
-
-
-def _build_error_message(*, event_type: EventType, task_id: str, error_text: str, duration: str, truncated: bool) -> str:
-    display_task_id = short_id(task_id)
-    icon_map = {
-        EventType.FAILED: "❌",
-        EventType.TIMEOUT: "⏰",
-        EventType.CANCELED: "🚫",
-    }
-    label_map = {
-        EventType.FAILED: "失败",
-        EventType.TIMEOUT: "超时",
-        EventType.CANCELED: "已取消",
-    }
-    icon = icon_map.get(event_type, "❌")
-    label = label_map.get(event_type, "错误")
-    parts = [f"{icon} {label} [{display_task_id}] {duration}"]
-    if error_text and error_text != "-":
-        parts.append(f"\n{error_text}")
-    if truncated:
-        parts.append("（输出已截断）")
-    return "".join(parts)
 
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -395,8 +372,15 @@ class RunEventStreamer:
                             "content_chars": len(event.content),
                         },
                     )
-                    prefix = "" if event.type == EventType.STDOUT else "[stderr] "
-                    await self._dispatcher.push_text(f"{prefix}{event.content}")
+                    await self._dispatcher.execute_display_event(
+                        DisplayEvent(
+                            kind=DisplayEventKind.STREAM_TEXT,
+                            payload=StreamTextDisplayPayload(
+                                text=event.content,
+                                is_stderr=event.type == EventType.STDERR,
+                            ),
+                        )
+                    )
                     continue
 
                 if event.type == EventType.STARTED:
@@ -434,23 +418,32 @@ class RunEventStreamer:
                 if self._start.interactive:
                     async with self._emit_lock:
                         await self._dispatcher.emit_presenter_messages(log_missing=True)
-                await self._dispatcher.flush()
+                status_display = self._status_display
+                lifecycle_message = self._lifecycle_message
+                status_display_success = event.type == EventType.EXITED and status_display is not None and lifecycle_message is not None
+                if status_display_success:
+                    await self._dispatcher.flush()
                 await self._stop_spinner()
                 duration, truncated = await _load_status_summary(self._task_service, self._start.task.task_id, self._user_id)
 
                 if event.type == EventType.EXITED:
-                    if self._status_display and self._lifecycle_message:
-                        await self._messenger.delete_message_safely(self._lifecycle_message)
-                        await self._status_display.clear(chat_id=self._lifecycle_message.chat.id, task_id=self._start.task.task_id)
+                    if status_display_success:
+                        assert status_display is not None and lifecycle_message is not None
+                        await self._messenger.delete_message_safely(lifecycle_message)
+                        await status_display.clear(chat_id=lifecycle_message.chat.id, task_id=self._start.task.task_id)
                     else:
-                        success_msg = _build_success_message(
-                            task_id=self._start.task.task_id,
-                            exit_code=event.exit_code,
-                            duration=duration,
-                            truncated=truncated,
+                        await self._dispatcher.execute_display_event(
+                            DisplayEvent(
+                                kind=DisplayEventKind.TASK_SUCCEEDED,
+                                payload=TaskSucceededDisplayPayload(
+                                    task_id=self._start.task.task_id,
+                                    duration=duration,
+                                    truncated=truncated,
+                                    exit_code=event.exit_code,
+                                ),
+                            ),
+                            lifecycle_message=self._lifecycle_message,
                         )
-                        if not await self._messenger.edit_message_safely(self._lifecycle_message, success_msg):
-                            await self._messenger.answer_safely(success_msg)
                     await self._maybe_auto_export()
                     # Generate and send diff on successful completion
                     await self._generate_and_send_diff()
@@ -467,15 +460,19 @@ class RunEventStreamer:
                             "duration": duration,
                         },
                     )
-                    error_msg = _build_error_message(
-                        event_type=event.type,
-                        task_id=self._start.task.task_id,
-                        error_text=error_text,
-                        duration=duration,
-                        truncated=truncated,
+                    await self._dispatcher.execute_display_event(
+                        DisplayEvent(
+                            kind=DisplayEventKind.TASK_FAILED,
+                            payload=TaskFailedDisplayPayload(
+                                event_type=event.type,
+                                task_id=self._start.task.task_id,
+                                error_text=error_text,
+                                duration=duration,
+                                truncated=truncated,
+                            ),
+                        ),
+                        lifecycle_message=self._lifecycle_message,
                     )
-                    if not await self._messenger.edit_message_safely(self._lifecycle_message, error_msg):
-                        await self._messenger.answer_safely(error_msg)
                     # Clear status display
                     if self._status_display and self._lifecycle_message:
                         await self._status_display.clear(chat_id=self._lifecycle_message.chat.id, task_id=self._start.task.task_id)
