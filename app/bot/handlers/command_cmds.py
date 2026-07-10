@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -12,6 +13,9 @@ from app.bot.handlers.user_utils import extract_user_id
 from app.domain.models import SessionContext
 from app.services.claude_command_discovery import ClaudeCommand, discover_commands
 from app.services.task_service import TaskService
+
+if TYPE_CHECKING:
+    from app.services.permission_gateway import PermissionGateway
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,7 @@ def register_cmds_handler(
     router: Router,
     *,
     task_service: TaskService,
+    permission_gateway: PermissionGateway | None = None,
 ) -> None:
     @router.message(Command("cmds"))
     async def command_cmds(message: Message, session: SessionContext) -> None:
@@ -123,4 +128,5 @@ def register_cmds_handler(
                 workdir=session.workdir,
                 diff_generator=None,
                 result_exporter=None,
+                permission_gateway=permission_gateway,
             )

@@ -429,7 +429,11 @@ def create_router(
     cmds_active_router.message.middleware(guard_active)
     cmds_active_router.callback_query.middleware(CallbackValidatorMiddleware(prefix="clcmd"))
     cmds_active_router.callback_query.middleware(guard_active)
-    register_cmds_handler(cmds_active_router, task_service=task_service)
+    register_cmds_handler(
+        cmds_active_router,
+        task_service=task_service,
+        permission_gateway=permission_gateway,
+    )
     router.include_router(cmds_active_router)
 
     # 可选处理器（依赖服务可用性）

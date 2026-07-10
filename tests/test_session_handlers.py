@@ -46,6 +46,18 @@ def _find_handler_by_name(router, name: str):
     return None
 
 
+def _find_callback_handler_by_name(router, name: str):
+    """Search main router and sub-routers for a callback handler by function name."""
+    for handler in router.callback_query.handlers:
+        if handler.callback.__name__ == name:
+            return handler.callback
+    for sub in router.sub_routers:
+        result = _find_callback_handler_by_name(sub, name)
+        if result is not None:
+            return result
+    return None
+
+
 class _DummyEventObserver:
     def __init__(self, handlers: list) -> None:
         self._handlers = handlers
@@ -817,3 +829,37 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
     assert run_mock.await_args.kwargs["structured_reply_pump_interval_sec"] == 0.77
     assert run_mock.await_args.kwargs["spinner_initial_delay_sec"] == 0.88
     assert run_mock.await_args.kwargs["spinner_interval_sec"] == 0.99
+
+
+@pytest.mark.asyncio
+async def test_router_clcmd_callback_passes_permission_gateway_to_stream(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session_service = _session_service(tmp_path)
+    service = SimpleNamespace(available_providers=lambda: ["claude_code"])
+    session, _ = await session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    permission_gateway = object()
+    run_mock = AsyncMock()
+    monkeypatch.setattr("app.bot.handlers.command_run.run_prompt_and_stream", run_mock)
+
+    router = create_router(
+        settings=make_settings(tmp_path),
+        task_service=service,
+        session_service=session_service,
+        permission_gateway=permission_gateway,
+    )
+    callback_handler = _find_callback_handler_by_name(router, "handle_cmd_callback")
+    assert callback_handler is not None, "handle_cmd_callback handler not found"
+    callback = DummyCallbackQuery("clcmd:/verify", message=DummyMessage("/cmds"))
+
+    await callback_handler(callback, session=session)
+
+    run_mock.assert_awaited_once()
+    assert run_mock.await_args.kwargs["prompt"] == "/verify"
+    assert run_mock.await_args.kwargs["provider"] == "claude_code"
+    assert run_mock.await_args.kwargs["workdir"] == str(tmp_path)
+    assert run_mock.await_args.kwargs["permission_gateway"] is permission_gateway
