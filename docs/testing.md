@@ -6,18 +6,16 @@
 
 ```
 tests/
-├── unit/                    # 单元测试
-│   └── test_session_actions.py
-├── property/                # 属性测试
-│   └── test_auto_approve_slot_aba.py
-├── test_bootstrap_hooks.py  # 集成测试
-├── test_command_list.py
-├── test_external_binding_reaper.py
-├── test_file_upload_handler.py
-├── test_pending_lock_cleanup.py
-├── test_session_handlers.py
-└── ...
+├── conftest.py              # pytest fixtures
+├── unit/                    # 纯单元测试（如 test_callback_validator.py、test_periodic_task.py）
+├── property/                # 属性测试（Hypothesis，如 test_auto_approve_slot_aba.py、test_binding_store_properties.py）
+├── integration/             # 集成测试（跨组件，如 test_external_session_pipeline.py、test_main_startup_flow.py）
+├── fakes/                   # 测试替身（cli.py、telegram.py、structured.py）
+└── test_*.py                # 顶层测试文件（约 90+ 个，覆盖 bootstrap、command_*、session_*、
+                             # external_binding_*、claude_* 等）
 ```
+
+> 子目录按测试类型划分；顶层 `test_*.py` 多为组件级测试。完整文件清单见 `ls tests/`，本节仅列结构骨架。
 
 ## 测试类型
 
@@ -305,16 +303,18 @@ async def test_with_patch() -> None:
 
 ## 测试配置
 
-### pytest.ini
+### pytest 配置
 
-```ini
-[pytest]
-testpaths = tests
-python_files = test_*.py
-python_classes = Test*
-python_functions = test_*
-asyncio_mode = auto
+项目不使用独立的 `pytest.ini`，测试配置在 `pyproject.toml` 的 `[tool.pytest.ini_options]` 段：
+
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 ```
+
+`asyncio_mode = "auto"` 让 `pytest-asyncio` 自动识别异步测试函数，无需显式 `@pytest.mark.asyncio`。
+其他常用项（`python_files`、`python_classes`、`python_functions`）均沿用 pytest 默认值（`test_*.py` / `Test*` / `test_*`），故未在配置中显式列出。
 
 ### conftest.py
 
@@ -339,23 +339,47 @@ def test_settings() -> Settings:
 ### GitHub Actions
 
 ```yaml
-# .github/workflows/test.yml
-name: Tests
+# .github/workflows/ci.yml （精简副本，以源文件为准）
+name: CI
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: pip install -e ".[dev]"
-      - run: pytest --cov=app --cov-report=xml
-      - uses: codecov/codecov-action@v3
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check app tests
+      - run: python -m ruff format --check app tests
+      - run: python -m mypy app/
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q --cov=app --cov-report=term-missing
+      - uses: actions/upload-artifact@v4
+        if: matrix.python-version == '3.11'
+        with:
+          name: coverage-report
+          path: .coverage
 ```
+
+> 实际工作流以 `.github/workflows/ci.yml` 为准。CI 矩阵跨 Python 3.11/3.12/3.13，项目 `requires-python >= 3.11`。
 
 ## 调试测试
 
@@ -393,9 +417,9 @@ pytest --cov=app --cov-report=term-missing
 ### Q: 异步测试不工作？
 
 确保：
-1. 使用 `@pytest.mark.asyncio` 装饰器
+1. 使用 `@pytest.mark.asyncio` 装饰器（项目已设 `asyncio_mode = "auto"`，亦可不写）
 2. 安装了 `pytest-asyncio`
-3. 在 `pytest.ini` 中配置 `asyncio_mode = auto`
+3. 在 `pyproject.toml` 的 `[tool.pytest.ini_options]` 中确认 `asyncio_mode = "auto"`
 
 ### Q: Mock 不生效？
 

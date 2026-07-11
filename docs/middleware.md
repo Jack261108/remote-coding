@@ -109,8 +109,6 @@ from app.bot.middleware.session_guard import SessionGuardMiddleware
 guard_basic = SessionGuardMiddleware(
     session_service,
     require_active=False,
-    skip_commands=("/start", "/session", "/claude"),
-    skip_callback_prefixes=("ext_perm:", "sess:"),
 )
 
 # 活跃守卫：要求会话处于活跃状态
@@ -132,8 +130,6 @@ router.include_router(active_router)
 **参数**:
 - `session_service`: 会话服务实例
 - `require_active`: 是否要求会话处于活跃状态
-- `skip_commands`: 跳过守卫的命令列表
-- `skip_callback_prefixes`: 跳过守卫的回调前缀列表
 
 **注入数据**:
 - `data["session"]`: 验证通过后注入的 `SessionContext` 对象

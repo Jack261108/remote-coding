@@ -70,8 +70,15 @@ app/
 │   │   ├── codex_cli.py                 # Codex CLI 适配器
 │   │   ├── gemini_cli.py                # Gemini CLI 适配器
 │   │   └── factory.py                   # 适配器工厂
-│   └── process/
-│       └── subprocess_runner.py         # 进程执行与事件流
+│   └── process/                        # 进程管理适配器
+│       ├── base_runner.py               # 进程执行基类
+│       ├── subprocess_runner.py         # subprocess 执行与事件流
+│       ├── tmux_runner.py                # Tmux 会话执行器（组合三个 Mixin）
+│       ├── tmux_session.py              # Tmux 会话管理 Mixin
+│       ├── tmux_commands.py             # Tmux 命令 Mixin
+│       ├── tmux_log.py                   # Tmux 日志 Mixin
+│       ├── claude_terminal_facade.py     # Claude 终端门面
+│       └── pty_injector.py              # PTY 输入注入
 ├── bot/
 │   ├── router.py                        # 路由
 │   ├── handlers/
@@ -88,7 +95,9 @@ app/
 │   │   ├── command_claude.py            # /claude 命令处理
 │   │   ├── command_permission.py        # 权限命令处理
 │   │   ├── command_user_question.py     # 用户问题处理
+│   │   ├── command_utils.py             # 命令工具
 │   │   ├── file_upload.py               # 文件上传处理
+│   │   ├── run_display_models.py        # 运行展示模型
 │   │   ├── run_event_streamer.py        # 运行事件流
 │   │   ├── run_presenter_dispatcher.py  # 运行展示调度器
 │   │   ├── run_telegram_messenger.py    # Telegram 消息发送
@@ -96,13 +105,26 @@ app/
 │   │   ├── external_permission.py       # 外部权限处理
 │   │   ├── external_session.py          # 外部会话处理
 │   │   ├── admin_challenge.py           # 管理员验证
+│   │   ├── user_utils.py                # 用户工具
 │   │   └── callback_utils.py            # 回调工具
 │   ├── middleware/
 │   │   ├── auth.py                      # 鉴权中间件
-│   │   └── rate_limit.py                # 限流中间件
+│   │   ├── rate_limit.py                # 限流中间件
+│   │   ├── error_handling.py            # 错误处理中间件
+│   │   ├── session_guard.py            # 会话守卫中间件
+│   │   └── callback_validator.py        # 回调验证中间件
 │   └── presenters/
 │       ├── chunk_sender.py              # 分片发送
-│       └── permission_message_builder.py # 权限消息构建
+│       ├── permission_message_builder.py # 权限消息构建
+│       ├── session_text.py             # 会话文本
+│       ├── structured_reply_messages.py # 结构化回复消息
+│       ├── structured_reply_models.py   # 结构化回复模型
+│       ├── structured_reply_presenter.py # 结构化回复展示
+│       ├── structured_reply_snapshot_loader.py # 结构化回复快照加载
+│       ├── structured_reply_text.py     # 结构化回复文本
+│       ├── structured_reply_trackers.py # 结构化回复追踪
+│       ├── telegram_formatting.py      # Telegram 格式化
+│       └── tool_message_manager.py      # 工具消息管理
 ├── services/
 │   ├── task_service.py                  # 任务服务
 │   ├── session_service.py               # 会话服务
@@ -150,15 +172,32 @@ app/
 │   ├── structured_session_resolver.py   # 结构化会话解析器
 │   ├── task_lifecycle_service.py        # 任务生命周期服务
 │   ├── message_sender.py                # 消息发送器
-│   ├── lock_registry.py                 # 锁注册表
 │   ├── admin_password_service.py        # 管理员密码服务
 │   ├── upload_queue.py                  # 上传队列
 │   ├── upload_cleanup.py                # 上传清理
 │   └── user_question_service.py         # 用户问题服务
-├── domain/
-│   └── ...                              # 领域模型
-└── infra/
-    └── ...                              # 基础设施
+├── domain/                              # 领域模型层
+│   ├── models.py                        # 核心数据模型（SessionContext、TaskRecord）
+│   ├── protocols.py                     # 接口协议定义
+│   ├── session_models.py                # 会话状态模型
+│   ├── session_tombstone.py             # 会话墓碑存储
+│   ├── external_session_models.py       # 外部会话模型
+│   ├── file_models.py                   # 文件相关模型
+│   ├── hook_models.py                  # Hook 事件模型
+│   ├── permission_models.py             # 权限相关模型
+│   └── user_question_models.py          # 用户问题模型
+└── infra/                               # 基础设施层
+    ├── async_utils.py                   # 异步工具
+    ├── file_mtime_utils.py              # 文件 mtime 追踪
+    ├── gitignore_utils.py               # Gitignore 模式加载
+    ├── lock_registry.py                 # 引用计数锁注册表
+    ├── logging.py                       # 日志
+    ├── periodic_task.py                 # 周期性任务基类
+    ├── scan_filter.py                   # 扫描过滤
+    ├── source_text_normalization.py     # 源文本归一化
+    ├── text_formatting.py               # 文本格式化
+    ├── tmux_preflight.py                # Tmux 启动预检
+    └── user_question_constants.py       # 用户问题常量
 
 deploy/
 ├── env/.env.example                     # 配置模板
@@ -167,10 +206,13 @@ deploy/
 
 docs/
 ├── architecture.md                      # 架构文档
-├── middleware.md                         # 中间件文档
+├── middleware.md                        # 中间件文档
 ├── quality.md                           # 质量保证文档
 ├── testing.md                           # 测试文档
-└── claude/                              # Claude 相关文档
+├── module_call_diagram.md               # 模块调用图概览
+├── specs/                               # 设计规格（feature design 文档）
+└── claude/
+    └── plans/                           # Claude 工作计划
 
 scripts/
 ├── quality_check.sh                     # 代码质量门禁脚本
@@ -452,9 +494,6 @@ bash deploy/scripts/healthcheck.sh
 - [质量保证](docs/quality.md)
 - [测试指南](docs/testing.md)
 - [模块调用图](docs/module_call_diagram.md)
-- [会话生命周期](docs/session-lifecycle-issues.md)
-- [代码审查报告](CODE_REVIEW_REPORT.md)
-- [贡献指南](CONTRIBUTING.md)
 
 ## 许可证
 

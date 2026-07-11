@@ -173,12 +173,19 @@ python -m pytest tests/ --cov=app --cov-report=html
 2. 为未覆盖的代码添加测试
 3. 重点关注核心业务逻辑
 
-### Q: 如何跳过 pre-commit 检查？
+### Q: 如何跳过本地钩子检查？
+
+紧急情况下可跳过本地钩子：
 
 ```bash
-# 跳过 pre-commit 检查（不推荐）
+# 跳过 pre-push 检查（mypy + pytest，不推荐）
+git push --no-verify
+
+# 单次跳过 pre-commit 检查（ruff）
 git commit --no-verify -m "commit message"
 ```
+
+注意：`--no-verify` 只会跳过**本地**钩子，**远端 CI 仍会执行完整的检查集**（ruff lint、ruff format 校验、mypy、pytest）。因此该选项只是绕过本地的提前反馈，并不能跳过 CI。详见 [README「开发 / 本地钩子」](../README.md#开发--本地钩子pre-commit)。
 
 ## 最佳实践
 

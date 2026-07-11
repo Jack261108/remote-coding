@@ -34,9 +34,13 @@ app/
 
 - **models.py** - 核心数据模型（SessionContext、TaskRecord 等）
 - **protocols.py** - 接口协议定义
+- **session_models.py** - 会话状态模型
 - **session_tombstone.py** - 会话墓碑存储
+- **external_session_models.py** - 外部会话模型
 - **file_models.py** - 文件相关模型
+- **hook_models.py** - Hook 事件模型
 - **permission_models.py** - 权限相关模型
+- **user_question_models.py** - 用户问题模型
 
 ### 2. 服务层（Services）
 
@@ -80,6 +84,13 @@ Telegram Bot 接口层，处理用户交互。
 - **file_mtime_utils.py** - 文件修改时间追踪
 - **gitignore_utils.py** - Gitignore 模式加载
 - **lock_registry.py** - 引用计数锁注册表
+- **async_utils.py** - 异步工具
+- **logging.py** - 日志工厂
+- **scan_filter.py** - 扫描过滤
+- **source_text_normalization.py** - 源文本归一化
+- **text_formatting.py** - 文本格式化
+- **tmux_preflight.py** - Tmux 启动预检
+- **user_question_constants.py** - 用户问题常量
 
 ## 核心组件
 
@@ -160,7 +171,7 @@ ExternalBindingCleanupTask (PeriodicBackgroundTask)
 
 ```
 /claude 命令 → SessionService.create()
-    → TmuxRunner.create_terminal()
+    → TmuxRunner.ensure_terminal()
         → Claude CLI 启动
             → SessionSupervisor 监控
                 → JSONL 解析和同步
