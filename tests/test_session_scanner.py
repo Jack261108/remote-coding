@@ -27,7 +27,7 @@ def _make_session_file(
     projects_dir: Path,
     encoded_workdir: str,
     session_id: str,
-    human_message: str = "hello world",
+    user_message: str = "hello world",
     mtime: float | None = None,
 ) -> Path:
     session_dir = projects_dir / encoded_workdir
@@ -36,7 +36,7 @@ def _make_session_file(
 
     lines = [
         json.dumps({"type": "permission-mode", "sessionId": session_id}),
-        json.dumps({"type": "human", "message": {"content": [{"type": "text", "text": human_message}]}}),
+        json.dumps({"type": "user", "message": {"content": [{"type": "text", "text": user_message}]}}),
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -57,6 +57,9 @@ class TestEncodeWorkdir:
 
     def test_no_slashes(self, scanner: SessionScanner) -> None:
         assert scanner.encode_workdir("relative") == "relative"
+
+    def test_replaces_dots(self, scanner: SessionScanner) -> None:
+        assert scanner.encode_workdir("/home/user/my.app") == "-home-user-my-app"
 
 
 class TestScan:
@@ -90,7 +93,7 @@ class TestScan:
         session_dir = claude_paths.projects_dir / encoded
         subagents = session_dir / "subagents"
         subagents.mkdir(parents=True)
-        (subagents / "agent-1.jsonl").write_text(json.dumps({"type": "human", "message": {"content": "sub"}}) + "\n")
+        (subagents / "agent-1.jsonl").write_text(json.dumps({"type": "user", "message": {"content": "sub"}}) + "\n")
         _make_session_file(claude_paths.projects_dir, encoded, "main-session")
 
         result = scanner.scan("/work", claude_paths)
@@ -120,7 +123,7 @@ class TestScan:
         session_dir = claude_paths.projects_dir / encoded
         session_dir.mkdir(parents=True)
         path = session_dir / "s1.jsonl"
-        path.write_text(json.dumps({"type": "human", "message": {"content": "plain string content"}}) + "\n")
+        path.write_text(json.dumps({"type": "user", "message": {"content": "plain string content"}}) + "\n")
 
         result = scanner.scan("/work", claude_paths)
         assert result[0].summary == "plain string content"

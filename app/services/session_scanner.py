@@ -25,8 +25,8 @@ class SessionScanner:
 
     @staticmethod
     def encode_workdir(workdir: str) -> str:
-        """Encode a workdir path the same way Claude CLI does: replace `/` with `-`."""
-        return workdir.replace("/", "-")
+        """Encode a workdir path the same way Claude CLI does: replace `/` and `.` with `-`."""
+        return workdir.replace("/", "-").replace(".", "-")
 
     def scan(
         self,
@@ -59,7 +59,7 @@ class SessionScanner:
                 logger.debug("Cannot stat %s, skipping", path)
                 continue
 
-            summary = self._extract_first_human_message(path)
+            summary = self._extract_first_user_message(path)
 
             sessions.append(
                 SessionInfo(
@@ -72,8 +72,8 @@ class SessionScanner:
         sessions.sort(key=lambda s: s.modified_at, reverse=True)
         return sessions[:max_results]
 
-    def _extract_first_human_message(self, path: Path) -> str:
-        """Extract the content of the first human message from a JSONL file."""
+    def _extract_first_user_message(self, path: Path) -> str:
+        """Extract the content of the first user message from a JSONL file."""
         try:
             with path.open("r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
@@ -85,7 +85,7 @@ class SessionScanner:
                     except json.JSONDecodeError:
                         continue
 
-                    if payload.get("type") != "human":
+                    if payload.get("type") != "user":
                         continue
 
                     message = payload.get("message")
