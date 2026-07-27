@@ -97,6 +97,7 @@ class ExternalSessionBinder:
             jsonl_path=str(jsonl_path),
             pid=captured_pid,
             title=unbound.title,
+            reply_cursor_initialized=True,
         )
         self._binding_store.save_binding(binding)
 

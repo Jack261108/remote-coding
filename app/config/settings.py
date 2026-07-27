@@ -145,6 +145,7 @@ class Settings(BaseSettings):
 
     # External session settings
     external_session_stale_timeout_sec: float = Field(600.0, alias="EXTERNAL_SESSION_STALE_TIMEOUT_SEC")
+    external_push_reply_enabled: bool = Field(True, alias="EXTERNAL_PUSH_REPLY_ENABLED")
     tombstone_ttl_sec: int = Field(3600, alias="TOMBSTONE_TTL_SEC")
     push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
 

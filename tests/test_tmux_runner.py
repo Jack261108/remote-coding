@@ -2540,6 +2540,63 @@ async def test_terminate_session_returns_false_when_kill_fails_and_session_remai
 
 
 @pytest.mark.asyncio
+async def test_cancel_queued_persistent_task_does_not_interrupt_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path))
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_user_1",
+        log_file=tmp_path / "queued.log",
+        exit_file=tmp_path / "queued.exit",
+        task_id="task-queued",
+        workdir=str(tmp_path),
+        persistent_terminal=True,
+    )
+    runner._tasks[meta.task_id] = meta
+    interrupted: list[str] = []
+
+    async def fake_interrupt(session_name: str) -> bool:
+        interrupted.append(session_name)
+        return True
+
+    monkeypatch.setattr(runner, "_interrupt_session", fake_interrupt)
+
+    assert await runner.cancel("task-queued") is True
+    assert meta.cancel_requested is True
+    assert interrupted == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_started_persistent_task_interrupts_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = TmuxRunner(data_dir=str(tmp_path))
+    meta = _TmuxTaskMeta(
+        session_name="tgcli_user_1",
+        log_file=tmp_path / "started.log",
+        exit_file=tmp_path / "started.exit",
+        task_id="task-started",
+        workdir=str(tmp_path),
+        persistent_terminal=True,
+        command_started_at=utc_now(),
+    )
+    runner._tasks[meta.task_id] = meta
+    interrupted: list[str] = []
+
+    async def fake_interrupt(session_name: str) -> bool:
+        interrupted.append(session_name)
+        return True
+
+    monkeypatch.setattr(runner, "_interrupt_session", fake_interrupt)
+
+    assert await runner.cancel("task-started") is True
+    assert meta.cancel_requested is True
+    assert interrupted == ["tgcli_user_1"]
+
+
+@pytest.mark.asyncio
 async def test_cancel_returns_false_when_ephemeral_terminate_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

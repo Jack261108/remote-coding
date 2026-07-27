@@ -41,12 +41,16 @@ class ExternalBinding:
     title: str | None = None
     last_activity_at_init: InitVar[datetime | None] = None
     last_activity_at: datetime = field(init=False)
+    last_pushed_reply_turn_id: str | None = None
+    reply_cursor_initialized: bool = False
 
     def __post_init__(self, last_activity_at_init: datetime | None) -> None:
         # Default activity timestamp to bind time so existing callers that don't
         # pass `last_activity_at` get a sensible non-None value. The stored
         # attribute is always a `datetime`, never None.
         self.last_activity_at = last_activity_at_init if last_activity_at_init is not None else self.bound_at
+        if self.last_pushed_reply_turn_id is not None:
+            self.reply_cursor_initialized = True
 
 
 @dataclass

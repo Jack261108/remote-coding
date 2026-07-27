@@ -140,6 +140,7 @@ class TestSuccessfulBind:
             assert binding.user_id == user_id
             assert binding.session_id == event.session_id
             assert binding.cwd == event.cwd
+            assert binding.reply_cursor_initialized is True
 
             # JSONL path is resolved correctly
             expected_path = _resolve_jsonl_path(

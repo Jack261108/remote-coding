@@ -68,6 +68,9 @@ class _Container(HookHandlingMixin):
     """Minimal container satisfying HookHandlingMixin's hasattr() checks."""
 
     def __init__(self) -> None:
+        self.settings = SimpleNamespace(external_push_reply_enabled=True)
+        self.session_supervisor = SimpleNamespace(watch=MagicMock())
+        self.scheduled_jsonl_syncs: list[tuple[str, str]] = []
         self.push_notifier = MagicMock()
         self.push_notifier.notify_permission_request = AsyncMock(return_value=True)
         self.push_notifier.notify_user_question = AsyncMock(return_value=True)
@@ -94,7 +97,7 @@ class _Container(HookHandlingMixin):
         pass
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
-        pass
+        self.scheduled_jsonl_syncs.append((session_id, cwd))
 
     async def _bind_hook_session(self, event) -> None:
         pass
@@ -220,6 +223,30 @@ async def test_pipeline_bound_no_auto_approve_sends_push_notification() -> None:
 
     assert "push_notification" in executed_stages
     container.push_notifier.notify_permission_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bound_stop_uses_immediate_sync_without_debounced_duplicate() -> None:
+    container = await _make_container(auto_approve_active=False)
+    event = HookEvent(
+        session_id="sess-123",
+        cwd="/home/user/project",
+        event="Stop",
+        status="waiting_for_input",
+    )
+    stages = container._build_stage_list(event, _make_ownership(state="bound", user_id=42))
+
+    for stage_name, stage_coro in stages:
+        if stage_name == "jsonl_sync_scheduling":
+            await stage_coro
+        elif hasattr(stage_coro, "close"):
+            stage_coro.close()
+
+    container.session_supervisor.watch.assert_called_once_with(
+        session_id="sess-123",
+        workdir="/home/user/project",
+    )
+    assert container.scheduled_jsonl_syncs == []
 
 
 @pytest.mark.asyncio

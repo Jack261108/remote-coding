@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
@@ -13,6 +14,7 @@ from app.domain.external_session_models import SessionOrigin as ExternalSessionO
 from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus, utc_now
 from app.domain.session_models import (
+    ConversationTurn,
     FileSyncedPayload,
     HookReceivedPayload,
     PermissionDecisionPayload,
@@ -23,6 +25,7 @@ from app.domain.session_models import (
     SessionState,
 )
 from app.domain.user_question_models import extract_user_question_prompts
+from app.infra.text_formatting import ensure_aware_utc
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 
 logger = logging.getLogger(__name__)
@@ -30,6 +33,16 @@ logger = logging.getLogger(__name__)
 
 def _is_session_end_event(event: HookEvent) -> bool:
     return event.event == "SessionEnd" or event.status == "ended"
+
+
+def _is_completed_assistant_reply(turn: ConversationTurn) -> bool:
+    return turn.role == "assistant" and turn.is_complete and bool(turn.text.strip())
+
+
+class _BoundReplyPushResult(StrEnum):
+    NO_NEW_REPLY = "no_new_reply"
+    DELIVERED = "delivered"
+    DELIVERY_FAILED = "delivery_failed"
 
 
 class _StageShortCircuitError(Exception):
@@ -69,6 +82,29 @@ class JsonlSyncMixin(AppContainerBase):
                     type=SessionEventType.FILE_SYNCED,
                     payload=FileSyncedPayload.from_mapping(snapshot.to_payload()),
                 )
+            )
+
+    async def _sync_and_baseline_external_reply(self, session_id: str, cwd: str) -> None:
+        await self.sync_claude_session(session_id, cwd)
+        async with self._external_reply_delivery_locks.lock(session_id):
+            async with self._session_event_locks.lock(session_id):
+                state = self.structured_session_store.get(session_id)
+                turns = tuple(state.turns) if state is not None else ()
+            binding = self.external_binding_store.get_binding(session_id)
+            if binding is None or binding.last_pushed_reply_turn_id is not None:
+                return
+            bound_at = ensure_aware_utc(binding.bound_at)
+            latest_reply = next(
+                (
+                    turn
+                    for turn in reversed(turns)
+                    if _is_completed_assistant_reply(turn) and ensure_aware_utc(turn.ended_at or turn.started_at) <= bound_at
+                ),
+                None,
+            )
+            self.external_binding_store.set_reply_cursor(
+                session_id,
+                latest_reply.turn_id if latest_reply is not None else None,
             )
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
@@ -373,8 +409,11 @@ class HookHandlingMixin(AppContainerBase):
                 )
             )
 
-            # JSONL sync scheduling
+            # Stop is flushed synchronously by reply delivery; only register its watcher here.
             async def _schedule_jsonl_bound() -> None:
+                if event.event == "Stop" and not _is_session_end_event(event) and self.settings.external_push_reply_enabled:
+                    self.session_supervisor.watch(session_id=event.session_id, workdir=event.cwd)
+                    return
                 self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
 
             stages.append(("jsonl_sync_scheduling", _schedule_jsonl_bound()))
@@ -579,11 +618,92 @@ class HookHandlingMixin(AppContainerBase):
                 title=_title,
             )
         elif event.event == "Stop":
-            await self.push_notifier.notify_session_end(
-                user_id=user_id,
-                session_id=event.session_id,
-                cwd=event.cwd,
+            if _is_session_end_event(event):
+                await self.push_notifier.notify_session_end(
+                    user_id=user_id,
+                    session_id=event.session_id,
+                    cwd=event.cwd,
+                )
+                return
+            result = await self._push_bound_assistant_replies(event, user_id)
+            if result != _BoundReplyPushResult.DELIVERED:
+                await self.push_notifier.notify_session_end(
+                    user_id=user_id,
+                    session_id=event.session_id,
+                    cwd=event.cwd,
+                )
+
+    async def _push_bound_assistant_replies(self, event: HookEvent, user_id: int) -> _BoundReplyPushResult:
+        if not self.settings.external_push_reply_enabled:
+            return _BoundReplyPushResult.NO_NEW_REPLY
+
+        try:
+            await self.sync_claude_session(event.session_id, event.cwd)  # type: ignore[attr-defined]
+        except Exception:
+            logger.exception(
+                "bound assistant reply sync failed",
+                extra={"session_id": event.session_id, "user_id": user_id},
             )
+            self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
+            return _BoundReplyPushResult.DELIVERY_FAILED
+
+        async with self._external_reply_delivery_locks.lock(event.session_id):
+            async with self._session_event_locks.lock(event.session_id):
+                state = self.structured_session_store.get(event.session_id)
+                turns = tuple(state.turns) if state is not None else ()
+            binding = self.external_binding_store.get_binding(event.session_id)
+            if binding is None:
+                return _BoundReplyPushResult.NO_NEW_REPLY
+            if not binding.reply_cursor_initialized:
+                latest_reply = next((turn for turn in reversed(turns) if _is_completed_assistant_reply(turn)), None)
+                self.external_binding_store.set_reply_cursor(
+                    event.session_id,
+                    latest_reply.turn_id if latest_reply is not None else None,
+                )
+                logger.info(
+                    "legacy bound assistant reply cursor initialized",
+                    extra={"session_id": event.session_id, "user_id": user_id},
+                )
+                return _BoundReplyPushResult.NO_NEW_REPLY
+
+            cursor_id = binding.last_pushed_reply_turn_id
+            cursor_index = next(
+                (index for index, turn in enumerate(turns) if turn.turn_id == cursor_id),
+                None,
+            )
+            if cursor_index is not None:
+                pending_replies = [turn for turn in turns[cursor_index + 1 :] if _is_completed_assistant_reply(turn)]
+            else:
+                if cursor_id is not None:
+                    logger.warning(
+                        "bound assistant reply cursor not found; recovering from bind time",
+                        extra={"session_id": event.session_id, "user_id": user_id, "turn_id": cursor_id},
+                    )
+                bound_at = ensure_aware_utc(binding.bound_at)
+                pending_replies = [
+                    turn
+                    for turn in turns
+                    if _is_completed_assistant_reply(turn) and ensure_aware_utc(turn.ended_at or turn.started_at) > bound_at
+                ]
+
+            if not pending_replies:
+                return _BoundReplyPushResult.NO_NEW_REPLY
+
+            for turn in pending_replies:
+                delivered = await self.push_notifier.notify_assistant_reply(
+                    user_id=user_id,
+                    session_id=event.session_id,
+                    text=turn.text,
+                    title=binding.title,
+                )
+                if not delivered:
+                    logger.warning(
+                        "bound assistant reply delivery failed",
+                        extra={"session_id": event.session_id, "user_id": user_id, "turn_id": turn.turn_id},
+                    )
+                    return _BoundReplyPushResult.DELIVERY_FAILED
+                self.external_binding_store.set_reply_cursor(event.session_id, turn.turn_id)
+            return _BoundReplyPushResult.DELIVERED
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
         logger.warning(

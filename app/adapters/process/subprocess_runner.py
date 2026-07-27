@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import logging
 import os
 import signal
@@ -11,6 +12,9 @@ from app.adapters.process.base_runner import BaseRunner, yield_terminal_events
 from app.domain.models import CLIEvent, EventType
 
 logger = logging.getLogger(__name__)
+
+# 按固定大小读取，避免 readline 对 AI CLI 超长单行 JSON 施加长度上限。
+_STREAM_CHUNK_SIZE = 64 * 1024
 
 
 class SubprocessRunner(BaseRunner):
@@ -66,22 +70,24 @@ class SubprocessRunner(BaseRunner):
                 "use_process_group": self._use_process_group,
             },
         )
-        yield CLIEvent(type=EventType.STARTED, task_id=task_id)
-
         stdout_task = asyncio.create_task(
             self._pump_stream(task_id=task_id, stream=process.stdout, event_type=EventType.STDOUT, queue=queue)
         )
         stderr_task = asyncio.create_task(
             self._pump_stream(task_id=task_id, stream=process.stderr, event_type=EventType.STDERR, queue=queue)
         )
-        wait_task = asyncio.create_task(asyncio.wait_for(process.wait(), timeout=timeout_sec))
+        wait_task = asyncio.create_task(self._wait_with_timeout(process, timeout_sec))
 
         stream_done = 0
         timed_out = False
         exit_code: int | None = None
         get_task: asyncio.Task[CLIEvent | None] | None = asyncio.create_task(queue.get())
 
+        # yield 必须在 try 内：消费方放弃事件流时 GeneratorExit 会在挂起的
+        # yield 点抛出，只有位于 try 内 finally 才能回收进程与后台任务。
         try:
+            yield CLIEvent(type=EventType.STARTED, task_id=task_id)
+
             while True:
                 wait_set: set[asyncio.Task[Any]] = set()
                 if get_task is not None:
@@ -145,12 +151,27 @@ class SubprocessRunner(BaseRunner):
             ):
                 yield event
         finally:
-            for task in (stdout_task, stderr_task, wait_task):
+            pending: list[asyncio.Task[Any]] = [stdout_task, stderr_task, wait_task]
+            if get_task is not None:
+                pending.append(get_task)
+            for task in pending:
                 if not task.done():
                     task.cancel()
-            if get_task is not None and not get_task.done():
-                get_task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            # 事件流被消费方放弃（或循环异常退出）时进程可能仍在运行，必须回收。
+            if self._termination_target_exists(process):
+                logger.warning(
+                    "subprocess stream abandoned before exit, terminating process",
+                    extra={"task_id": task_id, "pid": process.pid},
+                )
+                await self._terminate_then_kill(process, task_id=task_id)
             self.registry.unregister(task_id)
+
+    @staticmethod
+    async def _wait_with_timeout(process: asyncio.subprocess.Process, timeout_sec: int) -> int:
+        # 延迟创建 process.wait() 协程：若外层 task 在首次调度前被取消，
+        # 直接传给 wait_for 的协程会触发 "coroutine was never awaited"。
+        return await asyncio.wait_for(process.wait(), timeout=timeout_sec)
 
     def _finish_log_extra(
         self,
@@ -182,7 +203,7 @@ class SubprocessRunner(BaseRunner):
             entry.cancel_requested = True
             process: asyncio.subprocess.Process = entry.task
 
-        if process.returncode is not None:
+        if not self._termination_target_exists(process):
             return False
 
         logger.info(
@@ -199,7 +220,7 @@ class SubprocessRunner(BaseRunner):
         return True
 
     async def _terminate_then_kill(self, process: asyncio.subprocess.Process, *, task_id: str | None = None) -> None:
-        if process.returncode is not None:
+        if not self._termination_target_exists(process):
             return
 
         logger.info(
@@ -212,29 +233,53 @@ class SubprocessRunner(BaseRunner):
                 "use_process_group": self._use_process_group,
             },
         )
+        started_at = asyncio.get_running_loop().time()
         self._send_signal(process, signal.SIGTERM)
         try:
             await asyncio.wait_for(process.wait(), timeout=self._kill_grace_sec)
-            return
         except TimeoutError:
             pass
 
+        if self._use_process_group:
+            remaining = self._kill_grace_sec - (asyncio.get_running_loop().time() - started_at)
+            if remaining > 0 and self._process_group_exists(process.pid):
+                await asyncio.sleep(remaining)
+            if not self._process_group_exists(process.pid):
+                return
+        elif process.returncode is not None:
+            return
+
+        logger.warning(
+            "subprocess kill sent",
+            extra={
+                "task_id": task_id,
+                "pid": process.pid,
+                "returncode": process.returncode,
+                "kill_grace_sec": self._kill_grace_sec,
+                "use_process_group": self._use_process_group,
+            },
+        )
+        self._kill(process)
         if process.returncode is None:
-            logger.warning(
-                "subprocess kill sent",
-                extra={
-                    "task_id": task_id,
-                    "pid": process.pid,
-                    "returncode": process.returncode,
-                    "kill_grace_sec": self._kill_grace_sec,
-                    "use_process_group": self._use_process_group,
-                },
-            )
-            self._kill(process)
             await process.wait()
 
+    def _termination_target_exists(self, process: asyncio.subprocess.Process) -> bool:
+        if self._use_process_group:
+            return self._process_group_exists(process.pid)
+        return process.returncode is None
+
+    @staticmethod
+    def _process_group_exists(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
     def _send_signal(self, process: asyncio.subprocess.Process, sig: signal.Signals) -> None:
-        if process.returncode is not None:
+        if not self._use_process_group and process.returncode is not None:
             return
         try:
             if self._use_process_group:
@@ -247,7 +292,7 @@ class SubprocessRunner(BaseRunner):
             return
 
     def _kill(self, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
+        if not self._use_process_group and process.returncode is not None:
             return
         try:
             if self._use_process_group:
@@ -269,12 +314,30 @@ class SubprocessRunner(BaseRunner):
             await queue.put(None)
             return
 
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        line_parts: list[str] = []
+
         try:
             while True:
-                chunk = await stream.readline()
-                if not chunk:
+                chunk = await stream.read(_STREAM_CHUNK_SIZE)
+                eof = not chunk
+                text = decoder.decode(chunk, final=eof)
+                start = 0
+
+                while True:
+                    newline = text.find("\n", start)
+                    if newline < 0:
+                        if start < len(text):
+                            line_parts.append(text[start:])
+                        break
+                    line_parts.append(text[start : newline + 1])
+                    await queue.put(CLIEvent(type=event_type, task_id=task_id, content="".join(line_parts)))
+                    line_parts.clear()
+                    start = newline + 1
+
+                if eof:
+                    if line_parts:
+                        await queue.put(CLIEvent(type=event_type, task_id=task_id, content="".join(line_parts)))
                     break
-                text = chunk.decode(errors="replace")
-                await queue.put(CLIEvent(type=event_type, task_id=task_id, content=text))
         finally:
             await queue.put(None)

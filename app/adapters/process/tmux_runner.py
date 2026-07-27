@@ -861,8 +861,12 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             meta.cancel_requested = True
             session_name = meta.session_name
             persistent_terminal = meta.persistent_terminal
-            log_extra = self._tmux_log_extra(meta, action="interrupt" if persistent_terminal else "terminate")
+            queued = persistent_terminal and meta.command_started_at is None
+            action = "dequeue" if queued else ("interrupt" if persistent_terminal else "terminate")
+            log_extra = self._tmux_log_extra(meta, action=action)
         logger.info("tmux task cancel requested", extra=log_extra)
+        if queued:
+            return True
         if persistent_terminal:
             return await self._interrupt_session(session_name)
         return await self._terminate_session(session_name)

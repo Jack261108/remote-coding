@@ -21,6 +21,7 @@ Telegram 交互式远程 CLI 执行网关：在 Telegram 下发任务，服务�
 
 - 会话生命周期管理：创建、切换、恢复、销毁
 - 外部会话绑定：支持 tmux 会话绑定和自动发现
+- 绑定会话回复推送：将已完成的 Claude 回复自动发送到 Telegram
 - 会话状态缓存与持久化
 - 会话所有权解析与权限控制
 
@@ -264,6 +265,12 @@ export TG_ALLOWED_USER_IDS=<user-id>
 # 方式 2：Env_File（默认读取当前目录 .env，或通过 --env-file 指定）
 cp deploy/env/.env.example .env
 # 修改 .env 中的 TG_BOT_TOKEN 和 TG_ALLOWED_USER_IDS
+```
+
+绑定外部会话后，已完成的 Claude 回复默认会推送到 Telegram；如需关闭：
+
+```bash
+EXTERNAL_PUSH_REPLY_ENABLED=false
 ```
 
 可选：当 `CLAUDE_TMUX_MODE=true` 启用 tmux 终端模式时，需额外安装 tmux：

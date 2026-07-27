@@ -1,7 +1,7 @@
 """Tests for ExternalSessionPushNotifier.
 
-Covers: notify_phase_change, notify_session_end, notify_user_question,
-notify_info, _send_with_retry, error branches.
+Covers: notify_assistant_reply, notify_phase_change, notify_session_end,
+notify_user_question, notify_info, _send_with_retry, error branches.
 """
 
 from __future__ import annotations
@@ -35,6 +35,96 @@ def _make_notifier(
         retry_count=retry_count,
     )
     return notifier, sender
+
+
+# ---------------------------------------------------------------------------
+# notify_assistant_reply
+# ---------------------------------------------------------------------------
+
+
+class TestNotifyAssistantReply:
+    @pytest.mark.asyncio
+    async def test_sends_formatted_reply(self):
+        notifier, sender = _make_notifier()
+
+        result = await notifier.notify_assistant_reply(
+            user_id=42,
+            session_id="sess-123456",
+            text="**完成**\n\n`pytest -q` 已通过。",
+            title="修复测试",
+        )
+
+        assert result is True
+        sender.send_message.assert_awaited_once()
+        kwargs = sender.send_message.call_args.kwargs
+        assert kwargs["chat_id"] == 42
+        assert kwargs["parse_mode"] == "HTML"
+        assert "[sess-123]" in kwargs["text"]
+        assert "修复测试" in kwargs["text"]
+        assert "<b>完成</b>" in kwargs["text"]
+        assert "<code>pytest -q</code>" in kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_splits_long_reply_at_telegram_limit(self):
+        notifier, sender = _make_notifier()
+
+        result = await notifier.notify_assistant_reply(
+            user_id=42,
+            session_id="sess-1",
+            text="line\n" * 2000,
+        )
+
+        assert result is True
+        assert sender.send_message.await_count > 1
+        for call in sender.send_message.await_args_list:
+            assert len(call.kwargs["text"]) <= 4096
+            assert call.kwargs["parse_mode"] == "HTML"
+
+    @pytest.mark.asyncio
+    async def test_long_html_tag_falls_back_to_plain_text_chunks(self):
+        notifier, sender = _make_notifier()
+        long_url = f"https://example.com/{'a' * 5000}"
+
+        result = await notifier.notify_assistant_reply(
+            user_id=42,
+            session_id="sess-1",
+            text=f"[link]({long_url})",
+        )
+
+        assert result is True
+        assert sender.send_message.await_count > 1
+        for call in sender.send_message.await_args_list:
+            assert len(call.kwargs["text"]) <= 4096
+            assert call.kwargs["parse_mode"] is None
+
+    @pytest.mark.asyncio
+    async def test_returns_false_for_empty_reply(self):
+        notifier, sender = _make_notifier()
+
+        result = await notifier.notify_assistant_reply(
+            user_id=42,
+            session_id="sess-1",
+            text="   ",
+        )
+
+        assert result is False
+        sender.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_delivery_fails(self):
+        notifier, sender = _make_notifier(
+            retry_count=1,
+            send_side_effects=[RuntimeError("fail"), RuntimeError("fail")],
+        )
+
+        result = await notifier.notify_assistant_reply(
+            user_id=42,
+            session_id="sess-1",
+            text="reply",
+        )
+
+        assert result is False
+        assert sender.send_message.await_count == 2
 
 
 # ---------------------------------------------------------------------------
