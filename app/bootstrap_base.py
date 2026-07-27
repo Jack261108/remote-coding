@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from aiogram import Bot, Dispatcher
 
     from app.bot.adapters.message_sender import AiogramMessageSender
+    from app.services.external_binding_store import ExternalBindingStore
+    from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 
 
 class AppContainerBase:
@@ -55,8 +57,11 @@ class AppContainerBase:
     session_service: SessionService
     task_service: TaskService
     session_registry: SessionRegistryService
+    external_binding_store: ExternalBindingStore
+    push_notifier: ExternalSessionPushNotifier
     _jsonl_sync_locks: RefCountedLockRegistry
     _session_event_locks: RefCountedLockRegistry
+    _external_reply_delivery_locks: RefCountedLockRegistry
     _background_tasks: BackgroundTaskRegistry
     _started: bool
     message_sender: AiogramMessageSender

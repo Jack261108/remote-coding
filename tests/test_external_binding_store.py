@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -72,6 +73,8 @@ def test_t1_load_json_missing_last_activity_at_falls_back_to_bound_at(tmp_path: 
     assert loaded is not None
     assert loaded.bound_at == bound_at
     assert loaded.last_activity_at == bound_at, "missing last_activity_at must fall back to bound_at"
+    assert loaded.last_pushed_reply_turn_id is None
+    assert loaded.reply_cursor_initialized is False
 
 
 # --- T2: round-trip preserves last_activity_at -------------------------------
@@ -86,6 +89,7 @@ def test_t2_save_and_reload_preserves_last_activity_at(tmp_path: Path) -> None:
         cwd="/home/user/proj",
         bound_at=bound_at,
         jsonl_path=None,
+        last_pushed_reply_turn_id="turn-t2",
         last_activity_at_init=last_activity,
     )
 
@@ -98,6 +102,35 @@ def test_t2_save_and_reload_preserves_last_activity_at(tmp_path: Path) -> None:
     assert reloaded is not None
     assert reloaded.bound_at == bound_at
     assert reloaded.last_activity_at == last_activity
+    assert reloaded.last_pushed_reply_turn_id == "turn-t2"
+    assert reloaded.reply_cursor_initialized is True
+
+
+# --- Reply cursor persistence ------------------------------------------------
+
+
+def test_set_reply_cursor_persists_only_on_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    binding = ExternalBinding(
+        session_id="session-cursor",
+        user_id=7,
+        cwd="/home/user/proj",
+        bound_at=utc_now(),
+        jsonl_path=None,
+    )
+    store = ExternalBindingStore(data_dir=tmp_path)
+    store.save_binding(binding)
+    persist = MagicMock(wraps=store._persist)
+    monkeypatch.setattr(store, "_persist", persist)
+
+    assert store.set_reply_cursor("session-cursor", "turn-1") is True
+    assert store.set_reply_cursor("session-cursor", "turn-1") is False
+    assert store.set_reply_cursor("missing", "turn-2") is False
+    persist.assert_called_once()
+
+    reloaded = ExternalBindingStore(data_dir=tmp_path).get_binding("session-cursor")
+    assert reloaded is not None
+    assert reloaded.last_pushed_reply_turn_id == "turn-1"
+    assert reloaded.reply_cursor_initialized is True
 
 
 # --- T3: dataclass default and explicit override ----------------------------

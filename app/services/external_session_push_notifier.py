@@ -4,7 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.domain.permission_models import PermissionPromptInput
-from app.infra.text_formatting import render_markdownish_to_telegram_html, short_id
+from app.infra.text_formatting import render_markdownish_to_telegram_html, short_id, split_telegram_html
 from app.services.message_sender import Button, Keyboard, MessageSender
 from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
@@ -98,6 +98,38 @@ class ExternalSessionPushNotifier:
         reason_text = "已批准" if reason == "terminal_approved" else reason
         text = f"✅ [{sid}] 权限已在终端{reason_text}\n工具: {tool_name}"
         return await self._send_with_retry(chat_id=user_id, text=text) is not None
+
+    async def notify_assistant_reply(
+        self,
+        *,
+        user_id: int,
+        session_id: str,
+        text: str,
+        title: str | None = None,
+    ) -> bool:
+        """Send one completed assistant reply to the bound user."""
+        reply = text.strip()
+        if not reply:
+            return False
+
+        sid = short_id(session_id)
+        heading = f"💬 [{sid}] Claude 回复"
+        if title:
+            heading = f"{heading}\n会话: {title.strip()}"
+        message = f"{heading}\n\n{reply}"
+        rendered = render_markdownish_to_telegram_html(message)
+        chunks = split_telegram_html(rendered, 4096)
+        parse_mode: str | None = "HTML"
+        if any(len(chunk) > 4096 for chunk in chunks):
+            chunks = [message[index : index + 4096] for index in range(0, len(message), 4096)]
+            parse_mode = None
+        if not chunks:
+            return False
+
+        for chunk in chunks:
+            if await self._send_with_retry(chat_id=user_id, text=chunk, parse_mode=parse_mode) is None:
+                return False
+        return True
 
     async def notify_phase_change(
         self,

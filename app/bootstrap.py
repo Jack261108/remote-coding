@@ -259,7 +259,7 @@ class AppContainer(
             discovery=self.external_discovery,
             binding_store=self.external_binding_store,
             projects_dir=Path("~/.claude/projects").expanduser(),
-            sync_callback=self.sync_claude_session,
+            sync_callback=self._sync_and_baseline_external_reply,
         )
         self.unbound_permission_handler = UnboundPermissionHandler(
             message_sender=self.message_sender,
@@ -341,6 +341,11 @@ class AppContainer(
             cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
         self._session_event_locks = RefCountedLockRegistry(
+            ttl_sec=settings.session_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
+        self._external_reply_delivery_locks = RefCountedLockRegistry(
             ttl_sec=settings.session_lock_ttl_sec,
             cleanup_interval_sec=settings.lock_cleanup_interval_sec,
             cleanup_batch_size=settings.lock_cleanup_batch_size,

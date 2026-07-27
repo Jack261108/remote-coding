@@ -58,6 +58,17 @@ class ExternalBindingStore:
     def get_bindings_for_user(self, user_id: int) -> list[ExternalBinding]:
         return [b for b in self._bindings.values() if b.user_id == user_id]
 
+    def set_reply_cursor(self, session_id: str, turn_id: str | None) -> bool:
+        binding = self._bindings.get(session_id)
+        if binding is None:
+            return False
+        if binding.reply_cursor_initialized and binding.last_pushed_reply_turn_id == turn_id:
+            return False
+        binding.last_pushed_reply_turn_id = turn_id
+        binding.reply_cursor_initialized = True
+        self._persist()
+        return True
+
     def list_all(self) -> list[ExternalBinding]:
         """Return a snapshot list of all current bindings.
 
@@ -133,6 +144,8 @@ class ExternalBindingStore:
                     jsonl_path=entry.get("jsonl_path"),
                     pid=entry.get("pid"),
                     title=entry.get("title"),
+                    last_pushed_reply_turn_id=entry.get("last_pushed_reply_turn_id"),
+                    reply_cursor_initialized=bool(entry.get("reply_cursor_initialized", False)),
                     last_activity_at_init=last_activity_at,
                 )
             return bindings
@@ -162,6 +175,8 @@ class ExternalBindingStore:
                 "jsonl_path": binding.jsonl_path,
                 "pid": binding.pid,
                 "title": binding.title,
+                "last_pushed_reply_turn_id": binding.last_pushed_reply_turn_id,
+                "reply_cursor_initialized": binding.reply_cursor_initialized,
             }
         # Atomic write: write to temp file then rename to avoid corruption
         try:
