@@ -187,7 +187,10 @@ async def test_removal_awaits_auto_approve_clear_session(tmp_path: Path) -> None
 
     await service._cleanup()
 
-    auto_approve.clear_session.assert_awaited_once_with("stale-t11")
+    auto_approve.clear_session.assert_awaited_once_with(
+        "stale-t11",
+        mark_ended=False,
+    )
 
 
 async def test_removal_awaits_cancel_pending_permissions(tmp_path: Path) -> None:

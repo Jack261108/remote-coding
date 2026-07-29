@@ -53,7 +53,7 @@ class _FakeObserver:
         self.join_timeout = timeout
 
     def is_alive(self) -> bool:
-        return self.alive_after_join
+        return self.stopped == 0 or self.alive_after_join
 
 
 def _event(path: str | bytes, *, event_type: str = "modified", dest_path: str | bytes | None = None, is_directory: bool = False):
@@ -62,6 +62,25 @@ def _event(path: str | bytes, *, event_type: str = "modified", dest_path: str | 
 
 def _ignore_change(session_id: str, cwd: str) -> None:
     _ = (session_id, cwd)
+
+
+@pytest.mark.asyncio
+async def test_jsonl_file_watcher_detects_observer_death(tmp_path: Path) -> None:
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    observer = _FakeObserver()
+    watcher = JSONLFileWatcher(
+        projects_dir=projects_dir,
+        on_change=_ignore_change,
+        observer_factory=lambda: observer,
+    )
+
+    assert watcher.start() is True
+    assert watcher.is_available is True
+
+    observer.stopped = 1
+
+    assert watcher.is_available is False
 
 
 @pytest.mark.asyncio

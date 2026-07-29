@@ -47,6 +47,7 @@ from app.services.external_binding_cleanup_service import ExternalBindingCleanup
 from app.services.external_binding_cleanup_task import ExternalBindingCleanupTask
 from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
+from app.services.external_reply_delivery_pump import ExternalReplyDeliveryPump
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
@@ -260,6 +261,8 @@ class AppContainer(
             binding_store=self.external_binding_store,
             projects_dir=Path("~/.claude/projects").expanduser(),
             sync_callback=self._sync_and_baseline_external_reply,
+            save_callback=self._save_external_binding,
+            remove_callback=self._unbind_external_binding,
         )
         self.unbound_permission_handler = UnboundPermissionHandler(
             message_sender=self.message_sender,
@@ -305,9 +308,11 @@ class AppContainer(
             auto_approve_service=self.auto_approve_service,
             hook_socket_server=self.hook_socket_server,
             permission_callback_registry=self.permission_callback_registry,
+            unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
             external_discovery=self.external_discovery,
             tombstone=self.tombstone_store,
+            remove_callback=self._remove_external_binding,
         )
 
         self.external_binding_cleanup_service = ExternalBindingCleanupService(
@@ -351,6 +356,14 @@ class AppContainer(
             cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
         self._background_tasks = BackgroundTaskRegistry(label="bootstrap")
+        self.external_reply_delivery_pump = ExternalReplyDeliveryPump(
+            session_store=self.structured_session_store,
+            binding_store=self.external_binding_store,
+            background_tasks=self._background_tasks,
+            sync_callback=self.sync_claude_session,
+            drain_callback=self._drain_bound_assistant_replies,
+            finalize_callback=self._finalize_bound_external_session,
+        )
         self._janitor = PeriodicJanitor()
         self._external_binding_cleanup_task = ExternalBindingCleanupTask(
             cleanup_service=self.external_binding_cleanup_service,
@@ -363,6 +376,7 @@ class AppContainer(
         self._pending_dead_unbound_cleanup_ids: dict[str, int] = {}  # session_id -> retry_count
         self._dead_unbound_cleanup_max_retries = 5
         self._started = False
+        self._stopping = False
 
     async def _cleanup_dead_unbound_external_session(self, session_id: str) -> bool:
         """Invalidate pending state for a dead-pruned unbound external session."""
@@ -415,7 +429,17 @@ class AppContainer(
     async def start(self) -> None:
         if self._started:
             return
+        self._stopping = False
+        self.external_reply_delivery_pump.reopen()
+        self.session_supervisor.reopen()
+        self.hook_socket_server.pause_ingress()
         try:
+            await self.hook_socket_server.start(
+                self._handle_hook_event,
+                self._handle_permission_failure,
+                self._handle_permission_resolved,
+            )
+
             # Register command menu (best-effort)
             try:
                 from app.bot.commands import BOT_COMMANDS
@@ -425,15 +449,16 @@ class AppContainer(
                 logger.warning("Failed to register bot commands: %s", exc)
             if self.settings.claude_install_hooks:
                 self.hook_installer.install()
-            await self.hook_socket_server.start(self._handle_hook_event, self._handle_permission_failure, self._handle_permission_resolved)
             self.jsonl_file_watcher.start()
             if self.settings.claude_tmux_mode:
                 await self.session_registry.reconcile_terminal_lifecycle()
             await self._restore_session_bindings()
 
-            # Initial cleanup passes (before periodic loop starts)
+            # Initial cleanup passes (before restoring external delivery tasks or starting periodic loops)
             await self.external_binding_cleanup_service.run_cleanup()
+            await self._restore_external_reply_delivery_pumps()
             await self.upload_cleanup.run_cleanup()
+            self.hook_socket_server.resume_ingress()
 
             # Register periodic jobs
             self._janitor.register(
@@ -484,13 +509,17 @@ class AppContainer(
             raise
 
     async def stop(self) -> None:
+        self._stopping = True
+        self.hook_socket_server.pause_ingress()
         try:
             await self._janitor_task.stop()
             await self._external_binding_cleanup_task.stop()
-            await self.session_supervisor.stop_all()
-            self.jsonl_file_watcher.stop()
             await self.hook_socket_server.stop()
+            self.jsonl_file_watcher.stop()
+            await self.external_reply_delivery_pump.stop_all()
+            await self.session_supervisor.stop_all()
             await self._stop_background_tasks()
+            self.external_binding_store.flush()
         finally:
             await self.bot.session.close()
             self._started = False

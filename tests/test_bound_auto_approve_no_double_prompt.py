@@ -20,6 +20,7 @@ import pytest
 
 from app.bootstrap_mixins import HookHandlingMixin, _StageShortCircuitError
 from app.domain.hook_models import HookEvent
+from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.auto_approve_service import AutoApproveService
 from app.services.permission_callback_registry import AutoApproveOutcome
 
@@ -69,6 +70,11 @@ class _Container(HookHandlingMixin):
 
     def __init__(self) -> None:
         self.settings = SimpleNamespace(external_push_reply_enabled=True)
+        self._external_reply_delivery_locks = RefCountedLockRegistry(
+            ttl_sec=60,
+            cleanup_interval_sec=60,
+            cleanup_batch_size=10,
+        )
         self.session_supervisor = SimpleNamespace(watch=MagicMock())
         self.scheduled_jsonl_syncs: list[tuple[str, str]] = []
         self.push_notifier = MagicMock()

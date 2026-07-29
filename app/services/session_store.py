@@ -220,6 +220,9 @@ class SessionStoreFacade:
     def get_revision(self, session_id: str) -> int:
         return self.get_cursor(session_id)
 
+    def get_publish_cursor(self, session_id: str) -> int:
+        return self._notifier.get_cursor(session_id)
+
     def get_structured_reply_cursor(self, session_id: str) -> tuple[str | None, str | None]:
         return self._tracker.get_structured_reply_cursor(session_id)
 

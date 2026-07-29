@@ -82,6 +82,108 @@ async def test_hook_socket_server_emits_plain_event(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_hook_socket_server_holds_valid_event_until_ingress_resumes(tmp_path) -> None:
+    seen: list[HookEvent] = []
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+    server.pause_ingress()
+
+    async def on_event(event: HookEvent) -> None:
+        seen.append(event)
+        delivered.set()
+
+    await server.start(on_event)
+    reader, writer = await _send_event(
+        socket_path,
+        {
+            "session_id": "s1",
+            "cwd": "/tmp/project",
+            "event": "SessionStart",
+            "status": "starting",
+        },
+    )
+    await asyncio.sleep(0.05)
+    assert not delivered.is_set()
+    assert server._client_tasks
+
+    server.resume_ingress()
+    await asyncio.wait_for(delivered.wait(), timeout=1)
+    assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+    writer.close()
+    await writer.wait_closed()
+    await server.stop()
+
+    assert [event.session_id for event in seen] == ["s1"]
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_stop_cancels_client_waiting_for_ingress(tmp_path) -> None:
+    delivered = asyncio.Event()
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+    server.pause_ingress()
+
+    async def on_event(event: HookEvent) -> None:
+        delivered.set()
+
+    await server.start(on_event)
+    reader, writer = await _send_event(
+        socket_path,
+        {
+            "session_id": "s1",
+            "cwd": "/tmp/project",
+            "event": "SessionStart",
+            "status": "starting",
+        },
+    )
+    await asyncio.sleep(0.05)
+    assert server._client_tasks
+
+    await server.stop()
+
+    assert not delivered.is_set()
+    assert server._client_tasks == set()
+    assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+    writer.close()
+    await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_hook_socket_server_stop_cancels_in_flight_event_handler(tmp_path) -> None:
+    socket_path = _socket_path()
+    server = HookSocketServer(str(socket_path))
+    entered = asyncio.Event()
+    completed = False
+
+    async def on_event(event: HookEvent) -> None:
+        nonlocal completed
+        entered.set()
+        await asyncio.sleep(10)
+        completed = True
+
+    await server.start(on_event)
+    reader, writer = await _send_event(
+        socket_path,
+        {
+            "session_id": "s1",
+            "cwd": "/tmp/project",
+            "event": "SessionStart",
+            "status": "starting",
+        },
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    await server.stop()
+
+    assert completed is False
+    assert server._client_tasks == set()
+    assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+    writer.close()
+    await writer.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_hook_socket_server_isolates_sync_event_handler_exception(tmp_path, caplog) -> None:
     socket_path = _socket_path()
     server = HookSocketServer(str(socket_path))

@@ -198,7 +198,10 @@ async def test_start_awaits_initial_cleanup_before_periodic_loop(tmp_path: Path)
         await service.start()
 
         assert store.get_binding("startup-stale") is None, "stale binding should be removed by the initial cleanup awaited inside start()"
-        auto_approve.clear_session.assert_awaited_once_with("startup-stale")
+        auto_approve.clear_session.assert_awaited_once_with(
+            "startup-stale",
+            mark_ended=False,
+        )
         hook_server.cancel_pending_permissions.assert_awaited_once_with(session_id="startup-stale")
     finally:
         await service.stop()

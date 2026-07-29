@@ -10,7 +10,7 @@ from aiogram import Router
 
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.bot.handlers.command_list import register_list_handler
+from app.bot.handlers.command_list import _collect_bound_items, register_list_handler
 from app.bot.handlers.session_actions import register_session_action_handlers
 from app.domain.external_session_models import ExternalBinding
 from app.domain.hook_models import HookEvent
@@ -148,6 +148,70 @@ def _save_external_binding(
             pid=pid,
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_bound_title_resolution_does_not_overwrite_rebound_generation(
+    tmp_path: Path,
+) -> None:
+    session_id = "bound-title-generation"
+    old_activity = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    new_activity = old_activity + timedelta(minutes=5)
+    store = ExternalBindingStore(data_dir=tmp_path)
+    old_binding = ExternalBinding(
+        session_id=session_id,
+        user_id=42,
+        cwd="/old/project",
+        bound_at=old_activity - timedelta(hours=1),
+        jsonl_path=None,
+        last_activity_at_init=old_activity,
+        pid=1234,
+    )
+    store.save_binding(old_binding)
+    binder = ExternalSessionBinder(
+        discovery=ExternalSessionDiscoveryService(),
+        binding_store=store,
+        projects_dir=tmp_path / "projects",
+    )
+    replacement = ExternalBinding(
+        session_id=session_id,
+        user_id=7,
+        cwd="/new/project",
+        bound_at=new_activity - timedelta(minutes=1),
+        jsonl_path="/new/project/session.jsonl",
+        title="new generation",
+        last_activity_at_init=new_activity,
+        pid=5678,
+        last_pushed_reply_turn_id="reply-9",
+        reply_cursor_initialized=True,
+    )
+
+    def replace_during_title_resolution(actual_session_id: str, cwd: str) -> str:
+        assert actual_session_id == session_id
+        assert cwd == old_binding.cwd
+        store.save_binding(replacement)
+        return "stale resolved title"
+
+    await _collect_bound_items(
+        [old_binding],
+        external_binder=binder,
+        liveness_enabled=False,
+        reaper=None,
+        title_resolver=replace_during_title_resolution,
+        external_prefixes={session_id: session_id[:16]},
+    )
+
+    current = store.get_binding(session_id)
+    assert current is not None
+    assert current is replacement
+    assert current.binding_id == replacement.binding_id
+    assert current.user_id == 7
+    assert current.cwd == "/new/project"
+    assert current.bound_at == new_activity - timedelta(minutes=1)
+    assert current.last_activity_at == new_activity
+    assert current.pid == 5678
+    assert current.title == "new generation"
+    assert current.last_pushed_reply_turn_id == "reply-9"
 
 
 @pytest.mark.asyncio
@@ -739,7 +803,15 @@ async def test_cleanup_removes_dead_sessions_and_refreshes(tmp_path: Path) -> No
 
     # 验证 reaper 被调用（cleanup + collect_items 刷新时各一次）
     assert reaper.remove_with_cleanup.await_count >= 1
-    reaper.remove_with_cleanup.assert_any_await("sess-dead-00001", reason="pid_dead")
+    binding = store.get_binding("sess-dead-00001")
+    assert binding is not None
+    reaper.remove_with_cleanup.assert_any_await(
+        "sess-dead-00001",
+        reason="pid_dead",
+        expected_binding_id=binding.binding_id,
+        expected_last_activity_at=binding.last_activity_at,
+        expected_pid=binding.pid,
+    )
 
     # 验证 toast 提示
     callback.answer.assert_awaited_once()

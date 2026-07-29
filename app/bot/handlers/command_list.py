@@ -175,21 +175,27 @@ async def _collect_bound_items(
 
     if liveness_enabled and reaper is not None:
         visible = []
-        dead_ids: list[str] = []
+        dead_bindings = []
         for binding in bound_sessions:
             if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
-                dead_ids.append(binding.session_id)
+                dead_bindings.append(binding)
                 invalid_count += 1
                 continue
             visible.append(binding)
         bound_sessions = visible
-        for session_id in dead_ids:
+        for binding in dead_bindings:
             try:
-                await reaper.remove_with_cleanup(session_id, reason="pid_dead")
+                await reaper.remove_with_cleanup(
+                    binding.session_id,
+                    reason="pid_dead",
+                    expected_binding_id=binding.binding_id,
+                    expected_last_activity_at=binding.last_activity_at,
+                    expected_pid=binding.pid,
+                )
             except Exception:
                 logger.warning(
                     "failed to reap dead binding during /list",
-                    extra={"session_id": session_id},
+                    extra={"session_id": binding.session_id},
                     exc_info=True,
                 )
 
@@ -199,8 +205,11 @@ async def _collect_bound_items(
             try:
                 title = title_resolver(b.session_id, b.cwd)
                 if title is not None and external_binder is not None:
-                    b.title = title
-                    external_binder._binding_store.save_binding(b)
+                    external_binder.set_title_if_current(
+                        session_id=b.session_id,
+                        expected_binding_id=b.binding_id,
+                        title=title,
+                    )
             except Exception:
                 logger.debug("title resolver failed for bound session", extra={"session_id": b.session_id})
         legacy_items.append(
@@ -245,7 +254,13 @@ async def _cleanup_dead_sessions(
         for binding in bound_sessions:
             if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
                 try:
-                    if await reaper.remove_with_cleanup(binding.session_id, reason="pid_dead"):
+                    if await reaper.remove_with_cleanup(
+                        binding.session_id,
+                        reason="pid_dead",
+                        expected_binding_id=binding.binding_id,
+                        expected_last_activity_at=binding.last_activity_at,
+                        expected_pid=binding.pid,
+                    ):
                         cleaned += 1
                 except Exception:
                     logger.warning("cleanup failed for binding", extra={"session_id": binding.session_id})

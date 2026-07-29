@@ -86,17 +86,16 @@ def test_property_4_cleanup_loop_honors_liveness_governance(
 
         now = utc_now()
         session_id = "pbt-loop-session"
-        store.save_binding(
-            ExternalBinding(
-                session_id=session_id,
-                user_id=4242,
-                cwd="/home/user/project",
-                bound_at=now - timedelta(hours=idle_hours),
-                jsonl_path=None,
-                pid=_KNOWN_PID,
-                last_activity_at_init=now - timedelta(hours=idle_hours),
-            )
+        binding = ExternalBinding(
+            session_id=session_id,
+            user_id=4242,
+            cwd="/home/user/project",
+            bound_at=now - timedelta(hours=idle_hours),
+            jsonl_path=None,
+            pid=_KNOWN_PID,
+            last_activity_at_init=now - timedelta(hours=idle_hours),
         )
+        store.save_binding(binding)
 
         # Reaper is a mock so it records calls without mutating the store.
         reaper = AsyncMock()
@@ -134,4 +133,10 @@ def test_property_4_cleanup_loop_honors_liveness_governance(
         else:
             # Rows 2-3: REMOVE — reaper called exactly once with reason='pid_dead',
             # regardless of idle age or pending permission.
-            reaper.remove_with_cleanup.assert_awaited_once_with(session_id, reason="pid_dead")
+            reaper.remove_with_cleanup.assert_awaited_once_with(
+                session_id,
+                reason="pid_dead",
+                expected_binding_id=binding.binding_id,
+                expected_last_activity_at=binding.last_activity_at,
+                expected_pid=binding.pid,
+            )

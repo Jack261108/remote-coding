@@ -145,6 +145,8 @@ class ExternalBindingCleanupService:
         snapshot = self._binding_store.list_all()
 
         for binding in snapshot:
+            if binding.ended_at is not None:
+                continue
             session_id = binding.session_id
             pid = binding.pid
 
@@ -156,7 +158,13 @@ class ExternalBindingCleanupService:
             if self._liveness_enabled and pid is not None and pid > 0:
                 if process_is_alive(pid):
                     continue
-                await self._reaper.remove_with_cleanup(session_id, reason="pid_dead")
+                await self._reaper.remove_with_cleanup(
+                    session_id,
+                    reason="pid_dead",
+                    expected_binding_id=binding.binding_id,
+                    expected_last_activity_at=binding.last_activity_at,
+                    expected_pid=binding.pid,
+                )
                 continue
 
             # Rows 4-9: idle-TTL fallback (pid unknown OR liveness disabled).
@@ -199,4 +207,10 @@ class ExternalBindingCleanupService:
             # Step vi: delegate the canonical removal sequence to the reaper.
             # The reaper drops the binding, clears auto-approve state, cancels
             # pending permissions, and emits the INFO log itself.
-            await self._reaper.remove_with_cleanup(session_id, reason="idle_ttl_expired")
+            await self._reaper.remove_with_cleanup(
+                session_id,
+                reason="idle_ttl_expired",
+                expected_binding_id=current.binding_id,
+                expected_last_activity_at=current.last_activity_at,
+                expected_pid=current.pid,
+            )

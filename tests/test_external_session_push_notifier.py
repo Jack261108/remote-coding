@@ -98,6 +98,41 @@ class TestNotifyAssistantReply:
             assert call.kwargs["parse_mode"] is None
 
     @pytest.mark.asyncio
+    async def test_retry_resumes_from_first_unsent_chunk(self):
+        notifier, sender = _make_notifier(retry_count=0)
+        send_count = 0
+
+        async def send_message(**kwargs) -> int:
+            nonlocal send_count
+            send_count += 1
+            if send_count == 2:
+                raise RuntimeError("second chunk failed")
+            return send_count
+
+        sender.send_message.side_effect = send_message
+
+        first_result = await notifier.notify_assistant_reply(
+            user_id=42,
+            session_id="sess-1",
+            turn_id="turn-1",
+            text="x" * 5000,
+        )
+        second_result = await notifier.notify_assistant_reply(
+            user_id=42,
+            session_id="sess-1",
+            turn_id="turn-1",
+            text="x" * 5000,
+        )
+
+        assert first_result is False
+        assert second_result is True
+        assert sender.send_message.await_count >= 3
+        calls = sender.send_message.await_args_list
+        assert calls[0].kwargs["text"] != calls[1].kwargs["text"]
+        assert calls[1].kwargs["text"] == calls[2].kwargs["text"]
+        assert all(call.kwargs["text"] != calls[0].kwargs["text"] for call in calls[2:])
+
+    @pytest.mark.asyncio
     async def test_returns_false_for_empty_reply(self):
         notifier, sender = _make_notifier()
 

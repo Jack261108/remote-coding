@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.domain.permission_models import PermissionPromptInput
@@ -18,6 +19,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _PendingReplyChunks:
+    chunks: tuple[str, ...]
+    parse_mode: str | None
+    next_index: int = 0
+
+
 class ExternalSessionPushNotifier:
     """Sends Telegram push notifications for bound external session events."""
 
@@ -33,6 +41,7 @@ class ExternalSessionPushNotifier:
         self._binding_store = binding_store
         self._retry_count = retry_count
         self._permission_gateway = permission_gateway
+        self._pending_reply_chunks: dict[tuple[int, str, str], _PendingReplyChunks] = {}
 
     async def notify_permission_request(
         self,
@@ -106,30 +115,52 @@ class ExternalSessionPushNotifier:
         session_id: str,
         text: str,
         title: str | None = None,
+        turn_id: str | None = None,
     ) -> bool:
         """Send one completed assistant reply to the bound user."""
         reply = text.strip()
         if not reply:
             return False
 
-        sid = short_id(session_id)
-        heading = f"💬 [{sid}] Claude 回复"
-        if title:
-            heading = f"{heading}\n会话: {title.strip()}"
-        message = f"{heading}\n\n{reply}"
-        rendered = render_markdownish_to_telegram_html(message)
-        chunks = split_telegram_html(rendered, 4096)
-        parse_mode: str | None = "HTML"
-        if any(len(chunk) > 4096 for chunk in chunks):
-            chunks = [message[index : index + 4096] for index in range(0, len(message), 4096)]
-            parse_mode = None
-        if not chunks:
-            return False
-
-        for chunk in chunks:
-            if await self._send_with_retry(chat_id=user_id, text=chunk, parse_mode=parse_mode) is None:
+        delivery_key = (user_id, session_id, turn_id) if turn_id is not None else None
+        pending = self._pending_reply_chunks.get(delivery_key) if delivery_key is not None else None
+        if pending is None:
+            sid = short_id(session_id)
+            heading = f"💬 [{sid}] Claude 回复"
+            if title:
+                heading = f"{heading}\n会话: {title.strip()}"
+            message = f"{heading}\n\n{reply}"
+            rendered = render_markdownish_to_telegram_html(message)
+            chunks = split_telegram_html(rendered, 4096)
+            parse_mode: str | None = "HTML"
+            if any(len(chunk) > 4096 for chunk in chunks):
+                chunks = [message[index : index + 4096] for index in range(0, len(message), 4096)]
+                parse_mode = None
+            if not chunks:
                 return False
+            pending = _PendingReplyChunks(chunks=tuple(chunks), parse_mode=parse_mode)
+            if delivery_key is not None:
+                self._pending_reply_chunks[delivery_key] = pending
+
+        for index in range(pending.next_index, len(pending.chunks)):
+            if (
+                await self._send_with_retry(
+                    chat_id=user_id,
+                    text=pending.chunks[index],
+                    parse_mode=pending.parse_mode,
+                )
+                is None
+            ):
+                return False
+            pending.next_index = index + 1
+        if delivery_key is not None:
+            self._pending_reply_chunks.pop(delivery_key, None)
         return True
+
+    def discard_assistant_reply_progress(self, session_id: str) -> None:
+        stale_keys = [key for key in self._pending_reply_chunks if key[1] == session_id]
+        for key in stale_keys:
+            self._pending_reply_chunks.pop(key, None)
 
     async def notify_phase_change(
         self,

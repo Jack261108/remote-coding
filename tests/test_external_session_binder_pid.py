@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
@@ -91,3 +92,41 @@ async def test_bind_succeeds_with_pid_none_when_pid_capture_raises(tmp_path: Pat
     stored = store.get_binding(session_id)
     assert stored is not None
     assert stored.pid is None
+
+
+async def test_bind_and_unbind_use_lifecycle_callbacks(tmp_path: Path) -> None:
+    session_id = "sess-callback"
+    store = ExternalBindingStore(data_dir=tmp_path)
+    unbound = _RaisingPidUnbound(session_id=session_id, cwd="/home/user/project")
+    discovery = _DiscoveryDouble(unbound)
+
+    async def save_binding(binding) -> bool:
+        store.save_binding(binding)
+        return True
+
+    async def remove_binding(actual_session_id: str, expected_binding_id: str | None):
+        binding = store.get_binding(actual_session_id)
+        if binding is None or binding.binding_id != expected_binding_id:
+            return None
+        store.remove_binding(actual_session_id)
+        return binding
+
+    save_callback = AsyncMock(side_effect=save_binding)
+    remove_callback = AsyncMock(side_effect=remove_binding)
+    binder = ExternalSessionBinder(
+        discovery=discovery,  # type: ignore[arg-type]
+        binding_store=store,
+        projects_dir=Path("/tmp/projects"),
+        save_callback=save_callback,
+        remove_callback=remove_callback,
+    )
+
+    bind_result = await binder.bind(user_id=1, session_id=session_id)
+    unbind_result = await binder.unbind(user_id=1, session_id=session_id)
+
+    assert bind_result.success is True
+    assert unbind_result.success is True
+    save_callback.assert_awaited_once()
+    saved_binding = save_callback.await_args.args[0]
+    remove_callback.assert_awaited_once_with(session_id, saved_binding.binding_id)
+    assert store.get_binding(session_id) is None

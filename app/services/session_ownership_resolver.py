@@ -62,6 +62,7 @@ class SessionOwnershipResolver:
                 owner_user_id=binding.user_id,
                 origin=SessionOrigin.EXTERNAL,
                 ownership_state="bound",
+                binding_id=binding.binding_id,
             )
 
         # Priority 3: Unbound

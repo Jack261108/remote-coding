@@ -32,11 +32,15 @@ class ExternalSessionBinder:
         binding_store: ExternalBindingStore,
         projects_dir: Path,
         sync_callback: Callable[[str, str], Awaitable[None]] | None = None,
+        save_callback: Callable[[ExternalBinding], Awaitable[bool]] | None = None,
+        remove_callback: Callable[[str, str | None], Awaitable[ExternalBinding | None]] | None = None,
     ) -> None:
         self._discovery = discovery
         self._binding_store = binding_store
         self._projects_dir = projects_dir
         self._sync_callback = sync_callback
+        self._save_callback = save_callback
+        self._remove_callback = remove_callback
 
     async def bind(self, *, user_id: int, session_id: str) -> BindResult:
         """Bind an unbound session to a user.
@@ -99,7 +103,16 @@ class ExternalSessionBinder:
             title=unbound.title,
             reply_cursor_initialized=True,
         )
-        self._binding_store.save_binding(binding)
+        if self._save_callback is not None:
+            saved = await self._save_callback(binding)
+            if not saved:
+                return BindResult(
+                    success=False,
+                    message="Session already bound to another user",
+                    session_id=session_id,
+                )
+        else:
+            self._binding_store.save_binding(binding)
 
         # 5. Remove from discovery list
         self._discovery.remove_session(session_id)
@@ -143,7 +156,16 @@ class ExternalSessionBinder:
             )
 
         # 2. Remove binding from store
-        self._binding_store.remove_binding(session_id)
+        if self._remove_callback is not None:
+            removed = await self._remove_callback(session_id, binding.binding_id)
+            if removed is None:
+                return BindResult(
+                    success=False,
+                    message="Session not bound to you",
+                    session_id=session_id,
+                )
+        else:
+            self._binding_store.remove_binding(session_id)
 
         # 3. Note: The session will be re-discovered automatically when
         #    the next hook event arrives (if still alive). We don't need
@@ -154,6 +176,19 @@ class ExternalSessionBinder:
             success=True,
             message="Session unbound successfully",
             session_id=session_id,
+        )
+
+    def set_title_if_current(
+        self,
+        *,
+        session_id: str,
+        expected_binding_id: str,
+        title: str,
+    ) -> bool:
+        return self._binding_store.set_title_if_current(
+            session_id,
+            expected_binding_id,
+            title,
         )
 
     def get_binding_user(self, session_id: str) -> int | None:

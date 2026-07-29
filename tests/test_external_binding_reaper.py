@@ -24,6 +24,8 @@ import pytest
 
 from app.domain.external_session_models import ExternalBinding
 from app.domain.models import utc_now
+from app.domain.session_tombstone import SessionTombstoneStore
+from app.services.auto_approve_service import AutoApproveService
 from app.services.external_binding_reaper import ExternalBindingReaper
 
 
@@ -89,6 +91,60 @@ async def test_remove_with_cleanup_calls_collaborators_in_canonical_order() -> N
     manager.remove_binding.assert_called_once_with("sess-order")
     manager.clear_session.assert_awaited_once_with("sess-order")
     manager.cancel_pending_permissions.assert_awaited_once_with(session_id="sess-order")
+
+
+async def test_remove_with_cleanup_uses_lifecycle_remove_callback() -> None:
+    binding = _make_binding("sess-callback")
+    binding_store = Mock()
+    binding_store.get_binding = Mock(return_value=binding)
+    binding_store.remove_binding = Mock()
+    remove_callback = AsyncMock(return_value=binding)
+    auto_approve_service = Mock()
+    auto_approve_service.clear_session = AsyncMock()
+    hook_socket_server = Mock()
+    hook_socket_server.cancel_pending_permissions = AsyncMock()
+    reaper = ExternalBindingReaper(
+        binding_store=binding_store,
+        auto_approve_service=auto_approve_service,
+        hook_socket_server=hook_socket_server,
+        remove_callback=remove_callback,
+    )
+
+    result = await reaper.remove_with_cleanup("sess-callback", reason="pid_dead")
+
+    assert result is True
+    remove_callback.assert_awaited_once_with("sess-callback", None, None, None)
+    binding_store.remove_binding.assert_not_called()
+    auto_approve_service.clear_session.assert_awaited_once_with("sess-callback")
+    hook_socket_server.cancel_pending_permissions.assert_awaited_once_with(session_id="sess-callback")
+
+
+async def test_manual_unbind_clears_auto_approve_without_ending_live_session() -> None:
+    session_id = "sess-manual-unbind"
+    tombstone = SessionTombstoneStore()
+    auto_approve_service = AutoApproveService(tombstone=tombstone)
+    await auto_approve_service.activate(session_id, user_id=7)
+    binding_store = Mock()
+    binding_store.get_binding = Mock(return_value=_make_binding(session_id))
+    binding_store.remove_binding = Mock()
+    hook_socket_server = Mock()
+    hook_socket_server.cancel_pending_permissions = AsyncMock()
+    reaper = ExternalBindingReaper(
+        binding_store=binding_store,
+        auto_approve_service=auto_approve_service,
+        hook_socket_server=hook_socket_server,
+        tombstone=tombstone,
+    )
+
+    result = await reaper.remove_with_cleanup(
+        session_id,
+        reason="manual_unbind",
+    )
+
+    assert result is True
+    assert not auto_approve_service.is_active(session_id)
+    assert not auto_approve_service.is_session_ended(session_id)
+    assert not tombstone.is_ended(session_id)
 
 
 # --- Re-read guard (Req 6.6, 9.2) -------------------------------------------
@@ -291,6 +347,10 @@ async def test_remove_with_cleanup_marks_idle_ttl_binding_unavailable_without_pi
     tombstone.mark_unavailable.assert_called_once_with("sess-idle")
     tombstone.mark_ended.assert_not_called()
     external_discovery.remove_session.assert_called_once_with("sess-idle")
+    auto_approve_service.clear_session.assert_awaited_once_with(
+        "sess-idle",
+        mark_ended=False,
+    )
 
 
 async def test_remove_with_cleanup_skips_optional_cleanup_when_binding_already_absent() -> None:

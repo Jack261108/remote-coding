@@ -149,10 +149,18 @@ class AutoApproveService:
     # Alias: disable == deactivate
     disable = deactivate
 
-    async def clear_session(self, session_id: str) -> None:
-        """Clear state for a session (called on SessionEnd/cleanup)."""
+    async def clear_session(
+        self,
+        session_id: str,
+        *,
+        mark_ended: bool = True,
+    ) -> None:
+        """Clear state for a session and optionally mark it as ended."""
         async with self._service_lock:
-            self._deactivate_all_for_session_locked(session_id)
+            self._deactivate_all_for_session_locked(
+                session_id,
+                mark_ended=mark_ended,
+            )
 
     async def try_claim_slot(self, *, session_id: str, user_id: int) -> SlotClaimResult:
         """Try to reserve the session activation slot for a user."""
@@ -296,7 +304,12 @@ class AutoApproveService:
             self._slots.pop(session_id, None)
         return len(session_ids)
 
-    def _deactivate_all_for_session_locked(self, session_id: str) -> int:
+    def _deactivate_all_for_session_locked(
+        self,
+        session_id: str,
+        *,
+        mark_ended: bool = True,
+    ) -> int:
         affected_user_ids: set[int] = set()
         owner_user_id = self._active_owners.get(session_id)
         if owner_user_id is not None:
@@ -312,7 +325,8 @@ class AutoApproveService:
             self._deactivate(user_id=user_id, session_id=session_id)
 
         self._active_owners.pop(session_id, None)
-        self._tombstone.mark_ended(session_id)
+        if mark_ended:
+            self._tombstone.mark_ended(session_id)
 
         for user_id in affected_user_ids:
             self._cleanup_user_lock_if_idle_locked(user_id)

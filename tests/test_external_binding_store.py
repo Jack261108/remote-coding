@@ -104,6 +104,54 @@ def test_t2_save_and_reload_preserves_last_activity_at(tmp_path: Path) -> None:
     assert reloaded.last_activity_at == last_activity
     assert reloaded.last_pushed_reply_turn_id == "turn-t2"
     assert reloaded.reply_cursor_initialized is True
+    assert reloaded.binding_id == binding.binding_id
+
+
+@pytest.mark.parametrize("ended_at", [None, utc_now()])
+def test_binding_lifecycle_fields_survive_restart(tmp_path: Path, ended_at: datetime | None) -> None:
+    binding = ExternalBinding(
+        session_id="session-lifecycle",
+        user_id=7,
+        cwd="/home/user/proj",
+        bound_at=utc_now(),
+        jsonl_path=None,
+        ended_at=ended_at,
+    )
+    store = ExternalBindingStore(data_dir=tmp_path)
+    store.save_binding(binding)
+
+    reloaded = ExternalBindingStore(data_dir=tmp_path).get_binding("session-lifecycle")
+
+    assert reloaded is not None
+    assert reloaded.binding_id == binding.binding_id
+    assert reloaded.ended_at == ended_at
+    reloaded_store = ExternalBindingStore(data_dir=tmp_path)
+    assert [item.session_id for item in reloaded_store.list_all()] == ["session-lifecycle"]
+    expected_visible = [] if ended_at is not None else ["session-lifecycle"]
+    assert [item.session_id for item in reloaded_store.get_bindings_for_user(7)] == expected_visible
+
+
+def test_legacy_binding_gets_persisted_binding_id_on_load(tmp_path: Path) -> None:
+    bound_at = utc_now()
+    _write_bindings_json(
+        tmp_path,
+        {
+            "legacy-session": {
+                "user_id": 7,
+                "cwd": "/home/user/proj",
+                "bound_at": bound_at.isoformat(),
+                "jsonl_path": None,
+            }
+        },
+    )
+
+    first = ExternalBindingStore(data_dir=tmp_path).get_binding("legacy-session")
+    second = ExternalBindingStore(data_dir=tmp_path).get_binding("legacy-session")
+
+    assert first is not None
+    assert second is not None
+    assert first.binding_id == second.binding_id
+    assert _read_bindings_json(tmp_path)["legacy-session"]["binding_id"] == first.binding_id
 
 
 # --- Reply cursor persistence ------------------------------------------------

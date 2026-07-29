@@ -254,7 +254,10 @@ async def test_unknown_pid_idle_ttl_fallback(tmp_path: Path, caplog: pytest.LogC
 
     probe.assert_not_called()
     assert ctx.store.get_binding(session_id) is None
-    ctx.auto_approve.clear_session.assert_awaited_once_with(session_id)
+    ctx.auto_approve.clear_session.assert_awaited_once_with(
+        session_id,
+        mark_ended=False,
+    )
     ctx.hook_socket.cancel_pending_permissions.assert_awaited_once_with(session_id=session_id)
     records = _removal_records(caplog)
     assert len(records) == 1

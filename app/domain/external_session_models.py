@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 
 class SessionOrigin(StrEnum):
@@ -17,6 +18,7 @@ class OwnershipResult:
     owner_user_id: int | None
     origin: SessionOrigin
     ownership_state: Literal["owned", "bound", "unbound"]
+    binding_id: str | None = None
 
 
 @dataclass
@@ -37,10 +39,12 @@ class ExternalBinding:
     cwd: str
     bound_at: datetime
     jsonl_path: str | None
+    binding_id: str = field(default_factory=lambda: uuid4().hex)
     pid: int | None = None
     title: str | None = None
     last_activity_at_init: InitVar[datetime | None] = None
     last_activity_at: datetime = field(init=False)
+    ended_at: datetime | None = None
     last_pushed_reply_turn_id: str | None = None
     reply_cursor_initialized: bool = False
 

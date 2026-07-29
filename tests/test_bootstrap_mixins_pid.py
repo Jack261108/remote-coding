@@ -24,8 +24,9 @@ Validates: Requirements 4.4, 11.2
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -36,6 +37,12 @@ from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.session_ownership_resolver import SessionOwnershipResolver
+
+
+class _LockRegistry:
+    @asynccontextmanager
+    async def lock(self, _key: str):
+        yield
 
 
 class _RecordingBindingStore:
@@ -50,7 +57,11 @@ class _RecordingBindingStore:
     def __init__(self) -> None:
         self.removed: list[str] = []
         self.touch_calls: list[tuple[str, object, int | None]] = []
-        self._binding = object()  # sentinel non-None binding
+        self._binding = SimpleNamespace(
+            binding_id="binding-generation-1",
+            user_id=1,
+            ended_at=None,
+        )
 
     def remove_binding(self, session_id: str) -> None:
         self.removed.append(session_id)
@@ -130,6 +141,7 @@ def _make_lifecycle_container(tmp_path, binding_store, discovery, seen, session_
         def __init__(self) -> None:
             self.settings = SimpleNamespace(allowed_workdirs=[str(tmp_path)])
             self.external_binding_store = binding_store
+            self._external_reply_delivery_locks = _LockRegistry()
             self.external_discovery = discovery
             self.session_service = session_service or _EmptySessionService()
             self.structured_session_store = SimpleNamespace(get=lambda _session_id: None)
@@ -145,6 +157,9 @@ def _make_lifecycle_container(tmp_path, binding_store, discovery, seen, session_
             seen.append(f"dispatch:{event.session_id}")
 
         def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
+            seen.append(f"sync:{session_id}")
+
+        async def sync_claude_session(self, session_id: str, cwd: str) -> None:
             seen.append(f"sync:{session_id}")
 
         async def _run_auto_approve_check(self, *args, **kwargs):
@@ -233,7 +248,9 @@ async def test_bound_external_session_end_removes_binding_without_rediscovery(tm
         )
     )
 
-    assert binding_store.get_binding(session_id) is None
+    binding = binding_store.get_binding(session_id)
+    assert binding is not None
+    assert binding.ended_at is not None
     assert discovery.get(session_id) is None
     assert discovery.recorded == []
     assert seen == [f"dispatch:{session_id}", f"sync:{session_id}"]
@@ -277,7 +294,9 @@ async def test_late_hook_after_bound_external_session_end_is_not_rediscovered(tm
         )
     )
 
-    assert binding_store.get_binding(session_id) is None
+    binding = binding_store.get_binding(session_id)
+    assert binding is not None
+    assert binding.ended_at is not None
     assert discovery.get(session_id) is None
     assert discovery.recorded == []
     assert seen == [f"dispatch:{session_id}", f"sync:{session_id}"]
@@ -311,7 +330,9 @@ async def test_bound_external_ended_status_removes_binding_without_rediscovery(t
         )
     )
 
-    assert binding_store.get_binding(session_id) is None
+    binding = binding_store.get_binding(session_id)
+    assert binding is not None
+    assert binding.ended_at is not None
     assert discovery.get(session_id) is None
     assert discovery.recorded == []
     assert seen == [f"dispatch:{session_id}", f"sync:{session_id}"]
@@ -440,7 +461,11 @@ async def test_late_unbound_permission_after_session_end_is_not_notified(tmp_pat
     assert discovery.get(session_id) is None
     assert discovery.recorded == []
     assert unbound_permissions.handled == []
-    hook_socket_server.cancel_pending_permissions.assert_awaited_once_with(session_id=session_id)
+    assert hook_socket_server.cancel_pending_permissions.await_count == 2
+    assert hook_socket_server.cancel_pending_permissions.await_args_list == [
+        call(session_id=session_id),
+        call(session_id=session_id),
+    ]
     assert seen == []
 
 
@@ -756,6 +781,7 @@ async def test_bound_non_session_end_event_refreshes_pid(tmp_path) -> None:
                         owner_user_id=1,
                         origin=SessionOrigin.EXTERNAL,
                         ownership_state="bound",
+                        binding_id="binding-generation-1",
                     )
                 )
             )

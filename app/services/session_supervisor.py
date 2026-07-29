@@ -18,6 +18,8 @@ from app.infra.file_mtime_utils import clear_seen_mtimes, refresh_seen_mtimes
 
 logger = logging.getLogger(__name__)
 
+_MainJSONLSignature = tuple[str, int | None, int | None]
+
 
 class _SessionStore(Protocol):
     def get(self, session_id: str) -> SessionState | None: ...
@@ -73,12 +75,19 @@ class SessionSupervisor:
         self._locks: dict[str, asyncio.Lock] = {}
         self._wake_events: dict[str, asyncio.Event] = {}
         self._jsonl_sync_requests: dict[str, tuple[str, float]] = {}  # session_id -> (cwd, requested_at)
+        self._main_jsonl_signatures: dict[str, _MainJSONLSignature] = {}
         self._seen_mtimes: dict[str, float] = {}
         self._session_mtime_keys: dict[str, set[str]] = {}  # session_id -> tracked file paths
         self._active = False
+        self._closing = False
+
+    def reopen(self) -> None:
+        self._closing = False
 
     def watch(self, *, session_id: str, workdir: str) -> None:
         """Start watching a session if not already watched."""
+        if self._closing:
+            return
         self._active = True
         self._wake_events.setdefault(session_id, asyncio.Event())
         self._watch_main_jsonl_file(session_id=session_id, workdir=workdir)
@@ -86,6 +95,7 @@ class SessionSupervisor:
         if task is not None and not task.done():
             self._wake(session_id)
             return
+        self._baseline_main_jsonl_signature(session_id=session_id, workdir=workdir)
         self._start_watch_task(session_id=session_id, workdir=workdir)
 
     def _start_watch_task(self, *, session_id: str, workdir: str) -> None:
@@ -110,6 +120,8 @@ class SessionSupervisor:
 
     def schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         """Request a debounced JSONL sync and wake the session watcher."""
+        if self._closing:
+            return
         existing = self._jsonl_sync_requests.get(session_id)
         if existing is not None:
             _, requested_at = existing
@@ -123,6 +135,7 @@ class SessionSupervisor:
         task = self._tasks.pop(session_id, None)
         await self._clear_session_mtimes(session_id)
         self._jsonl_sync_requests.pop(session_id, None)
+        self._main_jsonl_signatures.pop(session_id, None)
         self._locks.pop(session_id, None)
         self._wake_events.pop(session_id, None)
         if self._jsonl_file_watcher is not None:
@@ -134,6 +147,7 @@ class SessionSupervisor:
 
     async def stop_all(self) -> None:
         """Cancel all watched sessions and wait for termination."""
+        self._closing = True
         self._active = False
         tasks = list(self._tasks.values())
         for task in tasks:
@@ -147,6 +161,7 @@ class SessionSupervisor:
         self._seen_mtimes.clear()
         self._session_mtime_keys.clear()
         self._jsonl_sync_requests.clear()
+        self._main_jsonl_signatures.clear()
         if self._jsonl_file_watcher is not None:
             self._jsonl_file_watcher.clear()
 
@@ -158,6 +173,7 @@ class SessionSupervisor:
         try:
             while self._active:
                 active_state = True
+                main_jsonl_signature: _MainJSONLSignature | None = None
                 try:
                     async with lock:
                         state = self._session_store.get(session_id)
@@ -176,7 +192,13 @@ class SessionSupervisor:
                             if await self._sync_files_if_needed(state):
                                 await self._refresh_seen_mtimes(state)
 
-                    # Debounced JSONL sync (outside lock to avoid deadlock with _on_jsonl_sync)
+                        if not self._is_file_watcher_available() and session_id not in self._jsonl_sync_requests:
+                            main_jsonl_signature = self._changed_main_jsonl_signature(state)
+
+                    # JSONL sync must stay outside the watcher lock because it dispatches events.
+                    if main_jsonl_signature is not None:
+                        await self._on_jsonl_sync(session_id, state.workdir)
+                        self._main_jsonl_signatures[session_id] = main_jsonl_signature
                     await self._maybe_process_jsonl_sync(session_id)
                 except asyncio.CancelledError:
                     raise
@@ -192,6 +214,7 @@ class SessionSupervisor:
                 await self._clear_session_mtimes(session_id)
                 self._locks.pop(session_id, None)
                 self._wake_events.pop(session_id, None)
+                self._main_jsonl_signatures.pop(session_id, None)
                 if self._jsonl_file_watcher is not None:
                     self._jsonl_file_watcher.unwatch_session(session_id)
 
@@ -233,6 +256,35 @@ class SessionSupervisor:
         return self._poll_interval_sec
 
     # ── JSONL file watcher registration ───────────────────────────────────────
+
+    def _is_file_watcher_available(self) -> bool:
+        return self._jsonl_file_watcher is not None and self._jsonl_file_watcher.is_available
+
+    def _baseline_main_jsonl_signature(self, *, session_id: str, workdir: str) -> None:
+        signature = self._main_jsonl_signature(session_id=session_id, workdir=workdir)
+        previous = self._main_jsonl_signatures.get(session_id)
+        if previous is None or previous[0] != signature[0]:
+            self._main_jsonl_signatures[session_id] = signature
+
+    def _changed_main_jsonl_signature(self, state: SessionState) -> _MainJSONLSignature | None:
+        signature = self._main_jsonl_signature(
+            session_id=state.claude_session_id or state.session_id,
+            workdir=state.workdir,
+        )
+        if self._main_jsonl_signatures.get(state.session_id) == signature:
+            return None
+        return signature
+
+    def _main_jsonl_signature(self, *, session_id: str, workdir: str) -> _MainJSONLSignature:
+        try:
+            path = self._claude_jsonl_parser.session_file_path(session_id=session_id, cwd=workdir)
+        except ValueError:
+            return ("", None, None)
+        try:
+            stat = path.stat()
+        except OSError:
+            return (str(path), None, None)
+        return (str(path), stat.st_mtime_ns, stat.st_size)
 
     def _watch_main_jsonl_file(self, *, session_id: str, workdir: str) -> None:
         watcher = self._jsonl_file_watcher

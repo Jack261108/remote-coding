@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,9 +20,19 @@ class _OwnershipResolver:
         )
 
 
+class _LockRegistry:
+    @asynccontextmanager
+    async def lock(self, _key: str):
+        yield
+
+
 class _Container(HookHandlingMixin):
     def __init__(self, cwd: str) -> None:
-        self.settings = SimpleNamespace(allowed_workdirs=[cwd])
+        self.settings = SimpleNamespace(
+            allowed_workdirs=[cwd],
+            external_push_reply_enabled=False,
+        )
+        self._external_reply_delivery_locks = _LockRegistry()
         self.ownership_resolver = _OwnershipResolver()
         self.auto_approve_service = SimpleNamespace(is_active=MagicMock(return_value=True))
         self.permission_gateway = SimpleNamespace(maybe_auto_approve=AsyncMock(return_value=AutoApproveOutcome.APPROVED))

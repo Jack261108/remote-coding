@@ -83,21 +83,21 @@ async def test_resolve_external_bound(
 ) -> None:
     """Session in binding store is externally bound."""
     session_service.list_all.return_value = []
-    binding_store.save_binding(
-        ExternalBinding(
-            session_id="sess-ext",
-            user_id=99,
-            cwd="/tmp/work",
-            bound_at=datetime.now(UTC),
-            jsonl_path=None,
-        )
+    binding = ExternalBinding(
+        session_id="sess-ext",
+        user_id=99,
+        cwd="/tmp/work",
+        bound_at=datetime.now(UTC),
+        jsonl_path=None,
     )
+    binding_store.save_binding(binding)
 
     result = await resolver.resolve("sess-ext")
 
     assert result.ownership_state == "bound"
     assert result.origin == SessionOrigin.EXTERNAL
     assert result.owner_user_id == 99
+    assert result.binding_id == binding.binding_id
 
 
 @pytest.mark.asyncio

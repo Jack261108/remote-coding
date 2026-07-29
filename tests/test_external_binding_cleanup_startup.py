@@ -128,7 +128,10 @@ async def test_t14_startup_with_stale_binding_in_json_is_cleaned_after_start(
         # /list would not see it because cleanup was awaited inside start().
         assert store.get_binding(session_id) is None, "stale binding should be removed by the initial cleanup awaited in start()"
         # Associated state is cleaned up too.
-        auto_approve.clear_session.assert_awaited_once_with(session_id)
+        auto_approve.clear_session.assert_awaited_once_with(
+            session_id,
+            mark_ended=False,
+        )
         hook_server.cancel_pending_permissions.assert_awaited_once_with(
             session_id=session_id,
         )
@@ -271,7 +274,10 @@ async def test_t16_cleanup_runs_standalone_cleans_stale_preserves_fresh(tmp_path
         assert store.get_binding(fresh_id) is not None, "fresh binding should be preserved"
 
         # Cleanup side effects fired only for the stale one.
-        auto_approve.clear_session.assert_awaited_once_with(stale_id)
+        auto_approve.clear_session.assert_awaited_once_with(
+            stale_id,
+            mark_ended=False,
+        )
         hook_server.cancel_pending_permissions.assert_awaited_once_with(session_id=stale_id)
     finally:
         await service.stop()

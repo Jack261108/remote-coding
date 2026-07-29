@@ -6,6 +6,7 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from app.domain.external_session_models import ExternalBinding
 
@@ -32,7 +33,10 @@ class ExternalBindingStore:
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
         self._file_path = data_dir / "external_bindings.json"
+        self._needs_migration_persist = False
         self._bindings: dict[str, ExternalBinding] = self.load_all()
+        if self._needs_migration_persist:
+            self._persist()
         # Per-session monotonic timestamps of the last on-disk persist driven
         # by ``touch_activity``. Used to throttle writes to at most once per
         # ``persist_min_interval_sec`` per session. Missing entry means the
@@ -56,7 +60,17 @@ class ExternalBindingStore:
         return self._bindings.get(session_id)
 
     def get_bindings_for_user(self, user_id: int) -> list[ExternalBinding]:
-        return [b for b in self._bindings.values() if b.user_id == user_id]
+        return [b for b in self._bindings.values() if b.user_id == user_id and b.ended_at is None]
+
+    def mark_ended(self, session_id: str, ended_at: datetime) -> bool:
+        binding = self._bindings.get(session_id)
+        if binding is None:
+            return False
+        if binding.ended_at is not None:
+            return False
+        binding.ended_at = ended_at
+        self._persist()
+        return True
 
     def set_reply_cursor(self, session_id: str, turn_id: str | None) -> bool:
         binding = self._bindings.get(session_id)
@@ -66,6 +80,21 @@ class ExternalBindingStore:
             return False
         binding.last_pushed_reply_turn_id = turn_id
         binding.reply_cursor_initialized = True
+        self._persist()
+        return True
+
+    def set_title_if_current(
+        self,
+        session_id: str,
+        expected_binding_id: str,
+        title: str,
+    ) -> bool:
+        binding = self._bindings.get(session_id)
+        if binding is None or binding.binding_id != expected_binding_id:
+            return False
+        if binding.title == title:
+            return True
+        binding.title = title
         self._persist()
         return True
 
@@ -136,14 +165,22 @@ class ExternalBindingStore:
                     last_activity_at = bound_at
                 else:
                     last_activity_at = _normalize_to_utc(datetime.fromisoformat(last_activity_raw))
+                ended_at_raw = entry.get("ended_at")
+                ended_at = _normalize_to_utc(datetime.fromisoformat(ended_at_raw)) if ended_at_raw is not None else None
+                binding_id = entry.get("binding_id")
+                if not binding_id:
+                    binding_id = uuid4().hex
+                    self._needs_migration_persist = True
                 bindings[session_id] = ExternalBinding(
                     session_id=session_id,
                     user_id=entry["user_id"],
                     cwd=entry["cwd"],
                     bound_at=bound_at,
                     jsonl_path=entry.get("jsonl_path"),
+                    binding_id=binding_id,
                     pid=entry.get("pid"),
                     title=entry.get("title"),
+                    ended_at=ended_at,
                     last_pushed_reply_turn_id=entry.get("last_pushed_reply_turn_id"),
                     reply_cursor_initialized=bool(entry.get("reply_cursor_initialized", False)),
                     last_activity_at_init=last_activity_at,
@@ -168,6 +205,7 @@ class ExternalBindingStore:
         data: dict[str, dict] = {}
         for session_id, binding in self._bindings.items():
             data[session_id] = {
+                "binding_id": binding.binding_id,
                 "user_id": binding.user_id,
                 "cwd": binding.cwd,
                 "bound_at": binding.bound_at.isoformat(),
@@ -175,6 +213,7 @@ class ExternalBindingStore:
                 "jsonl_path": binding.jsonl_path,
                 "pid": binding.pid,
                 "title": binding.title,
+                "ended_at": binding.ended_at.isoformat() if binding.ended_at is not None else None,
                 "last_pushed_reply_turn_id": binding.last_pushed_reply_turn_id,
                 "reply_cursor_initialized": binding.reply_cursor_initialized,
             }

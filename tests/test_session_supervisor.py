@@ -225,9 +225,35 @@ async def test_session_supervisor_stop_all_cleans_state() -> None:
     assert supervisor._locks == {}
     assert supervisor._wake_events == {}
     assert supervisor._jsonl_sync_requests == {}
+    assert supervisor._main_jsonl_signatures == {}
     assert supervisor._seen_mtimes == {}
     assert supervisor._session_mtime_keys == {}
     assert file_watcher.cleared is True
+
+
+@pytest.mark.asyncio
+async def test_session_supervisor_stop_blocks_new_watchers_until_reopened() -> None:
+    state = SessionState(session_id="claude-session-1", workdir="/tmp")
+    supervisor = SessionSupervisor(
+        session_store=_FakeStore(state),
+        claude_jsonl_parser=_FakeParser(),
+        on_jsonl_sync=lambda session_id, cwd: asyncio.sleep(0),
+        on_dispatch_event=lambda event: asyncio.sleep(0),
+        poll_interval_sec=0.01,
+        debounce_sec=0.01,
+    )
+
+    await supervisor.stop_all()
+    supervisor.watch(session_id=state.session_id, workdir=state.workdir)
+    supervisor.schedule_jsonl_sync(state.session_id, state.workdir)
+
+    assert supervisor._tasks == {}
+    assert supervisor._jsonl_sync_requests == {}
+
+    supervisor.reopen()
+    supervisor.watch(session_id=state.session_id, workdir=state.workdir)
+    assert state.session_id in supervisor._tasks
+    await supervisor.stop_all()
 
 
 @pytest.mark.asyncio
@@ -352,6 +378,43 @@ async def test_session_supervisor_falls_back_to_active_interval_when_file_watche
     )
 
     assert supervisor._next_wait_timeout(session_id=state.session_id, active_state=False) == 0.25
+
+
+@pytest.mark.asyncio
+async def test_session_supervisor_polls_main_jsonl_when_file_watcher_unavailable(tmp_path: Path) -> None:
+    state = SessionState(session_id="claude-session-1", workdir=str(tmp_path), phase=SessionPhase.IDLE)
+    session_file = tmp_path / "claude-session-1.jsonl"
+    session_file.write_text("partial", encoding="utf-8")
+    sync_calls = 0
+    synced = asyncio.Event()
+
+    async def on_jsonl_sync(session_id: str, cwd: str) -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            raise RuntimeError("transient sync failure")
+        synced.set()
+
+    supervisor = SessionSupervisor(
+        session_store=_FakeStore(state),
+        claude_jsonl_parser=_FakeParser(),
+        on_jsonl_sync=on_jsonl_sync,
+        on_dispatch_event=lambda event: asyncio.sleep(0),
+        poll_interval_sec=0.01,
+        idle_poll_interval_sec=60.0,
+        debounce_sec=0.01,
+        jsonl_file_watcher=_FakeJSONLFileWatcher(available=False),
+    )
+
+    supervisor.watch(session_id=state.session_id, workdir=state.workdir)
+    await asyncio.sleep(0.02)
+    session_file.write_text("completed reply", encoding="utf-8")
+    try:
+        await asyncio.wait_for(synced.wait(), timeout=1)
+    finally:
+        await supervisor.stop_all()
+
+    assert sync_calls == 2
 
 
 @pytest.mark.asyncio

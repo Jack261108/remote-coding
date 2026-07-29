@@ -3,18 +3,20 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import uuid
 import warnings
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.bootstrap import AppContainer
-from app.bootstrap_base import AppContainerBase
 from app.config.settings import Settings
+from app.domain.external_session_models import ExternalBinding
 from app.domain.hook_models import HookEvent
-from app.domain.models import TaskRecord, TaskStatus
+from app.domain.models import TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
 from app.domain.user_question_models import UserQuestionPrompt
 from app.services.auto_approve_service import ActivationSlot
@@ -88,10 +90,11 @@ async def cleanup_app_containers() -> AsyncIterator[None]:
         # abort cleanup of the others (which would mask resource leaks behind an
         # unrelated exception). Collect failures and surface them after best-effort
         # cleanup so no container is left dangling.
-        containers = [obj for obj in gc.get_objects() if isinstance(obj, AppContainerBase)]
+        containers = [obj for obj in gc.get_objects() if isinstance(obj, AppContainer)]
         cleanup_errors: list[tuple[Any, BaseException]] = []
         for container in containers:
             try:
+                await container.external_reply_delivery_pump.stop_all()
                 await container.session_supervisor.stop_all()
                 container.jsonl_file_watcher.stop()
             except BaseException as exc:  # noqa: BLE001 - cleanup must be best-effort
@@ -101,7 +104,7 @@ async def cleanup_app_containers() -> AsyncIterator[None]:
             except BaseException as exc:  # noqa: BLE001 - cleanup must be best-effort
                 cleanup_errors.append((container, exc))
 
-        # Verify no *uncleaned* AppContainerBase instances leak past cleanup. We count
+        # Verify no *uncleaned* AppContainer instances leak past cleanup. We count
         # containers whose supervisor is still active (the reliable teardown signal) rather
         # than merely-reachable ones: a container referenced only by a still-live test frame
         # is not a leak. This is a soft check (warning, not hard assertion) so a flaky gc
@@ -110,11 +113,11 @@ async def cleanup_app_containers() -> AsyncIterator[None]:
         leaked = [
             obj
             for obj in gc.get_objects()
-            if isinstance(obj, AppContainerBase) and getattr(getattr(obj, "session_supervisor", None), "_active", False)
+            if isinstance(obj, AppContainer) and getattr(getattr(obj, "session_supervisor", None), "_active", False)
         ]
         if leaked:
             warnings.warn(
-                f"{len(leaked)} AppContainerBase instance(s) still have an active session supervisor after cleanup",
+                f"{len(leaked)} AppContainer instance(s) still have an active session supervisor after cleanup",
                 stacklevel=1,
             )
 
@@ -303,6 +306,77 @@ async def test_app_container_starts_jsonl_file_watcher_before_restoring_sessions
         assert calls == ["watcher_start", "restore"]
     finally:
         await container.stop()
+
+
+@pytest.mark.asyncio
+async def test_app_container_holds_hook_event_until_startup_restore_finishes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(
+        make_settings(
+            tmp_path,
+            install_hooks=False,
+            CLAUDE_HOOK_SOCKET_PATH=f"/tmp/rc-startup-{uuid.uuid4().hex}.sock",
+        )
+    )
+    restore_entered = asyncio.Event()
+    allow_restore = asyncio.Event()
+    handled = asyncio.Event()
+    seen: list[HookEvent] = []
+
+    async def fake_restore() -> None:
+        restore_entered.set()
+        await allow_restore.wait()
+
+    async def fake_handle(event: HookEvent) -> None:
+        seen.append(event)
+        handled.set()
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_handle_hook_event", fake_handle)
+    monkeypatch.setattr(container, "_restore_session_bindings", fake_restore)
+    monkeypatch.setattr(container.external_binding_cleanup_service, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_external_reply_delivery_pumps", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.jsonl_file_watcher, "start", lambda: True)
+    monkeypatch.setattr(container.jsonl_file_watcher, "stop", MagicMock())
+    monkeypatch.setattr(container.external_reply_delivery_pump, "stop_all", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.session_supervisor, "stop_all", AsyncMock(return_value=None))
+
+    start_task = asyncio.create_task(container.start())
+    await asyncio.wait_for(restore_entered.wait(), timeout=1)
+    reader, writer = await asyncio.open_unix_connection(container.settings.claude_hook_socket_path)
+    writer.write(
+        json.dumps(
+            {
+                "session_id": "startup-session",
+                "cwd": str(tmp_path),
+                "event": "SessionStart",
+                "status": "starting",
+            }
+        ).encode("utf-8")
+    )
+    await writer.drain()
+    if writer.can_write_eof():
+        writer.write_eof()
+    await asyncio.sleep(0.05)
+    assert not handled.is_set()
+
+    allow_restore.set()
+    await start_task
+    await asyncio.wait_for(handled.wait(), timeout=1)
+
+    assert [event.session_id for event in seen] == ["startup-session"]
+    assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+    writer.close()
+    await writer.wait_closed()
+    await container.stop()
 
 
 @pytest.mark.asyncio
@@ -544,6 +618,88 @@ async def test_dead_unbound_cleanup_clears_external_user_question_state(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_manual_unbind_clears_owner_state_before_allowing_rebind(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session_id = "manual-unbind-session"
+    binding = ExternalBinding(
+        session_id=session_id,
+        user_id=1,
+        cwd=str(tmp_path),
+        bound_at=utc_now(),
+        jsonl_path=None,
+    )
+    container.external_binding_store.save_binding(binding)
+    await container.auto_approve_service.activate(session_id, user_id=1)
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    registry_invalidate = AsyncMock(return_value=1)
+    unbound_invalidate = AsyncMock(return_value=1)
+    uq_invalidate = MagicMock(return_value=1)
+
+    async def cancel_pending(*, session_id: str) -> None:
+        assert session_id == "manual-unbind-session"
+        cleanup_started.set()
+        await allow_cleanup.wait()
+
+    cancel_pending_mock = AsyncMock(side_effect=cancel_pending)
+
+    monkeypatch.setattr(
+        container.permission_callback_registry,
+        "invalidate_session",
+        registry_invalidate,
+    )
+    monkeypatch.setattr(
+        container.unbound_permission_handler,
+        "invalidate_session",
+        unbound_invalidate,
+    )
+    monkeypatch.setattr(
+        container.external_uq_state,
+        "invalidate_session",
+        uq_invalidate,
+    )
+    monkeypatch.setattr(
+        container.hook_socket_server,
+        "cancel_pending_permissions",
+        cancel_pending_mock,
+    )
+
+    try:
+        unbind_task = asyncio.create_task(container.external_binder.unbind(user_id=1, session_id=session_id))
+        await cleanup_started.wait()
+
+        replacement = ExternalBinding(
+            session_id=session_id,
+            user_id=2,
+            cwd=str(tmp_path),
+            bound_at=utc_now(),
+            jsonl_path=None,
+        )
+        assert await container._save_external_binding(replacement) is False
+
+        allow_cleanup.set()
+        result = await unbind_task
+
+        assert result.success is True
+        registry_invalidate.assert_awaited_once_with(session_id)
+        unbound_invalidate.assert_awaited_once_with(session_id)
+        uq_invalidate.assert_called_once_with(session_id)
+        cancel_pending_mock.assert_awaited_once_with(session_id=session_id)
+        assert not container.auto_approve_service.is_active(session_id)
+        assert not container.auto_approve_service.is_session_ended(session_id)
+        assert await container._save_external_binding(replacement) is True
+    finally:
+        allow_cleanup.set()
+        await container.external_reply_delivery_pump.stop_all()
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
 async def test_dead_unbound_cleanup_failure_is_retained_for_retry_when_called_directly(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     session_id = "dead-direct"
@@ -779,6 +935,127 @@ async def test_start_clears_dead_tmux_binding_before_restoring_watchers(tmp_path
         assert watched == []
     finally:
         await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_prunes_stale_external_binding_before_restoring_reply_delivery(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(
+        make_settings(
+            tmp_path,
+            install_hooks=False,
+            EXTERNAL_BINDING_IDLE_TTL_HOURS=1,
+        )
+    )
+    session_id = "stale-external-session"
+    stale_at = utc_now() - timedelta(hours=2)
+    container.external_binding_store.save_binding(
+        ExternalBinding(
+            session_id=session_id,
+            user_id=1,
+            cwd=str(tmp_path),
+            bound_at=stale_at,
+            jsonl_path=None,
+            last_activity_at_init=stale_at,
+        )
+    )
+    ensure = MagicMock()
+    pump_stop = AsyncMock()
+    watch = MagicMock()
+    schedule = MagicMock()
+    forget = AsyncMock()
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.jsonl_file_watcher, "start", lambda: True)
+    monkeypatch.setattr(container.jsonl_file_watcher, "stop", MagicMock())
+    monkeypatch.setattr(container.external_reply_delivery_pump, "ensure", ensure)
+    monkeypatch.setattr(container.external_reply_delivery_pump, "stop", pump_stop)
+    monkeypatch.setattr(container.external_reply_delivery_pump, "stop_all", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.session_supervisor, "watch", watch)
+    monkeypatch.setattr(container.session_supervisor, "schedule_jsonl_sync", schedule)
+    monkeypatch.setattr(container.session_supervisor, "forget", forget)
+    monkeypatch.setattr(container.session_supervisor, "stop_all", AsyncMock(return_value=None))
+
+    await container.start()
+    try:
+        assert container.external_binding_store.get_binding(session_id) is None
+        watch.assert_not_called()
+        ensure.assert_not_called()
+        schedule.assert_not_called()
+        pump_stop.assert_awaited_once_with(session_id)
+        forget.assert_awaited_once_with(session_id)
+    finally:
+        await container.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_restores_ended_binding_for_finalization_even_when_reply_push_disabled(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(
+        make_settings(
+            tmp_path,
+            install_hooks=False,
+            EXTERNAL_BINDING_IDLE_TTL_HOURS=1,
+            EXTERNAL_PUSH_REPLY_ENABLED=False,
+        )
+    )
+    session_id = "ended-external-session"
+    stale_at = utc_now() - timedelta(hours=2)
+    binding = ExternalBinding(
+        session_id=session_id,
+        user_id=1,
+        cwd=str(tmp_path),
+        bound_at=stale_at,
+        jsonl_path=None,
+        last_activity_at_init=stale_at,
+        ended_at=utc_now(),
+    )
+    container.external_binding_store.save_binding(binding)
+    ensure = MagicMock()
+    watch = MagicMock()
+    schedule = MagicMock()
+
+    monkeypatch.setattr(container.bot, "set_my_commands", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "start", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_restore_session_bindings", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.upload_cleanup, "run_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "start", lambda: None)
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._janitor_task, "start", lambda: None)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.jsonl_file_watcher, "start", lambda: True)
+    monkeypatch.setattr(container.jsonl_file_watcher, "stop", MagicMock())
+    monkeypatch.setattr(container.external_reply_delivery_pump, "ensure", ensure)
+    monkeypatch.setattr(container.external_reply_delivery_pump, "stop_all", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.session_supervisor, "watch", watch)
+    monkeypatch.setattr(container.session_supervisor, "schedule_jsonl_sync", schedule)
+    monkeypatch.setattr(container.session_supervisor, "stop_all", AsyncMock(return_value=None))
+
+    await container.start()
+    try:
+        restored = container.external_binding_store.get_binding(session_id)
+        assert restored is not None
+        assert restored.ended_at is not None
+        watch.assert_called_once_with(session_id=session_id, workdir=str(tmp_path))
+        ensure.assert_called_once_with(session_id=session_id, cwd=str(tmp_path))
+        schedule.assert_called_once_with(session_id, str(tmp_path))
+    finally:
+        await container.stop()
 
 
 @pytest.mark.asyncio
@@ -1442,6 +1719,57 @@ async def test_stop_cancels_pending_jsonl_sync_tasks(tmp_path, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_app_container_stop_blocks_remaining_in_flight_hook_stages(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    ownership_entered = asyncio.Event()
+    release_ownership = asyncio.Event()
+    bind_hook_session = AsyncMock()
+    dispatch_session_event = AsyncMock()
+    schedule_jsonl_sync = MagicMock()
+
+    async def blocked_ownership(_event: HookEvent):
+        ownership_entered.set()
+        await release_ownership.wait()
+        return MagicMock(ownership_state="owned", owner_user_id=1)
+
+    monkeypatch.setattr(container, "_resolve_ownership_stage", blocked_ownership)
+    monkeypatch.setattr(container, "_bind_hook_session", bind_hook_session)
+    monkeypatch.setattr(container, "_dispatch_session_event", dispatch_session_event)
+    monkeypatch.setattr(container, "_schedule_jsonl_sync", schedule_jsonl_sync)
+    monkeypatch.setattr(container._janitor_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container._external_binding_cleanup_task, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.hook_socket_server, "stop", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.jsonl_file_watcher, "stop", MagicMock())
+    monkeypatch.setattr(container.external_reply_delivery_pump, "stop_all", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.session_supervisor, "stop_all", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_stop_background_tasks", AsyncMock(return_value=None))
+    monkeypatch.setattr(container.bot.session, "close", AsyncMock(return_value=None))
+
+    hook_task = asyncio.create_task(
+        container._handle_hook_event(
+            HookEvent(
+                session_id="in-flight-session",
+                cwd=str(tmp_path),
+                event="Notification",
+                status="running",
+            )
+        )
+    )
+    await asyncio.wait_for(ownership_entered.wait(), timeout=1)
+
+    await container.stop()
+    release_ownership.set()
+    await asyncio.wait_for(hook_task, timeout=1)
+
+    bind_hook_session.assert_not_awaited()
+    dispatch_session_event.assert_not_awaited()
+    schedule_jsonl_sync.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_debounced_sync_keeps_request_added_during_sync(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify that a sync request scheduled during an active sync is picked up on the next poll."""
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
@@ -1527,6 +1855,183 @@ async def test_session_end_keeps_pending_sync_until_flushed(tmp_path, monkeypatc
     await wait_for_jsonl_sync_idle(container, "claude-session-1")
 
     assert seen == [("claude-session-1", str(tmp_path))]
+
+
+@pytest.mark.asyncio
+async def test_bound_hook_stops_after_binding_changes_during_event_dispatch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session_id = "bound-generation-change"
+    old_binding = ExternalBinding(
+        session_id=session_id,
+        user_id=1,
+        cwd=str(tmp_path),
+        bound_at=utc_now(),
+        jsonl_path=None,
+    )
+    container.external_binding_store.save_binding(old_binding)
+    dispatch_started = asyncio.Event()
+    allow_dispatch = asyncio.Event()
+    schedule_jsonl_sync = MagicMock()
+    auto_approve = AsyncMock()
+    notify = AsyncMock()
+    pump_ensure = MagicMock()
+
+    async def blocked_dispatch(_event: SessionEvent) -> None:
+        dispatch_started.set()
+        await allow_dispatch.wait()
+
+    monkeypatch.setattr(container, "_dispatch_session_event", blocked_dispatch)
+    monkeypatch.setattr(container, "_schedule_jsonl_sync", schedule_jsonl_sync)
+    monkeypatch.setattr(container, "_run_auto_approve_check", auto_approve)
+    monkeypatch.setattr(container, "_notify_bound_external_event", notify)
+    monkeypatch.setattr(container.external_reply_delivery_pump, "ensure", pump_ensure)
+
+    try:
+        hook_task = asyncio.create_task(
+            container._handle_hook_event(
+                HookEvent(
+                    session_id=session_id,
+                    cwd=str(tmp_path),
+                    event="Notification",
+                    status="running",
+                )
+            )
+        )
+        await dispatch_started.wait()
+        container.external_binding_store.save_binding(
+            ExternalBinding(
+                session_id=session_id,
+                user_id=1,
+                cwd=str(tmp_path),
+                bound_at=utc_now(),
+                jsonl_path=None,
+            )
+        )
+        allow_dispatch.set()
+        await hook_task
+
+        schedule_jsonl_sync.assert_not_called()
+        pump_ensure.assert_not_called()
+        auto_approve.assert_not_awaited()
+        notify.assert_not_awaited()
+    finally:
+        allow_dispatch.set()
+        await container.external_reply_delivery_pump.stop_all()
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_bound_file_send_rechecks_generation_after_waiting_for_delivery_lock(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session_id = "bound-file-generation-change"
+    old_binding = ExternalBinding(
+        session_id=session_id,
+        user_id=1,
+        cwd=str(tmp_path),
+        bound_at=utc_now(),
+        jsonl_path=None,
+    )
+    container.external_binding_store.save_binding(old_binding)
+    ownership = await container.ownership_resolver.resolve(session_id)
+    send_if_eligible = AsyncMock()
+    monkeypatch.setattr(container.file_sender, "send_if_eligible", send_if_eligible)
+    event = HookEvent(
+        session_id=session_id,
+        cwd=str(tmp_path),
+        event="PostToolUse",
+        status="running",
+        tool="Write",
+        tool_input={"file_path": "result.txt"},
+    )
+
+    async with container._external_reply_delivery_locks.lock(session_id):
+        send_task = asyncio.create_task(container._send_bound_file_if_current(event, ownership))
+        await asyncio.sleep(0)
+        container.external_binding_store.save_binding(
+            ExternalBinding(
+                session_id=session_id,
+                user_id=1,
+                cwd=str(tmp_path),
+                bound_at=utc_now(),
+                jsonl_path=None,
+            )
+        )
+
+    try:
+        await send_task
+        send_if_eligible.assert_not_awaited()
+    finally:
+        await container.external_reply_delivery_pump.stop_all()
+        await container.session_supervisor.stop_all()
+        await container.bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_bound_external_session_end_direct_syncs_and_requests_durable_finalization(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session_id = "bound-session-end"
+    container.external_binding_store.save_binding(
+        ExternalBinding(
+            session_id=session_id,
+            user_id=1,
+            cwd=str(tmp_path),
+            bound_at=utc_now(),
+            jsonl_path=None,
+        )
+    )
+    dispatch = AsyncMock()
+    direct_sync = AsyncMock()
+    scheduled_sync = MagicMock()
+    watch = MagicMock()
+    supervisor_schedule = MagicMock()
+    forget = AsyncMock()
+    pump_finalize = MagicMock()
+    notify_end = AsyncMock(return_value=True)
+    discard_progress = MagicMock()
+
+    monkeypatch.setattr(container, "_dispatch_session_event", dispatch)
+    monkeypatch.setattr(container, "sync_claude_session", direct_sync)
+    monkeypatch.setattr(container, "_schedule_jsonl_sync", scheduled_sync)
+    monkeypatch.setattr(container, "_run_auto_approve_check", AsyncMock(return_value=None))
+    monkeypatch.setattr(container, "_maybe_auto_file_send", MagicMock())
+    monkeypatch.setattr(container.session_supervisor, "watch", watch)
+    monkeypatch.setattr(container.session_supervisor, "schedule_jsonl_sync", supervisor_schedule)
+    monkeypatch.setattr(container.session_supervisor, "forget", forget)
+    monkeypatch.setattr(container.external_reply_delivery_pump, "request_finalize", pump_finalize)
+    monkeypatch.setattr(container.push_notifier, "notify_session_end", notify_end)
+    monkeypatch.setattr(container.push_notifier, "discard_assistant_reply_progress", discard_progress)
+
+    await container._handle_hook_event(
+        HookEvent(
+            session_id=session_id,
+            cwd=str(tmp_path),
+            event="SessionEnd",
+            status="ended",
+        )
+    )
+
+    dispatch.assert_awaited_once()
+    direct_sync.assert_awaited_once_with(session_id, str(tmp_path))
+    scheduled_sync.assert_not_called()
+    watch.assert_not_called()
+    supervisor_schedule.assert_not_called()
+    pump_finalize.assert_called_once_with(session_id=session_id, cwd=str(tmp_path))
+    notify_end.assert_not_awaited()
+    binding = container.external_binding_store.get_binding(session_id)
+    assert binding is not None
+    assert binding.ended_at is not None
+    forget.assert_not_awaited()
+    discard_progress.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1759,6 +2264,49 @@ async def test_match_session_context_prefers_terminal_binding(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_restore_session_bindings_syncs_existing_jsonl_even_when_state_is_nonempty(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    session, _ = await container.session_service.switch(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=True,
+        claude_chat_active=True,
+    )
+    session_id = "persisted-session"
+    await container.session_service.bind_claude_session(
+        user_id=1,
+        claude_session_id=session_id,
+        workdir=str(tmp_path),
+    )
+    state = container.structured_session_store.get_or_create(
+        session_id=session_id,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_id=session.terminal_id,
+        user_id=1,
+        claude_session_id=session_id,
+    )
+    state.turns = [ConversationTurn(turn_id="a1", role="assistant", text="persisted", is_complete=True)]
+    container.structured_session_store._persist(state)
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text("{}\n", encoding="utf-8")
+    sync = AsyncMock()
+    watch = MagicMock()
+    monkeypatch.setattr(container.claude_jsonl_parser, "session_file_path", MagicMock(return_value=session_file))
+    monkeypatch.setattr(container, "sync_claude_session", sync)
+    monkeypatch.setattr(container.session_supervisor, "watch", watch)
+
+    await container._restore_session_bindings()
+
+    sync.assert_awaited_once_with(session_id, str(tmp_path))
+    watch.assert_called_once_with(session_id=session_id, workdir=str(tmp_path))
+
+
+@pytest.mark.asyncio
 async def test_restore_session_bindings_clears_empty_terminal_binding_when_snapshot_missing(tmp_path) -> None:
     container = AppContainer(make_settings(tmp_path, install_hooks=False))
     session, _ = await container.session_service.switch(
@@ -1788,6 +2336,44 @@ async def test_restore_session_bindings_clears_empty_terminal_binding_when_snaps
     restored_session = await container.session_service.get(1)
     assert restored_session is not None
     assert restored_session.claude_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_restore_external_reply_delivery_pumps_resumes_persisted_bindings(tmp_path) -> None:
+    container = AppContainer(make_settings(tmp_path, install_hooks=False))
+    binding = ExternalBinding(
+        session_id="external-session-1",
+        user_id=1,
+        cwd=str(tmp_path),
+        bound_at=utc_now(),
+        jsonl_path=None,
+        last_pushed_reply_turn_id="a1",
+        reply_cursor_initialized=True,
+    )
+    container.external_binding_store.save_binding(binding)
+    container.external_reply_delivery_pump = MagicMock()
+    container.external_reply_delivery_pump.stop_all = AsyncMock()
+    container.session_supervisor.watch = MagicMock()
+    container.session_supervisor.schedule_jsonl_sync = MagicMock()
+
+    await container._restore_external_reply_delivery_pumps()
+
+    state = container.structured_session_store.get("external-session-1")
+    assert state is not None
+    assert state.user_id == 1
+    assert state.workdir == str(tmp_path)
+    container.session_supervisor.watch.assert_called_once_with(
+        session_id="external-session-1",
+        workdir=str(tmp_path),
+    )
+    container.external_reply_delivery_pump.ensure.assert_called_once_with(
+        session_id="external-session-1",
+        cwd=str(tmp_path),
+    )
+    container.session_supervisor.schedule_jsonl_sync.assert_called_once_with(
+        "external-session-1",
+        str(tmp_path),
+    )
 
 
 @pytest.mark.asyncio

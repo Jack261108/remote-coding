@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from enum import StrEnum
+from datetime import datetime
+from inspect import iscoroutine
 from pathlib import Path
 from typing import Any, cast
 
 from app.bootstrap_base import AppContainerBase
 from app.config.settings import is_workdir_allowed
-from app.domain.external_session_models import OwnershipResult
+from app.domain.external_session_models import ExternalBinding, OwnershipResult
 from app.domain.external_session_models import SessionOrigin as ExternalSessionOrigin
 from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus, utc_now
@@ -26,6 +27,7 @@ from app.domain.session_models import (
 )
 from app.domain.user_question_models import extract_user_question_prompts
 from app.infra.text_formatting import ensure_aware_utc
+from app.services.external_reply_delivery_pump import ExternalReplyDrainResult
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 
 logger = logging.getLogger(__name__)
@@ -37,12 +39,6 @@ def _is_session_end_event(event: HookEvent) -> bool:
 
 def _is_completed_assistant_reply(turn: ConversationTurn) -> bool:
     return turn.role == "assistant" and turn.is_complete and bool(turn.text.strip())
-
-
-class _BoundReplyPushResult(StrEnum):
-    NO_NEW_REPLY = "no_new_reply"
-    DELIVERED = "delivered"
-    DELIVERY_FAILED = "delivery_failed"
 
 
 class _StageShortCircuitError(Exception):
@@ -59,6 +55,131 @@ class _StageShortCircuitError(Exception):
 
 class JsonlSyncMixin(AppContainerBase):
     """JSONL sync: debounced incremental parsing and event dispatch."""
+
+    async def _save_external_binding(self, binding: ExternalBinding) -> bool:
+        async with self._external_reply_delivery_locks.lock(binding.session_id):
+            reaper = getattr(self, "external_binding_reaper", None)
+            if reaper is not None and reaper.is_cleanup_in_progress(binding.session_id):
+                return False
+            if self.external_binding_store.get_binding(binding.session_id) is not None:
+                return False
+            self.external_binding_store.save_binding(binding)
+            return True
+
+    async def _mark_external_binding_ended(
+        self,
+        session_id: str,
+        *,
+        expected_binding_id: str | None = None,
+        cleanup_callback: Callable[[], Awaitable[None]] | None = None,
+    ) -> bool:
+        cwd: str | None = None
+        async with self._external_reply_delivery_locks.lock(session_id):
+            binding = self.external_binding_store.get_binding(session_id)
+            if binding is None or (expected_binding_id is not None and binding.binding_id != expected_binding_id):
+                return False
+            self.external_binding_store.mark_ended(session_id, utc_now())
+            if cleanup_callback is not None:
+                await cleanup_callback()
+            cwd = binding.cwd
+        if cwd is not None and hasattr(self, "external_reply_delivery_pump"):
+            self.external_reply_delivery_pump.request_finalize(session_id=session_id, cwd=cwd)
+        return True
+
+    async def _finalize_bound_external_session(self, session_id: str) -> bool:
+        async with self._jsonl_sync_locks.lock(session_id):
+            async with self._external_reply_delivery_locks.lock(session_id):
+                async with self._session_event_locks.lock(session_id):
+                    binding = self.external_binding_store.get_binding(session_id)
+                    if binding is None:
+                        return True
+                    if binding.ended_at is None:
+                        return False
+                    if self.settings.external_push_reply_enabled:
+                        if not binding.reply_cursor_initialized:
+                            return False
+                        state = self.structured_session_store.get(session_id)
+                        turns = tuple(state.turns) if state is not None else ()
+                        cursor_id = binding.last_pushed_reply_turn_id
+                        cursor_index = next(
+                            (index for index, turn in enumerate(turns) if turn.turn_id == cursor_id),
+                            None,
+                        )
+                        if cursor_index is not None:
+                            has_pending_reply = any(_is_completed_assistant_reply(turn) for turn in turns[cursor_index + 1 :])
+                        else:
+                            bound_at = ensure_aware_utc(binding.bound_at)
+                            has_pending_reply = any(
+                                _is_completed_assistant_reply(turn) and ensure_aware_utc(turn.ended_at or turn.started_at) > bound_at
+                                for turn in turns
+                            )
+                        if has_pending_reply:
+                            return False
+                    if hasattr(self, "push_notifier"):
+                        delivered = await self.push_notifier.notify_session_end(
+                            user_id=binding.user_id,
+                            session_id=session_id,
+                            cwd=binding.cwd,
+                        )
+                        if not delivered:
+                            return False
+                    self.external_binding_store.remove_binding(session_id)
+                if hasattr(self, "push_notifier"):
+                    self.push_notifier.discard_assistant_reply_progress(session_id)
+                if hasattr(self, "session_supervisor"):
+                    try:
+                        await self.session_supervisor.forget(session_id)
+                    except Exception:
+                        logger.exception("external session watcher cleanup failed", extra={"session_id": session_id})
+                return True
+
+    async def _remove_external_binding(
+        self,
+        session_id: str,
+        expected_binding_id: str | None = None,
+        expected_last_activity_at: datetime | None = None,
+        expected_pid: int | None = None,
+    ) -> ExternalBinding | None:
+        async with self._external_reply_delivery_locks.lock(session_id):
+            binding = self.external_binding_store.get_binding(session_id)
+            if binding is None or (expected_binding_id is not None and binding.binding_id != expected_binding_id):
+                return None
+            if expected_last_activity_at is not None and (
+                binding.last_activity_at != expected_last_activity_at or binding.pid != expected_pid
+            ):
+                return None
+            self.external_binding_store.remove_binding(session_id)
+            if hasattr(self, "push_notifier"):
+                self.push_notifier.discard_assistant_reply_progress(session_id)
+            if hasattr(self, "external_reply_delivery_pump"):
+                try:
+                    await self.external_reply_delivery_pump.stop(session_id)
+                except Exception:
+                    logger.exception("external reply pump stop failed", extra={"session_id": session_id})
+            if hasattr(self, "session_supervisor"):
+                try:
+                    await self.session_supervisor.forget(session_id)
+                except Exception:
+                    logger.exception("external session watcher cleanup failed", extra={"session_id": session_id})
+            return binding
+
+    async def _unbind_external_binding(
+        self,
+        session_id: str,
+        expected_binding_id: str | None = None,
+    ) -> ExternalBinding | None:
+        binding = self.external_binding_store.get_binding(session_id)
+        if binding is None or (expected_binding_id is not None and binding.binding_id != expected_binding_id):
+            return None
+        reaper = cast(Any, self).external_binding_reaper
+        removed = await reaper.remove_with_cleanup(
+            session_id,
+            reason="manual_unbind",
+            expected_binding_id=binding.binding_id,
+            expected_last_activity_at=binding.last_activity_at,
+            expected_pid=binding.pid,
+        )
+        return binding if removed else None
 
     async def sync_claude_session(self, session_id: str, cwd: str) -> None:
         async with self._jsonl_sync_locks.lock(session_id):
@@ -85,27 +206,48 @@ class JsonlSyncMixin(AppContainerBase):
             )
 
     async def _sync_and_baseline_external_reply(self, session_id: str, cwd: str) -> None:
-        await self.sync_claude_session(session_id, cwd)
+        try:
+            await self.sync_claude_session(session_id, cwd)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "initial external reply sync failed",
+                extra={"session_id": session_id, "cwd": cwd},
+            )
+            if not getattr(self, "_stopping", False):
+                self._schedule_jsonl_sync(session_id, cwd)
+                if hasattr(self, "external_reply_delivery_pump"):
+                    self.external_reply_delivery_pump.request_settle(session_id=session_id, cwd=cwd)
+            return
+
         async with self._external_reply_delivery_locks.lock(session_id):
             async with self._session_event_locks.lock(session_id):
                 state = self.structured_session_store.get(session_id)
                 turns = tuple(state.turns) if state is not None else ()
             binding = self.external_binding_store.get_binding(session_id)
-            if binding is None or binding.last_pushed_reply_turn_id is not None:
+            if binding is None:
                 return
-            bound_at = ensure_aware_utc(binding.bound_at)
-            latest_reply = next(
-                (
-                    turn
-                    for turn in reversed(turns)
-                    if _is_completed_assistant_reply(turn) and ensure_aware_utc(turn.ended_at or turn.started_at) <= bound_at
-                ),
-                None,
-            )
-            self.external_binding_store.set_reply_cursor(
-                session_id,
-                latest_reply.turn_id if latest_reply is not None else None,
-            )
+            if binding.last_pushed_reply_turn_id is None:
+                bound_at = ensure_aware_utc(binding.bound_at)
+                latest_reply = next(
+                    (
+                        turn
+                        for turn in reversed(turns)
+                        if _is_completed_assistant_reply(turn) and ensure_aware_utc(turn.ended_at or turn.started_at) <= bound_at
+                    ),
+                    None,
+                )
+                self.external_binding_store.set_reply_cursor(
+                    session_id,
+                    latest_reply.turn_id if latest_reply is not None else None,
+                )
+        if getattr(self, "_stopping", False):
+            return
+        if hasattr(self, "session_supervisor"):
+            self.session_supervisor.watch(session_id=session_id, workdir=cwd)
+        if hasattr(self, "external_reply_delivery_pump"):
+            self.external_reply_delivery_pump.ensure(session_id=session_id, cwd=cwd)
 
     def _schedule_jsonl_sync(self, session_id: str, cwd: str) -> None:
         self.session_supervisor.watch(session_id=session_id, workdir=cwd)
@@ -115,7 +257,81 @@ class JsonlSyncMixin(AppContainerBase):
 class HookHandlingMixin(AppContainerBase):
     """Hook event handling: validate, bind session, dispatch events."""
 
+    def _is_current_bound_ownership(
+        self,
+        event: HookEvent,
+        ownership: OwnershipResult,
+    ) -> bool:
+        if ownership.origin != ExternalSessionOrigin.EXTERNAL or ownership.ownership_state != "bound":
+            return True
+        binding_store = getattr(self, "external_binding_store", None)
+        if binding_store is None or ownership.binding_id is None:
+            return False
+        binding = binding_store.get_binding(event.session_id)
+        return (
+            binding is not None
+            and binding.binding_id == ownership.binding_id
+            and binding.user_id == ownership.owner_user_id
+            and (binding.ended_at is None or _is_session_end_event(event))
+        )
+
+    async def _cleanup_session_end_permission_state(self, session_id: str) -> None:
+        async def run_async_cleanup(
+            label: str,
+            cleanup: Callable[[], Awaitable[object]],
+        ) -> None:
+            try:
+                await cleanup()
+            except Exception:
+                logger.exception(
+                    "session end permission cleanup failed",
+                    extra={"session_id": session_id, "step": label},
+                )
+
+        def run_sync_cleanup(label: str, cleanup: Callable[[], object]) -> None:
+            try:
+                cleanup()
+            except Exception:
+                logger.exception(
+                    "session end permission cleanup failed",
+                    extra={"session_id": session_id, "step": label},
+                )
+
+        if hasattr(self, "auto_approve_service"):
+            await run_async_cleanup(
+                "auto approve deactivation",
+                lambda: self.auto_approve_service.deactivate_all_for_session(session_id),
+            )
+            await run_async_cleanup(
+                "auto approve slot release",
+                lambda: self.auto_approve_service.release_all_slots_for_session(session_id),
+            )
+        if hasattr(self, "permission_callback_registry"):
+            await run_async_cleanup(
+                "permission callback registry",
+                lambda: self.permission_callback_registry.invalidate_session(session_id),
+            )
+        if hasattr(self, "unbound_permission_handler"):
+            await run_async_cleanup(
+                "unbound permission handler",
+                lambda: self.unbound_permission_handler.invalidate_session(session_id),
+            )
+        if hasattr(self, "external_uq_state"):
+            invalidator = getattr(self.external_uq_state, "invalidate_session", None)
+            if callable(invalidator):
+                run_sync_cleanup(
+                    "external user question state",
+                    lambda: invalidator(session_id),
+                )
+        if hasattr(self, "hook_socket_server"):
+            await run_async_cleanup(
+                "hook pending permissions",
+                lambda: self.hook_socket_server.cancel_pending_permissions(session_id=session_id),
+            )
+
     async def _handle_hook_event(self, event: HookEvent) -> None:
+        if getattr(self, "_stopping", False):
+            return
         logger.debug(
             "hook event received",
             extra={
@@ -135,38 +351,53 @@ class HookHandlingMixin(AppContainerBase):
         # A stage may raise _StageShortCircuitError to terminate the pipeline early.
         stages = self._build_stage_list(event, ownership)
         executed_up_to = -1
-        for i, (stage_name, stage_coro) in enumerate(stages):
-            try:
-                await stage_coro
-                executed_up_to = i
-            except _StageShortCircuitError as sc:
-                logger.info(
-                    "hook pipeline short-circuited",
-                    extra={
-                        "stage_name": stage_name,
-                        "reason": sc.reason,
-                        "session_id": event.session_id,
-                        "event_type": event.event,
-                    },
-                )
-                executed_up_to = i
-                break
-            except Exception:
-                logger.exception(
-                    "hook pipeline stage failed",
-                    extra={
-                        "stage_name": stage_name,
-                        "session_id": getattr(event, "session_id", None),
-                        "event_type": getattr(event, "event", None),
-                        "hook_cwd": getattr(event, "cwd", None),
-                    },
-                )
-
-        # Close un-awaited coroutines from skipped stages
-        for j in range(executed_up_to + 1, len(stages)):
-            coro = stages[j][1]
-            if hasattr(coro, "close"):
-                coro.close()
+        try:
+            for i, (stage_name, stage_coro) in enumerate(stages):
+                if getattr(self, "_stopping", False):
+                    break
+                if not self._is_current_bound_ownership(event, ownership):
+                    logger.info(
+                        "bound hook pipeline stopped after binding changed",
+                        extra={
+                            "stage_name": stage_name,
+                            "session_id": event.session_id,
+                            "event_type": event.event,
+                            "binding_id": ownership.binding_id,
+                            "owner_user_id": ownership.owner_user_id,
+                        },
+                    )
+                    break
+                try:
+                    await stage_coro
+                    executed_up_to = i
+                except _StageShortCircuitError as sc:
+                    logger.info(
+                        "hook pipeline short-circuited",
+                        extra={
+                            "stage_name": stage_name,
+                            "reason": sc.reason,
+                            "session_id": event.session_id,
+                            "event_type": event.event,
+                        },
+                    )
+                    executed_up_to = i
+                    break
+                except Exception:
+                    logger.exception(
+                        "hook pipeline stage failed",
+                        extra={
+                            "stage_name": stage_name,
+                            "session_id": getattr(event, "session_id", None),
+                            "event_type": getattr(event, "event", None),
+                            "hook_cwd": getattr(event, "cwd", None),
+                        },
+                    )
+        finally:
+            # Closing skipped coroutines also covers cancellation during a stage.
+            for j in range(executed_up_to + 1, len(stages)):
+                coro = stages[j][1]
+                if iscoroutine(coro):
+                    coro.close()
 
     async def _resolve_ownership_stage(self, event: HookEvent) -> OwnershipResult | None:
         """Gate stage: workdir check, SessionEnd cleanup, and ownership resolution.
@@ -187,20 +418,12 @@ class HookHandlingMixin(AppContainerBase):
 
             is_session_end = _is_session_end_event(event)
 
-            # Clear unified permission state on session end before removing bindings.
-            if is_session_end:
-                if hasattr(self, "auto_approve_service"):
-                    await self.auto_approve_service.deactivate_all_for_session(event.session_id)
-                    await self.auto_approve_service.release_all_slots_for_session(event.session_id)
-                if hasattr(self, "permission_callback_registry"):
-                    await self.permission_callback_registry.invalidate_session(event.session_id)
-                if hasattr(self, "unbound_permission_handler"):
-                    await self.unbound_permission_handler.invalidate_session(event.session_id)
-
-            # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior
+            # If ownership_resolver is not wired (e.g. in tests), fall back to old behavior.
             if not hasattr(self, "ownership_resolver"):
-                if is_session_end and hasattr(self, "external_binding_store"):
-                    self.external_binding_store.remove_binding(event.session_id)
+                if is_session_end:
+                    await self._cleanup_session_end_permission_state(event.session_id)
+                    if hasattr(self, "external_binding_store"):
+                        self.external_binding_store.remove_binding(event.session_id)
                 await self._bind_hook_session(event)
                 await self._dispatch_session_event(  # type: ignore[attr-defined]
                     SessionEvent(
@@ -212,9 +435,21 @@ class HookHandlingMixin(AppContainerBase):
                 self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
                 return None
 
-            # Resolve ownership before removing a SessionEnd binding so the ended
-            # event still follows the external-bound pipeline it belonged to.
+            # Resolve before SessionEnd cleanup so an in-flight old generation
+            # cannot clear permission state belonging to a replacement binding.
             ownership = await self.ownership_resolver.resolve(event.session_id)
+
+            if is_session_end:
+                if ownership.origin == ExternalSessionOrigin.EXTERNAL and ownership.ownership_state == "bound":
+                    marked = await self._mark_external_binding_ended(  # type: ignore[attr-defined]
+                        event.session_id,
+                        expected_binding_id=ownership.binding_id,
+                        cleanup_callback=lambda: self._cleanup_session_end_permission_state(event.session_id),
+                    )
+                    if not marked:
+                        return None
+                else:
+                    await self._cleanup_session_end_permission_state(event.session_id)
 
             if not is_session_end and ownership.origin == ExternalSessionOrigin.EXTERNAL and hasattr(self, "external_discovery"):
                 is_ended = getattr(self.external_discovery, "is_session_ended", None)
@@ -289,7 +524,6 @@ class HookHandlingMixin(AppContainerBase):
                                 },
                             )
 
-            # Remove external binding on session end so /list doesn't show stale entries.
             if is_session_end and ownership.origin == ExternalSessionOrigin.EXTERNAL:
                 if hasattr(self, "external_discovery"):
                     marker = getattr(self.external_discovery, "mark_session_ended", None)
@@ -297,12 +531,6 @@ class HookHandlingMixin(AppContainerBase):
                         marker(event.session_id)
                     else:
                         self.external_discovery.remove_session(event.session_id)
-                if hasattr(self, "external_uq_state"):
-                    invalidator = getattr(self.external_uq_state, "invalidate_session", None)
-                    if callable(invalidator):
-                        invalidator(event.session_id)
-                if hasattr(self, "external_binding_store"):
-                    self.external_binding_store.remove_binding(event.session_id)
             logger.info(
                 "hook event ownership resolved",
                 extra={
@@ -322,7 +550,7 @@ class HookHandlingMixin(AppContainerBase):
                 and ownership.ownership_state == "bound"
                 and not is_session_end
                 and hasattr(self, "external_binding_store")
-                and self.external_binding_store.get_binding(event.session_id) is not None
+                and self._is_current_bound_ownership(event, ownership)
             ):
                 self.external_binding_store.touch_activity(event.session_id, utc_now(), pid=event.pid)
 
@@ -409,37 +637,58 @@ class HookHandlingMixin(AppContainerBase):
                 )
             )
 
-            # Stop is flushed synchronously by reply delivery; only register its watcher here.
+            # Stop is flushed synchronously by reply delivery; SessionEnd gets one final direct sync without re-watching.
             async def _schedule_jsonl_bound() -> None:
-                if event.event == "Stop" and not _is_session_end_event(event) and self.settings.external_push_reply_enabled:
+                if _is_session_end_event(event):
+                    await self.sync_claude_session(event.session_id, event.cwd)  # type: ignore[attr-defined]
+                    return
+                if self.settings.external_push_reply_enabled and hasattr(self, "external_reply_delivery_pump"):
+                    self.external_reply_delivery_pump.ensure(session_id=event.session_id, cwd=event.cwd)
+                if event.event == "Stop" and self.settings.external_push_reply_enabled:
                     self.session_supervisor.watch(session_id=event.session_id, workdir=event.cwd)
                     return
                 self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
 
             stages.append(("jsonl_sync_scheduling", _schedule_jsonl_bound()))
 
-            # Auto-approve check — may short-circuit, skipping push_notification
-            stages.append(
-                (  # type: ignore[arg-type]
-                    "auto_approve_check",
-                    self._run_auto_approve_check(
+            # Permission decisions are serialized with unbind/rebind so an old
+            # owner cannot approve after the binding generation changes.
+            async def _auto_approve_bound() -> None:
+                async with self._external_reply_delivery_locks.lock(event.session_id):
+                    if not self._is_current_bound_ownership(event, ownership):
+                        raise _StageShortCircuitError(reason="binding-changed")
+                    await self._run_auto_approve_check(
                         event,
                         origin=SessionOrigin.EXTERNAL_BOUND,
                         candidate_user_id=ownership.owner_user_id,
-                    ),
-                )
-            )
+                    )
 
-            # Push notification
+            stages.append(("auto_approve_check", _auto_approve_bound()))
+
+            # Permission and user-question pushes share the same generation
+            # barrier. Stop reply delivery already acquires this lock internally.
             async def _push_notification_bound() -> None:
-                if hasattr(self, "push_notifier") and ownership.owner_user_id is not None:
+                if not hasattr(self, "push_notifier") or ownership.owner_user_id is None:
+                    return
+                if event.event == "Stop":
+                    await self._notify_bound_external_event(event, ownership.owner_user_id)
+                    return
+                async with self._external_reply_delivery_locks.lock(event.session_id):
+                    if not self._is_current_bound_ownership(event, ownership):
+                        return
                     await self._notify_bound_external_event(event, ownership.owner_user_id)
 
             stages.append(("push_notification", _push_notification_bound()))
 
             # Auto-file-send
             async def _auto_file_send_bound() -> None:
-                self._maybe_auto_file_send(event, ownership.owner_user_id)
+                if (
+                    event.event == "PostToolUse"
+                    and event.tool == "Write"
+                    and ownership.owner_user_id is not None
+                    and hasattr(self, "file_sender")
+                ):
+                    self._background_tasks.spawn(self._send_bound_file_if_current(event, ownership))
 
             stages.append(("auto_file_send", _auto_file_send_bound()))
 
@@ -542,6 +791,23 @@ class HookHandlingMixin(AppContainerBase):
                 exc_info=True,
             )
 
+    async def _send_bound_file_if_current(
+        self,
+        event: HookEvent,
+        ownership: OwnershipResult,
+    ) -> None:
+        async with self._external_reply_delivery_locks.lock(event.session_id):
+            owner_user_id = ownership.owner_user_id
+            if owner_user_id is None or not self._is_current_bound_ownership(event, ownership):
+                return
+            file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
+            file_sender = cast(Any, self).file_sender
+            await file_sender.send_if_eligible(
+                file_path_raw=file_path_raw,
+                cwd=event.cwd,
+                chat_id=owner_user_id,
+            )
+
     def _maybe_auto_file_send(self, event: HookEvent, owner_user_id: int | None) -> None:
         if event.event == "PostToolUse" and event.tool == "Write" and owner_user_id is not None and hasattr(self, "file_sender"):
             file_path_raw = event.tool_input.get("file_path", "") if event.tool_input else ""
@@ -559,6 +825,8 @@ class HookHandlingMixin(AppContainerBase):
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""
         if not hasattr(self, "push_notifier"):
+            return
+        if _is_session_end_event(event):
             return
         if event.expects_response:
             # AskUserQuestion: try PTY injection flow if tmux pane is available
@@ -618,24 +886,14 @@ class HookHandlingMixin(AppContainerBase):
                 title=_title,
             )
         elif event.event == "Stop":
-            if _is_session_end_event(event):
-                await self.push_notifier.notify_session_end(
-                    user_id=user_id,
-                    session_id=event.session_id,
-                    cwd=event.cwd,
-                )
-                return
-            result = await self._push_bound_assistant_replies(event, user_id)
-            if result != _BoundReplyPushResult.DELIVERED:
-                await self.push_notifier.notify_session_end(
-                    user_id=user_id,
-                    session_id=event.session_id,
-                    cwd=event.cwd,
-                )
+            await self._push_bound_assistant_replies(event, user_id)
 
-    async def _push_bound_assistant_replies(self, event: HookEvent, user_id: int) -> _BoundReplyPushResult:
+    async def _push_bound_assistant_replies(self, event: HookEvent, user_id: int) -> ExternalReplyDrainResult:
         if not self.settings.external_push_reply_enabled:
-            return _BoundReplyPushResult.NO_NEW_REPLY
+            return ExternalReplyDrainResult.NO_NEW_REPLY
+
+        if hasattr(self, "external_reply_delivery_pump"):
+            self.external_reply_delivery_pump.ensure(session_id=event.session_id, cwd=event.cwd)
 
         try:
             await self.sync_claude_session(event.session_id, event.cwd)  # type: ignore[attr-defined]
@@ -645,28 +903,45 @@ class HookHandlingMixin(AppContainerBase):
                 extra={"session_id": event.session_id, "user_id": user_id},
             )
             self._schedule_jsonl_sync(event.session_id, event.cwd)  # type: ignore[attr-defined]
-            return _BoundReplyPushResult.DELIVERY_FAILED
+            if hasattr(self, "external_reply_delivery_pump"):
+                self.external_reply_delivery_pump.request_settle(session_id=event.session_id, cwd=event.cwd)
+            return ExternalReplyDrainResult.DELIVERY_FAILED
 
-        async with self._external_reply_delivery_locks.lock(event.session_id):
-            async with self._session_event_locks.lock(event.session_id):
-                state = self.structured_session_store.get(event.session_id)
+        result = await self._drain_bound_assistant_replies(event.session_id)
+        if hasattr(self, "external_reply_delivery_pump"):
+            self.external_reply_delivery_pump.request_settle(session_id=event.session_id, cwd=event.cwd)
+        return result
+
+    async def _drain_bound_assistant_replies(self, session_id: str) -> ExternalReplyDrainResult:
+        if not self.settings.external_push_reply_enabled:
+            return ExternalReplyDrainResult.NO_NEW_REPLY
+
+        async with self._external_reply_delivery_locks.lock(session_id):
+            async with self._session_event_locks.lock(session_id):
+                state = self.structured_session_store.get(session_id)
                 turns = tuple(state.turns) if state is not None else ()
-            binding = self.external_binding_store.get_binding(event.session_id)
+            binding = self.external_binding_store.get_binding(session_id)
             if binding is None:
-                return _BoundReplyPushResult.NO_NEW_REPLY
+                return ExternalReplyDrainResult.NO_NEW_REPLY
+            user_id = binding.user_id
             if not binding.reply_cursor_initialized:
-                latest_reply = next((turn for turn in reversed(turns) if _is_completed_assistant_reply(turn)), None)
-                self.external_binding_store.set_reply_cursor(
-                    event.session_id,
-                    latest_reply.turn_id if latest_reply is not None else None,
+                bound_at = ensure_aware_utc(binding.bound_at)
+                latest_reply = next(
+                    (
+                        turn
+                        for turn in reversed(turns)
+                        if _is_completed_assistant_reply(turn) and ensure_aware_utc(turn.ended_at or turn.started_at) <= bound_at
+                    ),
+                    None,
                 )
+                cursor_id = latest_reply.turn_id if latest_reply is not None else None
+                self.external_binding_store.set_reply_cursor(session_id, cursor_id)
                 logger.info(
                     "legacy bound assistant reply cursor initialized",
-                    extra={"session_id": event.session_id, "user_id": user_id},
+                    extra={"session_id": session_id, "user_id": user_id},
                 )
-                return _BoundReplyPushResult.NO_NEW_REPLY
-
-            cursor_id = binding.last_pushed_reply_turn_id
+            else:
+                cursor_id = binding.last_pushed_reply_turn_id
             cursor_index = next(
                 (index for index, turn in enumerate(turns) if turn.turn_id == cursor_id),
                 None,
@@ -677,7 +952,7 @@ class HookHandlingMixin(AppContainerBase):
                 if cursor_id is not None:
                     logger.warning(
                         "bound assistant reply cursor not found; recovering from bind time",
-                        extra={"session_id": event.session_id, "user_id": user_id, "turn_id": cursor_id},
+                        extra={"session_id": session_id, "user_id": user_id, "turn_id": cursor_id},
                     )
                 bound_at = ensure_aware_utc(binding.bound_at)
                 pending_replies = [
@@ -687,23 +962,24 @@ class HookHandlingMixin(AppContainerBase):
                 ]
 
             if not pending_replies:
-                return _BoundReplyPushResult.NO_NEW_REPLY
+                return ExternalReplyDrainResult.NO_NEW_REPLY
 
             for turn in pending_replies:
                 delivered = await self.push_notifier.notify_assistant_reply(
                     user_id=user_id,
-                    session_id=event.session_id,
+                    session_id=session_id,
                     text=turn.text,
                     title=binding.title,
+                    turn_id=turn.turn_id,
                 )
                 if not delivered:
                     logger.warning(
                         "bound assistant reply delivery failed",
-                        extra={"session_id": event.session_id, "user_id": user_id, "turn_id": turn.turn_id},
+                        extra={"session_id": session_id, "user_id": user_id, "turn_id": turn.turn_id},
                     )
-                    return _BoundReplyPushResult.DELIVERY_FAILED
-                self.external_binding_store.set_reply_cursor(event.session_id, turn.turn_id)
-            return _BoundReplyPushResult.DELIVERED
+                    return ExternalReplyDrainResult.DELIVERY_FAILED
+                self.external_binding_store.set_reply_cursor(session_id, turn.turn_id)
+            return ExternalReplyDrainResult.DELIVERED
 
     async def _handle_permission_failure(self, session_id: str, tool_use_id: str) -> None:
         logger.warning(
@@ -1146,12 +1422,12 @@ class SessionRestoreMixin(AppContainerBase):
                 user_id=session.user_id,
                 claude_session_id=claude_session_id,
             )
-            if state.turns or state.tool_calls or state.pending_permission is not None:
-                self.session_supervisor.watch(session_id=state.session_id, workdir=state.workdir)
-                continue
             session_file = self.claude_jsonl_parser.session_file_path(session_id=claude_session_id, cwd=session.workdir)
             if session_file.exists():
                 await self.sync_claude_session(claude_session_id, session.workdir)  # type: ignore[attr-defined]
+                self.session_supervisor.watch(session_id=state.session_id, workdir=state.workdir)
+                continue
+            if state.turns or state.tool_calls or state.pending_permission is not None:
                 self.session_supervisor.watch(session_id=state.session_id, workdir=state.workdir)
                 continue
             terminal_state = self.structured_session_store.find_by_terminal_id(session.terminal_id) if session.terminal_id else None
@@ -1165,6 +1441,21 @@ class SessionRestoreMixin(AppContainerBase):
             # Clean up orphaned session state: clear binding and delete state files
             await self.session_service.clear_claude_session(user_id=session.user_id)
             self.structured_session_store.delete_session(claude_session_id)
+
+    async def _restore_external_reply_delivery_pumps(self) -> None:
+        for binding in self.external_binding_store.list_all():
+            if not self.settings.external_push_reply_enabled and binding.ended_at is None:
+                continue
+            self.structured_session_store.get_or_create(
+                session_id=binding.session_id,
+                provider="claude_code",
+                workdir=binding.cwd,
+                user_id=binding.user_id,
+                claude_session_id=binding.session_id,
+            )
+            self.session_supervisor.watch(session_id=binding.session_id, workdir=binding.cwd)
+            self.external_reply_delivery_pump.ensure(session_id=binding.session_id, cwd=binding.cwd)
+            self.session_supervisor.schedule_jsonl_sync(binding.session_id, binding.cwd)
 
 
 class EventDispatchMixin(AppContainerBase):

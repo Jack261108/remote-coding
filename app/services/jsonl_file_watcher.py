@@ -88,7 +88,21 @@ class JSONLFileWatcher:
 
     @property
     def is_available(self) -> bool:
-        return self._started and self._available
+        if not self._started or not self._available:
+            return False
+        observer = self._observer
+        if observer is None:
+            self._available = False
+            return False
+        try:
+            alive = observer.is_alive()
+        except Exception:
+            alive = False
+            logger.warning("jsonl file watcher observer health check failed", exc_info=True)
+        if not alive:
+            self._available = False
+            logger.warning("jsonl file watcher observer stopped; falling back to supervisor polling")
+        return self._available
 
     @property
     def is_enabled(self) -> bool:

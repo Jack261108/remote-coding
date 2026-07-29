@@ -90,7 +90,17 @@ class HookSocketServer:
         self._disconnected_permissions: dict[str, _DisconnectedPermission] = {}
         self._disconnect_grace_tasks: dict[str, asyncio.Task[None]] = {}
         self._tool_use_id_cache: dict[str, list[_CachedToolUseId]] = {}
+        self._client_tasks: set[asyncio.Task[None]] = set()
+        self._stopping = False
+        self._ingress_ready = asyncio.Event()
+        self._ingress_ready.set()
         self._lock = asyncio.Lock()
+
+    def pause_ingress(self) -> None:
+        self._ingress_ready.clear()
+
+    def resume_ingress(self) -> None:
+        self._ingress_ready.set()
 
     async def start(
         self,
@@ -100,6 +110,7 @@ class HookSocketServer:
     ) -> None:
         if self._server is not None:
             return
+        self._stopping = False
         self._event_handler = on_event
         self._permission_failure_handler = on_permission_failure
         self._permission_resolved_handler = on_permission_resolved
@@ -108,17 +119,23 @@ class HookSocketServer:
             self._socket_path.unlink()
         previous_umask = os.umask(0o177)
         try:
-            self._server = await asyncio.start_unix_server(self._handle_client, path=str(self._socket_path))
+            self._server = await asyncio.start_unix_server(self._accept_client, path=str(self._socket_path))
         finally:
             os.umask(previous_umask)
         self._socket_path.chmod(0o600)
 
     async def stop(self) -> None:
+        self._stopping = True
         server = self._server
         self._server = None
         if server is not None:
             server.close()
             await server.wait_closed()
+        client_tasks = list(self._client_tasks)
+        for task in client_tasks:
+            task.cancel()
+        await asyncio.gather(*client_tasks, return_exceptions=True)
+        self._client_tasks.clear()
         async with self._lock:
             pending = list(self._pending_permissions.values())
             expiration_tasks = list(self._pending_expiration_tasks.values())
@@ -232,6 +249,24 @@ class HookSocketServer:
             raw = await reader.read(self._max_message_bytes + 1)
             return raw, False
 
+    def _accept_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._stopping:
+            writer.close()
+            return
+        task = asyncio.create_task(self._run_client(reader, writer))
+        self._client_tasks.add(task)
+        task.add_done_callback(self._client_tasks.discard)
+
+    async def _run_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await self._handle_client(reader, writer)
+        except asyncio.CancelledError:
+            await self._close_writer(writer)
+            raise
+        except Exception:
+            logger.exception("hook socket client handler failed")
+            await self._close_writer(writer)
+
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         raw, is_framed = await self._read_hook_payload(reader)
         raw_size = len(raw)
@@ -293,6 +328,11 @@ class HookSocketServer:
                 "hook event rejected by workdir allowlist",
                 extra={"session_id": event.session_id, "cwd": event.cwd, "event": event.event},
             )
+            await self._close_writer(writer)
+            return
+
+        await self._ingress_ready.wait()
+        if self._stopping:
             await self._close_writer(writer)
             return
 
