@@ -1,10 +1,12 @@
 import asyncio
 import logging
+import shlex
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+from app.adapters.process import tmux_runner as tmux_runner_module
 from app.adapters.process.tmux_runner import TmuxRunner, _InteractiveWatchState, _TmuxTaskMeta
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import CLIEvent, EventType, utc_now
@@ -14,6 +16,16 @@ from app.services.session_store import SessionStore
 
 async def _collect_events(stream):
     return [event async for event in stream]
+
+
+class _FakeProcess:
+    def __init__(self, *, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> None:
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
 
 
 def _runner_with_session_store(tmp_path: Path, **kwargs) -> TmuxRunner:
@@ -2281,6 +2293,150 @@ async def test_reveal_terminal_reports_session_check_failure(monkeypatch: pytest
 
     assert opened is False
     assert text == "终端状态检查失败: permission denied"
+
+
+@pytest.mark.asyncio
+async def test_reveal_terminal_opens_when_osascript_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tmux_bin_path = tmp_path / "custom tmux/bin/tmux"
+    runner = TmuxRunner(tmux_bin=str(tmux_bin_path), cancel_grace_sec=0)
+    tmux_calls: list[tuple[str, ...]] = []
+    subprocess_calls: list[tuple[object, ...]] = []
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        tmux_calls.append(args)
+        assert args[0] == "has-session"
+        return 0, "", ""
+
+    async def fake_create_subprocess_exec(*args: object, **_kwargs: object) -> _FakeProcess:
+        subprocess_calls.append(args)
+        return _FakeProcess(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(tmux_runner_module.shutil, "which", lambda _bin: str(tmux_bin_path))
+    monkeypatch.setattr(tmux_runner_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    opened, text = await runner.reveal_terminal("user_1")
+
+    assert opened is True
+    assert text == "已在桌面打开 Terminal 并附着到 tgcli_user_1"
+    assert tmux_calls == [("has-session", "-t", "tgcli_user_1")]
+    assert len(subprocess_calls) == 1
+    osascript_args = subprocess_calls[0]
+    assert osascript_args[:2] == ("osascript", "-e")
+    script = osascript_args[2]
+    assert isinstance(script, str)
+    assert 'set targetTab to do script ""' in script
+    assert "delay 0.2" in script
+    assert "repeat with attempt from 1 to 100" in script
+    assert 'if busy of targetTab then error "Terminal shell did not become ready"' in script
+    assert "do script (item 1 of argv) in targetTab" in script
+    assert "return tty of targetTab" not in script
+    attach_command = osascript_args[4]
+    parts = shlex.split(attach_command)
+    assert parts == [
+        "/usr/bin/env",
+        "-u",
+        "TMUX",
+        "-u",
+        "TMUX_PANE",
+        str(tmux_bin_path),
+        "attach-session",
+        "-t",
+        "tgcli_user_1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reveal_terminal_reports_osascript_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        assert args[0] == "has-session"
+        return 0, "", ""
+
+    async def fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _FakeProcess:
+        return _FakeProcess(returncode=1, stderr=b"Terminal shell did not become ready")
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(tmux_runner_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    opened, text = await runner.reveal_terminal("user_1")
+
+    assert opened is False
+    assert text == ("打开桌面终端失败: Terminal shell did not become ready\nhint: 可手动执行 `tmux attach -t tgcli_user_1`")
+
+
+@pytest.mark.asyncio
+async def test_reveal_terminal_reports_osascript_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        assert args[0] == "has-session"
+        return 0, "", ""
+
+    async def fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _FakeProcess:
+        raise FileNotFoundError("osascript")
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(tmux_runner_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    opened, text = await runner.reveal_terminal("user_1")
+
+    assert opened is False
+    assert text == "找不到 osascript（仅支持 macOS 桌面）\nhint: 可手动执行 `tmux attach -t <tmux_session>`"
+
+
+@pytest.mark.asyncio
+async def test_reveal_terminal_reports_osascript_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = TmuxRunner(cancel_grace_sec=0)
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        assert args[0] == "has-session"
+        return 0, "", ""
+
+    async def fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _FakeProcess:
+        raise OSError("spawn blocked")
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(tmux_runner_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    opened, text = await runner.reveal_terminal("user_1")
+
+    assert opened is False
+    assert text == "打开桌面终端失败: spawn blocked"
+
+
+@pytest.mark.asyncio
+async def test_reveal_terminal_falls_back_to_resolved_tmux_bin_when_which_misses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tmux_bin_path = tmp_path / "bundled/tmux"
+    tmux_bin_path.parent.mkdir(parents=True, exist_ok=True)
+    tmux_bin_path.write_text("#!/bin/sh\n")
+    runner = TmuxRunner(tmux_bin=str(tmux_bin_path), cancel_grace_sec=0)
+
+    async def fake_run_tmux(*args: str, input_data: bytes | None = None):
+        assert args[0] == "has-session"
+        return 0, "", ""
+
+    async def fake_create_subprocess_exec(*args: object, **_kwargs: object) -> _FakeProcess:
+        attach_command = args[4]
+        parts = shlex.split(attach_command)
+        assert parts[5] == str(tmux_bin_path)
+        return _FakeProcess(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(runner, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(tmux_runner_module.shutil, "which", lambda _bin: None)
+    monkeypatch.setattr(tmux_runner_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    opened, text = await runner.reveal_terminal("user_1")
+
+    assert opened is True
+    assert text == "已在桌面打开 Terminal 并附着到 tgcli_user_1"
 
 
 @pytest.mark.asyncio

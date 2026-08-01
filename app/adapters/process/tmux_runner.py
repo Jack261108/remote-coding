@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
+import shutil
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -28,6 +29,21 @@ from app.infra.lock_registry import RefCountedLockRegistry
 
 CCB_BEGIN_PREFIX = "TGCLI_BEGIN"
 CCB_DONE_PREFIX = "TGCLI_DONE"
+_TERMINAL_REVEAL_SCRIPT = """
+on run argv
+    tell application "Terminal"
+        activate
+        set targetTab to do script ""
+        delay 0.2
+        repeat with attempt from 1 to 100
+            if not busy of targetTab then exit repeat
+            delay 0.1
+        end repeat
+        if busy of targetTab then error "Terminal shell did not become ready"
+        do script (item 1 of argv) in targetTab
+    end tell
+end run
+""".strip()
 logger = logging.getLogger(__name__)
 
 
@@ -1016,17 +1032,33 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
             return False, f"终端状态检查失败: {exc}"
         if not exists:
             return False, f"tmux 会话不存在: {session_name}\nhint: 请先发送 /claude 创建会话后再打开桌面终端"
+        resolved_tmux_bin = shutil.which(self._tmux_bin)
+        if resolved_tmux_bin:
+            tmux_bin = str(Path(resolved_tmux_bin).resolve())
+        elif Path(self._tmux_bin).exists():
+            tmux_bin = str(Path(self._tmux_bin).resolve())
+        else:
+            tmux_bin = self._tmux_bin
+        attach_command = shlex.join(
+            [
+                "/usr/bin/env",
+                "-u",
+                "TMUX",
+                "-u",
+                "TMUX_PANE",
+                tmux_bin,
+                "attach-session",
+                "-t",
+                session_name,
+            ]
+        )
         try:
             process = await asyncio.create_subprocess_exec(
                 "osascript",
                 "-e",
-                'tell application "Terminal"',
-                "-e",
-                "activate",
-                "-e",
-                f'do script "tmux attach -t {session_name}"',
-                "-e",
-                "end tell",
+                _TERMINAL_REVEAL_SCRIPT,
+                "--",
+                attach_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -1034,10 +1066,13 @@ class TmuxRunner(TmuxSessionMixin, TmuxCommandMixin, TmuxLogMixin):
         except FileNotFoundError:
             return False, "找不到 osascript（仅支持 macOS 桌面）\nhint: 可手动执行 `tmux attach -t <tmux_session>`"
         except Exception as exc:
+            logger.warning("reveal_terminal 启动 osascript 失败: %s", exc, exc_info=True)
             return False, f"打开桌面终端失败: {exc}"
         if process.returncode != 0:
             err = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip() or "unknown error"
+            logger.warning("reveal_terminal osascript 退出码非 0: session=%s err=%s", session_name, err)
             return False, f"打开桌面终端失败: {err}\nhint: 可手动执行 `tmux attach -t {session_name}`"
+        logger.debug("reveal_terminal 已通过 osascript 打开并附着: session=%s", session_name)
         return True, f"已在桌面打开 Terminal 并附着到 {session_name}"
 
     async def _is_cancel_requested(self, task_id: str) -> bool:
