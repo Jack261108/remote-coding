@@ -1,0 +1,259 @@
+"""Unit tests for GhosttyTerminalAdapter.
+
+Covers the security contract (argv-only payload, fixed script) and the
+outcome classification (not-unique, TCC, Ghostty-down, timeout,
+indeterminate, os-error) without depending on a real GUI or TCC grant. The
+``osascript`` subprocess is faked by monkeypatching
+``asyncio.create_subprocess_exec`` in the adapter module.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from app.adapters.process import ghostty_terminal_adapter as gta
+from app.adapters.process.ghostty_terminal_adapter import (
+    GhosttyTerminal,
+    GhosttyTerminalAdapter,
+    InjectionOutcome,
+)
+
+
+class _FakeProc:
+    def __init__(self, *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+def _patch_exec(monkeypatch: pytest.MonkeyPatch, factory) -> list[list[object]]:
+    calls: list[list[object]] = []
+
+    async def fake(*args: object, **_kwargs: object) -> object:
+        calls.append(list(args))
+        return factory(list(args))
+
+    monkeypatch.setattr(gta.asyncio, "create_subprocess_exec", fake)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_is_available_requires_darwin_and_osascript(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    assert GhosttyTerminalAdapter().is_available()
+
+    monkeypatch.setattr(gta.sys, "platform", "linux")
+    assert not GhosttyTerminalAdapter().is_available()
+
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: None)
+    assert not GhosttyTerminalAdapter().is_available()
+
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    assert not GhosttyTerminalAdapter(enable_applescript=False).is_available()
+
+
+@pytest.mark.asyncio
+async def test_list_terminals_parses_windows_tabs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    rows = "uuid-1\tclaude — project\t/home/u/project\nuuid-2\tshell\t/home/u\n"
+    calls = _patch_exec(monkeypatch, lambda _a: _FakeProc(stdout=rows.encode(), returncode=0))
+    adapter = GhosttyTerminalAdapter()
+    terminals, err = await adapter.list_terminals()
+    assert err is None
+    assert [t.terminal_id for t in terminals] == ["uuid-1", "uuid-2"]
+    assert terminals[0].name == "claude — project"
+    assert terminals[0].cwd == "/home/u/project"
+    assert terminals[1].cwd == "/home/u"
+    # Script source is the fixed _LIST_SCRIPT and argv is empty for listing.
+    assert calls[0][0] == "osascript"
+    assert calls[0][1] == "-e"
+    assert calls[0][2] == gta._LIST_SCRIPT
+    assert calls[0][3] == "--"
+
+
+@pytest.mark.asyncio
+async def test_list_terminals_unavailable_returns_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.sys, "platform", "linux")
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    terminals, reason = await GhosttyTerminalAdapter().list_terminals()
+    assert terminals is None
+    assert reason == "non_darwin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("not allowed to send Apple events", InjectionOutcome.TCC_DENIED),
+        ("Ghostty got an error: Can't get application", InjectionOutcome.GHOSTTY_NOT_RUNNING),
+        ("timed out", InjectionOutcome.TIMEOUT),
+        ("some osascript error", InjectionOutcome.OS_ERROR),
+    ],
+)
+async def test_list_terminals_classifies_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    stderr: str,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    _patch_exec(monkeypatch, lambda _a: _FakeProc(stderr=stderr.encode(), returncode=1))
+    terminals, reason = await GhosttyTerminalAdapter().list_terminals()
+    assert terminals is None
+    assert reason == expected
+
+
+@pytest.mark.asyncio
+async def test_validate_terminal_matches_full_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    rows = "uuid-A\tt1\t/c\nuuid-B\tt2\t/d\n"
+    _patch_exec(monkeypatch, lambda _a: _FakeProc(stdout=rows.encode(), returncode=0))
+    ok, term, err = await GhosttyTerminalAdapter().validate_terminal("uuid-B")
+    assert ok and err is None
+    assert term is not None and term.terminal_id == "uuid-B" and term.name == "t2"
+
+
+@pytest.mark.asyncio
+async def test_validate_terminal_zero_match_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    _patch_exec(monkeypatch, lambda _a: _FakeProc(stdout=b"uuid-A\tt1\t/c\n", returncode=0))
+    ok, term, err = await GhosttyTerminalAdapter().validate_terminal("missing")
+    assert not ok and err == InjectionOutcome.NOT_FOUND and term is None
+
+
+@pytest.mark.asyncio
+async def test_inject_text_passes_payload_only_via_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The user text and UUID must be argv items, never part of the script
+    source — assert the script argument is the constant and the payload rides
+    after ``--``."""
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    calls = _patch_exec(monkeypatch, lambda _a: _FakeProc(returncode=0))
+    payload = "hello; rm -rf / && `whoami`"
+    outcome = await GhosttyTerminalAdapter().inject_text("uuid-1", payload)
+    assert outcome == InjectionOutcome.OK
+    args = calls[0]
+    assert args[0] == "osascript" and args[1] == "-e"
+    assert args[2] == gta._INJECT_SCRIPT, "script source MUST be the constant"
+    assert args[3] == "--"
+    assert args[4] == "uuid-1"
+    assert args[5] == payload
+    # The payload must NOT appear inside the literal script source.
+    assert payload not in gta._INJECT_SCRIPT
+
+
+@pytest.mark.asyncio
+async def test_inject_text_unicode_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    calls = _patch_exec(monkeypatch, lambda _a: _FakeProc(returncode=0))
+    payload = "你好\n第二行\twith tab"
+    outcome = await GhosttyTerminalAdapter().inject_text("uuid-9", payload)
+    assert outcome == InjectionOutcome.OK
+    assert calls[0][5] == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("terminal not unique", InjectionOutcome.NOT_UNIQUE),
+        ("Can't get terminal", InjectionOutcome.NOT_FOUND),
+        ("not allowed to send Apple events", InjectionOutcome.TCC_DENIED),
+        ('Can\'t get application "Ghostty"', InjectionOutcome.GHOSTTY_NOT_RUNNING),
+    ],
+)
+async def test_inject_pre_flight_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    stderr: str,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    _patch_exec(monkeypatch, lambda _a: _FakeProc(stderr=stderr.encode(), returncode=1))
+    assert await GhosttyTerminalAdapter().inject_text("uuid-1", "x") == expected
+
+
+@pytest.mark.asyncio
+async def test_inject_ambiguous_failure_is_indeterminate_no_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure text that is not a recognized pre-flight reason is treated as
+    INDETERMINATE (text may already be pasted); the caller must not retry."""
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    _patch_exec(monkeypatch, lambda _a: _FakeProc(stderr=b"some unexpected applescript error", returncode=1))
+    assert await GhosttyTerminalAdapter().inject_text("uuid-1", "x") == InjectionOutcome.INDETERMINATE
+
+
+@pytest.mark.asyncio
+async def test_inject_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.sys, "platform", "linux")
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    assert await GhosttyTerminalAdapter().inject_text("uuid-1", "x") == "non_darwin"
+
+
+@pytest.mark.asyncio
+async def test_inject_timeout_kills_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+
+    class _HangingProc(_FakeProc):
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(10)
+            return b"", b""
+
+    proc = _HangingProc(returncode=0)
+
+    async def fake(*_args: object, **_kwargs: object) -> _HangingProc:
+        return proc
+
+    monkeypatch.setattr(gta.asyncio, "create_subprocess_exec", fake)
+    adapter = GhosttyTerminalAdapter(timeout_sec=0.01)
+    assert await adapter.inject_text("uuid-1", "x") == InjectionOutcome.TIMEOUT
+    assert proc.killed, "timeout SHALL kill the osascript child"
+
+
+@pytest.mark.asyncio
+async def test_inject_osascript_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+
+    async def fake(*_args: object, **_kwargs: object) -> _FakeProc:
+        raise FileNotFoundError
+
+    monkeypatch.setattr(gta.asyncio, "create_subprocess_exec", fake)
+    # FileNotFoundError from create_subprocess_exec is caught by _run_script,
+    # yielding a non-empty stderr so inject classifies os_error / not available.
+    outcome = await GhosttyTerminalAdapter().inject_text("uuid-1", "x")
+    assert outcome in {InjectionOutcome.OS_ERROR, "osascript_missing"}
+
+
+def test_parse_terminals_handles_empty_and_partial() -> None:
+    terminals = gta._parse_terminals("uuid-1\tname\t/c\n\nbad\nuuid-2\t\t\n")
+    assert [t.terminal_id for t in terminals] == ["uuid-1", "uuid-2"]
+    assert terminals[0].name == "name" and terminals[0].cwd == "/c"
+    assert terminals[1].name is None and terminals[1].cwd is None
+
+
+def test_ghostty_terminal_is_frozen() -> None:
+    import dataclasses
+
+    t = GhosttyTerminal(terminal_id="x", name=None, cwd=None)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        t.terminal_id = "y"  # type: ignore[misc]
