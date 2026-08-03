@@ -102,6 +102,7 @@ class ExternalSessionBinder:
             pid=captured_pid,
             title=unbound.title,
             reply_cursor_initialized=True,
+            tty=getattr(unbound, "tty", None),
         )
         if self._save_callback is not None:
             saved = await self._save_callback(binding)

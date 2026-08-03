@@ -552,7 +552,7 @@ class HookHandlingMixin(AppContainerBase):
                 and hasattr(self, "external_binding_store")
                 and self._is_current_bound_ownership(event, ownership)
             ):
-                self.external_binding_store.touch_activity(event.session_id, utc_now(), pid=event.pid)
+                self.external_binding_store.touch_activity(event.session_id, utc_now(), pid=event.pid, tty=event.tty)
 
             return ownership
         except Exception:

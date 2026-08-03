@@ -49,6 +49,7 @@ class ExternalSessionDiscoveryService:
                 last_seen=now,
                 event_count=1,
                 title=title,
+                tty=event.tty,
             )
         else:
             existing.last_seen = now
@@ -56,6 +57,8 @@ class ExternalSessionDiscoveryService:
             existing.cwd = event.cwd
             if event.pid is not None and event.pid > 0:
                 existing.pid = event.pid
+            if event.tty:
+                existing.tty = event.tty
             if existing.title is None:
                 existing.title = self._resolve_title(event.session_id, event.cwd)
 
