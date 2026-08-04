@@ -1,0 +1,346 @@
+"""Handler-layer smoke tests for the external Ghostty input feature.
+
+Covers the Telegram handlers registered in ``app/bot/handlers/session_actions.py``
+and ``app/bot/handlers/external_session.py`` and the router wiring in
+``app/bot/router.py``: ``ghpair:`` pairing consume, ``sess:leave`` exit, the
+external text router (active-target filter match / fall-through and the
+SendOutcome -> reply mapping), and ``/external leave``.
+
+These build a real ``ExternalSessionInputService`` over fake adapter/probe (no
+Ghostty/TCC/PTYs required) and drive aiogram routers directly, so the behaviour
+verified is the same code path the dispatcher hits in production.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from aiogram import Router
+from aiogram.types import CallbackQuery, Message, User
+
+from app.adapters.storage.file_session_store import FileSessionStore
+from app.bot.handlers.external_session import register_external_session_handler
+from app.bot.handlers.session_actions import (
+    register_external_text_handlers,
+    register_pair_consume_handler,
+    register_session_action_handlers,
+)
+from app.bot.router import ExternalInputTargetActiveFilter
+from app.domain.external_session_models import ExternalBinding, GhosttyInputTarget
+from app.domain.models import utc_now
+from app.domain.session_models import SessionPhase
+from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.external_binding_store import ExternalBindingStore
+from app.services.external_input_mode_state import ExternalInputTargetStore
+from app.services.external_input_queue import ExternalInputQueue
+from app.services.external_session_binder import ExternalSessionBinder
+from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.external_session_input_service import (
+    ExternalSessionInputService,
+    PairOutcome,
+)
+from app.services.pairing_callback_registry import PairingCallbackRegistry
+from app.services.session_store import SessionStore
+from tests.fakes.ghostty import FakeGhosttyTerminalAdapter
+from tests.fakes.process_probe import FakeLocalProcessProbe
+
+
+def _make_service(
+    tmp_path: Path,
+    *,
+    session_id: str = "session-1",
+    user_id: int = 42,
+    paired: bool = True,
+    enabled: bool = True,
+    adapter: FakeGhosttyTerminalAdapter | None = None,
+) -> tuple[ExternalSessionInputService, ExternalBindingStore, SessionStore, ExternalBinding]:
+    counter = [0]
+    counter[0] += 1
+    root = tmp_path / f"h-{counter[0]}"
+    binding_store = ExternalBindingStore(root / "binding")
+    binding = ExternalBinding(
+        session_id=session_id,
+        user_id=user_id,
+        cwd="/project",
+        bound_at=utc_now(),
+        jsonl_path=None,
+        binding_id=f"binding-{counter[0]}",
+        pid=1234,
+        tty="/dev/ttys005",
+    )
+    if paired:
+        binding.ghostty_target = GhosttyInputTarget(
+            terminal_id="term-1",
+            paired_tty="/dev/ttys005",
+            paired_at=utc_now(),
+            binding_id=binding.binding_id,
+            name="claude — project",
+            cwd="/project",
+        )
+    binding_store.save_binding(binding)
+
+    session_store = SessionStore(FileSessionStore(str(root / "state")))
+    state = session_store.get_or_create(
+        session_id=session_id,
+        user_id=user_id,
+        workdir="/project",
+        claude_session_id=session_id,
+    )
+    state.phase = SessionPhase.IDLE
+    session_store.save(state)
+
+    service = ExternalSessionInputService(
+        enabled=enabled,
+        binding_store=binding_store,
+        session_store=session_store,
+        ghostty_adapter=adapter or FakeGhosttyTerminalAdapter(),
+        process_probe=FakeLocalProcessProbe(),
+        pairing_registry=PairingCallbackRegistry(ttl_sec=60),
+        input_mode_store=ExternalInputTargetStore(),
+        input_queue=ExternalInputQueue(max_size=5, ttl_sec=60),
+        input_locks=RefCountedLockRegistry(ttl_sec=60, cleanup_interval_sec=60, cleanup_batch_size=50),
+        drain_publish_wait_timeout_sec=0.05,
+    )
+    return service, binding_store, session_store, binding
+
+
+def _callback(data: str, *, user_id: int = 42, message: Message | None = None) -> CallbackQuery:
+    cb = MagicMock(spec=CallbackQuery)
+    cb.data = data
+    cb.from_user = MagicMock(spec=User)
+    cb.from_user.id = user_id
+    cb.answer = AsyncMock()
+    cb.message = message
+    return cb
+
+
+def _message(text: str, *, user_id: int = 42) -> Message:
+    msg = MagicMock(spec=Message)
+    msg.text = text
+    msg.from_user = MagicMock(spec=User)
+    msg.from_user.id = user_id
+    msg.answer = AsyncMock()
+    return msg
+
+
+async def _dispatch_cb(router: Router, index: int, callback: CallbackQuery) -> None:
+    handler = router.callback_query.handlers[index]
+    parts = tuple(callback.data.split(":"))
+    await handler.callback(callback, callback_parts=parts)
+
+
+async def _dispatch_msg(router: Router, index: int, message: Message) -> object:
+    handler = router.message.handlers[index]
+    return await handler.callback(message)
+
+
+# ── ghpair consume ──────────────────────────────────────────────────────────
+
+
+class TestPairConsumeHandler:
+    @pytest.mark.asyncio
+    async def test_paired_replies_success(self, tmp_path: Path) -> None:
+        service, binding_store, _, binding = _make_service(tmp_path)
+        # Register a token bound to this terminal through the real registry.
+        token = await service.register_pair_token(
+            user_id=42,
+            session_id=binding.session_id,
+            expected_binding_id=binding.binding_id,
+            terminal_id="term-1",
+        )
+        assert token is not None
+
+        router = Router()
+        register_pair_consume_handler(router, input_service=service)
+        msg = _message("")
+        cb = _callback(f"ghpair:{token}", message=msg)
+        await _dispatch_cb(router, 0, cb)
+        msg.answer.assert_awaited_once_with("✅ 配对成功，已进入外部输入模式。")
+
+    @pytest.mark.asyncio
+    async def test_invalid_token_replies_error(self, tmp_path: Path) -> None:
+        service, *_ = _make_service(tmp_path)
+        router = Router()
+        register_pair_consume_handler(router, input_service=service)
+        msg = _message("")
+        cb = _callback("ghpair:does-not-exist", message=msg)
+        await _dispatch_cb(router, 0, cb)
+        assert msg.answer.await_args is not None
+
+
+# ── sess:leave ─────────────────────────────────────────────────────────────
+
+
+class TestSessionLeaveHandler:
+    @pytest.mark.asyncio
+    async def test_leave_when_input_service_none(self, tmp_path: Path) -> None:
+        discovery = ExternalSessionDiscoveryService()
+        binding_store = ExternalBindingStore(tmp_path / "b")
+        binder = ExternalSessionBinder(
+            discovery=discovery,
+            binding_store=binding_store,
+            projects_dir=tmp_path / "projects",
+        )
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        # Handler order in register_session_action_handlers:
+        # 0=select, then bind/unbind helpers attach → so we locate leave robustly.
+        awaited = False
+        for handler in router.callback_query.handlers:
+            if _is_leave_handler(handler):
+                cb = _callback("sess:leave:abc")
+                await handler.callback(cb)
+                cb.answer.assert_awaited_once_with("功能不可用")
+                awaited = True
+                break
+        assert awaited, "sess:leave handler not registered"
+
+    @pytest.mark.asyncio
+    async def test_leave_exits_input_mode(self, tmp_path: Path) -> None:
+        service, *_ = _make_service(tmp_path)
+        # Put the user into input mode via activate_select.
+        outcome = await service.activate_select(user_id=42, session_id="session-1")
+        assert outcome == PairOutcome.ACTIVATED
+        assert await service.has_target(42) is True
+
+        discovery = ExternalSessionDiscoveryService()
+        binding_store = ExternalBindingStore(tmp_path / "b")
+        binder = ExternalSessionBinder(
+            discovery=discovery,
+            binding_store=binding_store,
+            projects_dir=tmp_path / "projects",
+        )
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder, external_session_input_service=service)
+        for handler in router.callback_query.handlers:
+            if _is_leave_handler(handler):
+                cb = _callback("sess:leave:abc")
+                await handler.callback(cb)
+                cb.answer.assert_awaited_once_with("已退出外部输入模式")
+                break
+        assert await service.has_target(42) is False
+
+
+def _is_leave_handler(handler) -> bool:
+    """Return True if this registered callback handler is the ``sess:leave`` one.
+
+    Detected by dispatching a ``sess:leave:`` callback and observing the handler
+    runs without raising (bind/unbind/attach/close propagate AttributeError/KeyError
+    on a leave-shaped payload because their callback_parts[2] semantics differ);
+    instead we inspect handler source name via the callback closure.
+    """
+    cb_obj = handler.callback
+    name = getattr(cb_obj, "__name__", "")
+    return name == "handle_session_leave"
+
+
+# ── external text router ────────────────────────────────────────────────────
+
+
+class TestExternalTextRouter:
+    @pytest.mark.asyncio
+    async def test_filter_no_target_falls_through(self, tmp_path: Path) -> None:
+        service, *_ = _make_service(tmp_path)
+        assert await ExternalInputTargetActiveFilter(service)(_message("hi")) is False
+
+    @pytest.mark.asyncio
+    async def test_filter_with_target_matches(self, tmp_path: Path) -> None:
+        service, *_ = _make_service(tmp_path)
+        await service.activate_select(user_id=42, session_id="session-1")
+        assert await ExternalInputTargetActiveFilter(service)(_message("hi")) is True
+
+    @pytest.mark.asyncio
+    async def test_sent_is_silent(self, tmp_path: Path) -> None:
+        service, *_ = _make_service(tmp_path)
+        await service.activate_select(user_id=42, session_id="session-1")
+        router = Router()
+        register_external_text_handlers(router, input_service=service, target_filter=ExternalInputTargetActiveFilter(service))
+        msg = _message("hello world")
+        await _dispatch_msg(router, 0, msg)
+        msg.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_queued_replies_notice(self, tmp_path: Path) -> None:
+        adapter = FakeGhosttyTerminalAdapter()
+        # Force a non-sendable phase so send_text enqueues.
+        service, binding_store, session_store, binding = _make_service(tmp_path, adapter=adapter)
+        state = session_store.get("session-1")
+        state.phase = SessionPhase.PROCESSING
+        session_store.save(state)
+        await service.activate_select(user_id=42, session_id="session-1")
+        router = Router()
+        register_external_text_handlers(router, input_service=service, target_filter=ExternalInputTargetActiveFilter(service))
+        msg = _message("queue me")
+        await _dispatch_msg(router, 0, msg)
+        msg.answer.assert_awaited_once()
+        assert "已排队" in msg.answer.await_args.args[0]
+        await service.shutdown()
+
+
+# ── /external leave ────────────────────────────────────────────────────────
+
+
+class TestExternalLeaveCommand:
+    @pytest.mark.asyncio
+    async def test_external_leave_exits_input_mode(self, tmp_path: Path) -> None:
+        service, *_ = _make_service(tmp_path)
+        await service.activate_select(user_id=42, session_id="session-1")
+
+        discovery = ExternalSessionDiscoveryService()
+        binding_store = ExternalBindingStore(tmp_path / "b")
+        binder = ExternalSessionBinder(
+            discovery=discovery,
+            binding_store=binding_store,
+            projects_dir=tmp_path / "projects",
+        )
+        session_store = SessionStore(FileSessionStore(str(tmp_path / "s")))
+        router = Router()
+        register_external_session_handler(router, discovery=discovery, binder=binder, session_store=session_store, input_service=service)
+        msg = _message("/external leave")
+        # The Command filter consumes only the text body; emulate dispatcher.
+        handler = router.message.handlers[0]
+        await handler.callback(msg)
+        msg.answer.assert_awaited_once_with("✅ 已退出外部输入模式。")
+        assert await service.has_target(42) is False
+
+    @pytest.mark.asyncio
+    async def test_external_leave_disabled_when_no_service(self, tmp_path: Path) -> None:
+        discovery = ExternalSessionDiscoveryService()
+        binding_store = ExternalBindingStore(tmp_path / "b")
+        binder = ExternalSessionBinder(
+            discovery=discovery,
+            binding_store=binding_store,
+            projects_dir=tmp_path / "projects",
+        )
+        session_store = SessionStore(FileSessionStore(str(tmp_path / "s")))
+        router = Router()
+        register_external_session_handler(
+            router,
+            discovery=discovery,
+            binder=binder,
+            session_store=session_store,  # input_service defaults None
+        )
+        msg = _message("/external leave")
+        handler = router.message.handlers[0]
+        await handler.callback(msg)
+        msg.answer.assert_awaited_once_with("外部输入功能未启用。")
+
+    @pytest.mark.asyncio
+    async def test_external_leave_not_in_mode(self, tmp_path: Path) -> None:
+        service, *_ = _make_service(tmp_path)
+        discovery = ExternalSessionDiscoveryService()
+        binding_store = ExternalBindingStore(tmp_path / "b")
+        binder = ExternalSessionBinder(
+            discovery=discovery,
+            binding_store=binding_store,
+            projects_dir=tmp_path / "projects",
+        )
+        session_store = SessionStore(FileSessionStore(str(tmp_path / "s")))
+        router = Router()
+        register_external_session_handler(router, discovery=discovery, binder=binder, session_store=session_store, input_service=service)
+        msg = _message("/external leave")
+        handler = router.message.handlers[0]
+        await handler.callback(msg)
+        msg.answer.assert_awaited_once_with("当前不在外部输入模式。")

@@ -255,6 +255,7 @@ class GhosttyTerminalAdapter:
         missing", 127)`` so callers classify it as unavailable/os-error.
         """
         argv_list = list(argv)
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._osascript_bin,
@@ -267,10 +268,13 @@ class GhosttyTerminalAdapter:
             )
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), self._timeout_sec)
         except TimeoutError:
-            # proc only exists if spawn succeeded; guard just in case.
-            if "proc" in locals():
-                await self._kill(proc)  # type: ignore[possibly-undefined]
+            if proc is not None:
+                await self._kill(proc)
             return "", "timeout", -1
+        except asyncio.CancelledError:
+            if proc is not None:
+                await self._kill(proc)
+            raise
         except FileNotFoundError:
             return "", "osascript missing", 127
         return stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace"), proc.returncode or 0

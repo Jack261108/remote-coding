@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -48,6 +49,7 @@ class ProcessTargetReason:
     OK = "ok"
     PID_NOT_POSITIVE = "pid_not_positive"
     PID_DEAD = "pid_dead"
+    PID_ZOMBIE = "pid_zombie"
     TTY_UNRESOLVED = "tty_unresolved"
     TTY_MISMATCH = "tty_mismatch"
     FOREGROUND_UNKNOWN = "foreground_unknown"
@@ -55,6 +57,19 @@ class ProcessTargetReason:
     PGROUP_UNKNOWN = "pgroup_unknown"
     COMMAND_UNKNOWN = "command_unknown"
     NOT_CLAUDE = "not_claude"
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessCommandSignature:
+    """One ``ps`` snapshot used for strict process identity/liveness checks."""
+
+    state: str
+    comm: str
+    args: str
+
+    @property
+    def display(self) -> str:
+        return self.args
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,8 +99,8 @@ TtyResolver = Callable[[int], tuple[str | None, str | None]]
 PgidResolver = Callable[[int], int | None]
 # Returns the foreground pgroup of an open tty path, or None on any error.
 ForegroundResolver = Callable[[str], int | None]
-# Returns a lowercased command identity (comm or args[0] basename) or None.
-CommandResolver = Callable[[int], str | None]
+# Returns a single process state/comm/args snapshot, or None on lookup failure.
+CommandResolver = Callable[[int], ProcessCommandSignature | None]
 
 
 def _default_pgid(pid: int) -> int | None:
@@ -117,20 +132,19 @@ def _default_foreground(tty: str) -> int | None:
             pass
 
 
-def _default_command(pid: int) -> str | None:
-    """Return a lowercased command identity for ``pid`` via ``ps``.
+def _default_command(pid: int) -> ProcessCommandSignature | None:
+    """Return one strict ``ps`` snapshot: state, executable name and argv.
 
-    Synchronous ``subprocess.run`` (not ``asyncio``) so this works whether or
-    not the bot event loop is running. ``ps -p <pid> -o comm=`` gives the short
-    command name on both macOS and Linux; we use comm (not args) to avoid
-    depending on argv layout — the caller only needs "is this a claude-ish
-    process group leader, not an obvious shell".
+    ``stat/ucomm/command`` are emitted by one ``ps`` invocation, avoiding a
+    PID-reuse gap between separate state and identity queries. ``ucomm`` is a
+    whitespace-free executable name on macOS, so ``split(maxsplit=2)`` leaves
+    the full argv intact. Zombie/unknown state is rejected by the validator.
     """
     import subprocess
 
     try:
         proc = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "comm="],
+            ["ps", "-p", str(pid), "-o", "stat=", "-o", "ucomm=", "-o", "command="],
             capture_output=True,
             check=False,
         )
@@ -138,8 +152,11 @@ def _default_command(pid: int) -> str | None:
         return None
     if proc.returncode != 0:
         return None
-    text = proc.stdout.decode(errors="replace").strip()
-    return text or None
+    parts = proc.stdout.decode(errors="replace").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        return None
+    state, comm, args = parts
+    return ProcessCommandSignature(state=state, comm=comm, args=args)
 
 
 def _default_tty(pid: int) -> tuple[str | None, str | None]:
@@ -166,36 +183,34 @@ def _default_tty(pid: int) -> tuple[str | None, str | None]:
     return (text if text.startswith("/dev/") else f"/dev/{text}"), None
 
 
-# Tokens that identify a Claude process. The foreground process's comm must
-# match one of these (substring) for the "still Claude" check to pass. We keep
-# this broad: the actual Claude binary is typically ``node`` running the CLI,
-# so we also accept the process's ps comm being a shell only when it is NOT in
-# an obviously-not-claude list — but we never accept that as positive proof.
-# The foreground pgroup match is the real guard; this list only rules out the
-# common case where the foreground is obviously a fresh shell.
-_NOT_CLAUDE_HINTS = (
-    "bash",
-    "zsh",
-    "sh",
-    "fish",
-    "tcsh",
-    "csh",
-    "dash",
-    "ksh",
+_LIVE_PROCESS_STATES = frozenset({"R", "S", "D", "I", "U", "W"})
+_NATIVE_CLAUDE_COMMANDS = frozenset({"claude", "claude-code"})
+_NODE_COMMANDS = frozenset({"node", "nodejs"})
+_OFFICIAL_NODE_ENTRY_RE = re.compile(
+    r"(?:^|[/\\])@anthropic-ai[/\\]claude-code(?:[/\\]|$)",
+    re.IGNORECASE,
 )
 
 
-def _looks_like_claude(command: str | None) -> bool:
-    """Return whether ``command`` is plausibly the Claude TUI.
+def _looks_like_claude(signature: ProcessCommandSignature | None) -> bool:
+    """Require positive executable identity, never a free-form argv substring.
 
-    A None command is treated as unknown -- the caller treats unknown as a
-    refusal, so we return False here (no positive proof). A command that is an
-    obvious shell is also False. ``node`` (the actual Claude CLI runtime) is
-    accepted; the real guarantee comes from the foreground pgroup match.
+    Accepted forms:
+      * native executable basename exactly ``claude`` / ``claude-code``;
+      * ``node`` / ``nodejs`` whose argv contains the official scoped npm
+        package path ``@anthropic-ai/claude-code``.
+
+    A shell, Python, arbitrary interpreter, plain node process, or a path that
+    merely contains ``claude`` is refused.
     """
-    if command is None:
+    if signature is None:
         return False
-    return command not in _NOT_CLAUDE_HINTS
+    comm = os.path.basename(signature.comm).lower()
+    if comm in _NATIVE_CLAUDE_COMMANDS:
+        return True
+    if comm in _NODE_COMMANDS:
+        return bool(_OFFICIAL_NODE_ENTRY_RE.search(signature.args))
+    return False
 
 
 class LocalProcessProbe:
@@ -235,15 +250,17 @@ class LocalProcessProbe:
         """Return the current foreground process group of ``tty`` or None."""
         return self._foreground_resolver(tty)
 
-    def pid_command_signature(self, pid: int) -> str | None:
-        """Return a lowercased command identity (ps comm=) for ``pid`` or None.
-
-        Resolvers may return the raw ``comm`` mid-casing; we normalise here so
-        ``_looks_like_claude`` and ``ProcessTargetValidation.command`` always
-        compare against the lowercase shell hint list.
-        """
-        command = self._command_resolver(pid)
-        return command.lower() if command is not None else None
+    def pid_command_signature(self, pid: int) -> ProcessCommandSignature | None:
+        """Return a normalised state/comm/args snapshot for ``pid`` or None."""
+        signature = self._command_resolver(pid)
+        if signature is None:
+            return None
+        state = signature.state.strip()
+        comm = signature.comm.strip()
+        args = signature.args.strip()
+        if not state or not comm or not args:
+            return None
+        return ProcessCommandSignature(state=state, comm=comm, args=args)
 
     # --- aggregated validation ---------------------------------------------
 
@@ -299,9 +316,9 @@ class LocalProcessProbe:
                 foreground_pgid=foreground,
             )
 
-        command = self.pid_command_signature(pid)
-        if command is None:
-            # Unknown command identity is treated as refusal — no positive proof.
+        signature = self.pid_command_signature(pid)
+        if signature is None:
+            # Unknown state/identity is no positive proof.
             return ProcessTargetValidation(
                 ok=False,
                 reason=ProcessTargetReason.COMMAND_UNKNOWN,
@@ -309,14 +326,33 @@ class LocalProcessProbe:
                 pgid=pgid,
                 foreground_pgid=foreground,
             )
-        if not _looks_like_claude(command):
+        state_code = signature.state[0].upper()
+        if state_code == "Z":
+            return ProcessTargetValidation(
+                ok=False,
+                reason=ProcessTargetReason.PID_ZOMBIE,
+                tty=tty,
+                pgid=pgid,
+                foreground_pgid=foreground,
+                command=signature.display,
+            )
+        if state_code not in _LIVE_PROCESS_STATES:
+            return ProcessTargetValidation(
+                ok=False,
+                reason=ProcessTargetReason.COMMAND_UNKNOWN,
+                tty=tty,
+                pgid=pgid,
+                foreground_pgid=foreground,
+                command=signature.display,
+            )
+        if not _looks_like_claude(signature):
             return ProcessTargetValidation(
                 ok=False,
                 reason=ProcessTargetReason.NOT_CLAUDE,
                 tty=tty,
                 pgid=pgid,
                 foreground_pgid=foreground,
-                command=command,
+                command=signature.display,
             )
 
         return ProcessTargetValidation(
@@ -325,5 +361,5 @@ class LocalProcessProbe:
             tty=tty,
             pgid=pgid,
             foreground_pgid=foreground,
-            command=command,
+            command=signature.display,
         )

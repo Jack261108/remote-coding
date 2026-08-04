@@ -56,7 +56,7 @@ class _RecordingBindingStore:
 
     def __init__(self) -> None:
         self.removed: list[str] = []
-        self.touch_calls: list[tuple[str, object, int | None]] = []
+        self.touch_calls: list[tuple[str, object, int | None, str | None]] = []
         self._binding = SimpleNamespace(
             binding_id="binding-generation-1",
             user_id=1,
@@ -76,8 +76,9 @@ class _RecordingBindingStore:
         *,
         persist_min_interval_sec: int = 60,
         pid: int | None = None,
+        tty: str | None = None,
     ) -> None:
-        self.touch_calls.append((session_id, last_activity_at, pid))
+        self.touch_calls.append((session_id, last_activity_at, pid, tty))
 
 
 class _EmptySessionService:
@@ -793,6 +794,7 @@ async def test_bound_non_session_end_event_refreshes_pid(tmp_path) -> None:
         event="PostToolUse",
         status="running",
         pid=4242,
+        tty="/dev/ttys005",
     )
 
     ownership = await container._resolve_ownership_stage(event)
@@ -802,11 +804,12 @@ async def test_bound_non_session_end_event_refreshes_pid(tmp_path) -> None:
     assert ownership is not None
     assert ownership.ownership_state == "bound"
 
-    # Activity refreshed exactly once, carrying the event's pid.
+    # Activity refreshed exactly once, carrying the event's pid/tty.
     assert len(store.touch_calls) == 1
-    session_id, _, pid = store.touch_calls[0]
+    session_id, _, pid, tty = store.touch_calls[0]
     assert session_id == "bound-session"
     assert pid == 4242
+    assert tty == "/dev/ttys005"
 
     # Still independent of the reaper.
     reaper.remove_with_cleanup.assert_not_awaited()

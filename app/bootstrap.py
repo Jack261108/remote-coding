@@ -13,6 +13,7 @@ from app.adapters.claude.hook_installer import HookInstaller
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.adapters.claude.paths import ClaudePaths
 from app.adapters.cli.factory import CLIAdapterFactory
+from app.adapters.process.ghostty_terminal_adapter import GhosttyTerminalAdapter
 from app.adapters.process.subprocess_runner import SubprocessRunner
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
@@ -47,14 +48,19 @@ from app.services.external_binding_cleanup_service import ExternalBindingCleanup
 from app.services.external_binding_cleanup_task import ExternalBindingCleanupTask
 from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
+from app.services.external_input_mode_state import ExternalInputTargetStore
+from app.services.external_input_queue import ExternalInputQueue
 from app.services.external_reply_delivery_pump import ExternalReplyDeliveryPump
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.external_session_input_service import ExternalSessionInputService
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 from app.services.file_receiver import FileReceiverService
 from app.services.file_sender import FileSenderService
 from app.services.janitor_task import JanitorTask
 from app.services.jsonl_file_watcher import JSONLFileWatcher
+from app.services.local_process_probe import LocalProcessProbe
+from app.services.pairing_callback_registry import PairingCallbackRegistry
 from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
@@ -244,6 +250,15 @@ class AppContainer(
     def _init_external_services(self) -> None:
         """Initialize external session discovery, binding, permission, and notification services."""
         settings = self.settings
+        # External input uses an independent per-session lock registry (design §6):
+        # it is NOT part of the reply-delivery → session-event lock order, and must
+        # stay out of _init_infrastructure so ExternalSessionInputService can be built
+        # here (this method runs before _init_infrastructure).
+        self._input_locks = RefCountedLockRegistry(
+            ttl_sec=settings.session_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
         self.external_binding_store = ExternalBindingStore(
             data_dir=Path(settings.tmux_data_dir),
         )
@@ -322,6 +337,34 @@ class AppContainer(
             liveness_enabled=settings.external_binding_pid_liveness_enabled,
             ttl=timedelta(hours=settings.external_binding_idle_ttl_hours),
             interval_sec=settings.session_health_check_interval_sec,
+        )
+
+        # External Ghostty session input (design specs/2026-08-03-external-ghostty-input-design.md §4-9).
+        # Built unconditionally so enabled=False short-circuits internally and the rest of the
+        # binding/permission/reply system keeps working; the service methods are no-ops when off.
+        self.ghostty_adapter = GhosttyTerminalAdapter(
+            enable_applescript=settings.ghostty_applescript_enabled,
+        )
+        self.local_process_probe = LocalProcessProbe()
+        self.pairing_callback_registry = PairingCallbackRegistry(
+            ttl_sec=settings.ghostty_pairing_token_ttl_sec,
+        )
+        self.external_input_mode_store = ExternalInputTargetStore()
+        self.external_input_queue = ExternalInputQueue(
+            max_size=settings.ghostty_input_queue_max_size,
+            ttl_sec=settings.ghostty_input_queue_ttl_sec,
+        )
+        self.external_session_input_service = ExternalSessionInputService(
+            enabled=settings.ghostty_input_enabled,
+            binding_store=self.external_binding_store,
+            session_store=self.structured_session_store,
+            ghostty_adapter=self.ghostty_adapter,
+            process_probe=self.local_process_probe,
+            pairing_registry=self.pairing_callback_registry,
+            input_mode_store=self.external_input_mode_store,
+            input_queue=self.external_input_queue,
+            input_locks=self._input_locks,
+            drain_publish_wait_timeout_sec=settings.ghostty_drain_publish_wait_timeout_sec,
         )
 
     async def _resolve_unbound_permission_notify_user_ids(self) -> set[int]:
@@ -519,6 +562,7 @@ class AppContainer(
             await self.external_reply_delivery_pump.stop_all()
             await self.session_supervisor.stop_all()
             await self._stop_background_tasks()
+            await self.external_session_input_service.shutdown()
             self.external_binding_store.flush()
         finally:
             await self.bot.session.close()
@@ -565,5 +609,6 @@ class AppContainer(
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
             dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
             admin_password_service=self.admin_password_service,
+            external_session_input_service=self.external_session_input_service,
         )
         self.dispatcher.include_router(router)

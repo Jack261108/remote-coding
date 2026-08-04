@@ -28,10 +28,16 @@ from app.services.task_service import TaskService
 if TYPE_CHECKING:
     from aiogram import Bot, Dispatcher
 
+    from app.adapters.process.ghostty_terminal_adapter import GhosttyTerminalAdapter
     from app.bot.adapters.message_sender import AiogramMessageSender
     from app.services.external_binding_store import ExternalBindingStore
+    from app.services.external_input_mode_state import ExternalInputTargetStore
+    from app.services.external_input_queue import ExternalInputQueue
     from app.services.external_reply_delivery_pump import ExternalReplyDeliveryPump
+    from app.services.external_session_input_service import ExternalSessionInputService
     from app.services.external_session_push_notifier import ExternalSessionPushNotifier
+    from app.services.local_process_probe import LocalProcessProbe
+    from app.services.pairing_callback_registry import PairingCallbackRegistry
 
 
 class AppContainerBase:
@@ -61,9 +67,16 @@ class AppContainerBase:
     external_binding_store: ExternalBindingStore
     external_reply_delivery_pump: ExternalReplyDeliveryPump
     push_notifier: ExternalSessionPushNotifier
+    ghostty_adapter: GhosttyTerminalAdapter
+    local_process_probe: LocalProcessProbe
+    pairing_callback_registry: PairingCallbackRegistry
+    external_input_mode_store: ExternalInputTargetStore
+    external_input_queue: ExternalInputQueue
+    external_session_input_service: ExternalSessionInputService
     _jsonl_sync_locks: RefCountedLockRegistry
     _session_event_locks: RefCountedLockRegistry
     _external_reply_delivery_locks: RefCountedLockRegistry
+    _input_locks: RefCountedLockRegistry
     _background_tasks: BackgroundTaskRegistry
     _started: bool
     _stopping: bool

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from app.services.local_process_probe import (
     LocalProcessProbe,
+    ProcessCommandSignature,
     ProcessTargetReason,
     _looks_like_claude,
 )
@@ -23,15 +24,29 @@ def _probe(
     tty: tuple[str | None, str | None] = ("/dev/ttys005", None),
     pgid: int | None = 7,
     foreground: int | None = 7,
-    command: str | None = "node",
+    command: str | None = "claude",
+    process_state: str = "S+",
 ) -> LocalProcessProbe:
+    signature = None
+    if command is not None:
+        comm = command.split(maxsplit=1)[0]
+        signature = ProcessCommandSignature(state=process_state, comm=comm, args=command)
     return LocalProcessProbe(
         pid_is_alive=lambda _pid: alive,
         tty_resolver=lambda _pid: tty,
         pgid_resolver=lambda _pid: pgid,
         foreground_resolver=lambda _tty: foreground,
-        command_resolver=lambda _pid: command,
+        command_resolver=lambda _pid: signature,
     )
+
+
+def _signature(
+    comm: str,
+    args: str | None = None,
+    *,
+    state: str = "S+",
+) -> ProcessCommandSignature:
+    return ProcessCommandSignature(state=state, comm=comm, args=args or comm)
 
 
 # --- aggregated validator: every reason ------------------------------------
@@ -52,6 +67,20 @@ def test_validate_pid_not_positive() -> None:
 def test_validate_pid_dead() -> None:
     result = _probe(alive=False).validate_claude_foreground(pid=1234, paired_tty="/dev/ttys005")
     assert not result.ok and result.reason == ProcessTargetReason.PID_DEAD
+
+
+def test_validate_zombie_and_unknown_state_fail_closed() -> None:
+    zombie = _probe(process_state="Z+").validate_claude_foreground(
+        pid=1234,
+        paired_tty="/dev/ttys005",
+    )
+    assert not zombie.ok and zombie.reason == ProcessTargetReason.PID_ZOMBIE
+
+    unknown = _probe(process_state="?").validate_claude_foreground(
+        pid=1234,
+        paired_tty="/dev/ttys005",
+    )
+    assert not unknown.ok and unknown.reason == ProcessTargetReason.COMMAND_UNKNOWN
 
 
 def test_validate_tty_unresolved() -> None:
@@ -109,11 +138,20 @@ def test_validate_obvious_shell_command_refused() -> None:
     assert result.command == "bash"
 
 
-def test_validate_node_command_is_accepted() -> None:
-    """The Claude CLI runs under node; node is not an obvious shell so the
-    identity check passes — the real guard is the foreground pgroup match."""
-    result = _probe(command="node").validate_claude_foreground(pid=1234, paired_tty="/dev/ttys005")
+def test_validate_node_claude_path_is_accepted_but_plain_node_is_not() -> None:
+    """Older installs run under node, so args must contain positive Claude
+    identity; plain node is not sufficient proof."""
+    result = _probe(command="node /opt/@anthropic-ai/claude-code/cli.js").validate_claude_foreground(
+        pid=1234,
+        paired_tty="/dev/ttys005",
+    )
     assert result.ok and result.reason == ProcessTargetReason.OK
+
+    plain = _probe(command="node").validate_claude_foreground(
+        pid=1234,
+        paired_tty="/dev/ttys005",
+    )
+    assert not plain.ok and plain.reason == ProcessTargetReason.NOT_CLAUDE
 
 
 # --- primitive accessors ----------------------------------------------------
@@ -134,20 +172,34 @@ def test_tty_foreground_pgroup_returns_resolved_value() -> None:
     assert probe.tty_foreground_pgroup("/dev/ttys1") == 42
 
 
-def test_pid_command_signature_lowercases() -> None:
-    probe = _probe(command="Node")
-    assert probe.pid_command_signature(123) == "node"
+def test_pid_command_signature_returns_structured_snapshot() -> None:
+    probe = _probe(command="claude --resume abc", process_state="S+")
+    assert probe.pid_command_signature(123) == ProcessCommandSignature(
+        state="S+",
+        comm="claude",
+        args="claude --resume abc",
+    )
 
 
 # --- _looks_like_claude unit guard ------------------------------------------
 
 
-def test_looks_like_claude_rejects_obvious_shells() -> None:
+def test_looks_like_claude_rejects_shells_and_interpreter_argv_spoofing() -> None:
     for shell in ("bash", "zsh", "sh", "fish", "tcsh", "csh", "dash", "ksh"):
-        assert not _looks_like_claude(shell), f"{shell} must NOT count as Claude"
+        assert not _looks_like_claude(_signature(shell, f"{shell} -lc claude"))
+    assert not _looks_like_claude(_signature("python", "python /tmp/claude-code/cli.py"))
+    assert not _looks_like_claude(_signature("node", "node /tmp/claude-code/cli.js"))
+    assert not _looks_like_claude(_signature("node"))
+    assert not _looks_like_claude(_signature("notclaude"))
 
 
-def test_looks_like_claude_accepts_non_shell_and_none_is_false() -> None:
-    assert _looks_like_claude("node")
-    assert _looks_like_claude("claude")
+def test_looks_like_claude_accepts_native_and_official_node_entry() -> None:
+    assert _looks_like_claude(_signature("claude", "claude --resume abc"))
+    assert _looks_like_claude(_signature("/opt/bin/claude-code"))
+    assert _looks_like_claude(
+        _signature(
+            "node",
+            "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+        )
+    )
     assert not _looks_like_claude(None), "None is no positive proof -> False"

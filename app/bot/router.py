@@ -30,7 +30,11 @@ from app.bot.handlers.file_upload import (
     register_file_upload_handler,
     schedule_pending_upload_processing,
 )
-from app.bot.handlers.session_actions import register_session_action_handlers
+from app.bot.handlers.session_actions import (
+    register_external_text_handlers,
+    register_pair_consume_handler,
+    register_session_action_handlers,
+)
 from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.bot.middleware.error_handling import ErrorHandlingMiddleware
 from app.bot.middleware.session_guard import SessionGuardMiddleware
@@ -54,6 +58,7 @@ if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
     from app.services.admin_password_service import AdminPasswordService
     from app.services.external_binding_reaper import ExternalBindingReaper
+    from app.services.external_session_input_service import ExternalSessionInputService
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_gateway import PermissionGateway
     from app.services.unbound_permission_handler import UnboundPermissionHandler
@@ -73,6 +78,25 @@ class PendingAdminPasswordFilter(BaseFilter):
             and self._admin_password_service.is_enabled
             and self._admin_password_service.has_pending(user_id)
         )
+
+
+class ExternalInputTargetActiveFilter(BaseFilter):
+    """Match only when the user has an active external Ghostty input target.
+
+    Returns False (no match) when there is no target, so a plain text message
+    falls through to the managed ``chat_text_router`` instead of being consumed
+    here. This keeps the two flows partitioned by user state without raising
+    ``SkipHandler`` (which ErrorHandlingMiddleware would intercept).
+    """
+
+    def __init__(self, input_service: ExternalSessionInputService) -> None:
+        self._input_service = input_service
+
+    async def __call__(self, message: Message) -> bool:
+        user_id = message.from_user.id if message.from_user else 0
+        if not user_id:
+            return False
+        return await self._input_service.has_target(user_id)
 
 
 def _register_middleware(
@@ -118,6 +142,7 @@ def _register_optional_handlers(
     external_binding_reaper: ExternalBindingReaper | None,
     title_resolver: Callable[[str, str], str | None] | None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None,
+    external_session_input_service: ExternalSessionInputService | None,
 ) -> None:
     """Register optional handlers that depend on service availability."""
     if session_scanner is not None and claude_paths is not None:
@@ -157,8 +182,32 @@ def _register_optional_handlers(
             discovery=external_discovery,
             binder=external_binder,
             registry_service=registry_service,
+            external_session_input_service=external_session_input_service,
         )
         router.include_router(session_action_router)
+
+        # Pairing callbacks live on a separate router with their own ``ghpair`` prefix; sharing
+        # ``sess`` middleware would reject ghpair buttons (and vice versa), since
+        # CallbackValidatorMiddleware answers+consumes any callback whose prefix does not match.
+        if external_session_input_service is not None:
+            ghpair_router = Router()
+            ghpair_router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=2, prefix="ghpair"))
+            register_pair_consume_handler(ghpair_router, input_service=external_session_input_service)
+            router.include_router(ghpair_router)
+
+            # External text injection: match only when the user has an active
+            # Ghostty input target. Deliberately NOT guarded by ``guard_active``
+            # (the guard checks ``claude_chat_active`` for managed sessions, not
+            # external targets). ``F.text`` does not exclude slash commands, so
+            # an unregistered slash like ``/compact`` reaches Claude as text when
+            # a target is active; registered slashes are handled by earlier
+            # command routers which are included before this one. When there is
+            # no active target the filter returns False and the message falls
+            # through to ``chat_text_router`` (UNHANDLED propagation).
+            external_text_router = Router()
+            target_filter = ExternalInputTargetActiveFilter(external_session_input_service)
+            register_external_text_handlers(external_text_router, input_service=external_session_input_service, target_filter=target_filter)
+            router.include_router(external_text_router)
 
     if external_discovery is not None and external_binder is not None and structured_session_store is not None:
         register_external_session_handler(
@@ -307,6 +356,7 @@ def create_router(
     title_resolver: Callable[[str, str], str | None] | None = None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
     admin_password_service: AdminPasswordService | None = None,
+    external_session_input_service: ExternalSessionInputService | None = None,
 ) -> Router:
     router = Router()
 
@@ -463,6 +513,7 @@ def create_router(
         external_binding_reaper=external_binding_reaper,
         title_resolver=title_resolver,
         dead_unbound_cleanup=dead_unbound_cleanup,
+        external_session_input_service=external_session_input_service,
     )
 
     @router.message(PendingAdminPasswordFilter(admin_password_service), F.text & ~F.text.startswith("/"))

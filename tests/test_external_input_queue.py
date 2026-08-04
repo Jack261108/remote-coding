@@ -55,6 +55,18 @@ async def test_dequeue_drops_expired_head() -> None:
     assert (await q.dequeue("s1", binding_id="g")).text == "new"
 
 
+async def test_prepend_restores_just_dequeued_entry_to_fifo_head() -> None:
+    now, _ = _clock()
+    q = ExternalInputQueue(now=now)
+    await q.enqueue("s1", text="a", binding_id="g")
+    await q.enqueue("s1", text="b", binding_id="g")
+    first = await q.dequeue("s1", binding_id="g")
+    assert first is not None and first.text == "a"
+    assert await q.prepend("s1", first)
+    assert (await q.dequeue("s1", binding_id="g")).text == "a"
+    assert (await q.dequeue("s1", binding_id="g")).text == "b"
+
+
 async def test_dequeue_drops_cross_generation_entries() -> None:
     """Entries enqueued under gen-1 are dropped when dequeue is asked for gen-2
     (unbind+rebind ABA) — they are never injected into the new binding."""

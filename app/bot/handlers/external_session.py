@@ -16,6 +16,7 @@ from app.infra.text_formatting import (
 )
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.external_session_input_service import ExternalSessionInputService
 from app.services.session_id_resolver import BindResult, UnbindResult, _resolve_session_id, resolve_and_bind, resolve_and_unbind
 from app.services.session_store import SessionStore
 
@@ -28,6 +29,7 @@ def register_external_session_handler(
     discovery: ExternalSessionDiscoveryService,
     binder: ExternalSessionBinder,
     session_store: SessionStore,
+    input_service: ExternalSessionInputService | None = None,
 ) -> None:
     @router.message(Command("external"))
     async def command_external(message: Message) -> None:
@@ -37,7 +39,7 @@ def register_external_session_handler(
         # parts[0] = "/external"
         if len(parts) < 2:
             await message.answer(
-                "用法:\n/external list\n/external bind <session_id>\n/external unbind <session_id>\n/external status <session_id>"
+                "用法:\n/external list\n/external bind <session_id>\n/external unbind <session_id>\n/external status <session_id>\n/external leave (退出外部输入模式)"
             )
             return
 
@@ -52,6 +54,12 @@ def register_external_session_handler(
             await _handle_unbind(message, user_id=user_id, session_id=arg, binder=binder, discovery=discovery)
         elif subcommand == "status":
             await _handle_status(message, user_id=user_id, session_id=arg, binder=binder, discovery=discovery, session_store=session_store)
+        elif subcommand == "leave":
+            if input_service is None:
+                await message.answer("外部输入功能未启用。")
+            else:
+                left = await input_service.leave(user_id=user_id)
+                await message.answer("✅ 已退出外部输入模式。" if left else "当前不在外部输入模式。")
         else:
             await message.answer(f"未知子命令: {subcommand}")
 

@@ -115,19 +115,47 @@ class ExternalInputQueue:
             queue = self._queues.get(session_id)
             if queue is None:
                 return None
-            while queue:
-                entry = queue[0]
-                if self._is_expired(entry):
-                    queue.popleft()
-                    continue
-                if entry.binding_id != binding_id:
-                    # Stale generation: drop and keep draining.
-                    queue.popleft()
-                    continue
-                queue.popleft()
-                return entry
+            self._drop_unusable_head_locked(queue, binding_id=binding_id)
+            if queue:
+                return queue.popleft()
             self._maybe_drop_empty(session_id)
             return None
+
+    async def has_pending(self, session_id: str, *, binding_id: str) -> bool:
+        """Return whether a live same-generation FIFO head is pending.
+
+        Expired and stale-generation head entries are discarded first. The
+        input service uses this before direct injection so a newly arrived
+        message cannot overtake an older queued item.
+        """
+        async with self._lock:
+            queue = self._queues.get(session_id)
+            if queue is None:
+                return False
+            self._drop_unusable_head_locked(queue, binding_id=binding_id)
+            self._maybe_drop_empty(session_id)
+            return bool(queue)
+
+    async def prepend(self, session_id: str, entry: QueuedInput) -> bool:
+        """Restore a just-dequeued entry to the FIFO head.
+
+        Used only when a final process revalidation fails between dequeue and
+        injection. Preserves the original enqueue timestamp/generation; an
+        already-expired entry is not restored. Returns False if restoration is
+        impossible (the queue unexpectedly refilled to its cap).
+        """
+        async with self._lock:
+            if self._is_expired(entry):
+                return False
+            queue = self._queues.get(session_id)
+            if queue is None:
+                queue = deque()
+                self._queues[session_id] = queue
+            self._prune_expired_locked(queue)
+            if len(queue) >= self._max_size:
+                return False
+            queue.appendleft(entry)
+            return True
 
     async def peek_size(self, session_id: str) -> int:
         """Return the number of entries (incl. expired/stale until pruned)."""
@@ -156,6 +184,19 @@ class ExternalInputQueue:
             self._prune_expired_locked(queue)
             self._maybe_drop_empty(session_id)
             return before - len(queue)
+
+    def _drop_unusable_head_locked(
+        self,
+        queue: deque[QueuedInput],
+        *,
+        binding_id: str,
+    ) -> None:
+        while queue:
+            entry = queue[0]
+            if self._is_expired(entry) or entry.binding_id != binding_id:
+                queue.popleft()
+                continue
+            return
 
     def _prune_expired_locked(self, queue: deque[QueuedInput]) -> None:
         cutoff = self._now()

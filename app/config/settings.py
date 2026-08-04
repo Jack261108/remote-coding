@@ -149,6 +149,15 @@ class Settings(BaseSettings):
     tombstone_ttl_sec: int = Field(3600, alias="TOMBSTONE_TTL_SEC")
     push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
 
+    # External Ghostty session input (design specs/2026-08-03-external-ghostty-input-design.md §4-9).
+    # Off by default; the rest of the binding/permission/reply system keeps working when disabled.
+    ghostty_input_enabled: bool = Field(False, alias="GHOSTTY_INPUT_ENABLED")
+    ghostty_applescript_enabled: bool = Field(True, alias="GHOSTTY_APPLESCRIPT_ENABLED")
+    ghostty_pairing_token_ttl_sec: int = Field(180, alias="GHOSTTY_PAIRING_TOKEN_TTL_SEC", ge=1)
+    ghostty_input_queue_max_size: int = Field(5, alias="GHOSTTY_INPUT_QUEUE_MAX_SIZE", ge=1)
+    ghostty_input_queue_ttl_sec: int = Field(300, alias="GHOSTTY_INPUT_QUEUE_TTL_SEC", ge=1)
+    ghostty_drain_publish_wait_timeout_sec: float = Field(30.0, alias="GHOSTTY_DRAIN_PUBLISH_WAIT_TIMEOUT_SEC", gt=0)
+
     # Session cleanup settings
     session_cleanup_interval_sec: int = Field(3600, alias="SESSION_CLEANUP_INTERVAL_SEC")  # 1 hour
     session_cleanup_max_age_hours: int = Field(24, alias="SESSION_CLEANUP_MAX_AGE_HOURS")  # 24 hours
@@ -325,6 +334,8 @@ class Settings(BaseSettings):
         "claude_install_hooks",
         "jsonl_file_watcher_enabled",
         "auto_file_send_enabled",
+        "ghostty_input_enabled",
+        "ghostty_applescript_enabled",
         mode="before",
     )
     @classmethod
@@ -383,6 +394,9 @@ class Settings(BaseSettings):
         "zip_max_size_mb",
         "push_notification_retry_count",
         "tombstone_ttl_sec",
+        "ghostty_pairing_token_ttl_sec",
+        "ghostty_input_queue_max_size",
+        "ghostty_input_queue_ttl_sec",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:
@@ -409,6 +423,7 @@ class Settings(BaseSettings):
         "spinner_interval_sec",
         "session_health_check_interval_sec",
         "external_session_stale_timeout_sec",
+        "ghostty_drain_publish_wait_timeout_sec",
     )
     @classmethod
     def validate_positive_float(cls, value: float) -> float:

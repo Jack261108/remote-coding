@@ -33,6 +33,31 @@ from app.services.permission_callback_registry import AutoApproveOutcome, Sessio
 logger = logging.getLogger(__name__)
 
 
+# Hook events that signal the same "turn ended / back to sendable phase" as ``Stop``: a subagent
+# turn ends, stop failed mid-flush, or compaction finished. ``notify_hook_event`` normalises only
+# with ``.lower().replace("-","_")`` (no CamelCase→snake_case), so raw ``SubagentStop`` /
+# ``StopFailure`` / ``PostCompact`` would miss its ``stop`` branch — translate them here.
+_HOOK_STOP_EQUIVALENTS = frozenset({"Stop", "SubagentStop", "StopFailure"})
+
+
+def _map_hook_event_kind(event: HookEvent) -> str | None:
+    """Map a real HookEvent to the snake_case kind ``notify_hook_event`` recognises.
+
+    Returns None when the event is not phase-affecting for external input and should be ignored.
+    SessionEnd / status="ended" → "session_end"; Stop-family → "stop"; PostCompact →
+    "turn_completed" (compaction finished, phase returns to sendable). Other Hook event names are
+    passed through verbatim — the service lowercases them, and only Stop/SessionEnd currently
+    matter among the raw PascalCase Hook names.
+    """
+    if event.event == "SessionEnd" or event.status == "ended":
+        return "session_end"
+    if event.event in _HOOK_STOP_EQUIVALENTS:
+        return "stop"
+    if event.event == "PostCompact":
+        return "turn_completed"
+    return event.event
+
+
 def _is_session_end_event(event: HookEvent) -> bool:
     return event.event == "SessionEnd" or event.status == "ended"
 
@@ -56,6 +81,38 @@ class _StageShortCircuitError(Exception):
 class JsonlSyncMixin(AppContainerBase):
     """JSONL sync: debounced incremental parsing and event dispatch."""
 
+    async def _invalidate_external_input(self, session_id: str, *, reason: str) -> None:
+        """Tear down external input state (target/queue/pair-tokens/drain) for a session.
+
+        No-op when the input service is not assembled (feature disabled or tests). The service
+        acquires its own per-session input lock internally; callers here may already hold the
+        reply-delivery lock, which is independent and order-safe. Never raises — cleanup failures
+        must not prevent binding removal.
+        """
+        input_service = getattr(self, "external_session_input_service", None)
+        if input_service is None:
+            return
+        try:
+            await input_service.invalidate_binding(session_id, reason=reason)
+        except Exception:
+            logger.exception(
+                "external input invalidate_binding failed",
+                extra={"session_id": session_id, "reason": reason},
+            )
+
+    async def _rebind_external_input_aba(self, session_id: str, binding_id: str) -> None:
+        """Clear stale-generation input state after a rebind produces a new binding_id."""
+        input_service = getattr(self, "external_session_input_service", None)
+        if input_service is None:
+            return
+        try:
+            await input_service.rebind_aba(session_id, binding_id)
+        except Exception:
+            logger.exception(
+                "external input rebind_aba failed",
+                extra={"session_id": session_id, "binding_id": binding_id},
+            )
+
     async def _save_external_binding(self, binding: ExternalBinding) -> bool:
         async with self._external_reply_delivery_locks.lock(binding.session_id):
             reaper = getattr(self, "external_binding_reaper", None)
@@ -64,6 +121,10 @@ class JsonlSyncMixin(AppContainerBase):
             if self.external_binding_store.get_binding(binding.session_id) is not None:
                 return False
             self.external_binding_store.save_binding(binding)
+            # Defensive ABA sweep: a same-session rebind (unbind then re-bind) produces a new
+            # binding_id. Clear any input target/queue/drain left from the old generation so it
+            # cannot drive the new binding. Already-current generation sees a no-op clear.
+            await self._rebind_external_input_aba(binding.session_id, binding.binding_id)
             return True
 
     async def _mark_external_binding_ended(
@@ -81,6 +142,10 @@ class JsonlSyncMixin(AppContainerBase):
             self.external_binding_store.mark_ended(session_id, utc_now())
             if cleanup_callback is not None:
                 await cleanup_callback()
+            # SessionEnd does not go through the reaper: tear down input state here so queued
+            # text and drain tasks do not outlive the session. Invalidates inside its own input
+            # lock (independent of the reply-delivery lock held here).
+            await self._invalidate_external_input(session_id, reason="session_end")
             cwd = binding.cwd
         if cwd is not None and hasattr(self, "external_reply_delivery_pump"):
             self.external_reply_delivery_pump.request_finalize(session_id=session_id, cwd=cwd)
@@ -148,6 +213,10 @@ class JsonlSyncMixin(AppContainerBase):
                 binding.last_activity_at != expected_last_activity_at or binding.pid != expected_pid
             ):
                 return None
+            # Drop input state before the binding leaves the store, so a drain task cannot inject
+            # into a session whose binding is gone. Covers manual unbind, dead-PID and idle-TTL
+            # reaping. SessionEnd takes the other path via _mark_external_binding_ended.
+            await self._invalidate_external_input(session_id, reason="reaper_remove")
             self.external_binding_store.remove_binding(session_id)
             if hasattr(self, "push_notifier"):
                 self.push_notifier.discard_assistant_reply_progress(session_id)
@@ -329,6 +398,28 @@ class HookHandlingMixin(AppContainerBase):
                 lambda: self.hook_socket_server.cancel_pending_permissions(session_id=session_id),
             )
 
+    async def _notify_input_service_hook_event(self, event: HookEvent) -> None:
+        """Forward a phase-affecting hook event to the external input service.
+
+        No-op when the service is unavailable (not assembled, or feature disabled). Maps the raw
+        HookEvent to the snake_case ``event_kind`` the service recognises (see
+        ``_map_hook_event_kind``). Never raises — input notifications must not halt the hook
+        pipeline; a failure here only delays draining until the next Hook wake or publish.
+        """
+        input_service = getattr(self, "external_session_input_service", None)
+        if input_service is None:
+            return
+        kind = _map_hook_event_kind(event)
+        if kind is None:
+            return
+        try:
+            await input_service.notify_hook_event(session_id=event.session_id, event_kind=kind)
+        except Exception:
+            logger.exception(
+                "external input notify_hook_event failed",
+                extra={"session_id": event.session_id, "event": event.event, "kind": kind},
+            )
+
     async def _handle_hook_event(self, event: HookEvent) -> None:
         if getattr(self, "_stopping", False):
             return
@@ -346,6 +437,12 @@ class HookHandlingMixin(AppContainerBase):
         ownership = await self._resolve_ownership_stage(event)
         if ownership is None:
             return
+
+        # Let the external input service clear its in-flight marker / schedule a drain in response
+        # to phase-affecting hook events (Stop-family, PostCompact, SessionEnd). Runs before the
+        # bound stage list so a Stop arriving during injection releases the guard before the
+        # session-event lock is taken for phase dispatch. Fail-closed: never blocks the pipeline.
+        await self._notify_input_service_hook_event(event)
 
         # Stages 2+: each wrapped independently in error boundaries.
         # A stage may raise _StageShortCircuitError to terminate the pipeline early.

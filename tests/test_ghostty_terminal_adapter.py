@@ -27,6 +27,7 @@ class _FakeProc:
         self._stderr = stderr
         self.returncode = returncode
         self.killed = False
+        self.waited = False
 
     async def communicate(self) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr
@@ -35,6 +36,7 @@ class _FakeProc:
         self.killed = True
 
     async def wait(self) -> int:
+        self.waited = True
         return self.returncode
 
 
@@ -227,6 +229,34 @@ async def test_inject_timeout_kills_child(monkeypatch: pytest.MonkeyPatch) -> No
     adapter = GhosttyTerminalAdapter(timeout_sec=0.01)
     assert await adapter.inject_text("uuid-1", "x") == InjectionOutcome.TIMEOUT
     assert proc.killed, "timeout SHALL kill the osascript child"
+    assert proc.waited, "timeout SHALL reap the osascript child"
+
+
+@pytest.mark.asyncio
+async def test_inject_cancellation_kills_and_reaps_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    entered = asyncio.Event()
+
+    class _HangingProc(_FakeProc):
+        async def communicate(self) -> tuple[bytes, bytes]:
+            entered.set()
+            await asyncio.Event().wait()
+            return b"", b""
+
+    proc = _HangingProc(returncode=0)
+
+    async def fake(*_args: object, **_kwargs: object) -> _HangingProc:
+        return proc
+
+    monkeypatch.setattr(gta.asyncio, "create_subprocess_exec", fake)
+    task = asyncio.create_task(GhosttyTerminalAdapter().inject_text("uuid-1", "x"))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert proc.killed
+    assert proc.waited
 
 
 @pytest.mark.asyncio
