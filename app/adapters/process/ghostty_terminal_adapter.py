@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import sys
 from collections.abc import Iterable
@@ -41,9 +42,12 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+_SYSTEM_OSASCRIPT = "/usr/bin/osascript"
+
 
 # Fixed AppleScript: enumerate every terminal's id/name/cwd as tab/newline
-# delimited rows. Output column order is terminal_id, name, cwd (POSIX path).
+# delimited rows. Ghostty exposes ``working directory`` as path text already;
+# wrapping it in ``POSIX path of`` raises AppleScript -1700 on current Ghostty.
 # We do NOT rely on Ghostty's ``every terminal whose id is …`` counting here —
 # we list-and-match in Python so the pairing UI can show the matched snapshot.
 _LIST_SCRIPT = r"""
@@ -53,7 +57,7 @@ on run argv
         repeat with w in windows
             repeat with t in tabs of w
                 repeat with term in (terminals of t)
-                    set output to output & (id of term) & "\t" & (name of term) & "\t" & (POSIX path of (working directory of term)) & "\n"
+                    set output to output & (id of term) & "\t" & (name of term) & "\t" & ((working directory of term) as text) & "\n"
                 end repeat
             end repeat
         end repeat
@@ -76,6 +80,7 @@ on run argv
         end if
         set targetTerminal to item 1 of matches
         input text payload to targetTerminal
+        delay 0.1
         send key "enter" to targetTerminal
     end tell
 end run
@@ -175,18 +180,32 @@ class GhosttyTerminalAdapter:
         self._platform_name = platform_name
         self._enable_applescript = enable_applescript
 
+    def _resolved_osascript_bin(self) -> str | None:
+        """Resolve the executable without requiring ``/usr/bin`` on PATH.
+
+        Launch agents and GUI wrappers on macOS may provide a restricted PATH
+        that omits ``/usr/bin`` even though the system binary exists there.
+        Preserve custom binaries and normal PATH lookup; only the default name
+        falls back to the standard macOS absolute path.
+        """
+        if shutil.which(self._osascript_bin) is not None:
+            return self._osascript_bin
+        if self._osascript_bin == "osascript" and _is_darwin(self._platform_name) and os.access(_SYSTEM_OSASCRIPT, os.X_OK):
+            return _SYSTEM_OSASCRIPT
+        return None
+
     def is_available(self) -> bool:
         """Return whether the adapter can attempt an AppleScript call.
 
         False on non-darwin, when AppleScript is disabled by config, or when
-        ``osascript`` is not on PATH. (TCC/automation permission is only
-        discoverable at call time, not here.)
+        ``osascript`` is unavailable via PATH and ``/usr/bin/osascript``.
+        TCC/automation permission is only discoverable at call time.
         """
         if not self._enable_applescript:
             return False
         if not _is_darwin(self._platform_name):
             return False
-        return shutil.which(self._osascript_bin) is not None
+        return self._resolved_osascript_bin() is not None
 
     def _unavailable_reason(self) -> str:
         if not self._enable_applescript:
@@ -254,11 +273,15 @@ class GhosttyTerminalAdapter:
         binary (FileNotFoundError at spawn) yields ``(empty, "osascript
         missing", 127)`` so callers classify it as unavailable/os-error.
         """
+        osascript_bin = self._resolved_osascript_bin()
+        if osascript_bin is None:
+            return "", "osascript missing", 127
+
         argv_list = list(argv)
         proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
-                self._osascript_bin,
+                osascript_bin,
                 "-e",
                 script,
                 "--",

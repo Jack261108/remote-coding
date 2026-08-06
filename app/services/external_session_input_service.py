@@ -205,6 +205,12 @@ class ExternalSessionInputService:
             return PairOutcome.ADAPTER_UNAVAILABLE, None
         if not terminals:
             return PairOutcome.NO_TERMINALS, None
+
+        # Ghostty 1.3 does not expose terminal PID/TTY, so cwd/title are display
+        # hints only and MUST NOT auto-select a target. Put exact-cwd candidates
+        # first while preserving adapter order within each group; the handler
+        # shows enough identity for the owner to choose explicitly.
+        terminals = sorted(terminals, key=lambda terminal: terminal.cwd != binding.cwd)
         return (
             PairOutcome.NEEDS_PAIRING,
             PairingCandidates(

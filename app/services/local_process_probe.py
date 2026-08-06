@@ -7,8 +7,8 @@ trust anchor is the ``(pid, paired_tty)`` pair checked together:
 
   1. ``pid`` is alive and positive (reuses ``process_liveness.process_is_alive``);
   2. ``pid`` is still the foreground process group of ``paired_tty`` — i.e.
-     ``os.tcgetpgrp(tty_fd) == os.getpgid(pid)``. This is the only check that
-     proves "Claude is the program that would receive the keystrokes right
+     the tty's ``ps tpgid`` equals ``os.getpgid(pid)``. This is the only check
+     that proves "Claude is the program that would receive the keystrokes right
      now". If the user has ``Ctrl-C``'d back to a shell, the shell is foreground
      and this check fails — we refuse so the typed text is never handed to a
      shell that Enter would execute.
@@ -22,8 +22,8 @@ are only meaningful on the same host as this process. The bot and Claude Code
 share a host by virtue of the local hook Unix socket; if that ever changes this
 probe MUST be disabled too. See ``process_liveness.py``.
 
-All raw OS operations (``ps``, ``os.tcgetpgrp``, ``os.getpgid``) are tiny
-dependency-injected functions so tests run without a real PTY or process table.
+All raw OS operations (``ps``, ``os.getpgid``) are tiny dependency-injected
+functions so tests run without a real PTY or process table.
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ class ProcessTargetValidation:
 # constant (TTY_UNRESOLVED for "pid dead or ps failed").
 TtyResolver = Callable[[int], tuple[str | None, str | None]]
 PgidResolver = Callable[[int], int | None]
-# Returns the foreground pgroup of an open tty path, or None on any error.
+# Returns the tty's foreground pgroup, or None on any error/ambiguity.
 ForegroundResolver = Callable[[str], int | None]
 # Returns a single process state/comm/args snapshot, or None on lookup failure.
 CommandResolver = Callable[[int], ProcessCommandSignature | None]
@@ -111,25 +111,46 @@ def _default_pgid(pid: int) -> int | None:
 
 
 def _default_foreground(tty: str) -> int | None:
-    """Return the foreground process group of ``tty`` via ``os.tcgetpgrp``.
+    """Return the unique foreground process group reported for ``tty``.
 
-    Opens ``tty`` O_RDWR | O_NOCTTY. A failure to open or to read the
-    foreground pgroup is treated as unknown (None) — the caller then refuses the
-    injection rather than guessing.
+    ``tcgetpgrp`` only works for the calling process's own controlling terminal
+    on macOS; opening another Ghostty PTY and calling it returns ``ENOTTY``.
+    Query ``ps tpgid`` for every process on the target tty instead. All rows on
+    one tty should report the same positive foreground pgroup; anything empty,
+    malformed, non-positive, or ambiguous fails closed as unknown.
     """
-    try:
-        fd = os.open(tty, os.O_RDWR | os.O_NOCTTY)
-    except OSError:
+    import subprocess
+
+    tty_name = os.path.basename(tty.rstrip("/"))
+    if not tty_name:
         return None
     try:
-        return os.tcgetpgrp(fd)
-    except OSError:
+        proc = subprocess.run(
+            ["ps", "-t", tty_name, "-o", "tpgid="],
+            capture_output=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
         return None
-    finally:
+    if proc.returncode != 0:
+        return None
+
+    foreground_pgroups: set[int] = set()
+    for raw_line in proc.stdout.decode(errors="replace").splitlines():
+        text = raw_line.strip()
+        if not text:
+            continue
         try:
-            os.close(fd)
-        except OSError:  # pragma: no cover - close best-effort
-            pass
+            pgid = int(text)
+        except ValueError:
+            return None
+        if pgid <= 0:
+            return None
+        foreground_pgroups.add(pgid)
+
+    if len(foreground_pgroups) != 1:
+        return None
+    return next(iter(foreground_pgroups))
 
 
 def _default_command(pid: int) -> ProcessCommandSignature | None:
@@ -163,15 +184,17 @@ def _default_tty(pid: int) -> tuple[str | None, str | None]:
     """Return ``(tty, None)`` or ``(None, reason)`` for ``pid`` via ``ps``.
 
     Synchronous ``subprocess.run`` so it is loop-agnostic. ``ps -p <pid> -o
-    tt=`` prints the controlling tty name (e.g. ``ttys005``) or ``??`` when the
-    process has no controlling tty. We normalise to ``/dev/<name>`` to match
-    the binding's ``paired_tty``, which we always store as an absolute /dev path.
+    tty=`` prints the full controlling tty name (e.g. ``ttys005``) or ``??``
+    when the process has no controlling tty. The shorter ``tt=`` column is only
+    four characters wide on macOS and truncates ``ttys011`` to ``s011``. We
+    normalise to ``/dev/<name>`` to match the binding's ``paired_tty``, which we
+    always store as an absolute /dev path.
     """
     import subprocess
 
     try:
         proc = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "tt="],
+            ["ps", "-p", str(pid), "-o", "tty="],
             capture_output=True,
             check=False,
         )

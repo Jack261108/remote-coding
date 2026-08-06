@@ -62,10 +62,27 @@ async def test_is_available_requires_darwin_and_osascript(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(gta.sys, "platform", "darwin")
     monkeypatch.setattr(gta.shutil, "which", lambda _b: None)
+    monkeypatch.setattr(gta.os, "access", lambda _path, _mode: False)
     assert not GhosttyTerminalAdapter().is_available()
 
     monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
     assert not GhosttyTerminalAdapter(enable_applescript=False).is_available()
+
+
+@pytest.mark.asyncio
+async def test_list_terminals_falls_back_to_system_osascript_when_path_omits_usr_bin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: None)
+    monkeypatch.setattr(gta.os, "access", lambda path, mode: path == gta._SYSTEM_OSASCRIPT and mode == gta.os.X_OK)
+    calls = _patch_exec(monkeypatch, lambda _a: _FakeProc(stdout=b"", returncode=0))
+
+    terminals, err = await GhosttyTerminalAdapter().list_terminals()
+
+    assert err is None
+    assert terminals == []
+    assert calls[0][0] == gta._SYSTEM_OSASCRIPT
 
 
 @pytest.mark.asyncio
@@ -157,6 +174,10 @@ async def test_inject_text_passes_payload_only_via_argv(monkeypatch: pytest.Monk
     assert args[3] == "--"
     assert args[4] == "uuid-1"
     assert args[5] == payload
+    # Ghostty queues ``input text`` asynchronously; delay before Enter so the
+    # key cannot overtake the pasted payload and submit an empty prompt.
+    assert gta._INJECT_SCRIPT.index("input text payload") < gta._INJECT_SCRIPT.index("delay 0.1")
+    assert gta._INJECT_SCRIPT.index("delay 0.1") < gta._INJECT_SCRIPT.index('send key "enter"')
     # The payload must NOT appear inside the literal script source.
     assert payload not in gta._INJECT_SCRIPT
 

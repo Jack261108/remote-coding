@@ -23,6 +23,7 @@ from aiogram.types import CallbackQuery, Message, User
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.bot.handlers.external_session import register_external_session_handler
 from app.bot.handlers.session_actions import (
+    _pair_terminal_label,
     register_external_text_handlers,
     register_pair_consume_handler,
     register_session_action_handlers,
@@ -136,6 +137,17 @@ async def _dispatch_msg(router: Router, index: int, message: Message) -> object:
     return await handler.callback(message)
 
 
+def test_pair_terminal_label_disambiguates_name_cwd_and_uuid() -> None:
+    assert (
+        _pair_terminal_label(
+            terminal_id="53362216-AE12-4EC7-8D3D-F6BF6270B6FE",
+            name="✳ Claude Code",
+            cwd="/Users/jack/project/bitchat",
+        )
+        == "配对: ✳ Claude Code · project/bitchat · 6270B6FE"
+    )
+
+
 # ── ghpair consume ──────────────────────────────────────────────────────────
 
 
@@ -214,11 +226,21 @@ class TestSessionLeaveHandler:
         )
         router = Router()
         register_session_action_handlers(router, discovery=discovery, binder=binder, external_session_input_service=service)
+        message = _message("")
+        message.text = "📂 Session: session-1...\n  cwd: /project\n\n✅ 已进入外部输入模式"
+        message.edit_text = AsyncMock()
         for handler in router.callback_query.handlers:
             if _is_leave_handler(handler):
-                cb = _callback("sess:leave:abc")
+                cb = _callback("sess:leave:abc", message=message)
                 await handler.callback(cb)
                 cb.answer.assert_awaited_once_with("已退出外部输入模式")
+                message.edit_text.assert_awaited_once()
+                assert message.edit_text.await_args is not None
+                updated_text = message.edit_text.await_args.args[0]
+                reply_markup = message.edit_text.await_args.kwargs["reply_markup"]
+                assert "✅ 已退出外部输入模式" in updated_text
+                assert "✅ 已进入外部输入模式" not in updated_text
+                assert [row[0].text for row in reply_markup.inline_keyboard] == ["重新进入输入模式", "取消绑定"]
                 break
         assert await service.has_target(42) is False
 

@@ -215,6 +215,7 @@ def _register_optional_handlers(
             discovery=external_discovery,
             binder=external_binder,
             session_store=structured_session_store,
+            input_service=external_session_input_service,
         )
 
     if hook_socket_server is not None and unbound_permission_handler is not None and permission_gateway is not None:

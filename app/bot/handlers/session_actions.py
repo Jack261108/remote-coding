@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 from aiogram import F, Router
 from aiogram.filters import BaseFilter
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.user_utils import extract_user_id
-from app.infra.text_formatting import format_external_session_bound_message, format_external_session_unbound_message, short_id
+from app.infra.text_formatting import (
+    format_external_session_bound_message,
+    format_external_session_unbound_message,
+    short_cwd,
+    short_id,
+    truncate_text,
+)
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.external_session_input_service import ExternalSessionInputService, PairOutcome, SendOutcome
@@ -34,6 +41,13 @@ def _pair_outcome_text(outcome: PairOutcome) -> str:
         PairOutcome.PAIRING_NOT_ENABLED: "外部输入功能未启用。",
         PairOutcome.PAIRED: "配对完成。",
     }.get(outcome, f"操作失败：{outcome.value}")
+
+
+def _pair_terminal_label(*, terminal_id: str, name: str | None, cwd: str | None) -> str:
+    """Build a compact but distinguishable explicit-pairing label."""
+    name_label = truncate_text((name or "未命名").strip() or "未命名", 22)
+    cwd_label = truncate_text(short_cwd(cwd or "", fallback="cwd 未知"), 22)
+    return f"配对: {name_label} · {cwd_label} · {terminal_id[-8:]}"
 
 
 async def _resolve_terminal_id_prefix(
@@ -98,7 +112,11 @@ def register_session_action_handlers(
                         )
                         if token is None:
                             continue
-                        label = f"配对: {terminal.name or terminal.terminal_id[:8]}"
+                        label = _pair_terminal_label(
+                            terminal_id=terminal.terminal_id,
+                            name=terminal.name,
+                            cwd=terminal.cwd,
+                        )
                         buttons.append([InlineKeyboardButton(text=label, callback_data=f"ghpair:{token}")])
                     buttons.append([InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")])
                     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -201,13 +219,38 @@ def register_session_action_handlers(
             await callback.message.answer(f"{'✅' if ok else '❌'} 会话 `{terminal_id}` {'已关闭' if ok else '关闭失败'}")
 
     @router.callback_query(F.data.startswith("sess:leave:"))
-    async def handle_session_leave(callback: CallbackQuery) -> None:
+    async def handle_session_leave(
+        callback: CallbackQuery,
+        callback_parts: tuple[str, ...] | None = None,
+    ) -> None:
         if external_session_input_service is None:
             await callback.answer("功能不可用")
             return
         user_id = extract_user_id(callback)
         left = await external_session_input_service.leave(user_id=user_id)
         await callback.answer("已退出外部输入模式" if left else "当前不在外部输入模式")
+        message = callback.message
+        if not left or not isinstance(message, Message):
+            return
+        editable_message = cast(Message, message)
+
+        parts = callback_parts or tuple((callback.data or "").split(":"))
+        callback_token = parts[2] if len(parts) > 2 else None
+        current_text = message.text
+        if isinstance(current_text, str) and "✅ 已进入外部输入模式" in current_text:
+            updated_text = current_text.replace("✅ 已进入外部输入模式", "✅ 已退出外部输入模式")
+        else:
+            updated_text = "✅ 已退出外部输入模式"
+
+        keyboard = None
+        if callback_token:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="重新进入输入模式", callback_data=f"sess:select:{callback_token}")],
+                    [InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")],
+                ]
+            )
+        await editable_message.edit_text(updated_text, reply_markup=keyboard)
 
 
 def register_pair_consume_handler(router: Router, *, input_service: ExternalSessionInputService) -> None:

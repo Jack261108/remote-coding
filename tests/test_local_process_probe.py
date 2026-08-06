@@ -10,10 +10,14 @@ shell that Enter would execute.
 
 from __future__ import annotations
 
+import subprocess
+
 from app.services.local_process_probe import (
     LocalProcessProbe,
     ProcessCommandSignature,
     ProcessTargetReason,
+    _default_foreground,
+    _default_tty,
     _looks_like_claude,
 )
 
@@ -155,6 +159,51 @@ def test_validate_node_claude_path_is_accepted_but_plain_node_is_not() -> None:
 
 
 # --- primitive accessors ----------------------------------------------------
+
+
+def test_default_tty_uses_full_mac_tty_column(monkeypatch) -> None:
+    """macOS ``tt=`` is only four columns wide (``ttys011`` -> ``s011``).
+    The resolver must request ``tty=`` so the persisted trust anchor names the
+    real device path and can be opened by ``os.tcgetpgrp`` later."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs) -> subprocess.CompletedProcess[bytes]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=b"ttys011\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    tty, reason = _default_tty(67632)
+
+    assert tty == "/dev/ttys011"
+    assert reason is None
+    assert calls == [["ps", "-p", "67632", "-o", "tty="]]
+
+
+def test_default_foreground_uses_ps_tpgid_for_external_tty(monkeypatch) -> None:
+    """The bot cannot call ``tcgetpgrp`` on another process's controlling tty
+    on macOS (ENOTTY), so foreground resolution uses the tty's ``ps tpgid``."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs) -> subprocess.CompletedProcess[bytes]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=b"67632\n67632\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    foreground_pgid = _default_foreground("/dev/ttys011")
+
+    assert foreground_pgid == 67632
+    assert calls == [["ps", "-t", "ttys011", "-o", "tpgid="]]
+
+
+def test_default_foreground_fails_closed_when_tpgid_is_ambiguous(monkeypatch) -> None:
+    def fake_run(args: list[str], **_kwargs) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args, 0, stdout=b"67632\n70000\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _default_foreground("/dev/ttys011") is None
 
 
 def test_pid_controlling_tty_returns_resolved_value() -> None:

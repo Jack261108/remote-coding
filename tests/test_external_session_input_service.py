@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from app.adapters.process.ghostty_terminal_adapter import InjectionOutcome
+from app.adapters.process.ghostty_terminal_adapter import GhosttyTerminal, InjectionOutcome
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.external_session_models import ExternalBinding, GhosttyInputTarget
 from app.domain.models import utc_now
@@ -181,6 +181,29 @@ async def test_pair_candidates_requires_owner_live_process_and_adapter(make_harn
     assert candidates.binding_id == harness.binding.binding_id
     assert candidates.paired_tty == "/dev/ttys005"
     assert [terminal.terminal_id for terminal in candidates.terminals] == ["term-1"]
+
+
+async def test_pair_candidates_prioritises_exact_cwd_without_auto_selecting(make_harness) -> None:
+    adapter = FakeGhosttyTerminalAdapter(
+        terminals=[
+            GhosttyTerminal(terminal_id="other-1", name="Claude Code", cwd="/other"),
+            GhosttyTerminal(terminal_id="match-claude", name="Claude Code", cwd="/project"),
+            GhosttyTerminal(terminal_id="match-shell", name="~/project", cwd="/project"),
+            GhosttyTerminal(terminal_id="other-2", name="shell", cwd="/elsewhere"),
+        ]
+    )
+    harness = make_harness(paired=False, adapter=adapter)
+
+    outcome, candidates = await harness.service.pair_candidates(user_id=42, session_id="session-1")
+
+    assert outcome is PairOutcome.NEEDS_PAIRING
+    assert candidates is not None
+    assert [terminal.terminal_id for terminal in candidates.terminals] == [
+        "match-claude",
+        "match-shell",
+        "other-1",
+        "other-2",
+    ]
 
 
 async def test_pair_candidates_resolves_tty_from_pid_when_binding_missing_tty(make_harness) -> None:

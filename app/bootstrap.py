@@ -271,6 +271,9 @@ class AppContainer(
             session_service=self.session_service,
             binding_store=self.external_binding_store,
         )
+        # Built before the binder so bind-time tty backfill (pid → controlling
+        # tty) has a probe to consult; also reused by the external input service.
+        self.local_process_probe = LocalProcessProbe()
         self.external_binder = ExternalSessionBinder(
             discovery=self.external_discovery,
             binding_store=self.external_binding_store,
@@ -278,6 +281,7 @@ class AppContainer(
             sync_callback=self._sync_and_baseline_external_reply,
             save_callback=self._save_external_binding,
             remove_callback=self._unbind_external_binding,
+            process_probe=self.local_process_probe,
         )
         self.unbound_permission_handler = UnboundPermissionHandler(
             message_sender=self.message_sender,
@@ -345,7 +349,6 @@ class AppContainer(
         self.ghostty_adapter = GhosttyTerminalAdapter(
             enable_applescript=settings.ghostty_applescript_enabled,
         )
-        self.local_process_probe = LocalProcessProbe()
         self.pairing_callback_registry = PairingCallbackRegistry(
             ttl_sec=settings.ghostty_pairing_token_ttl_sec,
         )
