@@ -36,8 +36,10 @@ if TYPE_CHECKING:
     from app.services.external_reply_delivery_pump import ExternalReplyDeliveryPump
     from app.services.external_session_input_service import ExternalSessionInputService
     from app.services.external_session_push_notifier import ExternalSessionPushNotifier
+    from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.local_process_probe import LocalProcessProbe
     from app.services.pairing_callback_registry import PairingCallbackRegistry
+    from app.services.user_question_callback_registry import UserQuestionCallbackRegistry
 
 
 class AppContainerBase:
@@ -65,6 +67,8 @@ class AppContainerBase:
     task_service: TaskService
     session_registry: SessionRegistryService
     external_binding_store: ExternalBindingStore
+    external_uq_state: ExternalUserQuestionState
+    user_question_callback_registry: UserQuestionCallbackRegistry
     external_reply_delivery_pump: ExternalReplyDeliveryPump
     push_notifier: ExternalSessionPushNotifier
     ghostty_adapter: GhosttyTerminalAdapter

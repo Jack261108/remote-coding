@@ -25,10 +25,16 @@ from app.domain.session_models import (
     SessionPhase,
     SessionState,
 )
-from app.domain.user_question_models import extract_user_question_prompts
+from app.domain.user_question_models import (
+    ExternalGhosttyQuestionTarget,
+    ExternalTmuxQuestionTarget,
+    UserQuestionPrompt,
+    extract_user_question_prompts,
+)
 from app.infra.text_formatting import ensure_aware_utc
 from app.services.external_reply_delivery_pump import ExternalReplyDrainResult
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
+from app.services.user_question_callback_registry import UserQuestionCallbackOrigin
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +398,11 @@ class HookHandlingMixin(AppContainerBase):
                     "external user question state",
                     lambda: invalidator(session_id),
                 )
+        if hasattr(self, "user_question_callback_registry"):
+            await run_async_cleanup(
+                "user question callback registry",
+                lambda: self.user_question_callback_registry.invalidate_session(session_id),
+            )
         if hasattr(self, "hook_socket_server"):
             await run_async_cleanup(
                 "hook pending permissions",
@@ -926,40 +937,48 @@ class HookHandlingMixin(AppContainerBase):
         if _is_session_end_event(event):
             return
         if event.expects_response:
-            # AskUserQuestion: try PTY injection flow if tmux pane is available
+            # AskUserQuestion: route to an interactive external question card
+            # (Ghostty or legacy tmux) when a target is available; otherwise fall
+            # through to the generic permission confirmation card.
             if event.tool == "AskUserQuestion":
                 prompts = extract_user_question_prompts(
                     tool_use_id=event.tool_use_id or "",
                     tool_name=event.tool,
                     tool_input=event.tool_input,
                 )
-                if prompts and hasattr(self, "external_uq_state") and event.pid is not None:
-                    # Try to find tmux pane for interactive injection
-                    from app.adapters.process.pty_injector import find_tmux_pane_for_pid
-
-                    pane_id = await find_tmux_pane_for_pid(event.pid, self.settings.tmux_bin)
-                    if pane_id is not None:
-                        # Store pending state and show interactive buttons
-                        # Do NOT auto-allow — hold the permission until user clicks
-                        from app.services.external_user_question_state import PendingExternalUserQuestion
-
-                        pending = PendingExternalUserQuestion(
-                            tool_use_id=event.tool_use_id or "",
-                            session_id=event.session_id,
-                            user_id=user_id,
-                            pid=event.pid,
-                            prompts=prompts,
-                            pane_id=pane_id,
-                            tmux_bin=self.settings.tmux_bin,
-                        )
-                        self.external_uq_state.store(pending)
-                        await self.push_notifier.notify_user_question(
-                            user_id=user_id,
-                            session_id=event.session_id,
-                            prompts=prompts,
-                            interactive=True,
-                        )
+                if prompts and hasattr(self, "external_uq_state"):
+                    # Ghostty-bound session: inject via the verified transport.
+                    ghostty_handled = await self._try_ghostty_user_question(event=event, user_id=user_id, prompts=prompts)
+                    if ghostty_handled:
                         return
+
+                    # Legacy tmux: PTY injection when a pane is reachable for the PID.
+                    if event.pid is not None:
+                        from app.adapters.process.pty_injector import find_tmux_pane_for_pid
+
+                        pane_id = await find_tmux_pane_for_pid(event.pid, self.settings.tmux_bin)
+                        if pane_id is not None:
+                            from app.services.external_user_question_state import PendingExternalUserQuestion
+
+                            pending = PendingExternalUserQuestion(
+                                tool_use_id=event.tool_use_id or "",
+                                session_id=event.session_id,
+                                user_id=user_id,
+                                prompts=prompts,
+                                target=ExternalTmuxQuestionTarget(
+                                    pane_id=pane_id,
+                                    tmux_bin=self.settings.tmux_bin,
+                                ),
+                            )
+                            self.external_uq_state.store(pending)
+                            await self.push_notifier.notify_user_question(
+                                user_id=user_id,
+                                session_id=event.session_id,
+                                prompts=prompts,
+                                interactive=True,
+                                origin=UserQuestionCallbackOrigin.EXTERNAL_TMUX,
+                            )
+                            return
 
                 # Fallback: no tmux pane found or no PID — fall through to normal
                 # permission flow (notify_permission_request below). The user sees
@@ -984,6 +1003,57 @@ class HookHandlingMixin(AppContainerBase):
             )
         elif event.event == "Stop":
             await self._push_bound_assistant_replies(event, user_id)
+
+    async def _try_ghostty_user_question(
+        self,
+        *,
+        event: HookEvent,
+        user_id: int,
+        prompts: tuple[UserQuestionPrompt, ...],
+    ) -> bool:
+        """Route an AskUserQuestion to a bound, paired Ghostty session.
+
+        Returns True when a Ghostty target exists for the bound session and the
+        interactive question card has been pushed (the Hook permission is held
+        until the user answers and the transport reports completion). Returns
+        False to let the caller fall through to the tmux / generic card.
+        """
+        if not hasattr(self, "external_binding_store"):
+            return False
+        binding = self.external_binding_store.get_binding(event.session_id)
+        if binding is None or binding.ended_at is not None or binding.user_id != user_id:
+            return False
+        ghostty_target = binding.ghostty_target
+        if ghostty_target is None:
+            return False
+        from app.services.external_user_question_state import (
+            ExternalUserQuestionState,
+            PendingExternalUserQuestion,
+        )
+
+        state: ExternalUserQuestionState = self.external_uq_state
+        question_target = ExternalGhosttyQuestionTarget(
+            binding_id=ghostty_target.binding_id,
+            terminal_id=ghostty_target.terminal_id,
+            paired_tty=ghostty_target.paired_tty,
+            paired_at=ghostty_target.paired_at,
+        )
+        pending = PendingExternalUserQuestion(
+            tool_use_id=event.tool_use_id or "",
+            session_id=event.session_id,
+            user_id=user_id,
+            prompts=prompts,
+            target=question_target,
+        )
+        state.store(pending)
+        await self.push_notifier.notify_user_question(
+            user_id=user_id,
+            session_id=event.session_id,
+            prompts=prompts,
+            interactive=True,
+            origin=UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY,
+        )
+        return True
 
     async def _push_bound_assistant_replies(self, event: HookEvent, user_id: int) -> ExternalReplyDrainResult:
         if not self.settings.external_push_reply_enabled:

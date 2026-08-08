@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,14 @@ from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.external_session_models import ExternalBinding, GhosttyInputTarget
 from app.domain.models import utc_now
 from app.domain.session_models import PendingPermission, SessionPhase
+from app.domain.user_question_models import (
+    ExternalGhosttyQuestionTarget,
+    ExternalQuestionActionStatus,
+    ExternalUserQuestionContext,
+    ExternalUserQuestionPhase,
+    UserQuestionOption,
+    UserQuestionPrompt,
+)
 from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_input_mode_state import ExternalInputTargetStore
@@ -29,6 +38,7 @@ from app.services.external_session_input_service import (
     PairOutcome,
     SendOutcome,
 )
+from app.services.external_user_question_state import ExternalUserQuestionState, PendingExternalUserQuestion
 from app.services.pairing_callback_registry import PairingCallbackRegistry
 from app.services.session_store import SessionStore
 from tests.fakes.ghostty import FakeGhosttyTerminalAdapter
@@ -45,6 +55,7 @@ class _Harness:
     pairing: PairingCallbackRegistry
     adapter: FakeGhosttyTerminalAdapter
     probe: FakeLocalProcessProbe
+    external_uq_state: ExternalUserQuestionState
     binding: ExternalBinding
 
 
@@ -103,6 +114,7 @@ async def make_harness(tmp_path: Path):
         adapter = adapter or FakeGhosttyTerminalAdapter()
         probe = probe or FakeLocalProcessProbe()
         pairing = PairingCallbackRegistry(ttl_sec=60)
+        external_uq_state = ExternalUserQuestionState(ttl_sec=60)
         mode_store = ExternalInputTargetStore()
         queue = ExternalInputQueue(max_size=queue_max_size, ttl_sec=60)
         locks = RefCountedLockRegistry(
@@ -120,6 +132,7 @@ async def make_harness(tmp_path: Path):
             input_mode_store=mode_store,
             input_queue=queue,
             input_locks=locks,
+            external_user_question_state=external_uq_state,
             drain_publish_wait_timeout_sec=drain_wait,
         )
         services.append(service)
@@ -132,6 +145,7 @@ async def make_harness(tmp_path: Path):
             pairing=pairing,
             adapter=adapter,
             probe=probe,
+            external_uq_state=external_uq_state,
             binding=binding,
         )
 
@@ -145,6 +159,65 @@ async def _activate(harness: _Harness, *, user_id: int = 42) -> None:
         user_id=user_id,
         session_id=harness.binding.session_id,
         binding_id=harness.binding.binding_id,
+    )
+
+
+def _seed_external_question(
+    harness: _Harness,
+    *,
+    tool_use_id: str = "tool-question",
+    multi_select: bool = False,
+) -> ExternalUserQuestionContext:
+    target = harness.binding.ghostty_target
+    assert target is not None
+    prompt = UserQuestionPrompt(
+        tool_use_id=tool_use_id,
+        question_index=0,
+        total_questions=1,
+        question="Pick one",
+        options=(
+            UserQuestionOption(label="A"),
+            UserQuestionOption(label="B"),
+        ),
+        multi_select=multi_select,
+    )
+    state = harness.session_store.get(harness.binding.session_id)
+    assert state is not None
+    state.phase = SessionPhase.WAITING_FOR_APPROVAL
+    state.pending_permission = PendingPermission(
+        tool_use_id=tool_use_id,
+        tool_name="AskUserQuestion",
+        tool_input={
+            "questions": [
+                {
+                    "question": prompt.question,
+                    "options": [{"label": option.label} for option in prompt.options],
+                    "multiSelect": multi_select,
+                }
+            ]
+        },
+    )
+    harness.session_store.save(state)
+    ghostty_target = ExternalGhosttyQuestionTarget(
+        binding_id=target.binding_id,
+        terminal_id=target.terminal_id,
+        paired_tty=target.paired_tty,
+        paired_at=target.paired_at,
+    )
+    harness.external_uq_state.store(
+        PendingExternalUserQuestion(
+            tool_use_id=tool_use_id,
+            session_id=harness.binding.session_id,
+            user_id=harness.binding.user_id,
+            prompts=(prompt,),
+            target=ghostty_target,
+        )
+    )
+    return ExternalUserQuestionContext(
+        tool_use_id=tool_use_id,
+        session_id=harness.binding.session_id,
+        user_id=harness.binding.user_id,
+        target=ghostty_target,
     )
 
 
@@ -310,6 +383,187 @@ async def test_activate_select_validates_persisted_target(make_harness) -> None:
     assert await harness.service.activate_select(user_id=42, session_id="session-1") is PairOutcome.NEEDS_PAIRING
     binding = harness.binding_store.get_binding("session-1")
     assert binding is not None and binding.ghostty_target is None
+
+
+async def test_repair_same_terminal_invalidates_old_question_generation(make_harness) -> None:
+    harness = make_harness(paired=True)
+    context = _seed_external_question(harness)
+    token = await harness.service.register_pair_token(
+        user_id=42,
+        session_id=harness.binding.session_id,
+        expected_binding_id=harness.binding.binding_id,
+        terminal_id="term-1",
+    )
+    assert token is not None
+
+    outcome = await harness.service.consume_pair_token(token=token, user_id=42)
+
+    assert outcome is PairOutcome.PAIRED
+    assert harness.external_uq_state.get(context.tool_use_id) is None
+    rebound = harness.binding_store.get_binding(harness.binding.session_id)
+    assert rebound is not None and rebound.ghostty_target is not None
+    assert rebound.ghostty_target.paired_at != context.target.paired_at
+
+
+# ─── AskUserQuestion transport ---------------------------------------------
+
+
+async def test_question_select_does_not_require_active_input_mode(make_harness) -> None:
+    harness = make_harness(paired=True)
+    context = _seed_external_question(harness)
+    assert await harness.service.has_target(42) is False
+
+    result = await harness.service.select_option(
+        context=context,
+        question_index=0,
+        option_count=2,
+        option_index=1,
+        submit_after=False,
+    )
+
+    assert result.status is ExternalQuestionActionStatus.APPLIED
+    assert harness.adapter.question_calls == [("term-1", "select", 2, 1, False, "")]
+    assert harness.external_uq_state.get_active(context.tool_use_id) is not None
+
+
+async def test_final_question_uses_two_phase_completion(make_harness) -> None:
+    harness = make_harness(paired=True)
+    context = _seed_external_question(harness)
+
+    result = await harness.service.select_option(
+        context=context,
+        question_index=0,
+        option_count=2,
+        option_index=0,
+        submit_after=True,
+    )
+
+    assert result.status is ExternalQuestionActionStatus.APPLIED
+    pending = harness.external_uq_state.get(context.tool_use_id)
+    assert pending is not None and pending.phase is ExternalUserQuestionPhase.TERMINAL_ACTION_APPLIED
+
+    await harness.service.question_completed(context=context)
+    pending = harness.external_uq_state.get(context.tool_use_id)
+    assert pending is not None and pending.phase is ExternalUserQuestionPhase.COMPLETED
+
+
+async def test_question_rejects_owner_and_process_mismatch_without_adapter_action(make_harness) -> None:
+    harness = make_harness(paired=True)
+    context = _seed_external_question(harness)
+
+    wrong_owner = ExternalUserQuestionContext(
+        tool_use_id=context.tool_use_id,
+        session_id=context.session_id,
+        user_id=7,
+        target=context.target,
+    )
+    result = await harness.service.select_option(
+        context=wrong_owner,
+        question_index=0,
+        option_count=2,
+        option_index=0,
+        submit_after=False,
+    )
+    assert result.status is ExternalQuestionActionStatus.REJECTED
+
+    harness.probe.valid = False
+    result = await harness.service.select_option(
+        context=context,
+        question_index=0,
+        option_count=2,
+        option_index=0,
+        submit_after=False,
+    )
+    assert result.status is ExternalQuestionActionStatus.REJECTED
+    assert harness.adapter.question_calls == []
+
+
+async def test_question_rechecks_target_after_terminal_validation_await(make_harness) -> None:
+    harness = make_harness(paired=True)
+    context = _seed_external_question(harness)
+    harness.adapter.validate_entered = asyncio.Event()
+    harness.adapter.validate_release = asyncio.Event()
+
+    task = asyncio.create_task(
+        harness.service.select_option(
+            context=context,
+            question_index=0,
+            option_count=2,
+            option_index=0,
+            submit_after=False,
+        )
+    )
+    await asyncio.wait_for(harness.adapter.validate_entered.wait(), timeout=1)
+    old_target = harness.binding.ghostty_target
+    assert old_target is not None
+    harness.binding.ghostty_target = GhosttyInputTarget(
+        terminal_id=old_target.terminal_id,
+        paired_tty=old_target.paired_tty,
+        paired_at=old_target.paired_at + timedelta(seconds=1),
+        binding_id=old_target.binding_id,
+        name=old_target.name,
+        cwd=old_target.cwd,
+    )
+    harness.binding_store.save_binding(harness.binding)
+    harness.adapter.validate_release.set()
+
+    result = await task
+    assert result.status is ExternalQuestionActionStatus.REJECTED
+    assert harness.adapter.question_calls == []
+
+
+async def test_question_indeterminate_blocks_retry(make_harness) -> None:
+    harness = make_harness(paired=True)
+    context = _seed_external_question(harness)
+    harness.adapter.question_outcomes.append(InjectionOutcome.INDETERMINATE)
+
+    first = await harness.service.select_option(
+        context=context,
+        question_index=0,
+        option_count=2,
+        option_index=0,
+        submit_after=False,
+    )
+    second = await harness.service.select_option(
+        context=context,
+        question_index=0,
+        option_count=2,
+        option_index=0,
+        submit_after=False,
+    )
+
+    assert first.status is ExternalQuestionActionStatus.INDETERMINATE
+    assert second.status is ExternalQuestionActionStatus.REJECTED
+    assert len(harness.adapter.question_calls) == 1
+    pending = harness.external_uq_state.get(context.tool_use_id)
+    assert pending is not None and pending.phase is ExternalUserQuestionPhase.INDETERMINATE
+
+
+async def test_question_text_and_multi_advance_preserve_typed_actions(make_harness) -> None:
+    harness = make_harness(paired=True)
+    text_context = _seed_external_question(harness, tool_use_id="tool-text")
+    answer = "  自由文本\n第二行  "
+
+    text_result = await harness.service.answer_with_text(
+        context=text_context,
+        question_index=0,
+        option_count=2,
+        text=answer,
+        submit_after=False,
+    )
+    assert text_result.status is ExternalQuestionActionStatus.APPLIED
+    assert harness.adapter.question_calls[-1] == ("term-1", "answer_text", 2, -1, False, answer)
+
+    harness.external_uq_state.invalidate_tool("tool-text")
+    multi_context = _seed_external_question(harness, tool_use_id="tool-multi", multi_select=True)
+    multi_result = await harness.service.advance_after_multi_select(
+        context=multi_context,
+        question_index=0,
+        option_count=2,
+        final_question=False,
+    )
+    assert multi_result.status is ExternalQuestionActionStatus.APPLIED
+    assert harness.adapter.question_calls[-1] == ("term-1", "advance_multi", 2, -1, False, "")
 
 
 # ─── send ------------------------------------------------------------------

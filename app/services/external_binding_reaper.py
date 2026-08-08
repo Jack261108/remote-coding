@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_callback_registry import PermissionCallbackRegistry
     from app.services.unbound_permission_handler import UnboundPermissionHandler
+    from app.services.user_question_callback_registry import UserQuestionCallbackRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class ExternalBindingReaper:
         permission_callback_registry: PermissionCallbackRegistry | None = None,
         unbound_permission_handler: UnboundPermissionHandler | None = None,
         external_uq_state: ExternalUserQuestionState | None = None,
+        user_question_callback_registry: UserQuestionCallbackRegistry | None = None,
         external_discovery: ExternalSessionDiscoveryService | None = None,
         tombstone: SessionTombstoneStore | None = None,
         remove_callback: Callable[
@@ -59,6 +61,7 @@ class ExternalBindingReaper:
         self._permission_callback_registry = permission_callback_registry
         self._unbound_permission_handler = unbound_permission_handler
         self._external_uq_state = external_uq_state
+        self._user_question_callback_registry = user_question_callback_registry
         self._external_discovery = external_discovery
         self._tombstone = tombstone or SessionTombstoneStore()
         self._remove_callback = remove_callback
@@ -167,6 +170,12 @@ class ExternalBindingReaper:
                 run_sync_cleanup(
                     "external user question state",
                     lambda: uq_state.invalidate_session(session_id),
+                )
+            if clear_owner_state and self._user_question_callback_registry is not None:
+                uq_registry: UserQuestionCallbackRegistry = self._user_question_callback_registry
+                await run_async_cleanup(
+                    "user question callback registry",
+                    lambda: uq_registry.invalidate_session(session_id),
                 )
             if reason == "pid_dead":
                 await run_async_cleanup(

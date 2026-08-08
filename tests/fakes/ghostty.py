@@ -31,11 +31,15 @@ class FakeGhosttyTerminalAdapter:
         self.validate_error: str | None = None
         self.inject_outcomes: deque[str] = deque()
         self.inject_calls: list[tuple[str, str]] = []
+        self.question_outcomes: deque[str] = deque()
+        self.question_calls: list[tuple[str, str, int, int, bool, str]] = []
         self.validate_calls: list[str] = []
         self.validate_entered: asyncio.Event | None = None
         self.validate_release: asyncio.Event | None = None
         self.inject_entered: asyncio.Event | None = None
         self.inject_release: asyncio.Event | None = None
+        self.question_entered: asyncio.Event | None = None
+        self.question_release: asyncio.Event | None = None
         self.active_injections = 0
         self.max_active_injections = 0
 
@@ -68,6 +72,77 @@ class FakeGhosttyTerminalAdapter:
         if not matches:
             return False, None, InjectionOutcome.NOT_FOUND
         return False, None, InjectionOutcome.NOT_UNIQUE
+
+    async def select_user_question_option(
+        self,
+        terminal_id: str,
+        *,
+        option_count: int,
+        option_index: int,
+        submit_after: bool,
+    ) -> str:
+        return await self._record_question_action(
+            terminal_id,
+            "select",
+            option_count,
+            option_index,
+            submit_after,
+            "",
+        )
+
+    async def answer_user_question_with_text(
+        self,
+        terminal_id: str,
+        *,
+        option_count: int,
+        text: str,
+        submit_after: bool,
+    ) -> str:
+        return await self._record_question_action(
+            terminal_id,
+            "answer_text",
+            option_count,
+            -1,
+            submit_after,
+            text,
+        )
+
+    async def advance_user_question_after_multi_select(
+        self,
+        terminal_id: str,
+        *,
+        option_count: int,
+        final_question: bool,
+    ) -> str:
+        return await self._record_question_action(
+            terminal_id,
+            "advance_multi",
+            option_count,
+            -1,
+            final_question,
+            "",
+        )
+
+    async def _record_question_action(
+        self,
+        terminal_id: str,
+        action: str,
+        option_count: int,
+        option_index: int,
+        final: bool,
+        text: str,
+    ) -> str:
+        self.question_calls.append((terminal_id, action, option_count, option_index, final, text))
+        self.active_injections += 1
+        self.max_active_injections = max(self.max_active_injections, self.active_injections)
+        try:
+            if self.question_entered is not None:
+                self.question_entered.set()
+            if self.question_release is not None:
+                await self.question_release.wait()
+            return self.question_outcomes.popleft() if self.question_outcomes else InjectionOutcome.OK
+        finally:
+            self.active_injections -= 1
 
     async def inject_text(self, terminal_id: str, text: str) -> str:
         self.inject_calls.append((terminal_id, text))

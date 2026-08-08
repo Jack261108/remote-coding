@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from app.domain.models import CLIEvent, ExecutionTask
     from app.domain.session_models import SessionEvent, SessionPhase, SessionState
+    from app.domain.user_question_models import ExternalQuestionActionResult, ExternalUserQuestionContext
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,7 @@ class ClaudeTerminalRuntimeProtocol(Protocol):
 
 @runtime_checkable
 class ClaudeUserQuestionTransportProtocol(Protocol):
-    """Claude AskUserQuestion 的终端/TUI 操作能力。"""
+    """Claude AskUserQuestion 的 managed terminal/TUI 操作能力。"""
 
     async def select_option(
         self,
@@ -105,6 +106,44 @@ class ClaudeUserQuestionTransportProtocol(Protocol):
         workdir: str,
         final_question: bool,
     ) -> tuple[bool, str]: ...
+
+
+@runtime_checkable
+class ExternalClaudeUserQuestionTransportProtocol(Protocol):
+    """External Ghostty AskUserQuestion 的显式 target 操作能力。"""
+
+    async def select_option(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        option_index: int,
+        submit_after: bool,
+    ) -> ExternalQuestionActionResult: ...
+
+    async def answer_with_text(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        text: str,
+        submit_after: bool,
+    ) -> ExternalQuestionActionResult: ...
+
+    async def advance_after_multi_select(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        final_question: bool,
+    ) -> ExternalQuestionActionResult: ...
+
+    async def question_completed(self, *, context: ExternalUserQuestionContext) -> None: ...
+
+    async def question_indeterminate(self, *, context: ExternalUserQuestionContext, reason: str) -> None: ...
 
 
 @runtime_checkable

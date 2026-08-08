@@ -25,11 +25,15 @@ from app.domain.session_models import (
     ToolCallRecord,
     ToolStatus,
 )
-from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
+from app.domain.user_question_models import ExternalTmuxQuestionTarget, UserQuestionOption, UserQuestionPrompt
 from app.services.external_user_question_state import ExternalUserQuestionState, PendingExternalUserQuestion
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
+from app.services.user_question_callback_registry import (
+    UserQuestionCallbackOrigin,
+    UserQuestionCallbackRegistry,
+)
 from tests.fakes.cli import StubAdapter, StubFactory, make_settings
 from tests.fakes.telegram import DummyCallbackQuery, DummyMessage
 
@@ -398,8 +402,7 @@ async def test_external_user_question_callback_still_uses_existing_handler(monke
             tool_use_id="tool-question",
             session_id="external-session",
             user_id=1,
-            pid=123,
-            pane_id="%1",
+            target=ExternalTmuxQuestionTarget(pane_id="%1"),
             prompts=(
                 UserQuestionPrompt(
                     tool_use_id="tool-question",
@@ -411,6 +414,18 @@ async def test_external_user_question_callback_still_uses_existing_handler(monke
             ),
         )
     )
+    registry = UserQuestionCallbackRegistry(ttl_sec=300)
+    tokens = await registry.register_question_tokens(
+        owner_user_id=1,
+        session_id="external-session",
+        tool_use_id="tool-question",
+        question_index=0,
+        option_count=1,
+        multi_select=False,
+        origin=UserQuestionCallbackOrigin.EXTERNAL_TMUX,
+    )
+    assert tokens.is_tokenised
+    token = tokens.select_tokens[0]
 
     router = DummyRouter()
     register_external_permission_handler(
@@ -419,10 +434,11 @@ async def test_external_user_question_callback_still_uses_existing_handler(monke
         unbound_permission_handler=SimpleNamespace(),
         permission_gateway=SimpleNamespace(handle_callback=AsyncMock()),
         external_uq_state=external_uq_state,
+        user_question_callback_registry=registry,
     )
 
     message = DummyMessage("Question")
-    callback = DummyCallbackQuery("ext_uq:tool-question:0", user_id=1, message=message)
+    callback = DummyCallbackQuery(f"ext_uq:{token}", user_id=1, message=message)
 
     await _call_callback(router, 1, callback)
 
@@ -433,6 +449,189 @@ async def test_external_user_question_callback_still_uses_existing_handler(monke
     )
     assert callback.answers == [("✅ Selected: A", False)]
     assert external_uq_state.get("tool-question") is None
+
+
+async def _store_multi_prompt_external_question(
+    *,
+    registry: UserQuestionCallbackRegistry,
+    external_uq_state: ExternalUserQuestionState,
+    multi_select_prompt_one_options: int = 2,
+    prompt_one_multi_select: bool = False,
+) -> tuple[str, str, str, str]:
+    """Store a 2-prompt AskUserQuestion and register EXTERNAL_TMUX tokens for both.
+
+    Returns ``(tool_use_id, q0_option0_token, q1_option0_token, q1_option1_token)``.
+    Mirrors what ``notify_user_question`` would emit: one single-choice card per
+    prompt, each backed by opaque ``ext_uq:`` tokens (tmux renders multi-select
+    prompts as single-choice per the injector's capability).
+    """
+    tool_use_id = "tool-multi"
+    external_uq_state.store(
+        PendingExternalUserQuestion(
+            tool_use_id=tool_use_id,
+            session_id="external-session",
+            user_id=1,
+            target=ExternalTmuxQuestionTarget(pane_id="%1"),
+            prompts=(
+                UserQuestionPrompt(
+                    tool_use_id=tool_use_id,
+                    question_index=0,
+                    total_questions=2,
+                    question="First pick",
+                    options=(UserQuestionOption(label="A0"), UserQuestionOption(label="B0")),
+                    multi_select=prompt_one_multi_select,
+                ),
+                UserQuestionPrompt(
+                    tool_use_id=tool_use_id,
+                    question_index=1,
+                    total_questions=2,
+                    question="Second pick",
+                    options=(UserQuestionOption(label="A1"), UserQuestionOption(label="B1")),
+                    multi_select=False,
+                ),
+            ),
+        )
+    )
+    q0_tokens = await registry.register_question_tokens(
+        owner_user_id=1,
+        session_id="external-session",
+        tool_use_id=tool_use_id,
+        question_index=0,
+        option_count=multi_select_prompt_one_options,
+        multi_select=False,
+        origin=UserQuestionCallbackOrigin.EXTERNAL_TMUX,
+    )
+    q1_tokens = await registry.register_question_tokens(
+        owner_user_id=1,
+        session_id="external-session",
+        tool_use_id=tool_use_id,
+        question_index=1,
+        option_count=2,
+        multi_select=False,
+        origin=UserQuestionCallbackOrigin.EXTERNAL_TMUX,
+    )
+    return (
+        tool_use_id,
+        q0_tokens.select_tokens[0],
+        q1_tokens.select_tokens[0],
+        q1_tokens.select_tokens[1],
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_multi_prompt_callback_advances_without_submitting_or_allowing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answering an intermediate prompt (N>1) must NOT submit, NOT allow the
+    Hook, NOT remove the pending record, and must push a fresh button card for
+    the next prompt. This is the regression fixed after the prompts[0]/len==1
+    bug that left multi-prompt external tmux sessions blocked on Claude's side.
+    """
+    submit_after_seen: list[bool] = []
+
+    async def fake_inject(pane_id: str, *, option_index: int, submit_after: bool, tmux_bin: str = "tmux") -> tuple[bool, str]:
+        assert pane_id == "%1"
+        submit_after_seen.append(submit_after)
+        return True, ""
+
+    monkeypatch.setattr("app.adapters.process.pty_injector.inject_option_selection", fake_inject)
+
+    hook_socket_server = SimpleNamespace(respond_to_permission=AsyncMock(return_value=True))
+    external_uq_state = ExternalUserQuestionState()
+    registry = UserQuestionCallbackRegistry(ttl_sec=300)
+    tool_use_id, q0_token, _, _ = await _store_multi_prompt_external_question(
+        registry=registry,
+        external_uq_state=external_uq_state,
+    )
+
+    router = DummyRouter()
+    register_external_permission_handler(
+        router,
+        hook_socket_server=hook_socket_server,
+        unbound_permission_handler=SimpleNamespace(),
+        permission_gateway=SimpleNamespace(handle_callback=AsyncMock()),
+        external_uq_state=external_uq_state,
+        user_question_callback_registry=registry,
+    )
+
+    message = DummyMessage("First pick")
+    callback = DummyCallbackQuery(f"ext_uq:{q0_token}", user_id=1, message=message)
+
+    await _call_callback(router, 1, callback)
+
+    # Intermediate prompt: keystroke selected option 0 but did NOT submit.
+    assert submit_after_seen == [False]
+    # Hook allow must never fire for an intermediate question.
+    hook_socket_server.respond_to_permission.assert_not_awaited()
+    # The pending record survives — remaining prompts still need it.
+    assert external_uq_state.get(tool_use_id) is not None
+    # User is acknowledged for this prompt.
+    assert callback.answers == [("✅ Selected: A0", False)]
+    # A fresh button card for the next question was pushed with a non-empty
+    # keyboard. ``edits`` also land in ``sent_messages``, so the answer card is
+    # the last entry; ``answers`` tracks only fresh ``answer()`` calls.
+    assert "Second pick" in message.answers
+    answer_cards = [m for m in message.sent_messages if m.reply_markup is not None]
+    assert len(answer_cards) == 1
+    next_card = answer_cards[-1]
+    assert next_card.text == "Second pick"
+    next_buttons = [btn for row in next_card.reply_markup.inline_keyboard for btn in row]
+    assert {btn.text for btn in next_buttons} == {"1. A1", "2. B1"}
+    # The original card's keyboard was cleared.
+    assert message.edited_reply_markups == [None]
+
+
+@pytest.mark.asyncio
+async def test_external_multi_prompt_callback_final_prompt_submits_allows_and_removes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answering the LAST prompt of a multi-prompt batch must submit the answer,
+    allow the Hook permission, and remove the pending record — so Claude
+    actually resumes instead of staying blocked.
+    """
+    submit_after_seen: list[bool] = []
+
+    async def fake_inject(pane_id: str, *, option_index: int, submit_after: bool, tmux_bin: str = "tmux") -> tuple[bool, str]:
+        submit_after_seen.append(submit_after)
+        return True, ""
+
+    monkeypatch.setattr("app.adapters.process.pty_injector.inject_option_selection", fake_inject)
+
+    hook_socket_server = SimpleNamespace(respond_to_permission=AsyncMock(return_value=True))
+    external_uq_state = ExternalUserQuestionState()
+    registry = UserQuestionCallbackRegistry(ttl_sec=300)
+    tool_use_id, _, q1_token_a, q1_token_b = await _store_multi_prompt_external_question(
+        registry=registry,
+        external_uq_state=external_uq_state,
+    )
+
+    router = DummyRouter()
+    register_external_permission_handler(
+        router,
+        hook_socket_server=hook_socket_server,
+        unbound_permission_handler=SimpleNamespace(),
+        permission_gateway=SimpleNamespace(handle_callback=AsyncMock()),
+        external_uq_state=external_uq_state,
+        user_question_callback_registry=registry,
+    )
+
+    message = DummyMessage("Second pick")
+    callback = DummyCallbackQuery(f"ext_uq:{q1_token_b}", user_id=1, message=message)
+
+    await _call_callback(router, 1, callback)
+
+    # Final prompt: option 1 (B1) selected AND submitted.
+    assert submit_after_seen == [True]
+    hook_socket_server.respond_to_permission.assert_awaited_once_with(
+        tool_use_id=tool_use_id,
+        decision="allow",
+        reason="AskUserQuestion answered via Telegram by user 1",
+    )
+    assert callback.answers == [("✅ Selected: B1", False)]
+    # Pending record removed after the final answer.
+    assert external_uq_state.get(tool_use_id) is None
+    # No next-question card pushed for the final prompt: only the annotation
+    # edit was applied; no fresh ``answer`` carrying the next prompt text.
+    assert message.answers == []
+    assert message.edited_reply_markups == [None]
+    # The unused q1 token-b is consumed; ensure no stale behavior
+    _ = q1_token_a  # registered but not exercised in this scenario
 
 
 @pytest.mark.asyncio
@@ -452,8 +651,7 @@ async def test_external_user_question_callback_rejects_invalidated_session(monke
             tool_use_id="tool-question",
             session_id="external-session",
             user_id=1,
-            pid=123,
-            pane_id="%1",
+            target=ExternalTmuxQuestionTarget(pane_id="%1"),
             prompts=(
                 UserQuestionPrompt(
                     tool_use_id="tool-question",
@@ -466,6 +664,17 @@ async def test_external_user_question_callback_rejects_invalidated_session(monke
         )
     )
     assert external_uq_state.invalidate_session("external-session") == 1
+    registry = UserQuestionCallbackRegistry(ttl_sec=300)
+    tokens = await registry.register_question_tokens(
+        owner_user_id=1,
+        session_id="external-session",
+        tool_use_id="tool-question",
+        question_index=0,
+        option_count=1,
+        multi_select=False,
+        origin=UserQuestionCallbackOrigin.EXTERNAL_TMUX,
+    )
+    token = tokens.select_tokens[0]
 
     router = DummyRouter()
     register_external_permission_handler(
@@ -474,9 +683,10 @@ async def test_external_user_question_callback_rejects_invalidated_session(monke
         unbound_permission_handler=SimpleNamespace(),
         permission_gateway=SimpleNamespace(handle_callback=AsyncMock()),
         external_uq_state=external_uq_state,
+        user_question_callback_registry=registry,
     )
 
-    callback = DummyCallbackQuery("ext_uq:tool-question:0", user_id=1, message=DummyMessage("Question"))
+    callback = DummyCallbackQuery(f"ext_uq:{token}", user_id=1, message=DummyMessage("Question"))
 
     await _call_callback(router, 1, callback)
 
@@ -542,7 +752,7 @@ async def test_user_question_callback_handler_records_choice_and_prompts_next_qu
     tmux_runner._session_store._persist(state)
 
     router = DummyRouter()
-    register_user_question_handlers(router, task_service=service)
+    register_user_question_handlers(router, task_service=service, callback_registry=None)
     message = DummyMessage("需要你选择")
     callback = DummyCallbackQuery("ask:tool-ask-1:0:0", message=message)
 
@@ -615,7 +825,7 @@ async def test_user_question_callback_handler_rejects_cross_user_button(tmp_path
     tmux_runner._session_store._persist(state)
 
     router = DummyRouter()
-    register_user_question_handlers(router, task_service=service)
+    register_user_question_handlers(router, task_service=service, callback_registry=None)
     message = DummyMessage("需要你选择", user_id=2)
     callback = DummyCallbackQuery("ask:tool-ask-1:0:0", user_id=2, message=message)
 
@@ -679,7 +889,7 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
     tmux_runner._session_store._persist(state)
 
     router = DummyRouter()
-    register_user_question_handlers(router, task_service=service)
+    register_user_question_handlers(router, task_service=service, callback_registry=None)
     message = DummyMessage("需要你选择")
 
     toggle_callback = DummyCallbackQuery("ask:toggle:tool-ask-multi:0:0", message=message)

@@ -38,7 +38,13 @@ from app.services.terminal_session_service import TerminalSessionService
 from app.services.user_question_service import UserQuestionService
 
 if TYPE_CHECKING:
+    from app.domain.protocols import ExternalClaudeUserQuestionTransportProtocol
     from app.services.context_builder import ContextBuilderService
+    from app.services.external_user_question_state import ExternalUserQuestionState
+    from app.services.user_question_callback_registry import (
+        QuestionCallbackTokens,
+        UserQuestionCallbackRegistry,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +115,19 @@ class TaskService:
             terminal_runtime=resolved_terminal_runtime,
             clear_user_questions=self._user_question_service.clear_user,
             auto_approve_service=auto_approve_service,
+        )
+
+    def configure_external(
+        self,
+        *,
+        external_uq_state: ExternalUserQuestionState | None,
+        external_question_transport: ExternalClaudeUserQuestionTransportProtocol | None,
+        callback_registry: UserQuestionCallbackRegistry | None,
+    ) -> None:
+        self._user_question_service.configure_external(
+            external_uq_state=external_uq_state,
+            external_question_transport=external_question_transport,
+            callback_registry=callback_registry,
         )
 
     def _task_lifecycle_lock(self, task_id: str) -> asyncio.Lock:
@@ -226,6 +245,17 @@ class TaskService:
 
     async def get_pending_user_questions(self, user_id: int) -> tuple[UserQuestionPrompt, ...]:
         return await self._user_question_service.get_pending_user_questions(user_id)
+
+    async def register_question_callback_tokens(
+        self,
+        *,
+        user_id: int,
+        prompt: UserQuestionPrompt,
+    ) -> QuestionCallbackTokens:
+        return await self._user_question_service.register_question_callback_tokens(
+            user_id=user_id,
+            prompt=prompt,
+        )
 
     async def answer_pending_user_question_option(
         self, *, user_id: int, tool_use_id: str, question_index: int, option_index: int

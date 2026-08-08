@@ -158,6 +158,11 @@ class Settings(BaseSettings):
     ghostty_input_queue_ttl_sec: int = Field(300, alias="GHOSTTY_INPUT_QUEUE_TTL_SEC", ge=1)
     ghostty_drain_publish_wait_timeout_sec: float = Field(30.0, alias="GHOSTTY_DRAIN_PUBLISH_WAIT_TIMEOUT_SEC", gt=0)
 
+    # TTL for opaque AskUserQuestion callback tokens (managed + external). Aligned
+    # with the external pending-question TTL so a live button never resolves against
+    # an already-pruned pending question.
+    user_question_callback_ttl_sec: int = Field(300, alias="USER_QUESTION_CALLBACK_TTL_SEC", ge=1)
+
     # Session cleanup settings
     session_cleanup_interval_sec: int = Field(3600, alias="SESSION_CLEANUP_INTERVAL_SEC")  # 1 hour
     session_cleanup_max_age_hours: int = Field(24, alias="SESSION_CLEANUP_MAX_AGE_HOURS")  # 24 hours
@@ -397,6 +402,7 @@ class Settings(BaseSettings):
         "ghostty_pairing_token_ttl_sec",
         "ghostty_input_queue_max_size",
         "ghostty_input_queue_ttl_sec",
+        "user_question_callback_ttl_sec",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:

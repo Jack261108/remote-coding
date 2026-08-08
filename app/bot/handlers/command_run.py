@@ -135,6 +135,8 @@ async def _create_streaming_components(
         messenger=messenger,
         tool_message_manager=tool_message_manager,
         task_id=start.task.task_id,
+        user_id=user_id,
+        task_service=task_service,
         permission_gateway=permission_gateway,
     )
     streamer = RunEventStreamer(

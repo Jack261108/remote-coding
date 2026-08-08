@@ -194,6 +194,133 @@ async def test_inject_text_unicode_payload(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_user_question_select_uses_fixed_script_and_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    calls = _patch_exec(monkeypatch, lambda _a: _FakeProc(returncode=0))
+
+    outcome = await GhosttyTerminalAdapter().select_user_question_option(
+        "uuid-select",
+        option_count=3,
+        option_index=2,
+        submit_after=True,
+    )
+
+    assert outcome == InjectionOutcome.OK
+    assert calls[0][2] == gta._QUESTION_ACTION_SCRIPT
+    assert calls[0][3:] == ["--", "uuid-select", "select", "3", "2", "1", ""]
+    assert "uuid-select" not in gta._QUESTION_ACTION_SCRIPT
+    # Ghostty's `Ghostty.Input.Key` String enum only accepts the camelCase
+    # arrow names (arrowUp/arrowDown/...); the bare "up"/"down"/"right" names
+    # are NOT valid and raise errAECoercionFail (-1700) "Unknown key name".
+    assert 'send key "up"' not in gta._QUESTION_ACTION_SCRIPT
+    assert 'send key "down"' not in gta._QUESTION_ACTION_SCRIPT
+    assert 'send key "right"' not in gta._QUESTION_ACTION_SCRIPT
+    assert 'send key "arrowUp"' in gta._QUESTION_ACTION_SCRIPT
+
+
+@pytest.mark.asyncio
+async def test_user_question_text_preserves_unicode_and_multiline_in_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    calls = _patch_exec(monkeypatch, lambda _a: _FakeProc(returncode=0))
+    answer = "  你好\n第二行 'quoted'  "
+
+    outcome = await GhosttyTerminalAdapter().answer_user_question_with_text(
+        "uuid-text",
+        option_count=2,
+        text=answer,
+        submit_after=False,
+    )
+
+    assert outcome == InjectionOutcome.OK
+    assert calls[0][3:] == ["--", "uuid-text", "answer_text", "2", "-1", "0", answer]
+    assert answer not in gta._QUESTION_ACTION_SCRIPT
+    input_pos = gta._QUESTION_ACTION_SCRIPT.index("input text answerText")
+    assert gta._QUESTION_ACTION_SCRIPT.index('send key "enter"') < input_pos
+    assert input_pos < gta._QUESTION_ACTION_SCRIPT.index("delay 0.1", input_pos)
+
+
+@pytest.mark.asyncio
+async def test_user_question_multi_advance_resets_then_moves_right(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    calls = _patch_exec(monkeypatch, lambda _a: _FakeProc(returncode=0))
+
+    outcome = await GhosttyTerminalAdapter().advance_user_question_after_multi_select(
+        "uuid-multi",
+        option_count=4,
+        final_question=True,
+    )
+
+    assert outcome == InjectionOutcome.OK
+    assert calls[0][3:] == ["--", "uuid-multi", "advance_multi", "4", "-1", "1", ""]
+    reset_pos = gta._QUESTION_ACTION_SCRIPT.index("repeat (optionCount + 1) times")
+    right_pos = gta._QUESTION_ACTION_SCRIPT.index('send key "arrowRight"')
+    assert reset_pos < right_pos
+
+
+@pytest.mark.asyncio
+async def test_user_question_timeout_is_indeterminate_and_child_is_reaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+
+    class _HangingProc(_FakeProc):
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(10)
+            return b"", b""
+
+    proc = _HangingProc(returncode=0)
+
+    async def fake(*_args: object, **_kwargs: object) -> _HangingProc:
+        return proc
+
+    monkeypatch.setattr(gta.asyncio, "create_subprocess_exec", fake)
+    outcome = await GhosttyTerminalAdapter(timeout_sec=0.01).select_user_question_option(
+        "uuid",
+        option_count=2,
+        option_index=0,
+        submit_after=False,
+    )
+
+    assert outcome == InjectionOutcome.INDETERMINATE
+    assert proc.killed and proc.waited
+
+
+@pytest.mark.asyncio
+async def test_user_question_unknown_error_is_indeterminate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+    _patch_exec(monkeypatch, lambda _a: _FakeProc(stderr=b"partial action failed", returncode=1))
+
+    assert (
+        await GhosttyTerminalAdapter().select_user_question_option(
+            "uuid",
+            option_count=2,
+            option_index=0,
+            submit_after=False,
+        )
+        == InjectionOutcome.INDETERMINATE
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs"),
+    [
+        ("select_user_question_option", {"option_count": 0, "option_index": 0, "submit_after": False}),
+        ("select_user_question_option", {"option_count": 2, "option_index": 2, "submit_after": False}),
+        ("answer_user_question_with_text", {"option_count": -1, "text": "x", "submit_after": False}),
+        ("answer_user_question_with_text", {"option_count": 2, "text": "", "submit_after": False}),
+        ("advance_user_question_after_multi_select", {"option_count": 0, "final_question": False}),
+    ],
+)
+async def test_user_question_action_rejects_invalid_arguments(method: str, kwargs: dict[str, object]) -> None:
+    adapter = GhosttyTerminalAdapter(platform_name="darwin")
+    with pytest.raises(ValueError):
+        await getattr(adapter, method)("uuid", **kwargs)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stderr", "expected"),
     [

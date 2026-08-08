@@ -22,6 +22,7 @@ from app.domain.session_models import ConversationTurn, PendingPermission, Sessi
 from app.services.message_sender import Button, Keyboard
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 from app.services.permission_gateway import RegisterForButtonOk
+from app.services.user_question_callback_registry import QuestionCallbackTokens
 from tests.fakes.structured import make_structured_session as _structured_session
 from tests.fakes.telegram import DummyMessage
 
@@ -116,6 +117,9 @@ class DummyTaskService:
         self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
     ) -> None:
         self._structured_user_question_key = question_key
+
+    async def register_question_callback_tokens(self, *, user_id: int, prompt: object):
+        return QuestionCallbackTokens()
 
     async def wait_for_structured_session_update(
         self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None

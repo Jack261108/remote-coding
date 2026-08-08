@@ -4,10 +4,24 @@ import logging
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.bot.handlers.callback_utils import apply_callback_response
+from app.bot.handlers.callback_utils import apply_callback_response, safe_edit_keyboard
+from app.bot.handlers.command_user_question import _is_accessible_message
 from app.bot.handlers.user_utils import extract_user_id
+from app.domain.user_question_models import ExternalTmuxQuestionTarget, UserQuestionPrompt
+from app.infra.user_question_callbacks import (
+    build_user_question_callback_data as build_opaque_callback_data,
+)
+from app.infra.user_question_callbacks import (
+    parse_user_question_callback_token,
+)
+from app.services.user_question_callback_registry import (
+    UserQuestionCallbackOrigin,
+    UserQuestionCallbackRegistry,
+    UserQuestionCallbackResolved,
+    UserQuestionCallbackUnauthorized,
+)
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
@@ -18,15 +32,62 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _build_next_prompt_keyboard(
+    *,
+    user_id: int,
+    pending_session_id: str,
+    prompt: UserQuestionPrompt,
+    registry: UserQuestionCallbackRegistry,
+) -> InlineKeyboardMarkup | None:
+    """Register EXTERNAL_TMUX select tokens for *prompt* and build an inline keyboard.
+
+    The multi-prompt tmux path renders one question at a time; after the user
+    answers an intermediate prompt we push a fresh card whose buttons resolve
+    to the same ``ext_uq:`` handler. Multi-select prompts are rendered as
+    single-choice here (one button per option), matching the initial card — the
+    legacy tmux injector has no multi-select toggle/submit.
+    """
+    if not prompt.options:
+        return None
+    tokens = await registry.register_question_tokens(
+        owner_user_id=user_id,
+        session_id=pending_session_id,
+        tool_use_id=prompt.tool_use_id,
+        question_index=prompt.question_index,
+        option_count=len(prompt.options),
+        multi_select=False,
+        origin=UserQuestionCallbackOrigin.EXTERNAL_TMUX,
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, option in enumerate(prompt.options):
+        token = tokens.select_tokens[index] if index < len(tokens.select_tokens) else None
+        if token is None:
+            # Should not happen for a tokenised registration; guard defensively.
+            return None
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{index + 1}. {option.label}"[:40],
+                    callback_data=build_opaque_callback_data(prefix="ext_uq", token=token),
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def register_external_permission_handler(
-    router: Router,
+    permission_router: Router,
+    uq_router: Router | None = None,
     *,
     hook_socket_server: HookSocketServer,
     unbound_permission_handler: UnboundPermissionHandler,
     external_uq_state: ExternalUserQuestionState | None = None,
     permission_gateway: PermissionGateway,
+    user_question_callback_registry: UserQuestionCallbackRegistry | None = None,
 ) -> None:
-    @router.callback_query(F.data.startswith("ext_perm:"))
+    external_uq_target = uq_router if uq_router is not None else permission_router
+
+    @permission_router.callback_query(F.data.startswith("ext_perm:"))
     async def handle_external_permission_callback(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         _, token, decision = callback_parts
         if decision not in ("allow", "deny", "auto_approve"):
@@ -44,84 +105,142 @@ def register_external_permission_handler(
             log_prefix="external permission",
         )
 
-    @router.callback_query(F.data.startswith("ext_uq:"))
+    @external_uq_target.callback_query(F.data.startswith("ext_uq:"))
     async def handle_external_user_question_callback(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
-        """Handle user clicking an AskUserQuestion option button for external sessions."""
-        from app.adapters.process.pty_injector import inject_option_selection
+        """Handle an AskUserQuestion option button for external (tmux) sessions.
 
-        _, tool_use_id, option_index_str = callback_parts
-        try:
-            option_index = int(option_index_str)
-        except ValueError:
-            await callback.answer("Invalid option index", show_alert=True)
-            return
-
-        if external_uq_state is None:
+        The button carries an opaque registry token (``ext_uq:{token}``); only
+        tokens registered with the ``EXTERNAL_TMUX`` origin route to the legacy
+        tmux PTY injection path. Ghostty questions use the ``ask:`` prefix and
+        are handled by the managed user-question router.
+        """
+        if user_question_callback_registry is None or external_uq_state is None:
             await callback.answer("Feature not available", show_alert=True)
             return
 
-        pending = external_uq_state.get(tool_use_id)
-        if pending is None:
-            await callback.answer("Question expired or already answered", show_alert=True)
-            return
-
-        if pending.pane_id is None:
-            await callback.answer("Cannot inject: no tmux pane found", show_alert=True)
-            return
-
-        # Validate option index
-        prompt = pending.prompts[0] if pending.prompts else None
-        if prompt is None or option_index < 0 or option_index >= len(prompt.options):
-            await callback.answer("Invalid option", show_alert=True)
+        token = parse_user_question_callback_token(callback_parts, prefix="ext_uq")
+        if token is None:
+            await callback.answer("无效的选择操作", show_alert=True)
             return
 
         user_id = extract_user_id(callback)
+        resolved = await user_question_callback_registry.resolve(token, user_id=user_id)
+        if isinstance(resolved, UserQuestionCallbackUnauthorized):
+            await callback.answer("Question does not belong to you", show_alert=True)
+            return
+        if not isinstance(resolved, UserQuestionCallbackResolved):
+            await callback.answer("Question expired or already answered", show_alert=True)
+            return
+
+        snapshot = resolved.snapshot
+        if snapshot.origin is not UserQuestionCallbackOrigin.EXTERNAL_TMUX:
+            # Ghostty/managed questions never travel via ext_uq:; fail closed.
+            await callback.answer("该问题不支持在此处作答", show_alert=True)
+            return
+
+        from app.adapters.process.pty_injector import inject_option_selection
+
+        pending = external_uq_state.get(snapshot.tool_use_id)
+        if pending is None or pending.user_id != user_id:
+            await callback.answer("Question expired or already answered", show_alert=True)
+            return
+        target = pending.target
+        if not isinstance(target, ExternalTmuxQuestionTarget):
+            await callback.answer("Cannot inject: question is not a tmux target", show_alert=True)
+            return
+
+        # Locate the prompt this button belongs to by the token's recorded
+        # question_index, not ``prompts[0]``. AskUserQuestion may carry multiple
+        # questions; an earlier bug hard-coded prompts[0] and treated the whole
+        # batch as final when ``len(prompts) == 1``, so N>1 prompts never
+        # submitted, never allowed the Hook, and dropped the pending record after
+        # a single non-submitting keystroke — leaving Claude blocked.
+        prompt = next((item for item in pending.prompts if item.question_index == snapshot.question_index), None)
+        if prompt is None:
+            await callback.answer("该问题已变化，请等待最新卡片", show_alert=True)
+            return
+        option_index = snapshot.option_index if snapshot.option_index is not None else -1
+        if option_index < 0 or option_index >= len(prompt.options):
+            await callback.answer("Invalid option", show_alert=True)
+            return
+
         selected_label = prompt.options[option_index].label
+        # The final question is the one at the highest question_index we still
+        # hold answers for, not the only element of a single-question batch.
+        is_final = snapshot.question_index == pending.prompts[-1].question_index
 
-        # Determine if this is the final question (submit after selection)
-        is_final = len(pending.prompts) == 1
-
-        # Inject the selection into the terminal
         ok, err = await inject_option_selection(
-            pending.pane_id,
+            target.pane_id,
             option_index=option_index,
             submit_after=is_final,
-            tmux_bin=pending.tmux_bin,
+            tmux_bin=target.tmux_bin,
         )
         if not ok:
             logger.warning(
                 "pty injection failed for external user question",
-                extra={"tool_use_id": tool_use_id, "pane_id": pending.pane_id, "error": err},
+                extra={"tool_use_id": snapshot.tool_use_id, "pane_id": target.pane_id, "error": err},
             )
             await callback.answer(f"Injection failed: {err}", show_alert=True)
             return
 
-        # After successful injection on final question, allow the permission
+        await callback.answer(f"✅ Selected: {selected_label}")
+
+        callback_message = callback.message if _is_accessible_message(callback.message) else None
+
+        if callback_message is not None:
+            # Clear this card's buttons so the user can't re-fire a stale option
+            # while the terminal is mid-transition.
+            await safe_edit_keyboard(callback_message, None, "clear ext_uq inline keyboard")
+            original_text = callback_message.text or ""
+            try:
+                await callback_message.edit_text(f"{original_text}\n\n✅ Selected: {selected_label}")
+            except Exception:
+                logger.debug("failed to annotate ext_uq message", exc_info=True)
+
         if is_final:
             await hook_socket_server.respond_to_permission(
-                tool_use_id=tool_use_id,
+                tool_use_id=snapshot.tool_use_id,
                 decision="allow",
                 reason=f"AskUserQuestion answered via Telegram by user {user_id}",
             )
+            external_uq_state.remove(snapshot.tool_use_id)
+            logger.info(
+                "external user question answered via Telegram",
+                extra={
+                    "tool_use_id": snapshot.tool_use_id,
+                    "question_index": snapshot.question_index,
+                    "option_index": option_index,
+                    "selected_label": selected_label,
+                    "user_id": user_id,
+                    "pane_id": target.pane_id,
+                },
+            )
+            return
 
-        # Clean up state
-        external_uq_state.remove(tool_use_id)
-
-        # Confirm to user
-        await callback.answer(f"✅ Selected: {selected_label}")
-
-        # Edit original message to reflect selection when the Telegram message object supports it.
-        if callback.message and hasattr(callback.message, "edit_text"):
-            original_text = callback.message.text or ""  # type: ignore[union-attr]
-            await callback.message.edit_text(f"{original_text}\n\n✅ Selected: {selected_label} (by you)")
-
+        # Intermediate question: Claude's TUI has advanced past this prompt after
+        # the keystroke, but the Hook permission is still held; we must NOT allow
+        # it and must NOT remove the pending record — the remaining prompts still
+        # need it. Push a fresh card with buttons for the next prompt so the user
+        # can keep answering without touching the terminal.
+        next_prompt = next(
+            (item for item in pending.prompts if item.question_index > snapshot.question_index),
+            None,
+        )
         logger.info(
-            "external user question answered via Telegram",
+            "external user question advanced to next prompt",
             extra={
-                "tool_use_id": tool_use_id,
+                "tool_use_id": snapshot.tool_use_id,
+                "question_index": snapshot.question_index,
                 "option_index": option_index,
-                "selected_label": selected_label,
                 "user_id": user_id,
-                "pane_id": pending.pane_id,
+                "pane_id": target.pane_id,
             },
         )
+        if next_prompt is not None and callback_message is not None:
+            keyboard = await _build_next_prompt_keyboard(
+                user_id=user_id,
+                pending_session_id=pending.session_id,
+                prompt=next_prompt,
+                registry=user_question_callback_registry,
+            )
+            await callback_message.answer(next_prompt.question, reply_markup=keyboard)

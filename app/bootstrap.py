@@ -310,17 +310,28 @@ class AppContainer(
             risk_evaluator=self.risk_evaluator,
         )
         self.unbound_permission_handler.set_permission_gateway(self.permission_gateway)
-        self.push_notifier = ExternalSessionPushNotifier(
-            message_sender=self.message_sender,
-            binding_store=self.external_binding_store,
-            permission_gateway=self.permission_gateway,
-            retry_count=settings.push_notification_retry_count,
-        )
 
         # External user question state for PTY injection
         from app.services.external_user_question_state import ExternalUserQuestionState
 
         self.external_uq_state = ExternalUserQuestionState()
+        # Opaque token registry shared by Telegram AskUserQuestion callbacks (managed
+        # tmux + external Ghostty + external tmux) so identity never travels in
+        # callback_data. TTL aligned with the external pending-question TTL (300s) so a
+        # live button never resolves against an already-pruned pending question.
+        from app.services.user_question_callback_registry import UserQuestionCallbackRegistry
+
+        self.user_question_callback_registry = UserQuestionCallbackRegistry(
+            ttl_sec=settings.user_question_callback_ttl_sec,
+        )
+        self.push_notifier = ExternalSessionPushNotifier(
+            message_sender=self.message_sender,
+            binding_store=self.external_binding_store,
+            permission_gateway=self.permission_gateway,
+            retry_count=settings.push_notification_retry_count,
+            external_uq_state=self.external_uq_state,
+            user_question_callback_registry=self.user_question_callback_registry,
+        )
 
         self.external_binding_reaper = ExternalBindingReaper(
             binding_store=self.external_binding_store,
@@ -329,6 +340,7 @@ class AppContainer(
             permission_callback_registry=self.permission_callback_registry,
             unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
+            user_question_callback_registry=self.user_question_callback_registry,
             external_discovery=self.external_discovery,
             tombstone=self.tombstone_store,
             remove_callback=self._remove_external_binding,
@@ -367,7 +379,18 @@ class AppContainer(
             input_mode_store=self.external_input_mode_store,
             input_queue=self.external_input_queue,
             input_locks=self._input_locks,
+            external_user_question_state=self.external_uq_state,
+            user_question_callback_registry=self.user_question_callback_registry,
             drain_publish_wait_timeout_sec=settings.ghostty_drain_publish_wait_timeout_sec,
+        )
+
+        # Hook external question transport/state/registry into the managed
+        # UserQuestionService *after* all external services are built, to avoid
+        # reordering the bootstrap dependency ring (design §6 / §10).
+        self.task_service.configure_external(
+            external_uq_state=self.external_uq_state,
+            external_question_transport=self.external_session_input_service,
+            callback_registry=self.user_question_callback_registry,
         )
 
     async def _resolve_unbound_permission_notify_user_ids(self) -> set[int]:
@@ -435,6 +458,10 @@ class AppContainer(
             ("permission callback registry", lambda: self.permission_callback_registry.invalidate_session(session_id)),
             ("unbound permission handler", lambda: self.unbound_permission_handler.invalidate_session(session_id)),
             ("external user question state", invalidate_external_uq_state),
+            (
+                "user question callback registry",
+                lambda: self.user_question_callback_registry.invalidate_session(session_id),
+            ),
             ("hook pending permissions", lambda: self.hook_socket_server.cancel_pending_permissions(session_id=session_id)),
         )
         success = True
@@ -613,5 +640,6 @@ class AppContainer(
             dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
             admin_password_service=self.admin_password_service,
             external_session_input_service=self.external_session_input_service,
+            user_question_callback_registry=self.user_question_callback_registry,
         )
         self.dispatcher.include_router(router)

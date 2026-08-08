@@ -86,6 +86,67 @@ on run argv
 end run
 """
 
+# Fixed AskUserQuestion actions. Dynamic values are argv-only; callers cannot
+# supply arbitrary key names or AppleScript. argv fields:
+# terminal_id, action, option_count, option_index, final_flag, answer_text.
+_QUESTION_ACTION_SCRIPT = r"""
+on run argv
+    set targetId to (item 1 of argv)
+    set actionName to (item 2 of argv)
+    set optionCount to (item 3 of argv) as integer
+    set optionIndex to (item 4 of argv) as integer
+    set finalFlag to (item 5 of argv)
+    set answerText to (item 6 of argv)
+
+    if optionCount < 0 then error "invalid option count"
+    if actionName is "select" and (optionIndex < 0 or optionIndex >= optionCount) then error "invalid option index"
+    if actionName is not "select" and actionName is not "answer_text" and actionName is not "advance_multi" then error "invalid question action"
+
+    tell application "Ghostty"
+        set matches to (every terminal whose id is targetId)
+        if (count of matches) is not 1 then error "terminal not unique"
+        set targetTerminal to item 1 of matches
+
+        repeat (optionCount + 1) times
+            send key "arrowUp" to targetTerminal
+            delay 0.05
+        end repeat
+
+        if actionName is "select" then
+            repeat optionIndex times
+                send key "arrowDown" to targetTerminal
+                delay 0.05
+            end repeat
+            send key "enter" to targetTerminal
+            if finalFlag is "1" then
+                delay 0.15
+                send key "enter" to targetTerminal
+            end if
+        else if actionName is "answer_text" then
+            repeat optionCount times
+                send key "arrowDown" to targetTerminal
+                delay 0.05
+            end repeat
+            send key "enter" to targetTerminal
+            delay 0.15
+            input text answerText to targetTerminal
+            delay 0.1
+            send key "enter" to targetTerminal
+            if finalFlag is "1" then
+                delay 0.15
+                send key "enter" to targetTerminal
+            end if
+        else
+            send key "arrowRight" to targetTerminal
+            if finalFlag is "1" then
+                delay 0.15
+                send key "enter" to targetTerminal
+            end if
+        end if
+    end tell
+end run
+"""
+
 
 class InjectionOutcome:
     """Outcomes for ``inject_text``.
@@ -264,6 +325,99 @@ class GhosttyTerminalAdapter:
         logger.warning("ghostty inject_text failed: %s", reason, extra={"returncode": returncode})
         return reason
 
+    async def select_user_question_option(
+        self,
+        terminal_id: str,
+        *,
+        option_count: int,
+        option_index: int,
+        submit_after: bool,
+    ) -> str:
+        if option_count <= 0:
+            raise ValueError("option_count must be positive")
+        if option_index < 0 or option_index >= option_count:
+            raise ValueError("option_index out of range")
+        return await self._apply_user_question_action(
+            terminal_id,
+            action="select",
+            option_count=option_count,
+            option_index=option_index,
+            submit_after=submit_after,
+            text="",
+        )
+
+    async def answer_user_question_with_text(
+        self,
+        terminal_id: str,
+        *,
+        option_count: int,
+        text: str,
+        submit_after: bool,
+    ) -> str:
+        if option_count < 0:
+            raise ValueError("option_count must be non-negative")
+        if not text:
+            raise ValueError("text must be non-empty")
+        return await self._apply_user_question_action(
+            terminal_id,
+            action="answer_text",
+            option_count=option_count,
+            option_index=-1,
+            submit_after=submit_after,
+            text=text,
+        )
+
+    async def advance_user_question_after_multi_select(
+        self,
+        terminal_id: str,
+        *,
+        option_count: int,
+        final_question: bool,
+    ) -> str:
+        if option_count <= 0:
+            raise ValueError("option_count must be positive")
+        return await self._apply_user_question_action(
+            terminal_id,
+            action="advance_multi",
+            option_count=option_count,
+            option_index=-1,
+            submit_after=final_question,
+            text="",
+        )
+
+    async def _apply_user_question_action(
+        self,
+        terminal_id: str,
+        *,
+        action: str,
+        option_count: int,
+        option_index: int,
+        submit_after: bool,
+        text: str,
+    ) -> str:
+        if not self.is_available():
+            return self._unavailable_reason()
+        stdout, stderr, returncode = await self._run_script(
+            _QUESTION_ACTION_SCRIPT,
+            [
+                terminal_id,
+                action,
+                str(option_count),
+                str(option_index),
+                "1" if submit_after else "0",
+                text,
+            ],
+        )
+        if returncode == 0:
+            return InjectionOutcome.OK
+        reason = self._classify_question_failure(stderr or stdout, returncode)
+        logger.warning(
+            "ghostty user-question action failed: %s",
+            reason,
+            extra={"returncode": returncode, "action": action},
+        )
+        return reason
+
     async def _run_script(self, script: str, argv: Iterable[str]) -> tuple[str, str, int]:
         """Run ``osascript -e <script> -- <argv...>`` with a hard timeout.
 
@@ -328,6 +482,24 @@ class GhosttyTerminalAdapter:
         if not message:
             return InjectionOutcome.NOT_FOUND if returncode != 0 else InjectionOutcome.OK
         return InjectionOutcome.OS_ERROR
+
+    @staticmethod
+    def _classify_question_failure(message: str, returncode: int) -> str:
+        """Classify a multi-key question action; unknown post-start errors are indeterminate."""
+        text = (message or "").lower()
+        if "osascript missing" in text:
+            return InjectionOutcome.OS_ERROR
+        if "can't get application" in text or "no such application" in text or "-1728" in text:
+            return InjectionOutcome.GHOSTTY_NOT_RUNNING
+        if "not unique" in text:
+            return InjectionOutcome.NOT_UNIQUE
+        if "not allowed" in text or "automation" in text or "appleevent" in text or "-1743" in text:
+            return InjectionOutcome.TCC_DENIED
+        if "invalid option" in text or "invalid question action" in text:
+            return InjectionOutcome.OS_ERROR
+        if returncode == -1 or "timed out" in text or "timeout" in text or "-1712" in text:
+            return InjectionOutcome.INDETERMINATE
+        return InjectionOutcome.INDETERMINATE
 
     @staticmethod
     def _classify_inject_failure(message: str, returncode: int) -> str:

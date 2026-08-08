@@ -39,6 +39,12 @@ from app.adapters.process.ghostty_terminal_adapter import (
 from app.domain.external_session_models import ExternalBinding, GhosttyInputTarget
 from app.domain.models import utc_now
 from app.domain.session_models import SessionPhase
+from app.domain.user_question_models import (
+    ExternalGhosttyQuestionTarget,
+    ExternalQuestionActionResult,
+    ExternalQuestionActionStatus,
+    ExternalUserQuestionContext,
+)
 from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_input_mode_state import ExternalInputTargetStore
@@ -46,6 +52,10 @@ from app.services.external_input_queue import (
     ExternalInputQueue,
     QueuedInput,
     QueueEnqueueOverflow,
+)
+from app.services.external_user_question_state import (
+    ExternalUserQuestionState,
+    PendingExternalUserQuestionSnapshot,
 )
 from app.services.local_process_probe import LocalProcessProbe
 from app.services.pairing_callback_registry import (
@@ -55,6 +65,7 @@ from app.services.pairing_callback_registry import (
     PairingCallbackRegistry,
 )
 from app.services.session_store import SessionStore
+from app.services.user_question_callback_registry import UserQuestionCallbackRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +158,8 @@ class ExternalSessionInputService:
         input_mode_store: ExternalInputTargetStore,
         input_queue: ExternalInputQueue,
         input_locks: RefCountedLockRegistry,
+        external_user_question_state: ExternalUserQuestionState | None = None,
+        user_question_callback_registry: UserQuestionCallbackRegistry | None = None,
         drain_publish_wait_timeout_sec: float = 30.0,
     ) -> None:
         self._enabled = enabled
@@ -158,6 +171,8 @@ class ExternalSessionInputService:
         self._mode_store = input_mode_store
         self._queue = input_queue
         self._input_locks = input_locks
+        self._external_uq_state = external_user_question_state
+        self._uq_callback_registry = user_question_callback_registry
         self._drain_wait_timeout = drain_publish_wait_timeout_sec
         self._injecting: set[str] = set()
         self._in_flight: set[str] = set()
@@ -269,48 +284,69 @@ class ExternalSessionInputService:
                 return PairOutcome.TOKEN_UNAUTHORIZED
             return PairOutcome.TOKEN_INVALID
         snap = result.snapshot
-        binding = self._binding_store.get_binding(snap.session_id)
-        if binding is None or binding.user_id != user_id:
-            return PairOutcome.NOT_OWNER
-        if binding.ended_at is not None:
-            return PairOutcome.SESSION_ENDED
-        if binding.binding_id != snap.binding_id:
-            # ABA: token was issued under a generation that no longer matches.
-            return PairOutcome.BINDING_STALE
+        async with self._input_locks.lock(snap.session_id):
+            binding = self._binding_store.get_binding(snap.session_id)
+            if binding is None or binding.user_id != user_id:
+                return PairOutcome.NOT_OWNER
+            if binding.ended_at is not None:
+                return PairOutcome.SESSION_ENDED
+            if binding.binding_id != snap.binding_id:
+                # ABA: token was issued under a generation that no longer matches.
+                return PairOutcome.BINDING_STALE
 
-        ok, terminal, terminal_error = await self._adapter.validate_terminal(snap.terminal_id)
-        if not ok or terminal is None:
-            return (
-                PairOutcome.TERMINAL_INVALID
-                if terminal_error in {InjectionOutcome.NOT_FOUND, InjectionOutcome.NOT_UNIQUE}
-                else PairOutcome.ADAPTER_UNAVAILABLE
+            ok, terminal, terminal_error = await self._adapter.validate_terminal(snap.terminal_id)
+            if not ok or terminal is None:
+                return (
+                    PairOutcome.TERMINAL_INVALID
+                    if terminal_error in {InjectionOutcome.NOT_FOUND, InjectionOutcome.NOT_UNIQUE}
+                    else PairOutcome.ADAPTER_UNAVAILABLE
+                )
+
+            # validate_terminal awaited AppleScript; repeat binding/process checks
+            # while holding the same lock used by question actions.
+            binding = self._binding_store.get_binding(snap.session_id)
+            if binding is None or binding.user_id != user_id or binding.binding_id != snap.binding_id:
+                return PairOutcome.BINDING_STALE
+            if binding.ended_at is not None:
+                return PairOutcome.SESSION_ENDED
+            paired_tty = self._resolve_paired_tty(binding)
+            if paired_tty is None:
+                return PairOutcome.PROCESS_INVALID
+            process = self._probe.validate_claude_foreground(
+                pid=binding.pid or 0,
+                paired_tty=paired_tty,
             )
+            if not process.ok:
+                return PairOutcome.PROCESS_INVALID
 
-        paired_tty = self._resolve_paired_tty(binding)
-        if paired_tty is None:
-            return PairOutcome.PROCESS_INVALID
-        process = self._probe.validate_claude_foreground(
-            pid=binding.pid or 0,
-            paired_tty=paired_tty,
-        )
-        if not process.ok:
-            return PairOutcome.PROCESS_INVALID
+            old_target = binding.ghostty_target
+            if old_target is not None and self._external_uq_state is not None:
+                self._external_uq_state.invalidate_ghostty_target(
+                    session_id=snap.session_id,
+                    binding_id=old_target.binding_id,
+                    terminal_id=old_target.terminal_id,
+                    paired_tty=old_target.paired_tty,
+                    paired_at=old_target.paired_at,
+                )
+            if old_target is not None and self._uq_callback_registry is not None:
+                await self._uq_callback_registry.invalidate_session(snap.session_id)
+            saved = self._binding_store.set_ghostty_target(
+                snap.session_id,
+                binding.binding_id,
+                terminal_id=snap.terminal_id,
+                paired_tty=paired_tty,
+                paired_at=utc_now(),
+                name=terminal.name,
+                cwd=terminal.cwd,
+            )
+            if not saved:
+                return PairOutcome.BINDING_STALE
+            binding_id = binding.binding_id
 
-        saved = self._binding_store.set_ghostty_target(
-            snap.session_id,
-            binding.binding_id,
-            terminal_id=snap.terminal_id,
-            paired_tty=paired_tty,
-            paired_at=utc_now(),
-            name=terminal.name,
-            cwd=terminal.cwd,
-        )
-        if not saved:
-            return PairOutcome.BINDING_STALE
         activated = await self._activate_target(
             user_id=user_id,
             session_id=snap.session_id,
-            binding_id=binding.binding_id,
+            binding_id=binding_id,
         )
         return PairOutcome.PAIRED if activated else PairOutcome.BINDING_STALE
 
@@ -387,6 +423,90 @@ class ExternalSessionInputService:
             self._in_flight.discard(target.session_id)
             await self._stop_drain(target.session_id)
         return True
+
+    # ─── public: AskUserQuestion transport ───────────────────────────
+
+    async def select_option(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        option_index: int,
+        submit_after: bool,
+    ) -> ExternalQuestionActionResult:
+        return await self._apply_user_question_action(
+            context=context,
+            question_index=question_index,
+            option_count=option_count,
+            action="select",
+            option_index=option_index,
+            text="",
+            final_action=submit_after,
+        )
+
+    async def answer_with_text(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        text: str,
+        submit_after: bool,
+    ) -> ExternalQuestionActionResult:
+        return await self._apply_user_question_action(
+            context=context,
+            question_index=question_index,
+            option_count=option_count,
+            action="answer_text",
+            option_index=-1,
+            text=text,
+            final_action=submit_after,
+        )
+
+    async def advance_after_multi_select(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        final_question: bool,
+    ) -> ExternalQuestionActionResult:
+        return await self._apply_user_question_action(
+            context=context,
+            question_index=question_index,
+            option_count=option_count,
+            action="advance_multi",
+            option_index=-1,
+            text="",
+            final_action=final_question,
+        )
+
+    async def question_completed(self, *, context: ExternalUserQuestionContext) -> None:
+        state = self._external_uq_state
+        if state is None:
+            return
+        async with self._input_locks.lock(context.session_id):
+            pending = state.get(context.tool_use_id)
+            if not self._pending_matches_context(pending, context):
+                return
+            if not state.mark_completed(
+                tool_use_id=context.tool_use_id,
+                expected_target=context.target,
+            ):
+                return
+        await self._schedule_drain(context.session_id)
+
+    async def question_indeterminate(self, *, context: ExternalUserQuestionContext, reason: str) -> None:
+        state = self._external_uq_state
+        if state is None:
+            return
+        async with self._input_locks.lock(context.session_id):
+            state.mark_indeterminate(
+                tool_use_id=context.tool_use_id,
+                expected_target=context.target,
+                reason=reason,
+            )
 
     # ─── public: send / drain ────────────────────────────────────────
 
@@ -571,6 +691,10 @@ class ExternalSessionInputService:
             self._injecting.discard(session_id)
             self._in_flight.discard(session_id)
             await self._stop_drain(session_id)
+            if self._external_uq_state is not None:
+                self._external_uq_state.invalidate_session(session_id)
+            if self._uq_callback_registry is not None:
+                await self._uq_callback_registry.invalidate_session(session_id)
         if cleared_targets or dropped:
             logger.info(
                 "external input invalidated",
@@ -593,6 +717,10 @@ class ExternalSessionInputService:
             self._injecting.discard(session_id)
             self._in_flight.discard(session_id)
             await self._stop_drain(session_id)
+            if self._external_uq_state is not None:
+                self._external_uq_state.invalidate_stale_bindings(session_id, new_binding_id)
+            if self._uq_callback_registry is not None:
+                await self._uq_callback_registry.invalidate_session(session_id)
 
     async def shutdown(self) -> None:
         """Cancel all drain tasks. Call on container shutdown."""
@@ -604,6 +732,228 @@ class ExternalSessionInputService:
         await asyncio.gather(*(slot.task for slot in slots), return_exceptions=True)
 
     # ─── internals ──────────────────────────────────────────────────
+
+    async def _apply_user_question_action(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        action: str,
+        option_index: int,
+        text: str,
+        final_action: bool,
+    ) -> ExternalQuestionActionResult:
+        state = self._external_uq_state
+        if not self._enabled or state is None:
+            return ExternalQuestionActionResult(
+                ExternalQuestionActionStatus.REJECTED,
+                "外部 Ghostty 问答功能未启用",
+            )
+        target = context.target
+        if not isinstance(target, ExternalGhosttyQuestionTarget):
+            return ExternalQuestionActionResult(
+                ExternalQuestionActionStatus.REJECTED,
+                "该问题目标不支持 Ghostty 注入",
+            )
+
+        async with self._input_locks.lock(context.session_id):
+            pending = state.get_active(context.tool_use_id)
+            if not self._pending_matches_context(pending, context):
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    "问题已过期或目标已变化",
+                )
+            assert pending is not None
+            prompt = next(
+                (item for item in pending.prompts if item.question_index == question_index),
+                None,
+            )
+            if prompt is None or len(prompt.options) != option_count:
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    "问题选项已变化",
+                )
+            if action == "select" and (option_index < 0 or option_index >= option_count):
+                return ExternalQuestionActionResult(ExternalQuestionActionStatus.REJECTED, "无效的选项")
+            if action == "advance_multi" and not prompt.multi_select:
+                return ExternalQuestionActionResult(ExternalQuestionActionStatus.REJECTED, "这个问题不是多选题")
+            if action == "answer_text" and not text:
+                return ExternalQuestionActionResult(ExternalQuestionActionStatus.REJECTED, "回复内容不能为空")
+
+            if not self._structured_question_is_active(context):
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    "Claude 已不再等待这个问题",
+                )
+            binding = self._binding_for_question_context(context)
+            if binding is None:
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    "外部会话绑定或 Ghostty 配对已变化",
+                )
+            if not self._adapter.is_available():
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    "Ghostty 适配器不可用",
+                )
+            process = self._probe.validate_claude_foreground(
+                pid=binding.pid or 0,
+                paired_tty=target.paired_tty,
+            )
+            if not process.ok:
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    "无法验证前台 Claude 进程",
+                )
+
+            terminal_ok, _terminal, terminal_error = await self._adapter.validate_terminal(target.terminal_id)
+            if not terminal_ok:
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    f"Ghostty 终端不可用: {terminal_error or 'unknown'}",
+                )
+
+            # validate_terminal is an AppleScript await. Re-read every mutable
+            # security anchor and foreground status before sending any key.
+            pending = state.get_active(context.tool_use_id)
+            binding = self._binding_for_question_context(context)
+            if not self._pending_matches_context(pending, context) or binding is None or not self._structured_question_is_active(context):
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    "问题或目标在校验期间发生变化",
+                )
+            process = self._probe.validate_claude_foreground(
+                pid=binding.pid or 0,
+                paired_tty=target.paired_tty,
+            )
+            if not process.ok:
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.REJECTED,
+                    "前台 Claude 进程在发送前发生变化",
+                )
+
+            self._injecting.add(context.session_id)
+            try:
+                if action == "select":
+                    outcome = await self._adapter.select_user_question_option(
+                        target.terminal_id,
+                        option_count=option_count,
+                        option_index=option_index,
+                        submit_after=final_action,
+                    )
+                elif action == "answer_text":
+                    outcome = await self._adapter.answer_user_question_with_text(
+                        target.terminal_id,
+                        option_count=option_count,
+                        text=text,
+                        submit_after=final_action,
+                    )
+                elif action == "advance_multi":
+                    outcome = await self._adapter.advance_user_question_after_multi_select(
+                        target.terminal_id,
+                        option_count=option_count,
+                        final_question=final_action,
+                    )
+                else:  # pragma: no cover - only typed public methods call here
+                    raise ValueError(f"unsupported external question action: {action}")
+            except asyncio.CancelledError:
+                state.mark_indeterminate(
+                    tool_use_id=context.tool_use_id,
+                    expected_target=context.target,
+                    reason="Ghostty 问答操作被取消，终端状态不确定",
+                )
+                raise
+            except Exception:
+                logger.exception(
+                    "ghostty user-question action raised",
+                    extra={
+                        "session_id": context.session_id,
+                        "tool_use_id": context.tool_use_id,
+                        "action": action,
+                    },
+                )
+                state.mark_indeterminate(
+                    tool_use_id=context.tool_use_id,
+                    expected_target=context.target,
+                    reason="Ghostty 问答操作异常，终端状态不确定",
+                )
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.INDETERMINATE,
+                    "Ghostty 操作结果不确定，请检查终端",
+                )
+            finally:
+                self._injecting.discard(context.session_id)
+
+            if outcome == InjectionOutcome.OK:
+                if final_action and not state.mark_terminal_action_applied(
+                    tool_use_id=context.tool_use_id,
+                    expected_target=context.target,
+                ):
+                    state.mark_indeterminate(
+                        tool_use_id=context.tool_use_id,
+                        expected_target=context.target,
+                        reason="终端操作已完成，但问题状态无法确认",
+                    )
+                    return ExternalQuestionActionResult(
+                        ExternalQuestionActionStatus.INDETERMINATE,
+                        "终端操作已完成，但问题状态无法确认",
+                    )
+                return ExternalQuestionActionResult(ExternalQuestionActionStatus.APPLIED)
+
+            if outcome in {InjectionOutcome.INDETERMINATE, InjectionOutcome.TIMEOUT}:
+                state.mark_indeterminate(
+                    tool_use_id=context.tool_use_id,
+                    expected_target=context.target,
+                    reason=f"Ghostty 问答操作结果不确定: {outcome}",
+                )
+                return ExternalQuestionActionResult(
+                    ExternalQuestionActionStatus.INDETERMINATE,
+                    "Ghostty 操作结果不确定，请检查终端",
+                )
+            return ExternalQuestionActionResult(
+                ExternalQuestionActionStatus.REJECTED,
+                f"Ghostty 问答操作失败: {outcome}",
+            )
+
+    @staticmethod
+    def _pending_matches_context(
+        pending: PendingExternalUserQuestionSnapshot | None,
+        context: ExternalUserQuestionContext,
+    ) -> bool:
+        return (
+            pending is not None
+            and pending.tool_use_id == context.tool_use_id
+            and pending.session_id == context.session_id
+            and pending.user_id == context.user_id
+            and pending.target == context.target
+        )
+
+    def _structured_question_is_active(self, context: ExternalUserQuestionContext) -> bool:
+        state = self._session_store.find_by_active_user_question_tool_use_id(context.tool_use_id)
+        return state is not None and state.session_id == context.session_id
+
+    def _binding_for_question_context(
+        self,
+        context: ExternalUserQuestionContext,
+    ) -> ExternalBinding | None:
+        target = context.target
+        if not isinstance(target, ExternalGhosttyQuestionTarget):
+            # Only Ghostty-bound sessions carry an injectable question target.
+            return None
+        binding = self._binding_store.get_binding(context.session_id)
+        if binding is None or binding.user_id != context.user_id or binding.ended_at is not None or binding.binding_id != target.binding_id:
+            return None
+        binding_target = binding.ghostty_target
+        if (
+            binding_target is None
+            or binding_target.binding_id != target.binding_id
+            or binding_target.terminal_id != target.terminal_id
+            or binding_target.paired_tty != target.paired_tty
+            or binding_target.paired_at != target.paired_at
+        ):
+            return None
+        return binding
 
     def _current_binding_target(
         self,

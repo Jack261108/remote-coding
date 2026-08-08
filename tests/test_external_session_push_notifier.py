@@ -13,6 +13,10 @@ import pytest
 from app.domain.session_models import SessionPhase
 from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
+from app.services.user_question_callback_registry import (
+    UserQuestionCallbackOrigin,
+    UserQuestionCallbackRegistry,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,6 +27,7 @@ def _make_notifier(
     *,
     retry_count: int = 1,
     send_side_effects: list | None = None,
+    registry: UserQuestionCallbackRegistry | None = None,
 ) -> tuple[ExternalSessionPushNotifier, MagicMock]:
     sender = MagicMock()
     if send_side_effects:
@@ -33,6 +38,7 @@ def _make_notifier(
         message_sender=sender,
         binding_store=MagicMock(),
         retry_count=retry_count,
+        user_question_callback_registry=registry,
     )
     return notifier, sender
 
@@ -244,7 +250,8 @@ class TestNotifyUserQuestion:
 
     @pytest.mark.asyncio
     async def test_sends_interactive_with_options(self):
-        notifier, sender = _make_notifier()
+        registry = UserQuestionCallbackRegistry(ttl_sec=300)
+        notifier, sender = _make_notifier(registry=registry)
         prompts = (
             UserQuestionPrompt(
                 tool_use_id="tuid-1",
@@ -265,9 +272,118 @@ class TestNotifyUserQuestion:
         )
         assert result is True
         text = sender.send_message.call_args.kwargs["text"]
-        assert "点击按钮选择" in text
+        assert "可直接回复文字作为 Other/自由文本" in text
+        assert "请勿在 Ghostty 本地操作" in text
         keyboard = sender.send_message.call_args.kwargs["keyboard"]
         assert keyboard is not None
+        rows = keyboard.rows
+        assert len(rows) == 2
+        for row in rows:
+            cb_data = row[0].callback_data
+            assert cb_data.startswith("ask:")
+            assert len(cb_data.encode()) <= 64
+            assert cb_data.count(":") == 1  # colon-free token, two segments
+            token = cb_data.split(":", 1)[1]
+            resolved = await registry.resolve(token, user_id=42)
+            assert resolved.__class__.__name__ == "UserQuestionCallbackResolved"
+
+    @pytest.mark.asyncio
+    async def test_sends_interactive_multi_select_with_toggle_and_submit(self):
+        registry = UserQuestionCallbackRegistry(ttl_sec=300)
+        notifier, sender = _make_notifier(registry=registry)
+        prompts = (
+            UserQuestionPrompt(
+                tool_use_id="tuid-m",
+                question_index=0,
+                total_questions=1,
+                question="Pick:",
+                options=(
+                    UserQuestionOption(label="A"),
+                    UserQuestionOption(label="B"),
+                ),
+                multi_select=True,
+            ),
+        )
+        result = await notifier.notify_user_question(
+            user_id=42,
+            session_id="sess-1",
+            prompts=prompts,
+            interactive=True,
+        )
+        assert result is True
+        keyboard = sender.send_message.call_args.kwargs["keyboard"]
+        assert keyboard is not None
+        rows = keyboard.rows
+        assert len(rows) == 3  # two toggles + submit
+        assert rows[-1][0].text == "提交选择"
+        for row in rows:
+            cb_data = row[0].callback_data
+            assert cb_data.startswith("ask:")
+            assert len(cb_data.encode()) <= 64
+            assert cb_data.count(":") == 1
+
+    @pytest.mark.asyncio
+    async def test_tmux_origin_renders_multi_select_as_single_choice(self):
+        """The legacy tmux injector has no multi-select toggle/submit, so a
+        multi_select prompt under EXTERNAL_TMUX must render one single-choice
+        button per option (``ext_uq:`` tokens, no submit row) — otherwise the
+        ext_uq handler receives toggle/submit actions it cannot satisfy."""
+        registry = UserQuestionCallbackRegistry(ttl_sec=300)
+        notifier, sender = _make_notifier(registry=registry)
+        prompts = (
+            UserQuestionPrompt(
+                tool_use_id="tuid-tm",
+                question_index=0,
+                total_questions=1,
+                question="Pick:",
+                options=(
+                    UserQuestionOption(label="A"),
+                    UserQuestionOption(label="B"),
+                ),
+                multi_select=True,
+            ),
+        )
+        result = await notifier.notify_user_question(
+            user_id=42,
+            session_id="sess-1",
+            prompts=prompts,
+            interactive=True,
+            origin=UserQuestionCallbackOrigin.EXTERNAL_TMUX,
+        )
+        assert result is True
+        keyboard = sender.send_message.call_args.kwargs["keyboard"]
+        assert keyboard is not None
+        rows = keyboard.rows
+        # Two single-choice option rows only — NO submit button (tmux one-shot).
+        assert len(rows) == 2
+        for row in rows:
+            cb_data = row[0].callback_data
+            assert cb_data.startswith("ext_uq:")
+            assert len(cb_data.encode()) <= 64
+            assert cb_data.count(":") == 1
+        assert rows[-1][0].text != "提交选择"
+
+    @pytest.mark.asyncio
+    async def test_sends_info_when_registry_missing(self):
+        notifier, sender = _make_notifier()
+        prompts = (
+            UserQuestionPrompt(
+                tool_use_id="tuid-1",
+                question_index=0,
+                total_questions=1,
+                question="Choose?",
+                options=(UserQuestionOption(label="Yes"),),
+            ),
+        )
+        result = await notifier.notify_user_question(
+            user_id=42,
+            session_id="sess-1",
+            prompts=prompts,
+            interactive=True,
+        )
+        assert result is True
+        # No registry ⇒ informational-only, no buttons.
+        assert "请在终端中选择" in sender.send_message.call_args.kwargs["text"]
 
     @pytest.mark.asyncio
     async def test_sends_info_when_interactive_but_no_options(self):
