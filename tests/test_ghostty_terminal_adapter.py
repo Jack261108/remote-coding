@@ -408,6 +408,43 @@ async def test_inject_cancellation_kills_and_reaps_child(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_kill_abandons_reap_when_child_wedges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#11: a wedged osascript (D-state / grandchild holding the pipe) makes
+    ``proc.wait()`` never return. ``_kill`` must bound that reap so the caller's
+    input-lock await context is released instead of pinning the whole session
+    behind an unreachable lock. The injected child is still ``kill()``-ed; the
+    reap is simply abandoned once it times out.
+    """
+    monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
+    monkeypatch.setattr(gta.sys, "platform", "darwin")
+
+    class _WedgedProc(_FakeProc):
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(10)
+            return b"", b""
+
+        async def wait(self) -> int:
+            # Simulates an osascript stuck in uninterruptible state: wait()
+            # never reaps, no matter how long we hold the input lock.
+            await asyncio.Event().wait()  # pragma: no cover - test relies on timeout
+            return self.returncode  # pragma: no cover - unreachable
+
+    proc = _WedgedProc(returncode=0)
+
+    async def fake(*_args: object, **_kwargs: object) -> _WedgedProc:
+        return proc
+
+    monkeypatch.setattr(gta.asyncio, "create_subprocess_exec", fake)
+    # Tiny command timeout so communicate() aborts quickly; the reap budget is
+    # the same value, so the wedged wait() is abandoned within ~0.01s.
+    adapter = GhosttyTerminalAdapter(timeout_sec=0.01)
+    # Must return promptly (not hang); classifies as TIMEOUT.
+    assert await adapter.inject_text("uuid-1", "x") == InjectionOutcome.TIMEOUT
+    assert proc.killed, "timeout SHALL still SIGKILL the wedged child"
+    assert not proc.waited, "wedged child is NOT reaped — _kill abandoned the bounded wait"
+
+
+@pytest.mark.asyncio
 async def test_inject_osascript_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gta.shutil, "which", lambda _b: "/usr/bin/osascript")
     monkeypatch.setattr(gta.sys, "platform", "darwin")

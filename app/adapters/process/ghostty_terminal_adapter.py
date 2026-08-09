@@ -459,14 +459,25 @@ class GhosttyTerminalAdapter:
             return "", "osascript missing", 127
         return stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace"), proc.returncode or 0
 
-    @staticmethod
-    async def _kill(proc: asyncio.subprocess.Process) -> None:
+    async def _kill(self, proc: asyncio.subprocess.Process) -> None:
         try:
             proc.kill()
         except ProcessLookupError:
             return
+        # Reap the killed child, but bound the wait so a wedged osascript
+        # (uninterruptible 'D' state, or a grandchild holding the stdout/stderr
+        # pipe after a stuck TCC prompt) cannot pin the caller's input-lock
+        # await context indefinitely. If reaping does not complete within the
+        # same budget as the original command timeout, give up and let the OS
+        # reap it later rather than stalling every subsequent send for this
+        # session behind an unreachable lock.
         try:
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), self._timeout_sec)
+        except TimeoutError:
+            logger.warning(
+                "ghostty osascript child did not die %ss after kill; abandoning reap",
+                self._timeout_sec,
+            )
         except Exception:  # pragma: no cover - reap best-effort
             logger.debug("ghostty osascript wait after kill swallowed error")
 
