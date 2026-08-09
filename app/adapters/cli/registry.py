@@ -18,7 +18,8 @@ class CLIAdapterRegistry:
 
     新增 provider：编写 BaseCLIAdapter 子类（声明 provider/aliases/class_capabilities/
     build_file_args），在 settings.cli_bins 配置对应 provider 的可执行路径，然后调
-    register(<XxxCLIAdapter>) 即可接入，无需改本类内部字典。
+    register(<XxxCLIAdapter>) 即可接入，无需改本类内部字典。runner 后端默认走
+    subprocess；仅 claude_code 在 tmux 启用时改走 tmux_runner（见 register 内注释）。
     """
 
     def __init__(self, settings: Settings, runner: SubprocessRunner, tmux_runner: TmuxRunner | None = None) -> None:
@@ -56,6 +57,9 @@ class CLIAdapterRegistry:
         """
         provider = adapter_cls.provider
         bin_value = self._settings.cli_bins[provider]
+        # runner 后端绑定：claude_code 的持久交互必须走 tmux_runner；这是 runner
+        # 后端选型，非能力位路由（能力路由已全部交 AdapterCapabilities 驱动）。
+        # 仅 claude 需 tmux，不为此给 adapter 加"自述 runner 后端"抽象（YAGNI）。
         runner: Any = (
             self._tmux_runner
             if provider == "claude_code" and self._claude_terminal_enabled and self._tmux_runner is not None
