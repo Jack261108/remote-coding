@@ -950,3 +950,42 @@ async def test_rebind_aba_clears_old_mode_queue_and_pair_tokens(make_harness) ->
     assert await harness.mode_store.get_target(42) is None
     assert await harness.queue.peek_size("session-1") == 0
     assert await harness.service.consume_pair_token(token=token, user_id=42) is PairOutcome.TOKEN_INVALID
+
+
+# ─── shutdown race ─────────────────────────────────────────────────────────
+
+
+async def test_shutdown_blocks_new_drain_tasks(make_harness) -> None:
+    """shutdown must stop _ensure_drain from spawning orphan drain tasks.
+
+    Regression for #7: ``shutdown`` snapshots the drain slots and releases the
+    lifecycle lock before gathering cancellations. An in-flight caller entering
+    ``_ensure_drain`` in that window used to create a fresh ``_drain_loop`` that
+    shutdown's gather never saw — an orphan that kept injecting past teardown.
+    After shutdown sets ``_shutting_down``, ``_ensure_drain`` must refuse to
+    create a new slot even when no slot exists.
+    """
+    harness = make_harness(phase=SessionPhase.PROCESSING)
+    await _activate(harness)
+
+    # Precondition: no drain slot spins up by itself while the session is busy.
+    assert harness.service._drain_slots.get("session-1") is None
+
+    # Before shutdown, _ensure_drain creates a slot as usual.
+    await harness.service._ensure_drain("session-1")
+    slot = harness.service._drain_slots.get("session-1")
+    assert slot is not None and not slot.task.done()
+
+    # Shutdown cancels the existing slot and arms the shutdown flag.
+    await harness.service.shutdown()
+    assert harness.service._shutting_down is True
+    assert harness.service._drain_slots.get("session-1") is None
+
+    # After shutdown, _ensure_drain must not spawn a new orphan task even
+    # though no slot currently exists.
+    await harness.service._ensure_drain("session-1")
+    assert harness.service._drain_slots.get("session-1") is None
+
+    # Idempotent shutdown: a second call stays a no-op (no new slots, no error).
+    await harness.service.shutdown()
+    assert harness.service._drain_slots.get("session-1") is None

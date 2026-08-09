@@ -178,6 +178,7 @@ class ExternalSessionInputService:
         self._in_flight: set[str] = set()
         self._drain_slots: dict[str, _DrainSlot] = {}
         self._lifecycle_lock = asyncio.Lock()
+        self._shutting_down: bool = False
 
     # ─── public: pairing ────────────────────────────────────────────
 
@@ -725,6 +726,7 @@ class ExternalSessionInputService:
     async def shutdown(self) -> None:
         """Cancel all drain tasks. Call on container shutdown."""
         async with self._lifecycle_lock:
+            self._shutting_down = True
             slots = list(self._drain_slots.values())
             self._drain_slots.clear()
         for slot in slots:
@@ -1051,6 +1053,12 @@ class ExternalSessionInputService:
 
     async def _ensure_drain(self, session_id: str) -> None:
         async with self._lifecycle_lock:
+            if self._shutting_down:
+                # Container is shutting down: do not spawn a fresh drain loop that
+                # ``shutdown``'s snapshot+gather would miss (race: shutdown clears
+                # slots and releases the lock, an in-flight caller then enters here
+                # and creates an orphan task surviving past teardown).
+                return
             existing = self._drain_slots.get(session_id)
             if existing is not None and not existing.task.done():
                 existing.wake.set()
