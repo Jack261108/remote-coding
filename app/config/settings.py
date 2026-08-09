@@ -100,31 +100,32 @@ class Settings(BaseSettings):
     spinner_interval_sec: float = Field(1.0, alias="SPINNER_INTERVAL_SEC")
 
     # Provider CLI 可执行文件路径，按标准 provider 名索引。新增 provider 只需在此
-    # dict 或 .env 的 CLI_BINS 加一条；老 env CLAUDE_CLI_BIN/CODEX_CLI_BIN/
-    # GEMINI_CLI_BIN 仍可用（见 _absorb_legacy_cli_bins validator 兼容）。
-    cli_bins: dict[str, str] = Field(
-        default_factory=lambda: {"claude_code": "claude", "codex": "codex", "gemini": "gemini"},
-        alias="CLI_BINS",
-    )
+    # dict 或 .env 的 CLI_BINS 加一条。未设时不预填默认——_absorb_legacy_cli_bins
+    # validator 负责并入老 env CLAUDE_CLI_BIN/CODEX_CLI_BIN/GEMINI_CLI_BIN 与三个内置
+    # provider 的默认可执行名，使 cli_bins 成为填满后的单一事实源。
+    cli_bins: dict[str, str] = Field(default_factory=dict, alias="CLI_BINS")
+    # legacy 收集器：仅承接老式 env / .env 变量，validator after 阶段并入 cli_bins。
+    legacy_claude_cli_bin: str | None = Field(default=None, alias="CLAUDE_CLI_BIN")
+    legacy_codex_cli_bin: str | None = Field(default=None, alias="CODEX_CLI_BIN")
+    legacy_gemini_cli_bin: str | None = Field(default=None, alias="GEMINI_CLI_BIN")
 
-    @model_validator(mode="before")
-    @classmethod
-    def _absorb_legacy_cli_bins(cls, data: Any) -> Any:
-        """把老式 CLAUDE_CLI_BIN/CODEX_CLI_BIN/GEMINI_CLI_BIN 收编进 cli_bins。"""
-        if not isinstance(data, dict):
-            return data
-        bins = dict(data.get("CLI_BINS") or {})
-        for legacy_key, canonical in (
-            ("CLAUDE_CLI_BIN", "claude_code"),
-            ("CODEX_CLI_BIN", "codex"),
-            ("GEMINI_CLI_BIN", "gemini"),
+    @model_validator(mode="after")
+    def _absorb_legacy_cli_bins(self) -> Settings:
+        """把老式 CLAUDE_CLI_BIN/CODEX_CLI_BIN/GEMINI_CLI_BIN 与内置默认并入 cli_bins。
+
+        优先级：CLI_BINS dict 项 > 对应 legacy env > 内置默认二进制名（claude/codex/
+        gemini）。因 cli_bins 默认为空，setdefault 可干净区分用户提供与否，无需判等。
+        合并后三个内置 provider 总在 cli_bins 中，registry 直接按 provider 索引取值即可。
+        """
+        for legacy_value, canonical, default_bin in (
+            (self.legacy_claude_cli_bin, "claude_code", "claude"),
+            (self.legacy_codex_cli_bin, "codex", "codex"),
+            (self.legacy_gemini_cli_bin, "gemini", "gemini"),
         ):
-            value = data.get(legacy_key)
-            if value:
-                bins.setdefault(canonical, value)
-        if bins:
-            data["CLI_BINS"] = bins
-        return data
+            if legacy_value:
+                self.cli_bins.setdefault(canonical, legacy_value)
+            self.cli_bins.setdefault(canonical, default_bin)
+        return self
 
     @property
     def claude_cli_bin(self) -> str:
