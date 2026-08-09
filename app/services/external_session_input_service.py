@@ -57,7 +57,7 @@ from app.services.external_user_question_state import (
     ExternalUserQuestionState,
     PendingExternalUserQuestionSnapshot,
 )
-from app.services.local_process_probe import LocalProcessProbe
+from app.services.local_process_probe import LocalProcessProbe, ProcessTargetValidation
 from app.services.pairing_callback_registry import (
     PairConsumeOk,
     PairConsumeResult,
@@ -207,7 +207,7 @@ class ExternalSessionInputService:
         paired_tty = self._resolve_paired_tty(binding)
         if paired_tty is None:
             return PairOutcome.PROCESS_INVALID, None
-        process = self._probe.validate_claude_foreground(
+        process = await self._validate_foreground(
             pid=binding.pid or 0,
             paired_tty=paired_tty,
         )
@@ -313,7 +313,7 @@ class ExternalSessionInputService:
             paired_tty = self._resolve_paired_tty(binding)
             if paired_tty is None:
                 return PairOutcome.PROCESS_INVALID
-            process = self._probe.validate_claude_foreground(
+            process = await self._validate_foreground(
                 pid=binding.pid or 0,
                 paired_tty=paired_tty,
             )
@@ -390,7 +390,7 @@ class ExternalSessionInputService:
                 return PairOutcome.NEEDS_PAIRING
             return PairOutcome.ADAPTER_UNAVAILABLE
 
-        process = self._probe.validate_claude_foreground(
+        process = await self._validate_foreground(
             pid=binding.pid or 0,
             paired_tty=target.paired_tty,
         )
@@ -560,7 +560,7 @@ class ExternalSessionInputService:
             if not self._adapter.is_available():
                 return SendOutcome.ADAPTER_UNAVAILABLE
 
-            process = self._probe.validate_claude_foreground(
+            process = await self._validate_foreground(
                 pid=binding.pid or 0,
                 paired_tty=ghostty_target.paired_tty,
             )
@@ -615,7 +615,7 @@ class ExternalSessionInputService:
             # Terminal validation above can block on AppleScript for seconds.
             # Re-check the process trust anchor immediately before injection so
             # a shell that took over during that await never receives text+Enter.
-            process = self._probe.validate_claude_foreground(
+            process = await self._validate_foreground(
                 pid=binding.pid or 0,
                 paired_tty=ghostty_target.paired_tty,
             )
@@ -799,7 +799,7 @@ class ExternalSessionInputService:
                     ExternalQuestionActionStatus.REJECTED,
                     "Ghostty 适配器不可用",
                 )
-            process = self._probe.validate_claude_foreground(
+            process = await self._validate_foreground(
                 pid=binding.pid or 0,
                 paired_tty=target.paired_tty,
             )
@@ -825,7 +825,7 @@ class ExternalSessionInputService:
                     ExternalQuestionActionStatus.REJECTED,
                     "问题或目标在校验期间发生变化",
                 )
-            process = self._probe.validate_claude_foreground(
+            process = await self._validate_foreground(
                 pid=binding.pid or 0,
                 paired_tty=target.paired_tty,
             )
@@ -987,6 +987,21 @@ class ExternalSessionInputService:
         if state.structured_user_question_key:
             return False
         return True
+
+    async def _validate_foreground(self, *, pid: int, paired_tty: str) -> ProcessTargetValidation:
+        """Offload ``validate_claude_foreground`` to a worker thread (code-review #12).
+
+        The probe spawns up to four synchronous ``ps`` subprocesses per call; if
+        run on the event-loop thread it blocks every Hook/Telegram/drain coroutine
+        for the fork+exec+wait duration. Running it via ``asyncio.to_thread``
+        keeps the loop responsive while the system subprocess executes. The
+        probe interface itself stays synchronous and loop-agnostic.
+        """
+        return await asyncio.to_thread(
+            self._probe.validate_claude_foreground,
+            pid=pid,
+            paired_tty=paired_tty,
+        )
 
     async def _enqueue(self, session_id: str, binding_id: str, payload: str) -> SendOutcome:
         result = await self._queue.enqueue(session_id, text=payload, binding_id=binding_id)
@@ -1157,7 +1172,7 @@ class ExternalSessionInputService:
             if target is None or target.binding_id != binding.binding_id:
                 return await self._abort_drain(session_id)
 
-            process = self._probe.validate_claude_foreground(
+            process = await self._validate_foreground(
                 pid=binding.pid or 0,
                 paired_tty=target.paired_tty,
             )
@@ -1205,7 +1220,7 @@ class ExternalSessionInputService:
             # As in the immediate-send path, close the AppleScript validation
             # TOCTOU window by checking the process again at the last possible
             # point. Restore the FIFO head if the process changed meanwhile.
-            process = self._probe.validate_claude_foreground(
+            process = await self._validate_foreground(
                 pid=binding.pid or 0,
                 paired_tty=target.paired_tty,
             )

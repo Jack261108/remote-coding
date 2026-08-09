@@ -989,3 +989,45 @@ async def test_shutdown_blocks_new_drain_tasks(make_harness) -> None:
     # Idempotent shutdown: a second call stays a no-op (no new slots, no error).
     await harness.service.shutdown()
     assert harness.service._drain_slots.get("session-1") is None
+
+
+# ─── validate offload (#12) ────────────────────────────────────────────────
+
+
+async def test_validate_foreground_offloads_to_worker_thread(make_harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """validate_claude_foreground must run off the event-loop thread (#12).
+
+    The probe spawns up to four synchronous ``ps`` subprocesses per call; running
+    them synchronously on the loop thread blocks every Hook/Telegram/drain coroutine
+    for the fork+exec+wait duration. The service routes the probe through
+    ``asyncio.to_thread`` so the loop stays responsive while the system subprocess
+    executes.
+    """
+    harness = make_harness(paired=True)
+
+    from app.services import external_session_input_service as svc_mod
+
+    captured: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+    real = asyncio.to_thread
+
+    async def spy_to_thread(func, /, *args, **kwargs):
+        captured.append((func, args, kwargs))
+        return await real(func, *args, **kwargs)
+
+    monkeypatch.setattr(svc_mod.asyncio, "to_thread", spy_to_thread)
+
+    result = await harness.service._validate_foreground(pid=1234, paired_tty="/dev/ttys005")
+
+    assert result.ok is True
+    # Exactly one offload via to_thread, invoking the probe's sync method with
+    # the call's kwargs (not positional pid, no other args).
+    assert len(captured) == 1
+    func, args, kwargs = captured[0]
+    # Bound-method identity is not stable across attribute accesses (a fresh
+    # bound method object is created each time), so compare by equality instead
+    # of ``is``.
+    assert func == harness.probe.validate_claude_foreground
+    assert args == ()
+    assert kwargs == {"pid": 1234, "paired_tty": "/dev/ttys005"}
+    assert harness.probe.validation_calls[-1] == (1234, "/dev/ttys005")
