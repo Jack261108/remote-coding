@@ -26,6 +26,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def format_external_tmux_question_text(prompt: UserQuestionPrompt, session_id: str) -> str:
+    """Render the shared ❓/{sid}/问题/选项 block for a tmux external question card.
+
+    Used both by the initial ``notify_user_question`` push and the mid-batch
+    next-prompt push in the external_permission handler, so the two cards stay
+    visually consistent instead of the follow-up drifting to a bare question
+    string. Callers append their own CTA tail (button hint etc) when needed.
+    """
+    sid = short_id(session_id)
+    lines: list[str] = [f"❓ [{sid}] 用户选择"]
+    lines.append(f"问题: {prompt.question}")
+    if prompt.options:
+        lines.append("选项:")
+        for i, option in enumerate(prompt.options, start=1):
+            label = option.label
+            if option.description:
+                label += f" — {option.description}"
+            lines.append(f"  {i}. {label}")
+    return "\n".join(lines)
+
+
 @dataclass
 class _PendingReplyChunks:
     chunks: tuple[str, ...]
@@ -218,20 +239,10 @@ class ExternalSessionPushNotifier:
         """
         if not prompts:
             return False
-        sid = short_id(session_id)
         # For interactive mode, we only show the first unanswered prompt with buttons
         prompt = prompts[0]
         prefix = "ask" if origin is UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY else "ext_uq"
-        lines: list[str] = []
-        lines.append(f"❓ [{sid}] 用户选择")
-        lines.append(f"问题: {prompt.question}")
-        if prompt.options:
-            lines.append("选项:")
-            for i, option in enumerate(prompt.options, start=1):
-                label = option.label
-                if option.description:
-                    label += f" — {option.description}"
-                lines.append(f"  {i}. {label}")
+        lines = format_external_tmux_question_text(prompt, session_id).splitlines()
 
         if not interactive or not prompt.options:
             lines.append("请在终端中选择")

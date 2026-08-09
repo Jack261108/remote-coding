@@ -567,11 +567,14 @@ async def test_external_multi_prompt_callback_advances_without_submitting_or_all
     # A fresh button card for the next question was pushed with a non-empty
     # keyboard. ``edits`` also land in ``sent_messages``, so the answer card is
     # the last entry; ``answers`` tracks only fresh ``answer()`` calls.
-    assert "Second pick" in message.answers
+    expected_next = (
+        "❓ [external] 用户选择\n问题: Second pick\n选项:\n  1. A1\n  2. B1\n\n👇 点击按钮选择；可直接回复文字作为 Other/自由文本"
+    )
+    assert expected_next in message.answers
     answer_cards = [m for m in message.sent_messages if m.reply_markup is not None]
     assert len(answer_cards) == 1
     next_card = answer_cards[-1]
-    assert next_card.text == "Second pick"
+    assert next_card.text == expected_next
     next_buttons = [btn for row in next_card.reply_markup.inline_keyboard for btn in row]
     assert {btn.text for btn in next_buttons} == {"1. A1", "2. B1"}
     # The original card's keyboard was cleared.

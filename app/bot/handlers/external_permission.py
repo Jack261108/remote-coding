@@ -16,6 +16,7 @@ from app.infra.user_question_callbacks import (
 from app.infra.user_question_callbacks import (
     parse_user_question_callback_token,
 )
+from app.services.external_session_push_notifier import format_external_tmux_question_text
 from app.services.user_question_callback_registry import (
     UserQuestionCallbackOrigin,
     UserQuestionCallbackRegistry,
@@ -243,4 +244,8 @@ def register_external_permission_handler(
                 prompt=next_prompt,
                 registry=user_question_callback_registry,
             )
-            await callback_message.answer(next_prompt.question, reply_markup=keyboard)
+            # Match the initial card's ❓/{sid}/问题/选项 layout (not a bare
+            # question string) so the follow-up card is visually consistent.
+            body = format_external_tmux_question_text(next_prompt, pending.session_id)
+            text = f"{body}\n\n👇 点击按钮选择；可直接回复文字作为 Other/自由文本"
+            await callback_message.answer(text, reply_markup=keyboard)

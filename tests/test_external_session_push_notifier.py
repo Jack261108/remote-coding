@@ -12,7 +12,10 @@ import pytest
 
 from app.domain.session_models import SessionPhase
 from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
-from app.services.external_session_push_notifier import ExternalSessionPushNotifier
+from app.services.external_session_push_notifier import (
+    ExternalSessionPushNotifier,
+    format_external_tmux_question_text,
+)
 from app.services.user_question_callback_registry import (
     UserQuestionCallbackOrigin,
     UserQuestionCallbackRegistry,
@@ -488,6 +491,35 @@ class TestNotifyPermissionResolved:
         assert result is True
         text = sender.send_message.call_args.kwargs["text"]
         assert "denied" in text
+
+
+def test_format_external_tmux_question_text_matches_initial_card_layout() -> None:
+    """The mid-batch next-prompt push must reuse the initial card's ❓/sid/选项 layout.
+
+    Regression guard for #13: the external_permission handler used to send the
+    next prompt as a bare question string. Both initial card and follow-up must
+    show the ❓ user-select header, the question, and the numbered options list.
+    """
+    prompt = UserQuestionPrompt(
+        tool_use_id="tool-1",
+        question_index=1,
+        total_questions=2,
+        question="pick a color",
+        options=(
+            UserQuestionOption(label="red", description="warm"),
+            UserQuestionOption(label="blue", description="cool"),
+        ),
+        multi_select=False,
+    )
+    text = format_external_tmux_question_text(prompt, session_id="session-uuid-1")
+
+    lines = text.splitlines()
+    # short_id("session-uuid-1") == "session-" (first 8 chars).
+    assert lines[0] == "❓ [session-] 用户选择"
+    assert "问题: pick a color" in lines
+    assert "选项:" in lines
+    assert "  1. red — warm" in lines
+    assert "  2. blue — cool" in lines
 
 
 if __name__ == "__main__":  # pragma: no cover
