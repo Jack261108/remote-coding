@@ -46,14 +46,17 @@ def test_unknown_provider_keeps_legacy_error_text() -> None:
 def test_capabilities_when_claude_terminal_disabled() -> None:
     registry = CLIAdapterRegistry(settings=build_settings(), runner=SubprocessRunner())
 
+    # 静态能力位描述 provider 类别，与 tmux 是否启用无关——claude_code 恒真。
     claude_capabilities = registry.capabilities("claude")
     assert claude_capabilities.run_task is True
     assert claude_capabilities.cancel_task is True
-    assert claude_capabilities.persistent_terminal is False
-    assert claude_capabilities.interactive_input is False
-    assert claude_capabilities.claude_resume is False
-    assert claude_capabilities.user_question_tui is False
-    assert claude_capabilities.session_state is False
+    assert claude_capabilities.persistent_terminal is True
+    assert claude_capabilities.interactive_input is True
+    assert claude_capabilities.claude_resume is True
+    assert claude_capabilities.user_question_tui is True
+    assert claude_capabilities.session_state is True
+    # 动态位反映 tmux 后端此刻可用性——tmux 关闭时为假。
+    assert claude_capabilities.persistent_terminal_active is False
 
     assert registry.capabilities("codex").persistent_terminal is False
     assert registry.capabilities("gemini").persistent_terminal is False
@@ -68,4 +71,6 @@ def test_capabilities_when_claude_terminal_enabled() -> None:
     assert claude_capabilities.claude_resume is True
     assert claude_capabilities.user_question_tui is True
     assert claude_capabilities.session_state is True
+    # tmux 开启后动态位为真。
+    assert claude_capabilities.persistent_terminal_active is True
     assert registry.claude_terminal_enabled is True

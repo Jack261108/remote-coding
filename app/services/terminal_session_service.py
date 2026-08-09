@@ -79,7 +79,8 @@ class TerminalSessionService:
             self._clear_user_questions(affected_user_id)
 
     async def resolve_for_task(self, *, user_id: int, provider: str, workdir: str) -> TaskTerminalContext:
-        terminal_mode = provider == "claude_code" and self._settings.claude_tmux_mode
+        caps = self._capabilities_resolver(provider)
+        terminal_mode = caps.persistent_terminal and self._settings.claude_tmux_mode
         session, orphaned = await self._session_service.get_or_create(
             user_id=user_id,
             provider=provider,
@@ -94,7 +95,7 @@ class TerminalSessionService:
                 user_id=orphaned.user_id,
             )
         terminal_key = session.terminal_id if session.terminal_mode else None
-        interactive = bool(terminal_key and provider == "claude_code" and session.claude_chat_active and self._settings.claude_tmux_mode)
+        interactive = bool(terminal_key and caps.interactive_input and session.claude_chat_active and self._settings.claude_tmux_mode)
         return TaskTerminalContext(session=session, terminal_key=terminal_key, interactive=interactive)
 
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:

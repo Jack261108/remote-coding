@@ -226,7 +226,13 @@ class AppContainer(
     def _init_session_and_task_services(self) -> None:
         """Initialize session service, task service, and session registry."""
         settings = self.settings
-        self.session_service = SessionService(store=self.session_context_store)
+        claude_session_capable_providers = frozenset(
+            p for p in self.cli_factory.available_providers() if self.cli_factory.capabilities(p).session_state
+        )
+        self.session_service = SessionService(
+            store=self.session_context_store,
+            claude_session_capable_providers=claude_session_capable_providers,
+        )
         self.task_service = TaskService(
             settings=settings,
             task_store=self.task_store,

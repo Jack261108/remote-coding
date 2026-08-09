@@ -89,7 +89,11 @@ class StubFactory:
         return ["claude_code", "codex", "gemini"]
 
     def capabilities(self, provider: str) -> AdapterCapabilities:
-        _ = self.normalize_provider(provider)
+        # 贴近真实 registry：仅 claude_code 具备持久终端/交互/结构化会话能力；
+        # codex/gemini 默认无这些能力。StubAdapter 用于交互式回放，构造时假定
+        # 已运行于 claude_code 上下文，故 claude_code 返回满能力。
+        if self.normalize_provider(provider) != "claude_code":
+            return AdapterCapabilities()
         return AdapterCapabilities(
             persistent_terminal=True,
             interactive_input=True,

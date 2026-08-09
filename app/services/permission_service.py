@@ -50,7 +50,7 @@ class PermissionService:
         if self._structured_session_store is None or self._hook_socket_server is None:
             return False, "当前未启用 Claude hooks 权限通道"
         session = await self._session_service.get(user_id)
-        if session is None or session.provider != "claude_code":
+        if session is None or not self._capabilities_resolver(session.provider).session_state:
             return False, "当前没有 Claude 会话"
 
         lock_tool_use_id = expected_tool_use_id

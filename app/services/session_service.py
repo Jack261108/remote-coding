@@ -106,7 +106,7 @@ class UserSessionContextService:
         provider_changed = previous_provider is not None and provider != previous_provider
 
         orphaned: OrphanedTerminalInfo | None = None
-        if provider != "claude_code" or workdir_changed or provider_changed:
+        if provider not in self._claude_session_capable_providers or workdir_changed or provider_changed:
             existing.claude_session_id = None
             # Detect orphaned terminal: old terminal_id exists and either
             # workdir/provider changed or terminal_id will be rebuilt

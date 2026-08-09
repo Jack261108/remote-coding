@@ -1375,7 +1375,7 @@ class SessionMatchingMixin(AppContainerBase):
                     "session_terminal_id": session.terminal_id,
                 },
             )
-            if session.provider != "claude_code" or not session.claude_chat_active:
+            if not self.cli_factory.capabilities(session.provider).persistent_terminal or not session.claude_chat_active:
                 continue
             eligible_sessions.append(session)
             if event_workdir and session_workdir == event_workdir:
@@ -1476,7 +1476,7 @@ class SessionMatchingMixin(AppContainerBase):
         for task in tasks:
             if task.user_id != user_id:
                 continue
-            if task.provider != "claude_code":
+            if not self.cli_factory.capabilities(task.provider).interactive_input:
                 continue
             if task.workdir != workdir:
                 continue
@@ -1491,7 +1491,7 @@ class SessionMatchingMixin(AppContainerBase):
         session: SessionContext,
         resolved_event_workdir: str | None,
     ) -> tuple[bool, str, SessionState | None]:
-        if session.provider != "claude_code" or not session.claude_chat_active:
+        if not self.cli_factory.capabilities(session.provider).persistent_terminal or not session.claude_chat_active:
             return False, "inactive_claude_chat", None
         if not session.terminal_mode or not session.terminal_id:
             return False, "terminal_not_ready", None
@@ -1524,10 +1524,10 @@ class WatcherMixin(AppContainerBase):
     """Session watcher management (unified interrupt + file + JSONL sync)."""
 
     def _start_session_watchers(self) -> None:
-        """Start session supervisor watchers for all claude_code sessions."""
+        """Start session supervisor watchers for all structured-session-capable sessions."""
         sessions = self.structured_session_store.values()
         for state in sessions:
-            if state.provider != "claude_code":
+            if not self.cli_factory.capabilities(state.provider).session_state:
                 continue
             self.session_supervisor.watch(session_id=state.session_id, workdir=state.workdir)
 
@@ -1551,7 +1551,7 @@ class PeriodicRecheckMixin(AppContainerBase):
     async def _recheck_active_claude_sessions(self) -> None:
         sessions = await self.session_service.list_all()
         for session in sessions:
-            if session.provider != "claude_code" or not session.claude_chat_active:
+            if not self.cli_factory.capabilities(session.provider).session_state or not session.claude_chat_active:
                 continue
             if not session.claude_session_id:
                 continue

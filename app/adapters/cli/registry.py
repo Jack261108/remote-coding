@@ -35,11 +35,12 @@ class CLIAdapterRegistry:
         }
         self._capabilities: dict[str, AdapterCapabilities] = {
             "claude_code": AdapterCapabilities(
-                persistent_terminal=self._claude_terminal_enabled,
-                interactive_input=self._claude_terminal_enabled,
-                claude_resume=self._claude_terminal_enabled,
-                user_question_tui=self._claude_terminal_enabled,
-                session_state=self._claude_terminal_enabled,
+                persistent_terminal=True,
+                interactive_input=True,
+                claude_resume=True,
+                user_question_tui=True,
+                session_state=True,
+                persistent_terminal_active=self._claude_terminal_enabled,
             ),
             "codex": AdapterCapabilities(),
             "gemini": AdapterCapabilities(),

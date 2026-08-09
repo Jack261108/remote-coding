@@ -1114,7 +1114,7 @@ class UserQuestionService:
             return state.terminal_id, state.workdir, None
 
         session = await self._session_service.get(user_id)
-        if session is None or session.provider != "claude_code":
+        if session is None or not self._capabilities_resolver(session.provider).user_question_tui:
             return None, None, "当前没有 Claude 会话"
         if not session.terminal_mode or not session.terminal_id:
             return None, None, "当前没有可用的 Claude 持久终端"
@@ -1216,7 +1216,7 @@ class UserQuestionService:
         resolved_terminal_id = terminal_id
         resolved_workdir = workdir
         if resolved_terminal_id is None or resolved_workdir is None:
-            if session is None or session.provider != "claude_code":
+            if session is None or not self._capabilities_resolver(session.provider).interactive_input:
                 return False, "当前没有 Claude 会话"
             if not session.terminal_mode or not session.terminal_id:
                 return False, "当前没有可用的 Claude 持久终端"
