@@ -10,7 +10,3 @@ class GeminiCLIAdapter(BaseCLIAdapter):
     @classmethod
     def aliases(cls) -> list[str]:
         return ["gemini_cli", "gemini-cli"]
-
-    @classmethod
-    def cli_bin_setting(cls) -> str:
-        return "gemini_cli_bin"

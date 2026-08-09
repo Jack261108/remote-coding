@@ -31,11 +31,6 @@ class BaseCLIAdapter(ABC):
         """provider 自声明的别名（不含 provider 本身），registry 归一化时纳入。"""
         return []
 
-    @classmethod
-    def cli_bin_setting(cls) -> str:
-        """settings 上对应 *_cli_bin 字段名，供 registry 取 CLI 可执行路径。"""
-        raise NotImplementedError
-
     def build_file_args(self, file_paths: list[Path]) -> list[str]:
         """构造携带文件上下文的 provider 专属 CLI 标志位。
 

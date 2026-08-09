@@ -26,10 +26,6 @@ class ClaudeCodeAdapter(BaseCLIAdapter):
     def aliases(cls) -> list[str]:
         return ["claude", "claude-code"]
 
-    @classmethod
-    def cli_bin_setting(cls) -> str:
-        return "claude_cli_bin"
-
     def build_file_args(self, file_paths: list[Path]) -> list[str]:
         """claude_code 通过重复的 --file 标志携带文件上下文。"""
         args: list[str] = []

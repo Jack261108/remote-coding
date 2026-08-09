@@ -17,7 +17,7 @@ class CLIAdapterRegistry:
     """Provider adapter 注册表。
 
     新增 provider：编写 BaseCLIAdapter 子类（声明 provider/aliases/class_capabilities/
-    cli_bin_setting/build_file_args），在 settings 配置对应 *_cli_bin，然后调
+    build_file_args），在 settings.cli_bins 配置对应 provider 的可执行路径，然后调
     register(<XxxCLIAdapter>) 即可接入，无需改本类内部字典。
     """
 
@@ -50,11 +50,12 @@ class CLIAdapterRegistry:
 
         provider、aliases、静态能力由 adapter 类自描述；registry 仅按运行环境
         覆盖动态位 persistent_terminal_active（tmux 后端可用性）。cli_bin 取自
-        settings.<cli_bin_setting()>，runner 选取对内置 claude_code 走 tmux_runner
-        （启用时），其余走默认 subprocess runner。
+        settings.cli_bins[provider]（老式 CLAUDE_CLI_BIN 等 env 经
+        _absorb_legacy_cli_bins validator 收编进 cli_bins），runner 选取对内置
+        claude_code 走 tmux_runner（启用时），其余走默认 subprocess runner。
         """
         provider = adapter_cls.provider
-        bin_value = getattr(self._settings, adapter_cls.cli_bin_setting())
+        bin_value = self._settings.cli_bins[provider]
         runner: Any = (
             self._tmux_runner
             if provider == "claude_code" and self._claude_terminal_enabled and self._tmux_runner is not None

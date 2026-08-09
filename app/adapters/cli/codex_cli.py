@@ -10,7 +10,3 @@ class CodexCLIAdapter(BaseCLIAdapter):
     @classmethod
     def aliases(cls) -> list[str]:
         return ["codex_cli", "codex-cli"]
-
-    @classmethod
-    def cli_bin_setting(cls) -> str:
-        return "codex_cli_bin"

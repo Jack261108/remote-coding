@@ -76,7 +76,6 @@ class Settings(BaseSettings):
     tmux_bin: str = Field("tmux", alias="TMUX_BIN")
     tmux_data_dir: str = Field("/tmp/tg-cli-gateway", alias="TMUX_DATA_DIR")
 
-    claude_cli_bin: str = Field("claude", alias="CLAUDE_CLI_BIN")
     claude_config_dir: str | None = Field(None, alias="CLAUDE_CONFIG_DIR")
     claude_hook_socket_path: str = Field("/tmp/remote-coding-claude.sock", alias="CLAUDE_HOOK_SOCKET_PATH")
     claude_install_hooks: bool = Field(True, alias="CLAUDE_INSTALL_HOOKS")
@@ -99,8 +98,45 @@ class Settings(BaseSettings):
     structured_reply_pump_interval_sec: float = Field(1.0, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
     spinner_initial_delay_sec: float = Field(3.0, alias="SPINNER_INITIAL_DELAY_SEC")
     spinner_interval_sec: float = Field(1.0, alias="SPINNER_INTERVAL_SEC")
-    codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
-    gemini_cli_bin: str = Field("gemini", alias="GEMINI_CLI_BIN")
+
+    # Provider CLI 可执行文件路径，按标准 provider 名索引。新增 provider 只需在此
+    # dict 或 .env 的 CLI_BINS 加一条；老 env CLAUDE_CLI_BIN/CODEX_CLI_BIN/
+    # GEMINI_CLI_BIN 仍可用（见 _absorb_legacy_cli_bins validator 兼容）。
+    cli_bins: dict[str, str] = Field(
+        default_factory=lambda: {"claude_code": "claude", "codex": "codex", "gemini": "gemini"},
+        alias="CLI_BINS",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _absorb_legacy_cli_bins(cls, data: Any) -> Any:
+        """把老式 CLAUDE_CLI_BIN/CODEX_CLI_BIN/GEMINI_CLI_BIN 收编进 cli_bins。"""
+        if not isinstance(data, dict):
+            return data
+        bins = dict(data.get("CLI_BINS") or {})
+        for legacy_key, canonical in (
+            ("CLAUDE_CLI_BIN", "claude_code"),
+            ("CODEX_CLI_BIN", "codex"),
+            ("GEMINI_CLI_BIN", "gemini"),
+        ):
+            value = data.get(legacy_key)
+            if value:
+                bins.setdefault(canonical, value)
+        if bins:
+            data["CLI_BINS"] = bins
+        return data
+
+    @property
+    def claude_cli_bin(self) -> str:
+        return self.cli_bins.get("claude_code", "claude")
+
+    @property
+    def codex_cli_bin(self) -> str:
+        return self.cli_bins.get("codex", "codex")
+
+    @property
+    def gemini_cli_bin(self) -> str:
+        return self.cli_bins.get("gemini", "gemini")
 
     allowed_workdirs: Annotated[list[str], NoDecode] = Field(default_factory=lambda: [str(Path.cwd())], alias="ALLOWED_WORKDIRS")
     admin_password: str | None = Field(None, alias="ADMIN_PASSWORD")
