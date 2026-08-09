@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from app.domain.models import CLIEvent, ExecutionTask
     from app.domain.session_models import SessionEvent, SessionPhase, SessionState
     from app.domain.user_question_models import ExternalQuestionActionResult, ExternalUserQuestionContext
@@ -44,6 +46,8 @@ class CLIAdapterProtocol(Protocol):
     ) -> AsyncGenerator[CLIEvent, None]: ...
 
     async def cancel(self, task_id: str) -> bool: ...
+
+    def build_file_args(self, file_paths: list[Path]) -> list[str]: ...
 
 
 @runtime_checkable

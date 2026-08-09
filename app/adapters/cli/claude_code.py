@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 from app.adapters.cli.base import BaseCLIAdapter
 from app.adapters.process.tmux_runner import TmuxRunner
@@ -9,6 +10,14 @@ from app.domain.models import CLIEvent, ExecutionTask
 
 class ClaudeCodeAdapter(BaseCLIAdapter):
     provider = "claude_code"
+
+    def build_file_args(self, file_paths: list[Path]) -> list[str]:
+        """claude_code 通过重复的 --file 标志携带文件上下文。"""
+        args: list[str] = []
+        for path in file_paths:
+            args.append("--file")
+            args.append(str(path))
+        return args
 
     async def run(
         self,

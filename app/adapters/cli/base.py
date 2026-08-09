@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 from app.domain.models import CLIEvent, ExecutionTask
@@ -14,6 +15,15 @@ class BaseCLIAdapter(ABC):
     def __init__(self, cli_bin: str, runner: Any) -> None:
         self._cli_bin = cli_bin
         self._runner = runner
+
+    def build_file_args(self, file_paths: list[Path]) -> list[str]:
+        """构造携带文件上下文的 provider 专属 CLI 标志位。
+
+        默认返回空列表（文件在 prompt 文本中引用）；具备 --file 语义的
+        provider 子类覆盖此方法。
+        """
+        _ = file_paths
+        return []
 
     async def run(
         self,

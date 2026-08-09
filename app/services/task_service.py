@@ -357,7 +357,7 @@ class TaskService:
             task_context = self._context_builder.build_context(
                 user_id=user_id,
                 workdir=selected_workdir,
-                provider=selected_provider,
+                adapter=self._cli_factory.get(selected_provider),
                 prompt=prompt,
                 since=since,
             )
