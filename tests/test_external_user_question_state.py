@@ -205,22 +205,61 @@ def test_repair_with_same_terminal_and_tty_invalidates_old_paired_at() -> None:
 
 def test_ttl_prunes_active_but_keeps_recent_terminal_tombstone() -> None:
     now = datetime(2026, 8, 6, tzinfo=UTC)
-    current = now
-    state = ExternalUserQuestionState(ttl_sec=10, wall_clock=lambda: current)
+    wall = now
+    mono = 1000.0
+    state = ExternalUserQuestionState(
+        ttl_sec=10,
+        wall_clock=lambda: wall,
+        monotonic_clock=lambda: mono,
+    )
     target = _ghostty_target(paired_at=now)
     state.store(_pending("active", target=target))
     state.store(_pending("done", target=target))
     assert state.mark_terminal_action_applied(tool_use_id="done", expected_target=target)
     assert state.mark_completed(tool_use_id="done", expected_target=target)
 
-    current = now + timedelta(seconds=11)
+    # TTL expiry is monotonic; advance the monotonic clock past the active TTL
+    # but stay within the non-active grace window so the terminal tombstone survives.
+    mono += 11
     removed = state.prune_stale()
 
     assert [item.tool_use_id for item in removed] == ["active"]
     assert state.get("done") is not None
 
 
-def test_remove_if_matches_does_not_remove_new_target_generation() -> None:
+def test_ttl_ignores_wall_clock_jumps_and_uses_monotonic_only() -> None:
+    """A wall-clock jump (NTP/manual time change) must NOT affect TTL expiry.
+
+    Regression for the twin-clock domain: expiry must read the monotonic anchor,
+    never the wall-clock ``created_at``/``updated_at``. A wall clock moved far
+    backwards must keep a fresh question alive; moved far forwards must not
+    let a just-stored question evade its TTL grace either.
+    """
+    wall = datetime(2026, 8, 6, tzinfo=UTC)
+    mono = 5000.0
+    state = ExternalUserQuestionState(
+        ttl_sec=10,
+        wall_clock=lambda: wall,
+        monotonic_clock=lambda: mono,
+    )
+    target = _ghostty_target(paired_at=wall)
+    state.store(_pending("fresh", target=target))
+
+    # Wall clock yanked back a year — must not prematurely expire a fresh record.
+    wall = wall - timedelta(days=365)
+    mono += 1
+    assert state.prune_stale() == ()
+    assert state.get("fresh") is not None
+
+    # Wall clock yanked forward a year — must not grant a reprieve either; only
+    # monotonic advancement past the TTL expires the record.
+    wall = wall + timedelta(days=2 * 365)
+    mono += 1
+    assert state.prune_stale() == ()
+    # monotonic past the active TTL → expires regardless of wall clock.
+    mono += 10
+    assert [item.tool_use_id for item in state.prune_stale()] == ["fresh"]
+
     state = ExternalUserQuestionState()
     old = _ghostty_target()
     new = _ghostty_target(paired_at=old.paired_at + timedelta(seconds=1))

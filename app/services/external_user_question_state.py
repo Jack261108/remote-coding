@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,6 +34,12 @@ class PendingExternalUserQuestion:
     failure_reason: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
+    # Monotonic anchors for TTL expiry, immune to wall-clock jumps (NTP/manual
+    # time changes). The wall-clock fields above are kept for snapshot display
+    # only; expiry always reads these so it matches the callback registry's
+    # monotonic-based token expiry (twin-clock design: display = wall, TTL = mono).
+    created_mono: float = field(default_factory=time.monotonic)
+    updated_mono: float = field(default_factory=time.monotonic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,18 +95,23 @@ class ExternalUserQuestionState:
         *,
         ttl_sec: float = _TTL_SEC,
         wall_clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         if ttl_sec <= 0:
             raise ValueError("ttl_sec must be positive")
         self._ttl_sec = ttl_sec
         self._wall_clock = wall_clock or utc_now
+        self._monotonic_clock = monotonic_clock or time.monotonic
         self._pending: dict[str, PendingExternalUserQuestion] = {}
 
     def store(self, pending: PendingExternalUserQuestion) -> None:
         self._prune_stale()
         now = self._wall_clock()
+        mono = self._monotonic_clock()
         pending.created_at = now
         pending.updated_at = now
+        pending.created_mono = mono
+        pending.updated_mono = mono
         self._pending[pending.tool_use_id] = pending
         logger.debug(
             "stored pending external user question",
@@ -150,6 +162,7 @@ class ExternalUserQuestionState:
             return False
         record.phase = ExternalUserQuestionPhase.TERMINAL_ACTION_APPLIED
         record.updated_at = self._wall_clock()
+        record.updated_mono = self._monotonic_clock()
         return True
 
     def mark_completed(
@@ -163,6 +176,7 @@ class ExternalUserQuestionState:
             return False
         record.phase = ExternalUserQuestionPhase.COMPLETED
         record.updated_at = self._wall_clock()
+        record.updated_mono = self._monotonic_clock()
         return True
 
     def mark_indeterminate(
@@ -186,6 +200,7 @@ class ExternalUserQuestionState:
         record.phase = ExternalUserQuestionPhase.INDETERMINATE
         record.failure_reason = reason.strip() or "question action result is indeterminate"
         record.updated_at = self._wall_clock()
+        record.updated_mono = self._monotonic_clock()
         return True
 
     def remove(self, tool_use_id: str) -> PendingExternalUserQuestionSnapshot | None:
@@ -210,18 +225,6 @@ class ExternalUserQuestionState:
 
     def invalidate_session(self, session_id: str) -> int:
         keys = [key for key, pending in self._pending.items() if pending.session_id == session_id]
-        for key in keys:
-            self._pending.pop(key, None)
-        return len(keys)
-
-    def invalidate_binding(self, session_id: str, binding_id: str) -> int:
-        keys = [
-            key
-            for key, pending in self._pending.items()
-            if pending.session_id == session_id
-            and isinstance(pending.target, ExternalGhosttyQuestionTarget)
-            and pending.target.binding_id == binding_id
-        ]
         for key in keys:
             self._pending.pop(key, None)
         return len(keys)
@@ -258,20 +261,15 @@ class ExternalUserQuestionState:
             self._pending.pop(key, None)
         return len(keys)
 
-    def clear(self) -> tuple[PendingExternalUserQuestionSnapshot, ...]:
-        removed = tuple(PendingExternalUserQuestionSnapshot.from_record(record) for record in self._pending.values())
-        self._pending.clear()
-        return removed
-
     def prune_stale(self) -> tuple[PendingExternalUserQuestionSnapshot, ...]:
         return self._prune_stale()
 
     def _prune_stale(self) -> tuple[PendingExternalUserQuestionSnapshot, ...]:
-        now = self._wall_clock()
+        now = self._monotonic_clock()
         stale_keys: list[str] = []
         for key, pending in self._pending.items():
-            age = (now - pending.created_at).total_seconds()
-            updated_age = (now - pending.updated_at).total_seconds()
+            age = now - pending.created_mono
+            updated_age = now - pending.updated_mono
             if pending.phase is ExternalUserQuestionPhase.ACTIVE:
                 stale = age > self._ttl_sec
             else:

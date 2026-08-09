@@ -636,11 +636,11 @@ class ExternalSessionInputService:
                 return SendOutcome.SENT
             if outcome == InjectionOutcome.INDETERMINATE:
                 return SendOutcome.INJECTION_INDETERMINATE
-            if outcome == InjectionOutcome.GHOSTTY_NOT_RUNNING or outcome in {
-                "ghostty_not_running",
-                "applescript_disabled",
-                "non_darwin",
-                "osascript_missing",
+            if outcome in {
+                InjectionOutcome.GHOSTTY_NOT_RUNNING,
+                InjectionOutcome.APPLESCRIPT_DISABLED,
+                InjectionOutcome.NON_DARWIN,
+                InjectionOutcome.OSASCRIPT_MISSING,
                 InjectionOutcome.TCC_DENIED,
             }:
                 return SendOutcome.ADAPTER_UNAVAILABLE

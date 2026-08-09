@@ -46,7 +46,7 @@ def _is_accessible_message(message: object) -> TypeGuard[Message]:
     return callable(getattr(message, "answer", None)) and callable(getattr(message, "edit_reply_markup", None))
 
 
-def build_user_question_callback_data(*, tool_use_id: str, question_index: int, option_index: int) -> str:
+def build_legacy_select_callback_data(*, tool_use_id: str, question_index: int, option_index: int) -> str:
     return f"{_QUESTION_CALLBACK_PREFIX}:{tool_use_id}:{question_index}:{option_index}"
 
 
@@ -134,7 +134,7 @@ def build_user_question_keyboard(
         else:
             callback_data = _build_button_callback_data(
                 token=tokens.select_tokens[index] if tokens and index < len(tokens.select_tokens) else None,
-                legacy_builder=build_user_question_callback_data,
+                legacy_builder=build_legacy_select_callback_data,
                 prompt=prompt,
                 option_index=index,
             )

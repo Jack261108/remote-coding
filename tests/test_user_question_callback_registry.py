@@ -75,11 +75,7 @@ async def test_invalidation_by_question_tool_session_and_user() -> None:
             )
         )
 
-    assert await registry.invalidate_question(session_id="s1", tool_use_id="t1", question_index=0) == 1
-    assert isinstance(await registry.resolve(tokens[0], user_id=42), UserQuestionCallbackNotFound)
-    assert isinstance(await registry.resolve(tokens[1], user_id=42), UserQuestionCallbackResolved)
-
-    assert await registry.invalidate_tool(session_id="s1", tool_use_id="t1") == 1
+    assert await registry.invalidate_tool(session_id="s1", tool_use_id="t1") == 2
     assert await registry.invalidate_session("s1") == 1
     assert await registry.invalidate_user(7) == 1
     for token in tokens[:3]:

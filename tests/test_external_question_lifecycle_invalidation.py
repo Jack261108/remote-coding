@@ -119,7 +119,6 @@ async def _register_token(
         multi_select=False,
         origin=UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY,
     )
-    assert tokens.is_tokenised
     return tokens.select_tokens[0]
 
 

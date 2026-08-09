@@ -98,15 +98,15 @@ class QuestionCallbackTokens:
 
     ``select_tokens[i]`` is the single-choice callback for option *i*;
     ``toggle_tokens[i]`` is the multi-select toggle for option *i*;
-    ``submit_token`` is the multi-select submit. ``is_tokenised`` is False when no
-    registry/session was available and the caller must fall back to legacy inline
-    callback_data (identity still travels in the button for that degenerate case).
+    ``submit_token`` is the multi-select submit. Empty tuples and a null
+    ``submit_token`` mark the degenerate case where registration was skipped
+    (no registry/session available); callers detect this by checking the
+    tuples rather than a separate flag.
     """
 
     select_tokens: tuple[str, ...] = ()
     toggle_tokens: tuple[str, ...] = ()
     submit_token: str | None = None
-    is_tokenised: bool = False
 
 
 class UserQuestionCallbackRegistry:
@@ -173,7 +173,6 @@ class UserQuestionCallbackRegistry:
             return QuestionCallbackTokens(
                 toggle_tokens=tuple(toggle_tokens),
                 submit_token=submit_token,
-                is_tokenised=True,
             )
         select_tokens = [
             await self.register(
@@ -189,7 +188,6 @@ class UserQuestionCallbackRegistry:
         ]
         return QuestionCallbackTokens(
             select_tokens=tuple(select_tokens),
-            is_tokenised=True,
         )
 
     async def register(
@@ -267,17 +265,6 @@ class UserQuestionCallbackRegistry:
             if record.owner_user_id != user_id:
                 return UserQuestionCallbackUnauthorized()
             return UserQuestionCallbackResolved(UserQuestionCallbackSnapshot.from_record(record))
-
-    async def get(self, token: str) -> UserQuestionCallbackSnapshot | None:
-        async with self._lock:
-            self._evict_stale()
-            record = self._records.get(token)
-            return UserQuestionCallbackSnapshot.from_record(record) if record is not None else None
-
-    async def invalidate_question(self, *, session_id: str, tool_use_id: str, question_index: int) -> int:
-        return await self._invalidate_matching(
-            lambda record: record.session_id == session_id and record.tool_use_id == tool_use_id and record.question_index == question_index
-        )
 
     async def invalidate_tool(self, *, session_id: str, tool_use_id: str) -> int:
         return await self._invalidate_matching(lambda record: record.session_id == session_id and record.tool_use_id == tool_use_id)

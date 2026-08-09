@@ -317,8 +317,10 @@ class AppContainer(
         self.external_uq_state = ExternalUserQuestionState()
         # Opaque token registry shared by Telegram AskUserQuestion callbacks (managed
         # tmux + external Ghostty + external tmux) so identity never travels in
-        # callback_data. TTL aligned with the external pending-question TTL (300s) so a
-        # live button never resolves against an already-pruned pending question.
+        # callback_data. TTL seconds match the external pending-question TTL so a live
+        # button never resolves against an already-pruned pending question; both stores
+        # judge expiry on a monotonic clock (immune to wall-clock jumps) — the pending
+        # store keeps wall-clock timestamps only for snapshot display.
         from app.services.user_question_callback_registry import UserQuestionCallbackRegistry
 
         self.user_question_callback_registry = UserQuestionCallbackRegistry(

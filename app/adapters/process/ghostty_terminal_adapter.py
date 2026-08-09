@@ -151,15 +151,18 @@ end run
 class InjectionOutcome:
     """Outcomes for ``inject_text``.
 
-    Plain string constants (not an enum) so the service can compare without
-    importing this module's enum — keep them stable.
+    String constants collected in one class so the service can compare against
+    ``InjectionOutcome.*`` names instead of bare literals — keep the string
+    values stable (some persist in logs/state).
     """
 
     OK = "ok"
     NOT_FOUND = "not_found"  # validate_terminal found zero surfaces
     NOT_UNIQUE = "not_unique"  # AppleScript matched != 1 (shouldn't for a UUID)
-    APPLETSCRIPT_DISABLED = "applescript_disabled"  # macOS AppleScript disabled by config
+    APPLESCRIPT_DISABLED = "applescript_disabled"  # macOS AppleScript disabled by config
     GHOSTTY_NOT_RUNNING = "ghostty_not_running"
+    NON_DARWIN = "non_darwin"  # host platform is not macOS
+    OSASCRIPT_MISSING = "osascript_missing"  # osascript binary not on PATH
     TCC_DENIED = "tcc_denied"
     TIMEOUT = "timeout"
     INDETERMINATE = "indeterminate"  # text may be pasted but Enter failed — don't retry
@@ -270,10 +273,10 @@ class GhosttyTerminalAdapter:
 
     def _unavailable_reason(self) -> str:
         if not self._enable_applescript:
-            return InjectionOutcome.APPLETSCRIPT_DISABLED
+            return InjectionOutcome.APPLESCRIPT_DISABLED
         if not _is_darwin(self._platform_name):
-            return "non_darwin"
-        return "osascript_missing"
+            return InjectionOutcome.NON_DARWIN
+        return InjectionOutcome.OSASCRIPT_MISSING
 
     async def list_terminals(self) -> tuple[list[GhosttyTerminal] | None, str | None]:
         """Enumerate Ghostty terminals.

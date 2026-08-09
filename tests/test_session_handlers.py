@@ -424,7 +424,6 @@ async def test_external_user_question_callback_still_uses_existing_handler(monke
         multi_select=False,
         origin=UserQuestionCallbackOrigin.EXTERNAL_TMUX,
     )
-    assert tokens.is_tokenised
     token = tokens.select_tokens[0]
 
     router = DummyRouter()
