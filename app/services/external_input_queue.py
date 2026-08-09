@@ -24,6 +24,7 @@ lock; this queue guards only its own dict with an ``asyncio.Lock``.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,11 +33,17 @@ from datetime import UTC, datetime
 
 @dataclass(frozen=True, slots=True)
 class QueuedInput:
-    """A single enqueued Telegram text, with the binding generation at enqueue."""
+    """A single enqueued Telegram text, with the binding generation at enqueue.
+
+    ``enqueued_at`` is a wall-clock stamp kept for diagnostics/reporting; TTL is
+    judged against ``enqueued_monotonic`` on a monotonic clock so NTP step jumps
+    cannot age or freeze queued input (mirrors Pairing/UserQuestion registries).
+    """
 
     text: str
     enqueued_at: datetime
     binding_id: str
+    enqueued_monotonic: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +72,7 @@ class ExternalInputQueue:
         max_size: int = 5,
         ttl_sec: int = 300,
         now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         if max_size <= 0:
             raise ValueError("max_size must be positive")
@@ -73,6 +81,7 @@ class ExternalInputQueue:
         self._max_size = max_size
         self._ttl_sec = ttl_sec
         self._now = now or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic or time.monotonic
         self._queues: dict[str, deque[QueuedInput]] = {}
         self._lock = asyncio.Lock()
 
@@ -96,7 +105,14 @@ class ExternalInputQueue:
             self._prune_expired_locked(queue)
             if len(queue) >= self._max_size:
                 return QueueEnqueueOverflow(size=len(queue))
-            queue.append(QueuedInput(text=text, enqueued_at=self._now(), binding_id=binding_id))
+            queue.append(
+                QueuedInput(
+                    text=text,
+                    enqueued_at=self._now(),
+                    binding_id=binding_id,
+                    enqueued_monotonic=self._monotonic(),
+                )
+            )
             return QueueEnqueueOk(size=len(queue))
 
     async def dequeue(
@@ -199,19 +215,19 @@ class ExternalInputQueue:
             return
 
     def _prune_expired_locked(self, queue: deque[QueuedInput]) -> None:
-        cutoff = self._now()
+        cutoff = self._monotonic()
         # deque has no dropwhile; pop from left while head is expired.
         # Note: prune only the head end (FIFO order means expired heads are old);
         # a middle entry can only become expired while waiting behind a non-expired
         # head, which cannot happen because we always check the head first.
         while queue:
-            if cutoff.timestamp() - queue[0].enqueued_at.timestamp() > self._ttl_sec:
+            if cutoff - queue[0].enqueued_monotonic > self._ttl_sec:
                 queue.popleft()
                 continue
             break
 
     def _is_expired(self, entry: QueuedInput) -> bool:
-        return self._now().timestamp() - entry.enqueued_at.timestamp() > self._ttl_sec
+        return self._monotonic() - entry.enqueued_monotonic > self._ttl_sec
 
     def _maybe_drop_empty(self, session_id: str) -> None:
         queue = self._queues.get(session_id)
