@@ -88,6 +88,7 @@ class TaskService:
         self._structured_session_resolver = StructuredSessionResolver(
             session_service=session_service,
             task_store=task_store,
+            capabilities_resolver=cli_factory.capabilities,
             session_state_reader=resolved_session_state_reader,
             structured_session_store=structured_session_store,
         )
@@ -98,12 +99,14 @@ class TaskService:
             structured_session_store=structured_session_store,
             hook_socket_server=hook_socket_server,
             session_resolver=self._structured_session_resolver,
+            capabilities_resolver=cli_factory.capabilities,
         )
         self._permission_service = PermissionService(
             session_service=session_service,
             structured_session_store=structured_session_store,
             hook_socket_server=hook_socket_server,
             session_resolver=self._structured_session_resolver,
+            capabilities_resolver=cli_factory.capabilities,
             permission_lock_ttl_sec=settings.effective_permission_lock_ttl_sec,
             lock_cleanup_interval_sec=settings.lock_cleanup_interval_sec,
             lock_cleanup_batch_size=settings.lock_cleanup_batch_size,
@@ -112,6 +115,7 @@ class TaskService:
         self._terminal_session_service = TerminalSessionService(
             settings=settings,
             session_service=session_service,
+            capabilities_resolver=cli_factory.capabilities,
             terminal_runtime=resolved_terminal_runtime,
             clear_user_questions=self._user_question_service.clear_user,
             auto_approve_service=auto_approve_service,

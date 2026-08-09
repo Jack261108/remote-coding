@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import timedelta
 
 from app.adapters.storage.memory import MemoryTaskStore
-from app.domain.protocols import SessionStateReaderProtocol
+from app.domain.protocols import AdapterCapabilities, SessionStateReaderProtocol
 from app.domain.session_models import SessionState, is_claude_session_id
 from app.services.session_lookup_service import SessionLookupService, _same_workdir
 from app.services.session_notifier import SessionNotifier
@@ -21,6 +22,7 @@ class StructuredSessionResolver:
         *,
         session_service: SessionService,
         task_store: MemoryTaskStore,
+        capabilities_resolver: Callable[[str], AdapterCapabilities],
         session_state_reader: SessionStateReaderProtocol | None = None,
         lookup: SessionLookupService | None = None,
         tracker: StructuredReplyTracker | None = None,
@@ -30,6 +32,7 @@ class StructuredSessionResolver:
     ) -> None:
         self._session_service = session_service
         self._task_store = task_store
+        self._capabilities_resolver = capabilities_resolver
         self._session_state_reader = session_state_reader
 
         # If new-style dependencies are provided, use them directly.

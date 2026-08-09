@@ -26,8 +26,14 @@ class OrphanedTerminalInfo:
 class UserSessionContextService:
     """Manages user-level session context (provider, workdir, terminal_mode)."""
 
-    def __init__(self, store: SessionContextStore) -> None:
+    def __init__(
+        self,
+        store: SessionContextStore,
+        *,
+        claude_session_capable_providers: frozenset[str] = frozenset({"claude_code"}),
+    ) -> None:
         self._store = store
+        self._claude_session_capable_providers = claude_session_capable_providers
         self._terminal_locks = RefCountedLockRegistry(
             ttl_sec=300,  # 5 minutes
             cleanup_interval_sec=60,  # 1 minute

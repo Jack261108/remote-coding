@@ -14,6 +14,7 @@ def make_terminal_service(tmp_path: Path, *, claude_tmux_mode: bool = True):
     service = TerminalSessionService(
         settings=make_settings(tmp_path, claude_tmux_mode=claude_tmux_mode),
         session_service=session_service,
+        capabilities_resolver=factory.capabilities,
         cli_factory=factory,
         clear_user_questions=cleared_users.append,
     )

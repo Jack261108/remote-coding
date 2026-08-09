@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.domain.protocols import (
+    AdapterCapabilities,
     ClaudeTerminalRuntimeProtocol,
     ClaudeUserQuestionTransportProtocol,
     ExternalClaudeUserQuestionTransportProtocol,
@@ -63,6 +65,7 @@ class UserQuestionService:
         structured_session_store: SessionStore | None,
         hook_socket_server: HookSocketServer | None,
         session_resolver: StructuredSessionResolver,
+        capabilities_resolver: Callable[[str], AdapterCapabilities],
     ) -> None:
         self._session_service = session_service
         self._terminal_runtime = terminal_runtime
@@ -70,6 +73,7 @@ class UserQuestionService:
         self._structured_session_store = structured_session_store
         self._hook_socket_server = hook_socket_server
         self._session_resolver = session_resolver
+        self._capabilities_resolver = capabilities_resolver
         self._user_question_drafts: dict[int, _UserQuestionDraft] = {}
         self._completed_user_question_tool_use_ids_by_user: dict[int, set[str]] = {}
         self._user_question_locks: dict[int, asyncio.Lock] = {}

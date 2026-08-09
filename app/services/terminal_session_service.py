@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import SessionContext
-from app.domain.protocols import ClaudeTerminalRuntimeProtocol
+from app.domain.protocols import AdapterCapabilities, ClaudeTerminalRuntimeProtocol
 from app.services.auto_approve_service import AutoApproveService
 from app.services.session_service import SessionService
 
@@ -28,12 +28,14 @@ class TerminalSessionService:
         settings: Settings,
         session_service: SessionService,
         clear_user_questions: Callable[[int], None],
+        capabilities_resolver: Callable[[str], AdapterCapabilities],
         terminal_runtime: ClaudeTerminalRuntimeProtocol | None = None,
         cli_factory: ClaudeTerminalRuntimeProtocol | None = None,
         auto_approve_service: AutoApproveService | None = None,
     ) -> None:
         self._settings = settings
         self._session_service = session_service
+        self._capabilities_resolver = capabilities_resolver
         resolved_terminal_runtime = terminal_runtime or cli_factory
         if resolved_terminal_runtime is None:
             raise ValueError("terminal_runtime is required")
