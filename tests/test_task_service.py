@@ -46,7 +46,7 @@ async def test_task_success(tmp_path: Path, caplog: pytest.LogCaptureFixture) ->
         settings=make_settings(tmp_path),
         task_store=MemoryTaskStore(),
         session_service=make_file_backed_session_service(tmp_path),
-        cli_factory=StubFactory(adapter),
+        cli_factory=StubFactory(adapter, claude_terminal_active=False),
         semaphore=asyncio.Semaphore(2),
     )
 

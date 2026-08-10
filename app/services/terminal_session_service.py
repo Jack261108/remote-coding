@@ -80,7 +80,11 @@ class TerminalSessionService:
 
     async def resolve_for_task(self, *, user_id: int, provider: str, workdir: str) -> TaskTerminalContext:
         caps = self._capabilities_resolver(provider)
-        terminal_mode = caps.persistent_terminal and self._settings.claude_tmux_mode
+        # persistent_terminal_active（动态能力位）已吸收原手写的
+        # settings.claude_tmux_mode 闸门：claude_code 的动态位 = tmux 后端
+        # 此刻可用，codex/gemini 恒 False，等价于原先由 caps.persistent_terminal
+        # 先短路掉 claude_tmux_mode 的真值表。
+        terminal_mode = caps.persistent_terminal_active
         session, orphaned = await self._session_service.get_or_create(
             user_id=user_id,
             provider=provider,
@@ -95,7 +99,7 @@ class TerminalSessionService:
                 user_id=orphaned.user_id,
             )
         terminal_key = session.terminal_id if session.terminal_mode else None
-        interactive = bool(terminal_key and caps.interactive_input and session.claude_chat_active and self._settings.claude_tmux_mode)
+        interactive = bool(terminal_key and caps.interactive_input and session.claude_chat_active and caps.persistent_terminal_active)
         return TaskTerminalContext(session=session, terminal_key=terminal_key, interactive=interactive)
 
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:

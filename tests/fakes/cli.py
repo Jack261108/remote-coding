@@ -59,8 +59,13 @@ class StubAdapter(BaseCLIAdapter):
 
 
 class StubFactory:
-    def __init__(self, adapter: BaseCLIAdapter) -> None:
+    def __init__(self, adapter: BaseCLIAdapter, *, claude_terminal_active: bool = True) -> None:
         self._adapters = {"claude_code": adapter, "codex": adapter, "gemini": adapter}
+        # 与真实 CLIAdapterRegistry 对齐：claude_code 的持久终端动态位反映 tmux
+        # 后端此刻可用性（生产中 = claude_tmux_mode ∧ tmux_runner 存在）。默认
+        # True 贴合多数 fixture 的 claude_tmux_mode=True；个别 tmux 关闭用例
+        # 显式传 False 让 claude 不走终端路径。codex/gemini 恒走默认 False。
+        self._claude_terminal_active = claude_terminal_active
         self._closed_terminal_key: str | None = None
         self._ensured_terminal_key: str | None = None
         self._ensured_workdir: str | None = None
@@ -103,6 +108,7 @@ class StubFactory:
             claude_resume=True,
             user_question_tui=True,
             session_state=True,
+            persistent_terminal_active=self._claude_terminal_active,
         )
 
     @property
