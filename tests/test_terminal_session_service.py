@@ -470,3 +470,61 @@ async def test_close_terminal_keeps_attached_group_when_tmux_close_fails(tmp_pat
     assert attached.claude_chat_active is True
     assert attached.claude_session_id == "claude-attached"
     assert attached.is_owner is False
+
+
+@pytest.mark.asyncio
+async def test_open_claude_resume_session_rejects_non_claude_provider(tmp_path: Path) -> None:
+    service, session_service, factory, _ = make_terminal_service(tmp_path)
+    await session_service.get_or_create(
+        user_id=1,
+        provider="codex",
+        workdir=str(tmp_path),
+        terminal_mode=False,
+        claude_chat_active=False,
+    )
+
+    opened, text = await service.open_claude_resume_session(1, session_id="claude-sess")
+    session = await session_service.get(1)
+
+    assert opened is False
+    assert "codex" in text and "不支持会话恢复" in text
+    # 门早于 _prepare_claude_session，provider 不应被静默改写为 claude_code
+    assert session is not None
+    assert session.provider == "codex"
+    assert session.terminal_mode is False
+    # _prepare_claude_session 与 ensure_resume_session 都不应被触达
+    assert factory._ensured_resume_terminal_key is None
+
+
+@pytest.mark.asyncio
+async def test_open_claude_resume_session_creates_claude_when_no_existing_session(tmp_path: Path) -> None:
+    service, session_service, factory, _ = make_terminal_service(tmp_path)
+
+    opened, _ = await service.open_claude_resume_session(1, session_id="claude-sess")
+    session = await session_service.get(1)
+
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path.resolve()))
+    assert opened is True
+    assert factory._ensured_resume_terminal_key == expected
+    assert factory._ensured_resume_session_id == "claude-sess"
+    assert session is not None
+    assert session.provider == "claude_code"
+
+
+@pytest.mark.asyncio
+async def test_open_claude_resume_session_allows_claude_provider(tmp_path: Path) -> None:
+    service, session_service, factory, _ = make_terminal_service(tmp_path)
+    await session_service.get_or_create(
+        user_id=1,
+        provider="claude_code",
+        workdir=str(tmp_path),
+        terminal_mode=False,
+        claude_chat_active=False,
+    )
+
+    opened, _ = await service.open_claude_resume_session(1, session_id="claude-sess")
+
+    expected = expected_terminal_id(user_id=1, workdir=str(tmp_path.resolve()))
+    assert opened is True
+    assert factory._ensured_resume_terminal_key == expected
+    assert factory._ensured_resume_session_id == "claude-sess"

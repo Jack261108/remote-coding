@@ -60,6 +60,9 @@ def test_capabilities_when_claude_terminal_disabled() -> None:
 
     assert registry.capabilities("codex").persistent_terminal is False
     assert registry.capabilities("gemini").persistent_terminal is False
+    # 会话恢复是 claude_code 专属能力——codex/gemini 不支持 resume。
+    assert registry.capabilities("codex").claude_resume is False
+    assert registry.capabilities("gemini").claude_resume is False
 
 
 def test_capabilities_when_claude_terminal_enabled() -> None:

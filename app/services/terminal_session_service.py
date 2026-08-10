@@ -229,6 +229,14 @@ class TerminalSessionService:
         return True, message
 
     async def open_claude_resume_session(self, user_id: int, session_id: str, *, workdir: str | None = None) -> tuple[bool, str]:
+        # 能力位门控（ AdapterCapabilities.claude_resume）：仅支持会话恢复的
+        # provider 才能进入 resume 路径。必须早于 _prepare_claude_session，否则
+        # 后者会把当前 provider 硬改写为 claude_code，静默污染 codex/gemini 等
+        # 用户的会话 provider。
+        existing = await self._session_service.get(user_id)
+        resume_provider = existing.provider if existing is not None else "claude_code"
+        if not self._capabilities_resolver(resume_provider).claude_resume:
+            return False, f"{resume_provider} 不支持会话恢复"
         result = await self._prepare_claude_session(user_id, workdir)
         if isinstance(result, str):
             return False, result

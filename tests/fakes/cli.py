@@ -66,6 +66,9 @@ class StubFactory:
         self._ensured_workdir: str | None = None
         self._ensured_interactive_terminal_key: str | None = None
         self._ensured_interactive_workdir: str | None = None
+        self._ensured_resume_terminal_key: str | None = None
+        self._ensured_resume_workdir: str | None = None
+        self._ensured_resume_session_id: str | None = None
         self._revealed_terminal_key: str | None = None
         self._interactive_inputs: list[tuple[str, str, str]] = []
         self._user_question_option_actions: list[tuple[str, str, int, bool]] = []
