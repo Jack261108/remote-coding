@@ -929,6 +929,8 @@ class HookHandlingMixin(AppContainerBase):
 
     async def _stop_background_tasks(self) -> None:
         await self._background_tasks.cancel_all()
+        await self._upload_background_tasks.cancel_all()
+        await self._stream_background_tasks.cancel_all()
 
     async def _notify_bound_external_event(self, event: HookEvent, user_id: int) -> None:
         """Send push notifications for bound external session events."""

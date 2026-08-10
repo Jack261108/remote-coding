@@ -179,6 +179,8 @@ class Settings(BaseSettings):
     )
     upload_expiry_hours: int = Field(24, alias="UPLOAD_EXPIRY_HOURS")
     upload_cleanup_interval_min: int = Field(60, alias="UPLOAD_CLEANUP_INTERVAL_MIN")
+    # upload 串行处理锁的条目 TTL——上传队列 drain 按用户串行化，空闲后回收
+    upload_processing_lock_ttl_sec: int = Field(300, alias="UPLOAD_PROCESSING_LOCK_TTL_SEC")
 
     # External session settings
     external_session_stale_timeout_sec: float = Field(600.0, alias="EXTERNAL_SESSION_STALE_TIMEOUT_SEC")

@@ -26,6 +26,7 @@ from app.domain.session_models import (
     ToolStatus,
 )
 from app.domain.user_question_models import ExternalTmuxQuestionTarget, UserQuestionOption, UserQuestionPrompt
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.external_user_question_state import ExternalUserQuestionState, PendingExternalUserQuestion
 from app.services.session_service import SessionService
 from app.services.session_store import SessionStore
@@ -104,6 +105,11 @@ def _tmux_runner_with_session_store(tmp_path) -> TmuxRunner:
 
 def _session_service(tmp_path) -> SessionService:
     return SessionService(FileSessionContextStore(FileSessionStore(str(tmp_path))))
+
+
+@pytest.fixture
+def stream_background_tasks() -> BackgroundTaskRegistry:
+    return BackgroundTaskRegistry(label="stream")
 
 
 def test_is_accessible_message_rejects_inaccessible_message() -> None:
@@ -921,7 +927,7 @@ async def test_user_question_callback_handler_toggles_multi_select_and_submits(t
 
 @pytest.mark.asyncio
 async def test_router_text_chat_answers_pending_user_question_instead_of_creating_new_task(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
 ) -> None:
     tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
@@ -974,7 +980,12 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
     run_mock = AsyncMock()
     monkeypatch.setattr("app.bot.router.run_prompt_and_stream", run_mock)
 
-    router = create_router(settings=make_settings(tmp_path, claude_tmux_mode=True), task_service=service, session_service=session_service)
+    router = create_router(
+        settings=make_settings(tmp_path, claude_tmux_mode=True),
+        task_service=service,
+        session_service=session_service,
+        stream_background_tasks=stream_background_tasks,
+    )
     text_handler = _find_handler_by_name(router, "command_claude_chat_text")
     assert text_handler is not None, "command_claude_chat_text handler not found"
     message = DummyMessage("直接删除")
@@ -988,7 +999,9 @@ async def test_router_text_chat_answers_pending_user_question_instead_of_creatin
 
 
 @pytest.mark.asyncio
-async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_text_chat_awaits_background_stream_task(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     tmux_runner = _tmux_runner_with_session_store(tmp_path)
     factory = StubFactory(StubAdapter(events=[]))
     factory._tmux_runner = tmux_runner
@@ -1029,6 +1042,7 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
         task_service=service,
         session_service=session_service,
         status_display=status_display,
+        stream_background_tasks=stream_background_tasks,
     )
     text_handler = _find_handler_by_name(router, "command_claude_chat_text")
     assert text_handler is not None, "command_claude_chat_text handler not found"
@@ -1044,7 +1058,9 @@ async def test_router_text_chat_awaits_background_stream_task(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_router_clcmd_callback_passes_permission_gateway_to_stream(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_clcmd_callback_passes_permission_gateway_to_stream(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     session_service = _session_service(tmp_path)
     service = SimpleNamespace(available_providers=lambda: ["claude_code"])
     session, _ = await session_service.switch(
@@ -1063,6 +1079,7 @@ async def test_router_clcmd_callback_passes_permission_gateway_to_stream(tmp_pat
         task_service=service,
         session_service=session_service,
         permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
     )
     callback_handler = _find_callback_handler_by_name(router, "handle_cmd_callback")
     assert callback_handler is not None, "handle_cmd_callback handler not found"

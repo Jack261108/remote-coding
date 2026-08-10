@@ -81,7 +81,10 @@ class AppContainerBase:
     _session_event_locks: RefCountedLockRegistry
     _external_reply_delivery_locks: RefCountedLockRegistry
     _input_locks: RefCountedLockRegistry
+    _upload_processing_locks: RefCountedLockRegistry
     _background_tasks: BackgroundTaskRegistry
+    _upload_background_tasks: BackgroundTaskRegistry
+    _stream_background_tasks: BackgroundTaskRegistry
     _started: bool
     _stopping: bool
     message_sender: AiogramMessageSender

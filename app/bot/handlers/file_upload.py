@@ -17,8 +17,6 @@ from app.services.task_service import TaskService
 from app.services.upload_queue import UploadQueueManager
 
 logger = logging.getLogger(__name__)
-_ACTIVE_UPLOAD_TASKS = BackgroundTaskRegistry(label="upload")
-_UPLOAD_PROCESSING_LOCKS = RefCountedLockRegistry(ttl_sec=300, cleanup_interval_sec=60, cleanup_batch_size=50)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -164,12 +162,13 @@ async def process_pending_uploads(
     file_receiver: FileReceiverService,
     session_service: SessionService,
     upload_queue: UploadQueueManager,
+    upload_processing_locks: RefCountedLockRegistry,
     user_id: int,
     task_service: TaskService | None = None,
     completed_task_id: str | None = None,
 ) -> None:
     """Process any queued uploads for a user after their task completes."""
-    async with _UPLOAD_PROCESSING_LOCKS.lock(str(user_id)):
+    async with upload_processing_locks.lock(str(user_id)):
         if task_service is not None and await _user_has_running_task(task_service, user_id, exclude_task_id=completed_task_id):
             logger.info(
                 "queued upload processing deferred because another task is active",
@@ -198,6 +197,7 @@ async def flush_pending_uploads_for_task_start(
     file_receiver: FileReceiverService,
     session_service: SessionService,
     upload_queue: UploadQueueManager,
+    upload_processing_locks: RefCountedLockRegistry,
     user_id: int,
     task_service: TaskService | None = None,
 ) -> None:
@@ -207,6 +207,7 @@ async def flush_pending_uploads_for_task_start(
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_processing_locks=upload_processing_locks,
         user_id=user_id,
         task_service=task_service,
     )
@@ -218,17 +219,20 @@ def schedule_pending_upload_processing(
     file_receiver: FileReceiverService,
     session_service: SessionService,
     upload_queue: UploadQueueManager,
+    upload_background_tasks: BackgroundTaskRegistry,
+    upload_processing_locks: RefCountedLockRegistry,
     user_id: int,
     task_service: TaskService | None = None,
     completed_task_id: str | None = None,
 ) -> asyncio.Task[None]:
     """Schedule queued uploads to be processed in the background."""
-    return _ACTIVE_UPLOAD_TASKS.spawn(
+    return upload_background_tasks.spawn(
         process_pending_uploads(
             message,
             file_receiver=file_receiver,
             session_service=session_service,
             upload_queue=upload_queue,
+            upload_processing_locks=upload_processing_locks,
             user_id=user_id,
             task_service=task_service,
             completed_task_id=completed_task_id,

@@ -12,13 +12,14 @@ from aiogram.types import InlineKeyboardMarkup
 
 from app.bot.handlers import command_run as command_run_module
 from app.bot.handlers import run_event_streamer as run_event_streamer_module
-from app.bot.handlers.command_run import _ABANDONED_STREAM_TASKS, _ACTIVE_STREAM_TASKS, run_prompt_and_stream
+from app.bot.handlers.command_run import _ABANDONED_STREAM_TASKS, run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.bot.presenters.permission_message_builder import PermissionMessageBuilder, PermissionPromptInput
 from app.bot.presenters.structured_reply_presenter import build_tool_progress_message, build_user_question_prompt
 from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, PendingPermission, SessionPhase, SubagentToolCall, ToolCallRecord, ToolStatus
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.message_sender import Button, Keyboard
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 from app.services.permission_gateway import RegisterForButtonOk
@@ -134,12 +135,18 @@ class DummyTaskService:
             yield event
 
 
+@pytest.fixture
+def stream_background_tasks() -> BackgroundTaskRegistry:
+    return BackgroundTaskRegistry(label="stream")
+
+
 async def _run_and_wait(
     *,
     message: DummyMessage,
     task_service: DummyTaskService,
     wait_sec: float = 0.05,
     permission_gateway: object | None = None,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     task = await run_prompt_and_stream(
         message=message,
@@ -150,6 +157,7 @@ async def _run_and_wait(
         prompt="hello",
         workdir="/tmp",
         permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
     )
     await asyncio.sleep(wait_sec)
     if task is not None:
@@ -157,7 +165,7 @@ async def _run_and_wait(
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_waits_for_pending_upload_finalizer_before_create_task() -> None:
+async def test_run_prompt_waits_for_pending_upload_finalizer_before_create_task(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -185,6 +193,7 @@ async def test_run_prompt_waits_for_pending_upload_finalizer_before_create_task(
             prompt="hello",
             workdir="/tmp",
             pending_upload_finalizer=finalizer,
+            stream_background_tasks=stream_background_tasks,
         )
     )
     await asyncio.wait_for(finalizer_started.wait(), timeout=1)
@@ -246,7 +255,9 @@ class FakePermissionGateway:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_pump_silences_missing_structured_logs() -> None:
+async def test_run_prompt_and_stream_interactive_pump_silences_missing_structured_logs(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -258,7 +269,7 @@ async def test_run_prompt_and_stream_interactive_pump_silences_missing_structure
     )
     task_service.get_structured_session = AsyncMock(return_value=None)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12, stream_background_tasks=stream_background_tasks)
 
     assert task_service.get_structured_session.await_count >= 2
     initial_call = task_service.get_structured_session.await_args_list[0]
@@ -288,7 +299,7 @@ def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_keeps_background_task_referenced_until_done() -> None:
+async def test_run_prompt_and_stream_keeps_background_task_referenced_until_done(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -307,16 +318,19 @@ async def test_run_prompt_and_stream_keeps_background_task_referenced_until_done
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
-    assert task in _ACTIVE_STREAM_TASKS
+    assert task in stream_background_tasks
     await task
-    assert task not in _ACTIVE_STREAM_TASKS
+    assert task not in stream_background_tasks
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_watchdog_cancels_stuck_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_watchdog_cancels_stuck_stream(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
@@ -356,13 +370,14 @@ async def test_run_prompt_and_stream_watchdog_cancels_stuck_stream(monkeypatch: 
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
     try:
         await asyncio.sleep(0.2)
         assert task.done()
-        assert task not in _ACTIVE_STREAM_TASKS
+        assert task not in stream_background_tasks
         assert task_service.cancel_called is True
         assert task_service.timeout_marked is True
         assert task_service._status.status == TaskStatus.TIMEOUT
@@ -374,7 +389,9 @@ async def test_run_prompt_and_stream_watchdog_cancels_stuck_stream(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_watchdog_timeout_schedules_queued_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_watchdog_timeout_schedules_queued_uploads(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
@@ -416,6 +433,7 @@ async def test_run_prompt_and_stream_watchdog_timeout_schedules_queued_uploads(m
         prompt="hello",
         workdir="/tmp",
         queued_upload_scheduler=queued_upload_scheduler,
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
@@ -431,7 +449,9 @@ async def test_run_prompt_and_stream_watchdog_timeout_schedules_queued_uploads(m
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_watchdog_ignores_late_exit_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_watchdog_ignores_late_exit_after_timeout(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
@@ -473,6 +493,7 @@ async def test_run_prompt_and_stream_watchdog_ignores_late_exit_after_timeout(mo
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
@@ -490,7 +511,9 @@ async def test_run_prompt_and_stream_watchdog_ignores_late_exit_after_timeout(mo
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_marks_timeout_before_cancel_race(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_marks_timeout_before_cancel_race(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
@@ -535,6 +558,7 @@ async def test_run_prompt_and_stream_marks_timeout_before_cancel_race(monkeypatc
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
@@ -552,6 +576,7 @@ async def test_run_prompt_and_stream_marks_timeout_before_cancel_race(monkeypatc
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_does_not_abandon_terminal_event_when_timeout_mark_loses_race(
     monkeypatch: pytest.MonkeyPatch,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
@@ -599,6 +624,7 @@ async def test_run_prompt_and_stream_does_not_abandon_terminal_event_when_timeou
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
@@ -618,7 +644,9 @@ async def test_run_prompt_and_stream_does_not_abandon_terminal_event_when_timeou
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_watchdog_allows_interactive_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_watchdog_allows_interactive_progress(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.03, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
@@ -646,6 +674,7 @@ async def test_run_prompt_and_stream_watchdog_allows_interactive_progress(monkey
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
@@ -657,7 +686,9 @@ async def test_run_prompt_and_stream_watchdog_allows_interactive_progress(monkey
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_watchdog_allows_structured_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_watchdog_allows_structured_progress(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_BUFFER_SEC", 0.03, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
@@ -691,6 +722,7 @@ async def test_run_prompt_and_stream_watchdog_allows_structured_progress(monkeyp
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
@@ -702,7 +734,7 @@ async def test_run_prompt_and_stream_watchdog_allows_structured_progress(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_reports_create_errors() -> None:
+async def test_run_prompt_and_stream_reports_create_errors(stream_background_tasks: BackgroundTaskRegistry) -> None:
     class FailingTaskService(DummyTaskService):
         async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
             raise RuntimeError("boom")
@@ -717,6 +749,7 @@ async def test_run_prompt_and_stream_reports_create_errors() -> None:
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is None
@@ -725,7 +758,9 @@ async def test_run_prompt_and_stream_reports_create_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     captured: dict[str, object] = {}
     original_init = command_run_module.RunEventStreamer.__init__
 
@@ -759,6 +794,7 @@ async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypa
         structured_reply_pump_interval_sec=0.77,
         spinner_initial_delay_sec=0.88,
         spinner_interval_sec=0.99,
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
@@ -776,7 +812,9 @@ async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_watchdog_cancels_stuck_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_watchdog_cancels_stuck_finalization(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CANCEL_GRACE_SEC", 0.01, raising=False)
@@ -810,13 +848,14 @@ async def test_run_prompt_and_stream_watchdog_cancels_stuck_finalization(monkeyp
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
     try:
         await asyncio.sleep(0.1)
         assert task.done()
-        assert task not in _ACTIVE_STREAM_TASKS
+        assert task not in stream_background_tasks
         assert cleanup_started.is_set()
     finally:
         release_cleanup.set()
@@ -829,6 +868,7 @@ async def test_run_prompt_and_stream_watchdog_cancels_stuck_finalization(monkeyp
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_tracks_abandoned_stream_and_force_cleans_interactive_pump(
     monkeypatch: pytest.MonkeyPatch,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
@@ -868,13 +908,14 @@ async def test_run_prompt_and_stream_tracks_abandoned_stream_and_force_cleans_in
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
     try:
         await asyncio.sleep(0.1)
         assert task.done()
-        assert task not in _ACTIVE_STREAM_TASKS
+        assert task not in stream_background_tasks
         assert inner_stream_task is not None
         assert inner_stream_task in _ABANDONED_STREAM_TASKS
         assert pump_task is not None
@@ -896,6 +937,7 @@ async def test_run_prompt_and_stream_tracks_abandoned_stream_and_force_cleans_in
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_force_cleanup_does_not_block_on_uncancellable_interactive_pump(
     monkeypatch: pytest.MonkeyPatch,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
@@ -940,13 +982,14 @@ async def test_run_prompt_and_stream_force_cleanup_does_not_block_on_uncancellab
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
     try:
         await asyncio.sleep(0.1)
         assert task.done()
-        assert task not in _ACTIVE_STREAM_TASKS
+        assert task not in stream_background_tasks
         assert pump_task is not None
         assert not pump_task.done()
     finally:
@@ -963,6 +1006,7 @@ async def test_run_prompt_and_stream_force_cleanup_does_not_block_on_uncancellab
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_real_finally_tracks_uncancellable_interactive_pump(
     monkeypatch: pytest.MonkeyPatch,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.02, raising=False)
@@ -999,6 +1043,7 @@ async def test_run_prompt_and_stream_real_finally_tracks_uncancellable_interacti
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
@@ -1020,6 +1065,7 @@ async def test_run_prompt_and_stream_real_finally_tracks_uncancellable_interacti
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_schedules_queued_uploads_before_interactive_finalization_timeout(
     monkeypatch: pytest.MonkeyPatch,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
@@ -1047,13 +1093,14 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_before_interactive
         prompt="hello",
         workdir="/tmp",
         queued_upload_scheduler=queued_upload_scheduler,
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
     try:
         await asyncio.sleep(0.1)
         assert task.done()
-        assert task not in _ACTIVE_STREAM_TASKS
+        assert task not in stream_background_tasks
         assert upload_scheduled is True
     finally:
         if not task.done():
@@ -1063,7 +1110,9 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_before_interactive
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_schedules_queued_uploads_when_terminal_flush_is_canceled(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_schedules_queued_uploads_when_terminal_flush_is_canceled(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_FINALIZE_GRACE_SEC", 0.01, raising=False)
     upload_scheduled = False
@@ -1095,13 +1144,14 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_when_terminal_flus
         prompt="hello",
         workdir="/tmp",
         queued_upload_scheduler=queued_upload_scheduler,
+        stream_background_tasks=stream_background_tasks,
     )
 
     assert task is not None
     try:
         await asyncio.sleep(0.1)
         assert task.done()
-        assert task not in _ACTIVE_STREAM_TASKS
+        assert task not in stream_background_tasks
         assert upload_scheduled is True
     finally:
         if not task.done():
@@ -1111,7 +1161,7 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_when_terminal_flus
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_reports_started_output_and_success() -> None:
+async def test_run_prompt_and_stream_reports_started_output_and_success(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -1122,7 +1172,7 @@ async def test_run_prompt_and_stream_reports_started_output_and_success() -> Non
         _status(task_status=TaskStatus.SUCCEEDED),
     )
 
-    await _run_and_wait(message=message, task_service=task_service)
+    await _run_and_wait(message=message, task_service=task_service, stream_background_tasks=stream_background_tasks)
 
     assert message.answers[0] == "⏳ 处理中… [t1]"
     lifecycle = message.sent_messages[0]
@@ -1131,7 +1181,9 @@ async def test_run_prompt_and_stream_reports_started_output_and_success() -> Non
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_sends_started_message_when_lifecycle_edit_fails() -> None:
+async def test_run_prompt_and_stream_sends_started_message_when_lifecycle_edit_fails(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage(fail_first_edit=True)
     task_service = DummyTaskService(
         [
@@ -1141,7 +1193,7 @@ async def test_run_prompt_and_stream_sends_started_message_when_lifecycle_edit_f
         _status(task_status=TaskStatus.SUCCEEDED),
     )
 
-    await _run_and_wait(message=message, task_service=task_service)
+    await _run_and_wait(message=message, task_service=task_service, stream_background_tasks=stream_background_tasks)
 
     # When first edit fails, started message is sent as answer, but completion still edits lifecycle
     assert "⏳ 处理中… [t1]" in message.answers
@@ -1149,7 +1201,7 @@ async def test_run_prompt_and_stream_sends_started_message_when_lifecycle_edit_f
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
+async def test_run_prompt_and_stream_updates_tool_message_to_success(stream_background_tasks: BackgroundTaskRegistry) -> None:
     running_tool = ToolCallRecord(
         tool_use_id="tool-1",
         name="Bash",
@@ -1180,7 +1232,7 @@ async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
         event_delays=[0.0, 0.16],
     )
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25, stream_background_tasks=stream_background_tasks)
 
     tool_messages = [
         sent for sent in message.sent_messages if "工具: Bash" in sent.text or any("工具: Bash" in edit for edit in sent.edits)
@@ -1191,7 +1243,7 @@ async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_aggregates_top_level_file_tools() -> None:
+async def test_run_prompt_and_stream_aggregates_top_level_file_tools(stream_background_tasks: BackgroundTaskRegistry) -> None:
     grep_tool = ToolCallRecord(
         tool_use_id="grep-1",
         name="Grep",
@@ -1240,7 +1292,7 @@ async def test_run_prompt_and_stream_aggregates_top_level_file_tools() -> None:
         event_delays=[0.0, 0.16],
     )
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25, stream_background_tasks=stream_background_tasks)
 
     file_tool_messages = [
         sent for sent in message.sent_messages if "文件检索" in sent.text or any("文件检索" in edit for edit in sent.edits)
@@ -1255,7 +1307,7 @@ async def test_run_prompt_and_stream_aggregates_top_level_file_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> None:
+async def test_run_prompt_and_stream_updates_subagent_aggregate_message(stream_background_tasks: BackgroundTaskRegistry) -> None:
     agent_1_running = ToolCallRecord(
         tool_use_id="agent-1",
         name="Agent",
@@ -1415,7 +1467,7 @@ async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> Non
         event_delays=[0.0, 0.24],
     )
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36, stream_background_tasks=stream_background_tasks)
 
     aggregate_messages = [sent for sent in message.sent_messages if "agents" in sent.text or any("agents" in edit for edit in sent.edits)]
     assert len(aggregate_messages) == 1
@@ -1433,7 +1485,7 @@ async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> Non
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam() -> None:
+async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam(stream_background_tasks: BackgroundTaskRegistry) -> None:
     create_1 = ToolCallRecord(
         tool_use_id="create-1",
         name="TaskCreate",
@@ -1566,7 +1618,7 @@ async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam(
         event_delays=[0.0, 0.24],
     )
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.36, stream_background_tasks=stream_background_tasks)
 
     task_list_messages = [
         sent for sent in message.sent_messages if "任务列表" in sent.text or any("任务列表" in edit for edit in sent.edits)
@@ -1585,7 +1637,7 @@ async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam(
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
+async def test_run_prompt_and_stream_strips_markers_and_marks_stderr(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -1596,7 +1648,7 @@ async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
         _status(task_status=TaskStatus.SUCCEEDED),
     )
 
-    await _run_and_wait(message=message, task_service=task_service)
+    await _run_and_wait(message=message, task_service=task_service, stream_background_tasks=stream_background_tasks)
 
     assert "TGCLI_BEGIN" not in "\n".join(message.answers)
     assert "TGCLI_DONE" not in "\n".join(message.answers)
@@ -1606,7 +1658,7 @@ async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_reports_failed_with_hint_and_truncation() -> None:
+async def test_run_prompt_and_stream_reports_failed_with_hint_and_truncation(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -1615,7 +1667,7 @@ async def test_run_prompt_and_stream_reports_failed_with_hint_and_truncation() -
         _status(task_status=TaskStatus.FAILED, truncated=True),
     )
 
-    await _run_and_wait(message=message, task_service=task_service)
+    await _run_and_wait(message=message, task_service=task_service, stream_background_tasks=stream_background_tasks)
 
     assert len(message.sent_messages) >= 1
     lifecycle = message.sent_messages[0]
@@ -1624,7 +1676,7 @@ async def test_run_prompt_and_stream_reports_failed_with_hint_and_truncation() -
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_reports_timeout() -> None:
+async def test_run_prompt_and_stream_reports_timeout(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -1633,14 +1685,14 @@ async def test_run_prompt_and_stream_reports_timeout() -> None:
         _status(task_status=TaskStatus.TIMEOUT),
     )
 
-    await _run_and_wait(message=message, task_service=task_service)
+    await _run_and_wait(message=message, task_service=task_service, stream_background_tasks=stream_background_tasks)
 
     lifecycle = message.sent_messages[0]
     assert any("⏰ 超时 [t1]" in edit for edit in lifecycle.edits)
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_reports_canceled() -> None:
+async def test_run_prompt_and_stream_reports_canceled(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -1649,14 +1701,14 @@ async def test_run_prompt_and_stream_reports_canceled() -> None:
         _status(task_status=TaskStatus.CANCELED),
     )
 
-    await _run_and_wait(message=message, task_service=task_service)
+    await _run_and_wait(message=message, task_service=task_service, stream_background_tasks=stream_background_tasks)
 
     lifecycle = message.sent_messages[0]
     assert any("🚫 已取消 [t1]" in edit for edit in lifecycle.edits)
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mode() -> None:
+async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mode(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     turns: list[ConversationTurn] = []
     task_service = DummyTaskService(
@@ -1676,7 +1728,7 @@ async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mod
         turns.append(ConversationTurn(turn_id="turn-1", role="assistant", text="\n干净正文\n", is_complete=True))
 
     updater = asyncio.create_task(append_new_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2, stream_background_tasks=stream_background_tasks)
     await updater
 
     assert "噪音" not in "\n".join(message.answers)
@@ -1685,7 +1737,7 @@ async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mod
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_does_not_ack_structured_reply_when_send_fails() -> None:
+async def test_run_prompt_and_stream_does_not_ack_structured_reply_when_send_fails(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage(fail_on_texts={"干净正文"})
     turns: list[ConversationTurn] = []
     task_service = DummyTaskService(
@@ -1705,7 +1757,7 @@ async def test_run_prompt_and_stream_does_not_ack_structured_reply_when_send_fai
         turns.append(ConversationTurn(turn_id="turn-1", role="assistant", text="\n干净正文\n", is_complete=True))
 
     updater = asyncio.create_task(append_new_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2, stream_background_tasks=stream_background_tasks)
     await updater
 
     assert "干净正文" not in "\n".join(message.answers)
@@ -1713,7 +1765,9 @@ async def test_run_prompt_and_stream_does_not_ack_structured_reply_when_send_fai
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_ignores_old_turn_and_emits_new_completed_turn() -> None:
+async def test_run_prompt_and_stream_interactive_ignores_old_turn_and_emits_new_completed_turn(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
     task_service = DummyTaskService(
@@ -1733,7 +1787,7 @@ async def test_run_prompt_and_stream_interactive_ignores_old_turn_and_emits_new_
         turns.append(ConversationTurn(turn_id="turn-new", role="assistant", text="\n新回复\n", is_complete=True))
 
     updater = asyncio.create_task(append_new_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.25, stream_background_tasks=stream_background_tasks)
     await updater
 
     assert "旧回复" not in "\n".join(message.answers)
@@ -1742,7 +1796,9 @@ async def test_run_prompt_and_stream_interactive_ignores_old_turn_and_emits_new_
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn(
+    monkeypatch: pytest.MonkeyPatch, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.01)
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n半截回复\n", is_complete=False)]
@@ -1758,7 +1814,7 @@ async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn(m
         event_delays=[0.0, 0.03, 0.08],
     )
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12, stream_background_tasks=stream_background_tasks)
 
     assert all("半截回复" not in item for item in message.answers)
     assert all("tmux 噪音" not in item for item in message.answers)
@@ -1769,7 +1825,9 @@ async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn(m
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_structured_session() -> None:
+async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_structured_session(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     task_service = DummyTaskService(
         [
@@ -1783,7 +1841,7 @@ async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_st
     )
     task_service.get_structured_session = AsyncMock(return_value=None)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.12, stream_background_tasks=stream_background_tasks)
 
     # Interactive mode always suppresses raw STDOUT to prevent duplicates
     # with the structured reply system. Only lifecycle messages are sent.
@@ -1793,7 +1851,7 @@ async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_st
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_continues_after_message_send_failure() -> None:
+async def test_run_prompt_and_stream_continues_after_message_send_failure(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage(fail_on_calls={1})
     task_service = DummyTaskService(
         [
@@ -1804,7 +1862,7 @@ async def test_run_prompt_and_stream_continues_after_message_send_failure() -> N
         _status(task_status=TaskStatus.SUCCEEDED),
     )
 
-    await _run_and_wait(message=message, task_service=task_service)
+    await _run_and_wait(message=message, task_service=task_service, stream_background_tasks=stream_background_tasks)
 
     # lifecycle_message send failed (call 1), so ⏳ never appears in answers.
     # Output and completion still get through.
@@ -1813,7 +1871,9 @@ async def test_run_prompt_and_stream_continues_after_message_send_failure() -> N
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_before_exit() -> None:
+async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_before_exit(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
     task_service = DummyTaskService(
@@ -1833,7 +1893,7 @@ async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_befo
         turns.append(ConversationTurn(turn_id="turn-late", role="assistant", text="\n迟到回复\n", is_complete=True))
 
     updater = asyncio.create_task(append_new_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.18)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.18, stream_background_tasks=stream_background_tasks)
     await updater
 
     assert "旧回复" not in "\n".join(message.answers)
@@ -1842,7 +1902,9 @@ async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_befo
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_event() -> None:
+async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_event(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     terminal_at = utc_now() + timedelta(seconds=1)
     turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
@@ -1871,7 +1933,7 @@ async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_
         )
 
     updater = asyncio.create_task(append_new_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.2, stream_background_tasks=stream_background_tasks)
     await updater
 
     assert "旧回复" not in "\n".join(message.answers)
@@ -1881,6 +1943,7 @@ async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_ignores_post_exit_unrelated_turn(
     monkeypatch: pytest.MonkeyPatch,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.15)
     monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_POLL_INTERVAL_SEC", 0.01)
@@ -1912,7 +1975,7 @@ async def test_run_prompt_and_stream_interactive_ignores_post_exit_unrelated_tur
         )
 
     updater = asyncio.create_task(append_unrelated_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.3)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.3, stream_background_tasks=stream_background_tasks)
     await updater
 
     assert "结构化回复暂不可用，已回退为原始输出。" in message.answers
@@ -1923,6 +1986,7 @@ async def test_run_prompt_and_stream_interactive_ignores_post_exit_unrelated_tur
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_edits_fallback_when_reply_arrives_after_final_poll(
     monkeypatch: pytest.MonkeyPatch,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.3)
     monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_POLL_INTERVAL_SEC", 0.01)
@@ -1954,7 +2018,7 @@ async def test_run_prompt_and_stream_interactive_edits_fallback_when_reply_arriv
         )
 
     updater = asyncio.create_task(append_new_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.45)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.45, stream_background_tasks=stream_background_tasks)
     await updater
 
     assert "结构化回复暂不可用，已回退为原始输出。" in message.answers
@@ -1966,6 +2030,7 @@ async def test_run_prompt_and_stream_interactive_edits_fallback_when_reply_arriv
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_deletes_fallback_when_delayed_reply_cannot_be_edited(
     monkeypatch: pytest.MonkeyPatch,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.3)
     monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_POLL_INTERVAL_SEC", 0.01)
@@ -1998,7 +2063,7 @@ async def test_run_prompt_and_stream_interactive_deletes_fallback_when_delayed_r
         )
 
     updater = asyncio.create_task(append_new_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.45)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.45, stream_background_tasks=stream_background_tasks)
     await updater
 
     fallback_message = message.sent_messages[1]
@@ -2010,7 +2075,9 @@ async def test_run_prompt_and_stream_interactive_deletes_fallback_when_delayed_r
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_uses_task_bound_session_after_context_drift() -> None:
+async def test_run_prompt_and_stream_interactive_uses_task_bound_session_after_context_drift(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     task_turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
     task_session = SimpleNamespace(
@@ -2053,7 +2120,7 @@ async def test_run_prompt_and_stream_interactive_uses_task_bound_session_after_c
         task_turns.append(ConversationTurn(turn_id="turn-task-new", role="assistant", text="\n任务对应回复\n", is_complete=True))
 
     updater = asyncio.create_task(drift_context_and_append_reply())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.18)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.18, stream_background_tasks=stream_background_tasks)
     await updater
 
     answers = "\n".join(message.answers)
@@ -2063,7 +2130,7 @@ async def test_run_prompt_and_stream_interactive_uses_task_bound_session_after_c
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_reports_pending_permission_once() -> None:
+async def test_run_prompt_and_stream_interactive_reports_pending_permission_once(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     permission_gateway = FakePermissionGateway()
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
@@ -2089,7 +2156,13 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, permission_gateway=permission_gateway)
+    await _run_and_wait(
+        message=message,
+        task_service=task_service,
+        wait_sec=0.14,
+        permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
+    )
 
     expected_prompt = permission_gateway.message_builder.build_permission_prompt(
         PermissionPromptInput(
@@ -2113,7 +2186,9 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_does_not_ack_permission_when_prompt_send_fails() -> None:
+async def test_run_prompt_and_stream_does_not_ack_permission_when_prompt_send_fails(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage(fail_on_texts={"请求权限"})
     permission_gateway = FakePermissionGateway()
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
@@ -2139,7 +2214,13 @@ async def test_run_prompt_and_stream_does_not_ack_permission_when_prompt_send_fa
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, permission_gateway=permission_gateway)
+    await _run_and_wait(
+        message=message,
+        task_service=task_service,
+        wait_sec=0.14,
+        permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
+    )
 
     expected_prompt = permission_gateway.message_builder.build_permission_prompt(
         PermissionPromptInput(
@@ -2155,7 +2236,7 @@ async def test_run_prompt_and_stream_does_not_ack_permission_when_prompt_send_fa
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_reports_user_question_once() -> None:
+async def test_run_prompt_and_stream_interactive_reports_user_question_once(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已收到问题\n", is_complete=True)]
     empty_session = SimpleNamespace(
@@ -2212,7 +2293,7 @@ async def test_run_prompt_and_stream_interactive_reports_user_question_once() ->
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, stream_background_tasks=stream_background_tasks)
 
     expected_prompt = build_user_question_prompt(
         SimpleNamespace(
@@ -2242,7 +2323,9 @@ async def test_run_prompt_and_stream_interactive_reports_user_question_once() ->
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_does_not_ack_user_question_when_prompt_send_fails() -> None:
+async def test_run_prompt_and_stream_does_not_ack_user_question_when_prompt_send_fails(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage(fail_on_texts={"这两条误写到项目级的记忆"})
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已收到问题\n", is_complete=True)]
     empty_session = SimpleNamespace(
@@ -2299,14 +2382,16 @@ async def test_run_prompt_and_stream_does_not_ack_user_question_when_prompt_send
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, stream_background_tasks=stream_background_tasks)
 
     assert all("这两条误写到项目级的记忆" not in answer for answer in message.answers)
     assert task_service._structured_user_question_key is None
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_reports_multi_select_user_question_with_submit_button() -> None:
+async def test_run_prompt_and_stream_interactive_reports_multi_select_user_question_with_submit_button(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已收到问题\n", is_complete=True)]
     empty_session = SimpleNamespace(
@@ -2363,7 +2448,7 @@ async def test_run_prompt_and_stream_interactive_reports_multi_select_user_quest
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, stream_background_tasks=stream_background_tasks)
 
     question_index = message.answers.index(
         build_user_question_prompt(
@@ -2397,7 +2482,9 @@ async def test_run_prompt_and_stream_interactive_reports_multi_select_user_quest
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_reports_only_first_question_for_multi_question_prompt() -> None:
+async def test_run_prompt_and_stream_interactive_reports_only_first_question_for_multi_question_prompt(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已收到问题\n", is_complete=True)]
     empty_session = SimpleNamespace(
@@ -2463,7 +2550,7 @@ async def test_run_prompt_and_stream_interactive_reports_only_first_question_for
 
     task_service.get_structured_session = AsyncMock(side_effect=get_structured_session)
 
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, stream_background_tasks=stream_background_tasks)
 
     first_prompt = build_user_question_prompt(
         SimpleNamespace(
@@ -2512,7 +2599,7 @@ async def test_run_prompt_and_stream_interactive_reports_only_first_question_for
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_interactive_emits_progress_update_immediately() -> None:
+async def test_run_prompt_and_stream_interactive_emits_progress_update_immediately(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     turns: list[ConversationTurn] = []
     tool_calls: dict[str, ToolCallRecord] = {}
@@ -2551,7 +2638,7 @@ async def test_run_prompt_and_stream_interactive_emits_progress_update_immediate
         current_session.phase = SessionPhase.WAITING_FOR_INPUT
 
     updater = asyncio.create_task(publish_progress())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.24)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.24, stream_background_tasks=stream_background_tasks)
     await updater
 
     progress_message = build_tool_progress_message(tool_name="Bash", tool_input={"command": "pytest -q"})
@@ -2569,7 +2656,7 @@ def test_render_markdownish_to_telegram_html_supports_bold_and_code_block() -> N
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_renders_structured_reply_as_html() -> None:
+async def test_run_prompt_and_stream_renders_structured_reply_as_html(stream_background_tasks: BackgroundTaskRegistry) -> None:
     message = DummyMessage()
     turns: list[ConversationTurn] = []
     task_service = DummyTaskService(
@@ -2595,7 +2682,7 @@ async def test_run_prompt_and_stream_renders_structured_reply_as_html() -> None:
         )
 
     updater = asyncio.create_task(append_markdown_turn())
-    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14)
+    await _run_and_wait(message=message, task_service=task_service, wait_sec=0.14, stream_background_tasks=stream_background_tasks)
     await updater
 
     assert "<b>你好</b>" in message.answers[1]
@@ -2604,7 +2691,9 @@ async def test_run_prompt_and_stream_renders_structured_reply_as_html() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_splits_long_code_block_reply_into_valid_html_chunks() -> None:
+async def test_run_prompt_and_stream_splits_long_code_block_reply_into_valid_html_chunks(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     turns: list[ConversationTurn] = []
     task_service = DummyTaskService(
@@ -2638,6 +2727,7 @@ async def test_run_prompt_and_stream_splits_long_code_block_reply_into_valid_htm
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
     await asyncio.sleep(0.14)
     if task is not None:
@@ -2654,7 +2744,9 @@ async def test_run_prompt_and_stream_splits_long_code_block_reply_into_valid_htm
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_and_stream_does_not_truncate_long_structured_reply_preview() -> None:
+async def test_run_prompt_and_stream_does_not_truncate_long_structured_reply_preview(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage()
     long_reply = "A" * 1905
     turns: list[ConversationTurn] = []
@@ -2689,6 +2781,7 @@ async def test_run_prompt_and_stream_does_not_truncate_long_structured_reply_pre
         provider="claude_code",
         prompt="hello",
         workdir="/tmp",
+        stream_background_tasks=stream_background_tasks,
     )
     await asyncio.sleep(0.14)
     if task is not None:

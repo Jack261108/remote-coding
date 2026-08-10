@@ -433,6 +433,20 @@ class AppContainer(
             cleanup_batch_size=settings.lock_cleanup_batch_size,
         )
         self._background_tasks = BackgroundTaskRegistry(label="bootstrap")
+        # upload 队列 drain 的后台 task 与按用户串行处理锁——由组合根构造并
+        # 注入 file_upload handler，停机时随 _stop_background_tasks 一并 cancel。
+        # 此前这两者在 handler 模块顶层创建，脱离容器停机序列（CLAUDE.md 禁止
+        # handler 直接创建后台任务），现回归组合根装配。
+        self._upload_background_tasks = BackgroundTaskRegistry(label="upload")
+        self._upload_processing_locks = RefCountedLockRegistry(
+            ttl_sec=settings.upload_processing_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
+        # /run、Claude 聊天自由文本、/cmds 回调的后台 watchdog task——此前是
+        # command_run 模块顶层的裸 set，停机时不会被 cancel_all，已脱管。现由
+        # 组合根构造并注入，停机时一并 cancel。
+        self._stream_background_tasks = BackgroundTaskRegistry(label="stream")
         self.external_reply_delivery_pump = ExternalReplyDeliveryPump(
             session_store=self.structured_session_store,
             binding_store=self.external_binding_store,
@@ -630,6 +644,9 @@ class AppContainer(
             registry_service=self.session_registry,
             file_receiver=self.file_receiver,
             upload_queue=self.upload_queue,
+            upload_background_tasks=self._upload_background_tasks,
+            upload_processing_locks=self._upload_processing_locks,
+            stream_background_tasks=self._stream_background_tasks,
             result_exporter=self.result_exporter,
             diff_generator=self.diff_generator,
             status_display=self.status_display,

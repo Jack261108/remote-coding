@@ -12,6 +12,8 @@ import pytest
 from app.bot.handlers.file_upload import flush_pending_uploads_for_task_start, process_pending_uploads, schedule_pending_upload_processing
 from app.domain.file_models import FileUploadResult, FileValidationError
 from app.domain.models import TaskStatus
+from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.upload_queue import UploadQueueManager
 from tests.fakes.telegram import DummyMessage
 
@@ -33,11 +35,22 @@ def session_service(tmp_path: Path) -> AsyncMock:
     return svc
 
 
+@pytest.fixture
+def upload_processing_locks() -> RefCountedLockRegistry:
+    return RefCountedLockRegistry(ttl_sec=300, cleanup_interval_sec=60, cleanup_batch_size=50)
+
+
+@pytest.fixture
+def upload_background_tasks() -> BackgroundTaskRegistry:
+    return BackgroundTaskRegistry(label="upload")
+
+
 @pytest.mark.asyncio
 async def test_drain_processes_all_queued_files(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
+    upload_processing_locks: RefCountedLockRegistry,
 ) -> None:
     """After task completion, drain processes all queued files in FIFO order."""
     await upload_queue.enqueue(user_id=42, filename="first.py", data=b"aaa")
@@ -56,6 +69,7 @@ async def test_drain_processes_all_queued_files(
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_processing_locks=upload_processing_locks,
         user_id=42,
     )
 
@@ -74,6 +88,7 @@ async def test_drain_uses_workdir_captured_when_file_was_queued(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
+    upload_processing_locks: RefCountedLockRegistry,
     tmp_path: Path,
 ) -> None:
     """Queued uploads are stored in the workdir active at upload time."""
@@ -92,6 +107,7 @@ async def test_drain_uses_workdir_captured_when_file_was_queued(
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_processing_locks=upload_processing_locks,
         user_id=42,
     )
 
@@ -108,6 +124,7 @@ async def test_failed_file_does_not_block_subsequent(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
+    upload_processing_locks: RefCountedLockRegistry,
 ) -> None:
     """A failed file in the queue should not prevent subsequent files from processing."""
     await upload_queue.enqueue(user_id=42, filename="fail.py", data=b"bad")
@@ -126,6 +143,7 @@ async def test_failed_file_does_not_block_subsequent(
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_processing_locks=upload_processing_locks,
         user_id=42,
     )
 
@@ -141,6 +159,7 @@ async def test_drain_no_op_when_queue_empty(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
+    upload_processing_locks: RefCountedLockRegistry,
 ) -> None:
     """Drain does nothing when there are no queued files."""
     message = DummyMessage(user_id=42)
@@ -150,6 +169,7 @@ async def test_drain_no_op_when_queue_empty(
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_processing_locks=upload_processing_locks,
         user_id=42,
     )
 
@@ -162,6 +182,8 @@ async def test_schedule_creates_background_task(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
+    upload_background_tasks: BackgroundTaskRegistry,
+    upload_processing_locks: RefCountedLockRegistry,
 ) -> None:
     """schedule_pending_upload_processing creates an asyncio task that drains the queue."""
     await upload_queue.enqueue(user_id=42, filename="scheduled.py", data=b"data")
@@ -176,6 +198,8 @@ async def test_schedule_creates_background_task(
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_background_tasks=upload_background_tasks,
+        upload_processing_locks=upload_processing_locks,
         user_id=42,
     )
     await task
@@ -189,6 +213,7 @@ async def test_flush_waits_for_in_progress_drain_before_returning(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
+    upload_processing_locks: RefCountedLockRegistry,
 ) -> None:
     await upload_queue.enqueue(user_id=42, filename="first.py", data=b"first")
     await upload_queue.enqueue(user_id=42, filename="second.py", data=b"second")
@@ -210,6 +235,7 @@ async def test_flush_waits_for_in_progress_drain_before_returning(
             file_receiver=file_receiver,
             session_service=session_service,
             upload_queue=upload_queue,
+            upload_processing_locks=upload_processing_locks,
             user_id=42,
         )
     )
@@ -221,6 +247,7 @@ async def test_flush_waits_for_in_progress_drain_before_returning(
             file_receiver=file_receiver,
             session_service=session_service,
             upload_queue=upload_queue,
+            upload_processing_locks=upload_processing_locks,
             user_id=42,
         )
     )
@@ -240,6 +267,7 @@ async def test_process_pending_uploads_keeps_queue_when_another_task_is_active(
     upload_queue: UploadQueueManager,
     file_receiver: AsyncMock,
     session_service: AsyncMock,
+    upload_processing_locks: RefCountedLockRegistry,
 ) -> None:
     await upload_queue.enqueue(user_id=42, filename="queued.py", data=b"data")
     task_service = AsyncMock()
@@ -251,6 +279,7 @@ async def test_process_pending_uploads_keeps_queue_when_another_task_is_active(
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_processing_locks=upload_processing_locks,
         user_id=42,
         task_service=task_service,
         completed_task_id="completed",

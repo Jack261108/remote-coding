@@ -45,6 +45,8 @@ from app.bot.middleware.session_guard import SessionGuardMiddleware
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
 from app.domain.models import SessionContext
+from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.diff_generator import DiffGeneratorService
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
@@ -397,6 +399,7 @@ def _create_chat_text_router(
     queued_upload_scheduler: Callable[[Message, int, str], None] | None,
     pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None,
     permission_gateway: PermissionGateway | None,
+    stream_background_tasks: BackgroundTaskRegistry,
     structured_reply_pump_interval_sec: float,
     spinner_initial_delay_sec: float,
     spinner_interval_sec: float,
@@ -447,6 +450,7 @@ def _create_chat_text_router(
             queued_upload_scheduler=queued_upload_scheduler,
             pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
+            stream_background_tasks=stream_background_tasks,
             structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
             spinner_initial_delay_sec=spinner_initial_delay_sec,
             spinner_interval_sec=spinner_interval_sec,
@@ -472,6 +476,9 @@ def create_router(
     registry_service: SessionRegistryService | None = None,
     file_receiver: FileReceiverService | None = None,
     upload_queue: UploadQueueManager | None = None,
+    upload_background_tasks: BackgroundTaskRegistry | None = None,
+    upload_processing_locks: RefCountedLockRegistry | None = None,
+    stream_background_tasks: BackgroundTaskRegistry | None = None,
     result_exporter: ResultExporterService | None = None,
     diff_generator: DiffGeneratorService | None = None,
     status_display: StatusDisplayService | None = None,
@@ -547,6 +554,8 @@ def create_router(
     queued_upload_scheduler = None
     pending_upload_finalizer = None
     if file_receiver is not None and upload_queue is not None:
+        # 走 upload 路径时，后台 task registry 与串行处理锁必须由组合根同时注入。
+        assert upload_background_tasks is not None and upload_processing_locks is not None
 
         def _queued_upload_scheduler(message: Message, user_id: int, completed_task_id: str) -> None:
             schedule_pending_upload_processing(
@@ -554,6 +563,8 @@ def create_router(
                 file_receiver=file_receiver,
                 session_service=session_service,
                 upload_queue=upload_queue,
+                upload_background_tasks=upload_background_tasks,
+                upload_processing_locks=upload_processing_locks,
                 user_id=user_id,
                 task_service=task_service,
                 completed_task_id=completed_task_id,
@@ -565,6 +576,7 @@ def create_router(
                 file_receiver=file_receiver,
                 session_service=session_service,
                 upload_queue=upload_queue,
+                upload_processing_locks=upload_processing_locks,
                 user_id=user_id,
                 task_service=task_service,
             )
@@ -573,6 +585,9 @@ def create_router(
         pending_upload_finalizer = _pending_upload_finalizer
 
     # 核心命令处理器
+    # /run 与 Claude 聊天自由文本都走后台 watchdog task，stream 后台 registry
+    # 必须由组合根注入。
+    assert stream_background_tasks is not None
     register_run_handler(
         router,
         task_service=task_service,
@@ -583,6 +598,7 @@ def create_router(
         queued_upload_scheduler=queued_upload_scheduler,
         pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
         structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
         spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
         spinner_interval_sec=settings.spinner_interval_sec,
@@ -615,6 +631,7 @@ def create_router(
         cmds_active_router,
         task_service=task_service,
         permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
     )
     router.include_router(cmds_active_router)
 
@@ -672,6 +689,7 @@ def create_router(
         queued_upload_scheduler=queued_upload_scheduler,
         pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
         structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
         spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
         spinner_interval_sec=settings.spinner_interval_sec,
