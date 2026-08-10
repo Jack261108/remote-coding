@@ -315,6 +315,12 @@ class TaskService:
     ) -> StartTaskResult:
         selected_provider = provider or self._settings.default_provider
         selected_provider = self._cli_factory.normalize_provider(selected_provider)
+        # 能力位门控（ AdapterCapabilities.run_task）：仅支持启动任务的 provider
+        # 才能进入 run 路径。当前所有内置 provider 恒 True，此门为未来不支持 run
+        # 的 provider 预留统一拒接点；拒绝语义沿用 ValueError，由 command_run 转
+        # 成参数错误文案，与上方 normalize/workdir 校验一致。
+        if not self._cli_factory.capabilities(selected_provider).run_task:
+            raise ValueError(f"{selected_provider} 不支持启动任务")
 
         selected_timeout = timeout_sec if timeout_sec is not None else self._settings.default_timeout_sec
 
@@ -475,6 +481,12 @@ class TaskService:
         if task.is_final:
             return False
 
+        # 能力位门控（ AdapterCapabilities.cancel_task）：provider 不支持取消时
+        # 直接返回 False（与任务已结束语义一致）。当前内置 provider 恒 True，
+        # 此门为未来不支持 cancel 的 provider 预留统一拒接点。
+        if not self._cli_factory.capabilities(task.provider).cancel_task:
+            return False
+
         adapter = self._cli_factory.get(task.provider)
         canceled = await adapter.cancel(task_id)
         canceled_event = CLIEvent(type=EventType.CANCELED, task_id=task_id, error="cancel requested before start")
@@ -548,6 +560,11 @@ class TaskService:
         if cleanup_lock:
             self._cleanup_task_lifecycle_lock(task_id)
         if not marked or provider is None:
+            return marked, False
+
+        # 能力位门控（ AdapterCapabilities.cancel_task）：watchdog 取消路径同
+        # TaskService.cancel 一样按能力拒接；provider 不支持取消则不尝试 adapter。
+        if not self._cli_factory.capabilities(provider).cancel_task:
             return marked, False
 
         adapter = self._cli_factory.get(provider)

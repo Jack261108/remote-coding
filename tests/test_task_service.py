@@ -3691,3 +3691,60 @@ async def test_submit_pending_user_question_multi_select_uses_button_tool_use_id
     assert factory._interactive_inputs == []
     assert factory._user_question_option_actions == [(expected_terminal_id(user_id=1, workdir=active_workdir), active_workdir, 0, False)]
     assert factory._user_question_multi_select_advances == [(expected_terminal_id(user_id=1, workdir=active_workdir), active_workdir, True)]
+
+
+@pytest.mark.asyncio
+async def test_create_and_run_rejects_provider_without_run_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AdapterCapabilities.run_task=False 的 provider 被 run 路径拒接。
+
+    当前内置 provider 恒 True；此用例固化能力门存在，为未来不支持启动任务的
+    provider 预留统一拒接点（ValueError 由 command_run 转成参数错误文案）。
+    """
+    from app.domain.protocols import AdapterCapabilities
+
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    monkeypatch.setattr(
+        factory,
+        "capabilities",
+        lambda provider: AdapterCapabilities(run_task=False),
+    )
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+
+    with pytest.raises(ValueError, match="不支持启动任务"):
+        await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    assert adapter.cancel_called is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_returns_false_when_provider_lacks_cancel_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AdapterCapabilities.cancel_task=False 的 provider 被 cancel 拒接，返回 False 且不触达 adapter.cancel。"""
+    from app.domain.protocols import AdapterCapabilities
+
+    adapter = StubAdapter(events=[])
+    factory = StubFactory(adapter)
+    # 先用满能力跑起一个任务，再切到 cancel_task=False 验证取消门。
+    service = TaskService(
+        settings=make_settings(tmp_path),
+        task_store=MemoryTaskStore(),
+        session_service=make_file_backed_session_service(tmp_path),
+        cli_factory=factory,
+        semaphore=asyncio.Semaphore(2),
+    )
+    result = await service.create_and_run(user_id=1, provider="claude", prompt="hi", workdir=str(tmp_path))
+    _ = [event async for event in result.events]
+    monkeypatch.setattr(
+        factory,
+        "capabilities",
+        lambda provider: AdapterCapabilities(cancel_task=False),
+    )
+
+    canceled = await service.cancel(result.task.task_id, user_id=1)
+    assert canceled is False
+    assert adapter.cancel_called is False
