@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from datetime import UTC, datetime
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -17,15 +17,8 @@ from app.bot.handlers.run_display_models import (
     TaskSucceededDisplayPayload,
 )
 from app.bot.handlers.run_event_streamer import RunEventStreamer
-from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus
-
-
-class DummyTaskService:
-    def __init__(self, status: TaskRecord) -> None:
-        self._status = status
-
-    async def get_status(self, task_id: str, user_id: int) -> TaskRecord:
-        return self._status
+from app.domain.models import CLIEvent, EventType, TaskRecord
+from tests.fakes.task_service import FakeTaskService, make_task_record
 
 
 class DummyDispatcher:
@@ -85,18 +78,7 @@ async def _events(items: list[CLIEvent]):
 
 
 def _status() -> TaskRecord:
-    return TaskRecord(
-        task_id="t1",
-        session_id="s1",
-        user_id=42,
-        provider="claude_code",
-        prompt="hello",
-        workdir="/tmp",
-        timeout_sec=60,
-        status=TaskStatus.SUCCEEDED,
-        output_chars=0,
-        created_at=datetime(2025, 1, 1, tzinfo=UTC),
-    )
+    return make_task_record(user_id=42, prompt="hello", workdir="/tmp", timeout_sec=60)
 
 
 def _streamer(
@@ -110,7 +92,7 @@ def _streamer(
     dispatcher = DummyDispatcher()
     streamer = RunEventStreamer(
         start=start,
-        task_service=DummyTaskService(status or _status()),
+        task_service=FakeTaskService(events=[], status=status or _status()),
         user_id=42,
         presenter=DummyPresenter(),
         dispatcher=dispatcher,
@@ -224,7 +206,7 @@ async def test_diff_snapshot_capture_does_not_block_event_loop() -> None:
     )
     streamer = RunEventStreamer(
         start=start,
-        task_service=DummyTaskService(_status()),
+        task_service=FakeTaskService(events=[], status=_status()),
         user_id=42,
         presenter=DummyPresenter(),
         dispatcher=DummyDispatcher(),
@@ -275,7 +257,7 @@ async def test_terminal_event_skips_diff_when_snapshot_capture_times_out(monkeyp
     )
     streamer = RunEventStreamer(
         start=start,
-        task_service=DummyTaskService(_status()),
+        task_service=FakeTaskService(events=[], status=_status()),
         user_id=42,
         presenter=DummyPresenter(),
         dispatcher=DummyDispatcher(),

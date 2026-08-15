@@ -9,58 +9,10 @@ import pytest
 from app.bot.handlers.command_run import run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.domain.file_models import DiffResult, FileUploadResult, FileValidationError
-from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus
+from app.domain.models import TaskStatus
 from app.services.upload_queue import UploadQueueManager
+from tests.fakes.task_service import FakeTaskService, make_cli_event_stream, make_task_record
 from tests.fakes.telegram import DummyMessage
-
-
-class DummyTaskService:
-    def __init__(self, events: list[CLIEvent], status: TaskRecord | None = None) -> None:
-        self._events = events
-        self._status = status
-        self._revision = 0
-
-    async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
-        task = SimpleNamespace(
-            task_id="t1",
-            provider="claude_code",
-            session_id="s1",
-            workdir=workdir or "/tmp/work",
-            started_at=None,
-            created_at=None,
-        )
-        return SimpleNamespace(task=task, events=self._stream(), interactive=False)
-
-    async def get_status(self, task_id: str, user_id: int):
-        return self._status
-
-    async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
-        return None
-
-    async def get_structured_session_for_task(self, *, task_id: str, user_id: int, log_missing: bool = True):
-        return None
-
-    async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
-        return self._revision
-
-    async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
-        return None, None
-
-    async def acknowledge_structured_reply(self, user_id: int, **kwargs) -> None:
-        pass
-
-    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
-        return None
-
-    async def acknowledge_structured_user_question(self, user_id: int, **kwargs) -> None:
-        pass
-
-    async def wait_for_structured_session_update(self, **kwargs) -> bool:
-        return False
-
-    async def _stream(self):
-        for event in self._events:
-            yield event
 
 
 class OrderRecordingMessage(DummyMessage):
@@ -102,37 +54,16 @@ class OrderRecordingDiffGenerator:
         )
 
 
-def _task_record(*, task_id: str, user_id: int, status: TaskStatus) -> TaskRecord:
-    return TaskRecord(
-        task_id=task_id,
-        session_id="s1",
-        user_id=user_id,
-        provider="claude_code",
-        prompt="hello",
-        workdir="/tmp/work",
-        timeout_sec=30,
-        status=status,
-    )
+def _task_record(*, task_id: str, user_id: int, status: TaskStatus):
+    return make_task_record(task_id=task_id, user_id=user_id, status=status)
 
 
 @pytest.mark.asyncio
 async def test_queued_upload_scheduler_runs_after_success_message_is_displayed() -> None:
     message = DummyMessage(user_id=7)
-    task_service = DummyTaskService(
-        events=[
-            CLIEvent(type=EventType.STARTED, task_id="t1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
-        status=TaskRecord(
-            task_id="t1",
-            session_id="s1",
-            user_id=7,
-            provider="claude_code",
-            prompt="hello",
-            workdir="/tmp/work",
-            timeout_sec=30,
-            status=TaskStatus.SUCCEEDED,
-        ),
+    task_service = FakeTaskService(
+        events=make_cli_event_stream(),
+        status=make_task_record(user_id=7, workdir="/tmp/work"),
     )
     scheduler_calls: list[tuple[int, str, str]] = []
 
@@ -164,21 +95,9 @@ async def test_queued_upload_scheduler_runs_after_success_diff_output(tmp_path: 
     order: list[str] = []
     message = OrderRecordingMessage(user_id=7, order=order)
     modified_file = tmp_path / "file.py"
-    task_service = DummyTaskService(
-        events=[
-            CLIEvent(type=EventType.STARTED, task_id="t1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
-        status=TaskRecord(
-            task_id="t1",
-            session_id="s1",
-            user_id=7,
-            provider="claude_code",
-            prompt="hello",
-            workdir=str(tmp_path),
-            timeout_sec=30,
-            status=TaskStatus.SUCCEEDED,
-        ),
+    task_service = FakeTaskService(
+        events=make_cli_event_stream(),
+        status=make_task_record(user_id=7, workdir=str(tmp_path)),
     )
 
     def queued_upload_scheduler(root_message: DummyMessage, user_id: int, completed_task_id: str) -> None:
