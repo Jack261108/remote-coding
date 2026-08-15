@@ -85,6 +85,15 @@ def format_external_session_unbound_message(session_id: str | None) -> str:
     return f"🔓 Unbound session {short_id(session_id or '', 12)}..."
 
 
+def format_external_session_bound_prompt(session_id: str | None, message: str) -> str:
+    """绑定成功提示，附配对入口说明（按钮由调用方追加）。"""
+    return (
+        f"🔗 Bound session {short_id(session_id or '', 12)}...\n{message}\n\n"
+        "该会话已绑定。点击下方按钮在终端里直接回答问题或输入文本"
+        "（首次使用需配对一个 Ghostty 终端）。"
+    )
+
+
 _FENCED_CODE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+\-]*)[ \t]*\n?(.*?)```", re.DOTALL)
 _LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")

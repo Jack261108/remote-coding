@@ -4,12 +4,12 @@ import logging
 
 from aiogram import Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.command_utils import split_message_command
 from app.bot.handlers.user_utils import extract_user_id
 from app.infra.text_formatting import (
-    format_external_session_bound_message,
+    format_external_session_bound_prompt,
     format_external_session_unbound_message,
     relative_time_compact_en,
     short_id,
@@ -17,7 +17,14 @@ from app.infra.text_formatting import (
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.external_session_input_service import ExternalSessionInputService
-from app.services.session_id_resolver import BindResult, UnbindResult, _resolve_session_id, resolve_and_bind, resolve_and_unbind
+from app.services.session_id_resolver import (
+    BindResult,
+    UnbindResult,
+    _resolve_session_id,
+    external_session_select_token,
+    resolve_and_bind,
+    resolve_and_unbind,
+)
 from app.services.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -116,7 +123,15 @@ async def _handle_bind_unbind_action(
 
     if result.success:
         if action_type == "bind":
-            await message.answer(format_external_session_bound_message(result.session_id, result.message))
+            assert result.session_id is not None  # success ⇒ resolved session_id
+            token = external_session_select_token(result.session_id, discovery=discovery, binder=binder)
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="进入终端输入", callback_data=f"sess:select:{token}")]]
+            )
+            await message.answer(
+                format_external_session_bound_prompt(result.session_id, result.message),
+                reply_markup=keyboard,
+            )
         else:
             await message.answer(format_external_session_unbound_message(result.session_id))
     else:

@@ -10,6 +10,7 @@ import pytest
 from aiogram import Router
 from aiogram.types import CallbackQuery, Message, User
 
+from app.adapters.process.ghostty_terminal_adapter import GhosttyTerminal
 from app.bot.handlers.session_actions import _resolve_terminal_id_prefix, register_session_action_handlers
 from app.domain.external_session_models import ExternalBinding
 from app.domain.hook_models import HookEvent
@@ -17,7 +18,9 @@ from app.domain.models import TerminalSessionInfo, utc_now
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import _resolve_session_id, unique_prefixes
+from app.services.external_session_input_service import PairingCandidates, PairOutcome
+from app.services.session_action_validator import validate_external_session_select
+from app.services.session_id_resolver import _resolve_session_id, external_session_select_token, unique_prefixes
 
 
 async def _dispatch(router, index: int, callback) -> None:
@@ -601,3 +604,98 @@ class TestSessionUnbindHandler:
         await binder.bind(user_id=42, session_id=session_id)
         result = await binder.unbind(user_id=99, session_id=session_id)
         assert result.success is False
+
+
+class TestBindSuccessPairingPrompt:
+    """绑定成功消息应带 `sess:select:` 入口按钮，复用 select→pairing 链路。"""
+
+    @pytest.mark.asyncio
+    async def test_bind_success_callback_renders_select_button(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+
+        session_id = "abcdef1234567890full"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:bind:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+
+        await _dispatch(router, 1, callback)
+
+        callback.answer.assert_awaited_once_with("绑定成功")
+        callback.message.answer.assert_awaited_once()
+        _, kwargs = callback.message.answer.call_args
+        expected_token = external_session_select_token(session_id, discovery=discovery, binder=binder)
+        buttons = kwargs["reply_markup"].inline_keyboard
+        assert len(buttons) == 1
+        assert len(buttons[0]) == 1
+        assert buttons[0][0].text == "进入终端输入"
+        assert buttons[0][0].callback_data == f"sess:select:{expected_token}"
+        # the select token resolves back to the same session (same as /list rendering)
+        validation = validate_external_session_select(expected_token, user_id=42, discovery=discovery, binder=binder)
+        assert validation.session_id == session_id
+        assert validation.action == "unbind"
+        # suppress unused-import lint by referencing the import in a no-op
+
+    @pytest.mark.asyncio
+    async def test_select_button_after_bind_routes_to_needs_pairing(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+
+        session_id = "abcdef1234567890full"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+
+        router = Router()
+        binding = binder._binding_store.get_binding(session_id)
+        input_service = MagicMock()
+        input_service.activate_select = AsyncMock(return_value=PairOutcome.NEEDS_PAIRING)
+        input_service.pair_candidates = AsyncMock(
+            return_value=(
+                PairOutcome.NEEDS_PAIRING,
+                PairingCandidates(
+                    binding_id=binding.binding_id if binding is not None else "bid",
+                    paired_tty="/dev/ttyX",
+                    terminals=[GhosttyTerminal(terminal_id="t1", name="Ghostty", cwd="/home/user/proj")],
+                ),
+            )
+        )
+        input_service.register_pair_token = AsyncMock(return_value="pairtoken123")
+
+        register_session_action_handlers(router, discovery=discovery, binder=binder, external_session_input_service=input_service)
+
+        # Step 1: bind via callback, capture the rendered sess:select button.
+        bind_callback = AsyncMock(spec=CallbackQuery)
+        bind_callback.data = f"sess:bind:{session_id[:16]}"
+        bind_callback.from_user = MagicMock(spec=User)
+        bind_callback.from_user.id = 42
+        bind_callback.answer = AsyncMock()
+        bind_callback.message = AsyncMock(spec=Message)
+        bind_callback.message.answer = AsyncMock()
+        await _dispatch(router, 1, bind_callback)
+
+        expected_token = external_session_select_token(session_id, discovery=discovery, binder=binder)
+        select_buttons = bind_callback.message.answer.call_args.kwargs["reply_markup"].inline_keyboard
+        assert select_buttons[0][0].callback_data == f"sess:select:{expected_token}"
+
+        # Step 2: click the sess:select button → should route to NEEDS_PAIRING and render ghpair.
+        select_callback = AsyncMock(spec=CallbackQuery)
+        select_callback.data = f"sess:select:{expected_token}"
+        select_callback.from_user = MagicMock(spec=User)
+        select_callback.from_user.id = 42
+        select_callback.answer = AsyncMock()
+        select_callback.message = AsyncMock(spec=Message)
+        select_callback.message.answer = AsyncMock()
+        await _dispatch(router, 0, select_callback)
+
+        select_args, select_kwargs = select_callback.message.answer.call_args
+        rendered_text = select_args[0] if select_args else ""
+        assert "选择要配对的 Ghostty 终端" in rendered_text or "终端" in rendered_text
+        assert "ghpair:pairtoken123" in [b.callback_data for row in select_kwargs["reply_markup"].inline_keyboard for b in row]

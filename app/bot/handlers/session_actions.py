@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.infra.text_formatting import (
-    format_external_session_bound_message,
+    format_external_session_bound_prompt,
     format_external_session_unbound_message,
     short_cwd,
     short_id,
@@ -19,7 +19,14 @@ from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.external_session_input_service import ExternalSessionInputService, PairOutcome, SendOutcome
 from app.services.session_action_validator import validate_external_session_select
-from app.services.session_id_resolver import BindResult, UnbindResult, resolve_and_bind, resolve_and_unbind, resolve_unique_prefix
+from app.services.session_id_resolver import (
+    BindResult,
+    UnbindResult,
+    external_session_select_token,
+    resolve_and_bind,
+    resolve_and_unbind,
+    resolve_unique_prefix,
+)
 from app.services.session_registry import SessionRegistryService
 
 logger = logging.getLogger(__name__)
@@ -171,7 +178,15 @@ def register_session_action_handlers(
             await callback.answer(success_text)
             if callback.message:
                 if action_type == "bind":
-                    await callback.message.answer(format_external_session_bound_message(result.session_id, result.message))
+                    assert result.session_id is not None  # success ⇒ resolved session_id
+                    token = external_session_select_token(result.session_id, discovery=discovery, binder=binder)
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[[InlineKeyboardButton(text="进入终端输入", callback_data=f"sess:select:{token}")]]
+                    )
+                    await callback.message.answer(
+                        format_external_session_bound_prompt(result.session_id, result.message),
+                        reply_markup=keyboard,
+                    )
                 else:
                     await callback.message.answer(format_external_session_unbound_message(result.session_id))
         else:
