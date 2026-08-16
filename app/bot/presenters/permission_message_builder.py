@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping
 
 from app.domain.permission_models import PermissionPromptInput
+from app.infra.text_formatting import truncate_text
 
 # Re-export for backward compatibility
 __all__ = ["PermissionMessageBuilder", "PermissionPromptInput"]
@@ -56,7 +57,7 @@ def _text(value: object) -> str:
 
 
 def _truncate(value: str, max_chars: int) -> str:
-    return value[:max_chars]
+    return truncate_text(value, max_chars, suffix="")
 
 
 def _code_segment(value: str) -> str:
