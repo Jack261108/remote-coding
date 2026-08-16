@@ -337,24 +337,20 @@ class AppContainer(
             )
         return user_ids
 
+    def _session_lock_registry(self) -> RefCountedLockRegistry:
+        """Build a per-session-id lock registry with the configured TTL/policy."""
+        settings = self.settings
+        return RefCountedLockRegistry(
+            ttl_sec=settings.session_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
+
     def _init_infrastructure(self) -> None:
         """Initialize lock registries, background tasks, and janitor."""
-        settings = self.settings
-        self._jsonl_sync_locks = RefCountedLockRegistry(
-            ttl_sec=settings.session_lock_ttl_sec,
-            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
-            cleanup_batch_size=settings.lock_cleanup_batch_size,
-        )
-        self._session_event_locks = RefCountedLockRegistry(
-            ttl_sec=settings.session_lock_ttl_sec,
-            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
-            cleanup_batch_size=settings.lock_cleanup_batch_size,
-        )
-        self._external_reply_delivery_locks = RefCountedLockRegistry(
-            ttl_sec=settings.session_lock_ttl_sec,
-            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
-            cleanup_batch_size=settings.lock_cleanup_batch_size,
-        )
+        self._jsonl_sync_locks = self._session_lock_registry()
+        self._session_event_locks = self._session_lock_registry()
+        self._external_reply_delivery_locks = self._session_lock_registry()
         self._background_tasks = BackgroundTaskRegistry(label="bootstrap")
         self.external_reply_delivery_pump = ExternalReplyDeliveryPump(
             session_store=self.structured_session_store,

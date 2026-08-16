@@ -36,6 +36,14 @@ FINAL_STATUSES = {
 }
 
 
+TERMINAL_EVENT_TYPES = {
+    EventType.EXITED,
+    EventType.FAILED,
+    EventType.TIMEOUT,
+    EventType.CANCELED,
+}
+
+
 @dataclass
 class CLIEvent:
     type: EventType

@@ -196,6 +196,14 @@ class ExternalSessionBinder:
         binding = self._binding_store.get_binding(session_id)
         return binding.user_id if binding else None
 
+    def get_binding(self, session_id: str) -> ExternalBinding | None:
+        """Get the binding for a session, or None."""
+        return self._binding_store.get_binding(session_id)
+
     def list_bound_for_user(self, user_id: int) -> list[ExternalBinding]:
         """List all external sessions bound to a specific user."""
         return self._binding_store.get_bindings_for_user(user_id)
+
+    def list_bound(self) -> list[ExternalBinding]:
+        """List all external bindings (bound sessions), regardless of owner."""
+        return self._binding_store.list_all()

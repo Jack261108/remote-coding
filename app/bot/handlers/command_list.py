@@ -250,7 +250,7 @@ async def _cleanup_dead_sessions(
 
     # 1. 清理 dead pid binding
     if external_binder is not None and liveness_enabled and reaper is not None:
-        bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
+        bound_sessions = external_binder.list_bound_for_user(user_id)
         for binding in bound_sessions:
             if _is_dead_pid(binding.pid, session_id=binding.session_id, source="bound"):
                 try:
@@ -322,7 +322,7 @@ def register_list_handler(
             external_sessions = external_discovery.list_unbound()
         external_token_ids = [ext.session_id for ext in external_sessions]
         if external_binder is not None:
-            external_token_ids.extend(binding.session_id for binding in external_binder._binding_store.list_all())
+            external_token_ids.extend(binding.session_id for binding in external_binder.list_bound())
         if external_discovery is not None:
             external_token_ids.extend(external_discovery.unavailable_session_ids())
         external_prefixes = unique_prefixes(external_token_ids, min_length=16, max_length=52)
@@ -340,7 +340,7 @@ def register_list_handler(
         # Bound sessions
         bound_sessions = []
         if external_binder is not None:
-            bound_sessions = external_binder._binding_store.get_bindings_for_user(user_id)
+            bound_sessions = external_binder.list_bound_for_user(user_id)
 
         bound_legacy, bound_summary, bound_invalid = await _collect_bound_items(
             bound_sessions,

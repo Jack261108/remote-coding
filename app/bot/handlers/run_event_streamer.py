@@ -18,7 +18,7 @@ from app.bot.handlers.run_display_models import (
 from app.bot.handlers.run_presenter_dispatcher import PresenterOutputDispatcher
 from app.bot.handlers.run_telegram_messenger import RunTelegramMessenger
 from app.bot.presenters.structured_reply_presenter import StructuredReplyPresenter
-from app.domain.models import EventType
+from app.domain.models import TERMINAL_EVENT_TYPES, EventType
 from app.infra.gitignore_utils import load_gitignore_patterns
 from app.infra.source_text_normalization import normalize_source_text
 from app.infra.text_formatting import short_id
@@ -399,7 +399,7 @@ class RunEventStreamer:
                         self._interactive_pump = asyncio.create_task(self.pump_structured_reply())
                     continue
 
-                if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
+                if event.type in TERMINAL_EVENT_TYPES:
                     saw_terminal = True
                     terminal_at = event.at
                     if self._snapshot_task is not None:

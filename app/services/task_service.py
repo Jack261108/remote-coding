@@ -13,6 +13,7 @@ from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.adapters.storage.memory import MemoryTaskStore
 from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import (
+    TERMINAL_EVENT_TYPES,
     CLIEvent,
     EventType,
     ExecutionTask,
@@ -594,7 +595,7 @@ class TaskService:
 
     async def _apply_event(self, record: TaskRecord, event: CLIEvent) -> None:
         log_extra: dict[str, object] | None = None
-        if event.type in {EventType.EXITED, EventType.CANCELED, EventType.TIMEOUT, EventType.FAILED}:
+        if event.type in TERMINAL_EVENT_TYPES:
             session = await self._session_service.get(record.user_id)
             log_extra = {
                 "session_id": record.session_id,

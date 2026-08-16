@@ -159,9 +159,13 @@ def test_property_8_list_liveness_visibility_partition(
         registry_service = AsyncMock()
         registry_service.list_active_sessions = AsyncMock(return_value=[])
 
-        # external_binder stub exposing only the attribute the handler reads:
-        # ``external_binder._binding_store.get_bindings_for_user(user_id)``.
-        external_binder = SimpleNamespace(_binding_store=store)
+        # external_binder stub exposing only the public methods the handler reads:
+        # ``list_bound()`` (all bindings) and ``list_bound_for_user(user_id)``.
+        external_binder = SimpleNamespace(
+            _binding_store=store,
+            list_bound=store.list_all,
+            list_bound_for_user=store.get_bindings_for_user,
+        )
 
         # Reaper is an AsyncMock so it records reap calls without mutating the
         # store; the handler partitions BEFORE reaping, so rendering is unaffected
