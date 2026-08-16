@@ -85,6 +85,21 @@ def format_external_session_unbound_message(session_id: str | None) -> str:
     return f"🔓 Unbound session {short_id(session_id or '', 12)}..."
 
 
+def format_external_session_action_outcome(
+    action: str,
+    success: bool,
+    *,
+    session_id: str | None,
+    message: str,
+) -> str:
+    """Unified body text for bind/unbind outcomes (excluding short callback toasts)."""
+    if success:
+        if action == "bind":
+            return format_external_session_bound_message(session_id, message)
+        return format_external_session_unbound_message(session_id)
+    return f"❌ {message}"
+
+
 _FENCED_CODE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+\-]*)[ \t]*\n?(.*?)```", re.DOTALL)
 _LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")

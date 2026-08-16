@@ -9,8 +9,7 @@ from aiogram.types import Message
 from app.bot.handlers.command_utils import split_message_command
 from app.bot.handlers.user_utils import extract_user_id
 from app.infra.text_formatting import (
-    format_external_session_bound_message,
-    format_external_session_unbound_message,
+    format_external_session_action_outcome,
     relative_time_compact_en,
     short_id,
 )
@@ -107,12 +106,13 @@ async def _handle_bind_unbind_action(
         result = await resolve_and_unbind(session_id, user_id=user_id, discovery=discovery, binder=binder)
 
     if result.success:
-        if action_type == "bind":
-            await message.answer(format_external_session_bound_message(result.session_id, result.message))
-        else:
-            await message.answer(format_external_session_unbound_message(result.session_id))
+        await message.answer(
+            format_external_session_action_outcome(action_type, True, session_id=result.session_id, message=result.message)
+        )
     else:
-        await message.answer(f"❌ {result.message}")
+        await message.answer(
+            format_external_session_action_outcome(action_type, False, session_id=result.session_id, message=result.message)
+        )
 
 
 async def _handle_bind(

@@ -105,6 +105,22 @@ def unavailable_unbound_session_message(session_id: str, discovery: ExternalSess
     return None
 
 
+def build_token_candidates(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> list[str]:
+    """Build the ordered candidate session-id list for callback token generation.
+
+    Order: discoverable (unbound) sessions, then bound sessions, then
+    unavailable-but-tracked ids. Shared by ``unique_prefixes`` consumers so the
+    token candidate set is assembled in one place.
+    """
+    candidates = [session.session_id for session in discovery.list_unbound()]
+    candidates.extend(binding.session_id for binding in binder.list_bound())
+    candidates.extend(discovery.unavailable_session_ids())
+    return candidates
+
+
 def _resolve_session_id(
     session_id_prefix: str,
     discovery: ExternalSessionDiscoveryService,
@@ -115,23 +131,19 @@ def _resolve_session_id(
     Searches both unbound discovery list and bound sessions.
     Returns (full_session_id, error_message). If ambiguous, returns error.
     """
-    candidate_ids = [s.session_id for s in discovery.list_unbound()]
-    candidate_ids.extend(b.session_id for b in binder._binding_store.list_all())
-    unavailable_ids = discovery.unavailable_session_ids()
+    all_candidates = build_token_candidates(discovery, binder)
     if _is_hash_token_shape(session_id_prefix, prefix=_HASH_TOKEN_PREFIX):
         resolved_token, token_error = resolve_unique_prefix(
             session_id_prefix,
-            [*candidate_ids, *unavailable_ids],
+            all_candidates,
         )
         return resolved_token, token_error
-    legacy_hash_matches = [
-        session_id for session_id in [*candidate_ids, *unavailable_ids] if _legacy_hash_token(session_id) == session_id_prefix
-    ]
+    legacy_hash_matches = [session_id for session_id in all_candidates if _legacy_hash_token(session_id) == session_id_prefix]
     if legacy_hash_matches:
         return legacy_hash_matches[0], None
     if session_id_prefix.endswith("."):
         legacy_exact = session_id_prefix[:-1]
-        if legacy_exact in [*candidate_ids, *unavailable_ids]:
+        if legacy_exact in all_candidates:
             return legacy_exact, None
 
     prefix = session_id_prefix
@@ -149,7 +161,7 @@ def _resolve_session_id(
         if (session_id == prefix or session_id.startswith(prefix)) and session_id not in unavailable_candidates:
             unavailable_candidates.append(session_id)
 
-    for b in binder._binding_store.list_all():
+    for b in binder.list_bound():
         if b.session_id == prefix or b.session_id.startswith(prefix):
             if b.session_id not in candidates:
                 candidates.append(b.session_id)
@@ -195,7 +207,7 @@ async def resolve_and_bind(
     unavailable = unavailable_unbound_session_message(resolved, discovery)
     if unavailable is not None:
         return BindResult(success=False, message=unavailable)
-    if discovery.get(resolved) is None and binder._binding_store.get_binding(resolved) is not None:
+    if discovery.get(resolved) is None and binder.get_binding(resolved) is not None:
         return BindResult(success=False, message="Session is not available to bind")
 
     result = await binder.bind(user_id=user_id, session_id=resolved)
