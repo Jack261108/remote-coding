@@ -6,7 +6,7 @@ from typing import Any
 from aiogram.enums import ParseMode
 from aiogram.types import Message, ReactionTypeEmoji
 
-from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
+from app.bot.presenters.telegram_formatting import render_markdownish_with_html_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +22,14 @@ class RunTelegramMessenger:
         if not text:
             return None
         try:
-            rendered = render_markdownish_to_telegram_html(text)
-            chunks = split_telegram_html(rendered, 4096)
+            chunks, parse_mode_name = render_markdownish_with_html_fallback(text, 4096)
+            parse_mode = ParseMode.HTML if parse_mode_name == "HTML" else None
             sent_message = None
             for index, chunk in enumerate(chunks):
                 sent_message = await self._root_message.answer(
                     chunk,
                     reply_markup=reply_markup if index == len(chunks) - 1 else None,
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=parse_mode,
                 )
             return sent_message
         except Exception:
@@ -46,11 +46,11 @@ class RunTelegramMessenger:
         if target_message is None or not text:
             return False
         try:
-            rendered = render_markdownish_to_telegram_html(text)
-            chunks = split_telegram_html(rendered, 4096)
+            chunks, parse_mode_name = render_markdownish_with_html_fallback(text, 4096)
             if len(chunks) != 1:
                 return False
-            await target_message.edit_text(chunks[0], parse_mode=ParseMode.HTML)
+            parse_mode = ParseMode.HTML if parse_mode_name == "HTML" else None
+            await target_message.edit_text(chunks[0], parse_mode=parse_mode)
             return True
         except Exception:
             logger.exception(

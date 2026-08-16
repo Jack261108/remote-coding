@@ -461,6 +461,24 @@ def split_telegram_html(text: str, max_len: int) -> list[str]:
     return chunks
 
 
+def render_markdownish_with_html_fallback(text: str, max_len: int) -> tuple[list[str], str | None]:
+    """Render markdownish text to HTML chunks, falling back to raw plain-text chunks.
+
+    Returns ``(chunks, parse_mode)``. ``parse_mode`` is ``"HTML"`` on the normal
+    path. If any HTML chunk exceeds ``max_len`` (an un-splittable oversized HTML
+    tag, e.g. a very long ``<a href="...">`` URL), the output cannot be safely
+    delivered as HTML; the raw markdownish text is sliced at ``max_len`` and
+    ``parse_mode`` is ``None`` so callers send it as plain text. This enforces the
+    project rule that Telegram HTML shards must never exceed the text limit.
+    """
+    rendered = render_markdownish_to_telegram_html(text)
+    chunks = split_telegram_html(rendered, max_len)
+    if not any(len(chunk) > max_len for chunk in chunks):
+        return chunks, "HTML"
+    raw = text if text else ""
+    return [raw[i : i + max_len] for i in range(0, len(raw), max_len)], None
+
+
 def _split_plain_text(text: str, max_len: int) -> list[str]:
     if not text:
         return []

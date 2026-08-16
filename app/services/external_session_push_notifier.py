@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.domain.permission_models import PermissionPromptInput
-from app.infra.text_formatting import render_markdownish_to_telegram_html, short_id, split_telegram_html
+from app.infra.text_formatting import render_markdownish_to_telegram_html, render_markdownish_with_html_fallback, short_id
 from app.services.message_sender import Button, Keyboard, MessageSender
 from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
@@ -130,12 +130,7 @@ class ExternalSessionPushNotifier:
             if title:
                 heading = f"{heading}\n会话: {title.strip()}"
             message = f"{heading}\n\n{reply}"
-            rendered = render_markdownish_to_telegram_html(message)
-            chunks = split_telegram_html(rendered, 4096)
-            parse_mode: str | None = "HTML"
-            if any(len(chunk) > 4096 for chunk in chunks):
-                chunks = [message[index : index + 4096] for index in range(0, len(message), 4096)]
-                parse_mode = None
+            chunks, parse_mode = render_markdownish_with_html_fallback(message, 4096)
             if not chunks:
                 return False
             pending = _PendingReplyChunks(chunks=tuple(chunks), parse_mode=parse_mode)
