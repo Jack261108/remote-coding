@@ -6,7 +6,7 @@ from typing import Any
 from aiogram.enums import ParseMode
 from aiogram.types import Message, ReactionTypeEmoji
 
-from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
+from app.bot.presenters.telegram_formatting import TELEGRAM_TEXT_LIMIT, render_markdownish_to_telegram_html, split_telegram_html
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ class RunTelegramMessenger:
             return None
         try:
             rendered = render_markdownish_to_telegram_html(text)
-            chunks = split_telegram_html(rendered, 4096)
+            chunks = split_telegram_html(rendered, TELEGRAM_TEXT_LIMIT)
             sent_message = None
             for index, chunk in enumerate(chunks):
                 sent_message = await self._root_message.answer(
@@ -47,7 +47,7 @@ class RunTelegramMessenger:
             return False
         try:
             rendered = render_markdownish_to_telegram_html(text)
-            chunks = split_telegram_html(rendered, 4096)
+            chunks = split_telegram_html(rendered, TELEGRAM_TEXT_LIMIT)
             if len(chunks) != 1:
                 return False
             await target_message.edit_text(chunks[0], parse_mode=ParseMode.HTML)

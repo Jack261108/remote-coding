@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 
 from aiogram.exceptions import TelegramBadRequest
 
-from app.bot.presenters.telegram_formatting import split_markdownish_for_telegram
+from app.bot.presenters.telegram_formatting import TELEGRAM_TEXT_LIMIT, split_markdownish_for_telegram
 
 SendText = Callable[[str], Awaitable[bool | None]]
 
@@ -93,7 +93,7 @@ class ChunkSender:
         self._pending_flush_task = None
 
     def _split(self, text: str) -> list[str]:
-        max_len = min(4096, self._chunk_size)
+        max_len = min(TELEGRAM_TEXT_LIMIT, self._chunk_size)
         return split_markdownish_for_telegram(text, max_len)
 
     async def _safe_send(self, payload: str, send_fn: SendText) -> bool:
