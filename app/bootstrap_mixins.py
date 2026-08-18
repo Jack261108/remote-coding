@@ -15,6 +15,8 @@ from app.domain.external_session_models import SessionOrigin as ExternalSessionO
 from app.domain.hook_models import HookEvent
 from app.domain.models import SessionContext, TaskStatus, utc_now
 from app.domain.session_models import (
+    IDLE_PHASES,
+    INTERRUPTIBLE_PHASES,
     ConversationTurn,
     FileSyncedPayload,
     HookReceivedPayload,
@@ -1344,7 +1346,7 @@ class SessionMatchingMixin(AppContainerBase):
         if has_content:
             return True, "terminal_has_content", terminal_state
 
-        if terminal_state.phase in {SessionPhase.IDLE, SessionPhase.WAITING_FOR_INPUT}:
+        if terminal_state.phase in IDLE_PHASES:
             return True, "terminal_waiting", terminal_state
 
         if terminal_state.phase == SessionPhase.PROCESSING and terminal_state.session_id.startswith("tgcli_"):
@@ -1391,7 +1393,7 @@ class PeriodicRecheckMixin(AppContainerBase):
             state = self.structured_session_store.get(session.claude_session_id)
             if state is None:
                 continue
-            if state.phase not in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+            if state.phase not in INTERRUPTIBLE_PHASES:
                 continue
             logger.info(
                 "periodic recheck syncing",
@@ -1433,7 +1435,7 @@ class SessionRestoreMixin(AppContainerBase):
             terminal_state = self.structured_session_store.find_by_terminal_id(session.terminal_id) if session.terminal_id else None
             if (
                 terminal_state is not None
-                and terminal_state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}
+                and terminal_state.phase in INTERRUPTIBLE_PHASES
                 and (terminal_state.turns or terminal_state.tool_calls or terminal_state.pending_permission is not None)
             ):
                 self.session_supervisor.watch(session_id=terminal_state.session_id, workdir=terminal_state.workdir)

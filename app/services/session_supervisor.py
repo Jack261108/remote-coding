@@ -13,7 +13,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.domain.session_models import InterruptDetectedPayload, SessionEvent, SessionEventType, SessionPhase, SessionState, ToolStatus
+from app.domain.session_models import (
+    INTERRUPTIBLE_PHASES,
+    InterruptDetectedPayload,
+    SessionEvent,
+    SessionEventType,
+    SessionState,
+    ToolStatus,
+)
 from app.infra.file_mtime_utils import clear_seen_mtimes, refresh_seen_mtimes
 
 logger = logging.getLogger(__name__)
@@ -184,7 +191,7 @@ class SessionSupervisor:
                         self._watch_jsonl_files_for_state(state)
 
                         # Interrupt detection (PROCESSING, WAITING_FOR_APPROVAL)
-                        if state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL}:
+                        if state.phase in INTERRUPTIBLE_PHASES:
                             await self._maybe_detect_interrupt(state)
 
                         # Agent file sync (any phase with subagent containers)
@@ -219,7 +226,7 @@ class SessionSupervisor:
                     self._jsonl_file_watcher.unwatch_session(session_id)
 
     def _is_active_state(self, state: SessionState) -> bool:
-        return state.phase in {SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL} or self._has_active_subagent_files(state)
+        return state.phase in INTERRUPTIBLE_PHASES or self._has_active_subagent_files(state)
 
     def _wake(self, session_id: str) -> None:
         event = self._wake_events.get(session_id)

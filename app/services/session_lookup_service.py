@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.domain.hook_models import validate_session_id
 from app.domain.session_models import (
+    IDLE_PHASES,
     SessionPhase,
     SessionState,
     ToolStatus,
@@ -331,7 +332,7 @@ class SessionLookupService:
         )
         if state is None:
             return None
-        if state.phase in {SessionPhase.IDLE, SessionPhase.WAITING_FOR_INPUT}:
+        if state.phase in IDLE_PHASES:
             state.phase = SessionPhase.PROCESSING
             if self._persist_fn is not None:
                 self._persist_fn(state)

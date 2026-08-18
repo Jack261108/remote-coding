@@ -52,6 +52,12 @@ class SessionPhase(StrEnum):
     ENDED = "ended"
 
 
+# Phases in which the session occupies an agent turn and may be interrupted / needs watching.
+INTERRUPTIBLE_PHASES: frozenset[SessionPhase] = frozenset({SessionPhase.PROCESSING, SessionPhase.WAITING_FOR_APPROVAL})
+# Phases that represent a resting terminal (no active work awaiting the agent).
+IDLE_PHASES: frozenset[SessionPhase] = frozenset({SessionPhase.IDLE, SessionPhase.WAITING_FOR_INPUT})
+
+
 class SessionEventType(StrEnum):
     SESSION_STARTED = "session_started"
     RAW_CHUNK_APPENDED = "raw_chunk_appended"
