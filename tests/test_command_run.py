@@ -23,117 +23,14 @@ from app.services.message_sender import Button, Keyboard
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 from app.services.permission_gateway import RegisterForButtonOk
 from tests.fakes.structured import make_structured_session as _structured_session
+from tests.fakes.task_service import FakeTaskService, make_cli_event_stream, make_task_record
 from tests.fakes.telegram import DummyMessage
-
-
-class DummyTaskService:
-    def __init__(
-        self,
-        events: list[CLIEvent],
-        status: TaskRecord | None = None,
-        *,
-        interactive: bool = False,
-        structured_reply: str = "",
-        structured_turns: list[ConversationTurn] | None = None,
-        structured_sessions: list[object | None] | None = None,
-        event_delays: list[float] | None = None,
-    ) -> None:
-        self._events = events
-        self._status = status
-        self._interactive = interactive
-        self._structured_reply = structured_reply
-        self._structured_turns = structured_turns
-        self._structured_sessions = structured_sessions
-        self._structured_session_index = 0
-        self._event_delays = event_delays or [0.0] * len(events)
-        self._revision = 0
-        self._structured_reply_turn_id: str | None = None
-        self._structured_permission_key: str | None = None
-        self._structured_user_question_key: str | None = None
-        self.create_calls: list[tuple[int, str | None, str, str | None]] = []
-
-    async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
-        self.create_calls.append((user_id, provider, prompt, workdir))
-        task = SimpleNamespace(
-            task_id="t1",
-            provider="claude_code",
-            session_id="s1",
-            workdir=workdir or "/tmp",
-            started_at=None,
-            created_at=utc_now(),
-        )
-        return SimpleNamespace(task=task, events=self._stream(), interactive=self._interactive)
-
-    async def get_status(self, task_id: str, user_id: int):
-        return self._status
-
-    async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
-        if self._structured_sessions is not None:
-            if self._structured_session_index < len(self._structured_sessions):
-                session = self._structured_sessions[self._structured_session_index]
-                self._structured_session_index += 1
-            else:
-                session = self._structured_sessions[-1]
-            self._revision += 1
-            return session
-        if self._structured_turns is not None:
-            return SimpleNamespace(
-                session_id="claude-session-1",
-                phase=SessionPhase.WAITING_FOR_INPUT,
-                turns=self._structured_turns,
-                pending_permission=None,
-            )
-        if not self._structured_reply:
-            return None
-        return SimpleNamespace(
-            session_id="claude-session-1",
-            phase=SessionPhase.WAITING_FOR_INPUT,
-            turns=[ConversationTurn(turn_id="turn-1", role="assistant", text=self._structured_reply, is_complete=True)],
-            pending_permission=None,
-        )
-
-    async def get_structured_session_for_task(self, *, task_id: str, user_id: int, log_missing: bool = True):
-        return await self.get_structured_session(user_id, log_missing=log_missing)
-
-    async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
-        return self._revision
-
-    async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
-        return self._structured_reply_turn_id, self._structured_permission_key
-
-    async def acknowledge_structured_reply(
-        self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
-    ) -> None:
-        if turn_id is not None:
-            self._structured_reply_turn_id = turn_id
-        if permission_key is not None:
-            self._structured_permission_key = permission_key
-
-    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
-        return self._structured_user_question_key
-
-    async def acknowledge_structured_user_question(
-        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
-    ) -> None:
-        self._structured_user_question_key = question_key
-
-    async def wait_for_structured_session_update(
-        self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
-    ) -> bool:
-        await asyncio.sleep(timeout_sec)
-        return True
-
-    async def _stream(self):
-        for delay, event in zip(self._event_delays, self._events, strict=False):
-            if delay > 0:
-                await asyncio.sleep(delay)
-            yield event
 
 
 async def _run_and_wait(
     *,
     message: DummyMessage,
-    task_service: DummyTaskService,
+    task_service: FakeTaskService,
     wait_sec: float = 0.05,
     permission_gateway: object | None = None,
 ) -> None:
@@ -155,7 +52,7 @@ async def _run_and_wait(
 @pytest.mark.asyncio
 async def test_run_prompt_waits_for_pending_upload_finalizer_before_create_task() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1"),
             CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
@@ -244,11 +141,8 @@ class FakePermissionGateway:
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_pump_silences_missing_structured_logs() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
     )
@@ -268,14 +162,7 @@ async def test_run_prompt_and_stream_interactive_pump_silences_missing_structure
 def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
     started_at = utc_now() - timedelta(seconds=2)
     ended_at = utc_now()
-    return TaskRecord(
-        task_id="t1",
-        session_id="s1",
-        user_id=1,
-        provider="claude_code",
-        prompt="hello",
-        workdir="/tmp",
-        timeout_sec=30,
+    return make_task_record(
         status=task_status,
         started_at=started_at,
         ended_at=ended_at,
@@ -286,11 +173,8 @@ def _status(*, task_status: TaskStatus, truncated: bool = False) -> TaskRecord:
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_keeps_background_task_referenced_until_done() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         event_delays=[0.0, 0.03],
     )
@@ -317,7 +201,7 @@ async def test_run_prompt_and_stream_watchdog_cancels_stuck_stream(monkeypatch: 
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
 
-    class StuckTaskService(DummyTaskService):
+    class StuckTaskService(FakeTaskService):
         def __init__(self) -> None:
             super().__init__([], _status(task_status=TaskStatus.RUNNING))
             self.cancel_called = False
@@ -376,7 +260,7 @@ async def test_run_prompt_and_stream_watchdog_timeout_schedules_queued_uploads(m
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     upload_scheduled = False
 
-    class StuckTaskService(DummyTaskService):
+    class StuckTaskService(FakeTaskService):
         def __init__(self) -> None:
             super().__init__([], _status(task_status=TaskStatus.RUNNING))
 
@@ -433,7 +317,7 @@ async def test_run_prompt_and_stream_watchdog_ignores_late_exit_after_timeout(mo
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CANCEL_GRACE_SEC", 0.005, raising=False)
 
-    class LateExitTaskService(DummyTaskService):
+    class LateExitTaskService(FakeTaskService):
         def __init__(self) -> None:
             super().__init__([], _status(task_status=TaskStatus.RUNNING))
 
@@ -492,7 +376,7 @@ async def test_run_prompt_and_stream_marks_timeout_before_cancel_race(monkeypatc
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     cancel_released = asyncio.Event()
 
-    class CancelRaceTaskService(DummyTaskService):
+    class CancelRaceTaskService(FakeTaskService):
         def __init__(self) -> None:
             super().__init__([], _status(task_status=TaskStatus.RUNNING))
 
@@ -554,7 +438,7 @@ async def test_run_prompt_and_stream_does_not_abandon_terminal_event_when_timeou
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
     terminal_released = asyncio.Event()
 
-    class TerminalRaceTaskService(DummyTaskService):
+    class TerminalRaceTaskService(FakeTaskService):
         def __init__(self) -> None:
             super().__init__([], _status(task_status=TaskStatus.RUNNING))
             self.cancel_called = False
@@ -619,7 +503,7 @@ async def test_run_prompt_and_stream_watchdog_allows_interactive_progress(monkey
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
 
-    class ProgressTaskService(DummyTaskService):
+    class ProgressTaskService(FakeTaskService):
         async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
             async def stream():
                 yield CLIEvent(type=EventType.STARTED, task_id="t-progress")
@@ -658,7 +542,7 @@ async def test_run_prompt_and_stream_watchdog_allows_structured_progress(monkeyp
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_MIN_SEC", 0.01, raising=False)
     monkeypatch.setattr(command_run_module, "_STREAM_WATCHDOG_CHECK_INTERVAL_SEC", 0.005, raising=False)
 
-    class StructuredProgressTaskService(DummyTaskService):
+    class StructuredProgressTaskService(FakeTaskService):
         def __init__(self) -> None:
             super().__init__([], _status(task_status=TaskStatus.SUCCEEDED), interactive=True)
             self._cursor = 0
@@ -699,7 +583,7 @@ async def test_run_prompt_and_stream_watchdog_allows_structured_progress(monkeyp
 
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_reports_create_errors() -> None:
-    class FailingTaskService(DummyTaskService):
+    class FailingTaskService(FakeTaskService):
         async def create_and_run(self, *, user_id: int, provider: str | None, prompt: str, workdir: str | None = None):
             raise RuntimeError("boom")
 
@@ -735,11 +619,8 @@ async def test_run_prompt_and_stream_passes_timing_settings_to_streamer(monkeypa
     monkeypatch.setattr(command_run_module.RunEventStreamer, "__init__", capture_init)
     status_display = SimpleNamespace(start=AsyncMock(), clear=AsyncMock(), update_for_tool=AsyncMock())
     message = DummyMessage()
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
     )
 
@@ -791,7 +672,7 @@ async def test_run_prompt_and_stream_watchdog_cancels_stuck_finalization(monkeyp
     monkeypatch.setattr(command_run_module.RunEventStreamer, "stream_events", stuck_after_terminal)
 
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t-final"),
             CLIEvent(type=EventType.EXITED, task_id="t-final", exit_code=0),
@@ -848,7 +729,7 @@ async def test_run_prompt_and_stream_tracks_abandoned_stream_and_force_cleans_in
     monkeypatch.setattr(command_run_module.RunEventStreamer, "stream_events", stuck_after_terminal)
 
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t-pump-cleanup"),
             CLIEvent(type=EventType.EXITED, task_id="t-pump-cleanup", exit_code=0),
@@ -920,7 +801,7 @@ async def test_run_prompt_and_stream_force_cleanup_does_not_block_on_uncancellab
     monkeypatch.setattr(command_run_module.RunEventStreamer, "stream_events", stuck_after_terminal)
 
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t-uncancellable-pump"),
             CLIEvent(type=EventType.EXITED, task_id="t-uncancellable-pump", exit_code=0),
@@ -979,7 +860,7 @@ async def test_run_prompt_and_stream_real_finally_tracks_uncancellable_interacti
     monkeypatch.setattr(command_run_module.RunEventStreamer, "pump_structured_reply", uncancellable_pump)
 
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t-real-pump"),
             CLIEvent(type=EventType.EXITED, task_id="t-real-pump", exit_code=0),
@@ -1026,7 +907,7 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_before_interactive
         upload_scheduled = True
 
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t-final-upload"),
             CLIEvent(type=EventType.EXITED, task_id="t-final-upload", exit_code=0),
@@ -1075,7 +956,7 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_when_terminal_flus
         upload_scheduled = True
 
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t-flush"),
             CLIEvent(type=EventType.EXITED, task_id="t-flush", exit_code=0),
@@ -1109,7 +990,7 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_when_terminal_flus
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_reports_started_output_and_success() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="hello\nworld\n"),
@@ -1129,11 +1010,8 @@ async def test_run_prompt_and_stream_reports_started_output_and_success() -> Non
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_sends_started_message_when_lifecycle_edit_fails() -> None:
     message = DummyMessage(fail_first_edit=True)
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
     )
 
@@ -1159,11 +1037,8 @@ async def test_run_prompt_and_stream_updates_tool_message_to_success() -> None:
         status=ToolStatus.SUCCESS,
     )
     message = DummyMessage()
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_sessions=[
@@ -1213,11 +1088,8 @@ async def test_run_prompt_and_stream_aggregates_top_level_file_tools() -> None:
         status=ToolStatus.SUCCESS,
     )
     message = DummyMessage()
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_sessions=[
@@ -1362,11 +1234,8 @@ async def test_run_prompt_and_stream_updates_subagent_aggregate_message() -> Non
         status=ToolStatus.RUNNING,
     )
     message = DummyMessage()
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_sessions=[
@@ -1500,11 +1369,8 @@ async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam(
         status=ToolStatus.RUNNING,
     )
     message = DummyMessage()
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_sessions=[
@@ -1583,7 +1449,7 @@ async def test_run_prompt_and_stream_updates_claude_task_list_without_tool_spam(
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="\x1b[32mTGCLI_BEGIN\x1b[0m\n正文\nTGCLI_DONE\n"),
             CLIEvent(type=EventType.STDERR, task_id="t1", content="boom\n"),
@@ -1604,7 +1470,7 @@ async def test_run_prompt_and_stream_strips_markers_and_marks_stderr() -> None:
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_reports_failed_with_hint_and_truncation() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.FAILED, task_id="t1", error="tmux session lost"),
         ],
@@ -1622,7 +1488,7 @@ async def test_run_prompt_and_stream_reports_failed_with_hint_and_truncation() -
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_reports_timeout() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.TIMEOUT, task_id="t1", error="deadline exceeded"),
         ],
@@ -1638,7 +1504,7 @@ async def test_run_prompt_and_stream_reports_timeout() -> None:
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_reports_canceled() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.CANCELED, task_id="t1", error="user canceled"),
         ],
@@ -1655,7 +1521,7 @@ async def test_run_prompt_and_stream_reports_canceled() -> None:
 async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mode() -> None:
     message = DummyMessage()
     turns: list[ConversationTurn] = []
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="噪音\nTGCLI_BEGIN\n正文\nTGCLI_DONE\n"),
@@ -1684,7 +1550,7 @@ async def test_run_prompt_and_stream_prefers_structured_reply_in_interactive_mod
 async def test_run_prompt_and_stream_does_not_ack_structured_reply_when_send_fails() -> None:
     message = DummyMessage(fail_on_texts={"干净正文"})
     turns: list[ConversationTurn] = []
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="噪音\nTGCLI_BEGIN\n正文\nTGCLI_DONE\n"),
@@ -1712,7 +1578,7 @@ async def test_run_prompt_and_stream_does_not_ack_structured_reply_when_send_fai
 async def test_run_prompt_and_stream_interactive_ignores_old_turn_and_emits_new_completed_turn() -> None:
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="tmux 噪音\n"),
@@ -1742,7 +1608,7 @@ async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn(m
     monkeypatch.setattr(run_event_streamer_module, "_DELAYED_STRUCTURED_REPLY_TIMEOUT_SEC", 0.01)
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n半截回复\n", is_complete=False)]
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="tmux 噪音\n"),
@@ -1767,7 +1633,7 @@ async def test_run_prompt_and_stream_interactive_does_not_emit_incomplete_turn(m
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_structured_session() -> None:
     message = DummyMessage()
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="原始输出\n"),
@@ -1791,7 +1657,7 @@ async def test_run_prompt_and_stream_interactive_falls_back_to_stdout_without_st
 @pytest.mark.asyncio
 async def test_run_prompt_and_stream_continues_after_message_send_failure() -> None:
     message = DummyMessage(fail_on_calls={1})
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="hello\nworld\n"),
@@ -1812,7 +1678,7 @@ async def test_run_prompt_and_stream_continues_after_message_send_failure() -> N
 async def test_run_prompt_and_stream_interactive_emits_late_structured_turn_before_exit() -> None:
     message = DummyMessage()
     turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.STDOUT, task_id="t1", content="tmux 噪音\n"),
@@ -1842,7 +1708,7 @@ async def test_run_prompt_and_stream_interactive_emits_turn_arriving_after_exit_
     message = DummyMessage()
     terminal_at = utc_now() + timedelta(seconds=1)
     turns = [ConversationTurn(turn_id="turn-old", role="assistant", text="\n旧回复\n", is_complete=True)]
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0, at=terminal_at),
@@ -1883,7 +1749,7 @@ async def test_run_prompt_and_stream_interactive_ignores_post_exit_unrelated_tur
     message = DummyMessage()
     terminal_at = utc_now()
     turns: list[ConversationTurn] = []
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0, at=terminal_at),
@@ -1925,7 +1791,7 @@ async def test_run_prompt_and_stream_interactive_edits_fallback_when_reply_arriv
     message = DummyMessage()
     terminal_at = utc_now() + timedelta(seconds=1)
     turns: list[ConversationTurn] = []
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0, at=terminal_at),
@@ -1969,7 +1835,7 @@ async def test_run_prompt_and_stream_interactive_deletes_fallback_when_delayed_r
     terminal_at = utc_now() + timedelta(seconds=1)
     long_reply = "延迟结构化回复" * 600
     turns: list[ConversationTurn] = []
-    task_service = DummyTaskService(
+    task_service = FakeTaskService(
         [
             CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
             CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0, at=terminal_at),
@@ -2024,11 +1890,8 @@ async def test_run_prompt_and_stream_interactive_uses_task_bound_session_after_c
         tool_calls={},
     )
     current_session = {"value": task_session}
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         event_delays=[0.0, 0.08],
@@ -2064,11 +1927,8 @@ async def test_run_prompt_and_stream_interactive_reports_pending_permission_once
     permission_gateway = FakePermissionGateway()
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已完成回复\n", is_complete=True)]
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
@@ -2114,11 +1974,8 @@ async def test_run_prompt_and_stream_does_not_ack_permission_when_prompt_send_fa
     permission_gateway = FakePermissionGateway()
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     turns = [ConversationTurn(turn_id="turn-1", role="assistant", text="\n已完成回复\n", is_complete=True)]
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
@@ -2187,11 +2044,8 @@ async def test_run_prompt_and_stream_interactive_reports_user_question_once() ->
         status=ToolStatus.RUNNING,
     )
     question_session.tool_calls = {"tool-ask-1": question_tool}
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
@@ -2274,11 +2128,8 @@ async def test_run_prompt_and_stream_does_not_ack_user_question_when_prompt_send
         status=ToolStatus.RUNNING,
     )
     question_session.tool_calls = {"tool-ask-1": question_tool}
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
@@ -2338,11 +2189,8 @@ async def test_run_prompt_and_stream_interactive_reports_multi_select_user_quest
         status=ToolStatus.RUNNING,
     )
     question_session.tool_calls = {"tool-ask-multi": question_tool}
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
@@ -2438,11 +2286,8 @@ async def test_run_prompt_and_stream_interactive_reports_only_first_question_for
         status=ToolStatus.RUNNING,
     )
     question_session.tool_calls = {"tool-ask-1": question_tool}
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
@@ -2519,11 +2364,8 @@ async def test_run_prompt_and_stream_interactive_emits_progress_update_immediate
         pending_permission=None,
         tool_calls=tool_calls,
     )
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         event_delays=[0.0, 0.12],
@@ -2568,11 +2410,8 @@ def test_render_markdownish_to_telegram_html_supports_bold_and_code_block() -> N
 async def test_run_prompt_and_stream_renders_structured_reply_as_html() -> None:
     message = DummyMessage()
     turns: list[ConversationTurn] = []
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
@@ -2603,11 +2442,8 @@ async def test_run_prompt_and_stream_renders_structured_reply_as_html() -> None:
 async def test_run_prompt_and_stream_splits_long_code_block_reply_into_valid_html_chunks() -> None:
     message = DummyMessage()
     turns: list[ConversationTurn] = []
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
@@ -2654,11 +2490,8 @@ async def test_run_prompt_and_stream_does_not_truncate_long_structured_reply_pre
     message = DummyMessage()
     long_reply = "A" * 1905
     turns: list[ConversationTurn] = []
-    task_service = DummyTaskService(
-        [
-            CLIEvent(type=EventType.STARTED, task_id="t1", content="tmux_session=tgcli_user_1"),
-            CLIEvent(type=EventType.EXITED, task_id="t1", exit_code=0),
-        ],
+    task_service = FakeTaskService(
+        make_cli_event_stream(with_tmux_marker=True),
         _status(task_status=TaskStatus.SUCCEEDED),
         interactive=True,
         structured_turns=turns,
