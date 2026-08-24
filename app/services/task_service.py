@@ -29,6 +29,7 @@ from app.domain.protocols import (
 )
 from app.domain.session_models import SessionState, is_claude_session_id
 from app.domain.user_question_models import UserQuestionPrompt
+from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.auto_approve_service import AutoApproveService
 from app.services.permission_service import PermissionService
 from app.services.session_service import SessionService
@@ -79,7 +80,11 @@ class TaskService:
         resolved_session_state_reader = session_state_reader or cli_factory.session_state_reader
         self._semaphore = semaphore
         self._context_builder = context_builder
-        self._task_lifecycle_locks: dict[str, asyncio.Lock] = {}
+        self._task_lifecycle_locks = RefCountedLockRegistry(
+            ttl_sec=settings.session_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
         self._structured_session_resolver = StructuredSessionResolver(
             session_service=session_service,
             task_store=task_store,
@@ -111,16 +116,6 @@ class TaskService:
             clear_user_questions=self._user_question_service.clear_user,
             auto_approve_service=auto_approve_service,
         )
-
-    def _task_lifecycle_lock(self, task_id: str) -> asyncio.Lock:
-        lock = self._task_lifecycle_locks.get(task_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._task_lifecycle_locks[task_id] = lock
-        return lock
-
-    def _cleanup_task_lifecycle_lock(self, task_id: str) -> None:
-        self._task_lifecycle_locks.pop(task_id, None)
 
     async def cleanup_orphaned_terminal(self, terminal_id: str, *, claude_session_id: str | None, user_id: int) -> None:
         await self._terminal_session_service.cleanup_orphaned_terminal(
@@ -371,15 +366,11 @@ class TaskService:
             async with self._semaphore:
                 if record.cancel_requested:
                     canceled_event = CLIEvent(type=EventType.CANCELED, task_id=record.task_id, error="cancel requested before start")
-                    lock = self._task_lifecycle_lock(record.task_id)
-                    async with lock:
+                    async with self._task_lifecycle_locks.lock(record.task_id):
                         if not record.is_final:
                             await self._apply_event(record, canceled_event)
                             await self._task_store.save(record)
                             await self._cleanup_after_final_task(record)
-                        cleanup_lock = record.is_final
-                    if cleanup_lock:
-                        self._cleanup_task_lifecycle_lock(record.task_id)
                     yield canceled_event
                     return
                 try:
@@ -391,8 +382,7 @@ class TaskService:
                     ):
                         should_yield = True
                         yielded_canceled_event: CLIEvent | None = None
-                        lock = self._task_lifecycle_lock(record.task_id)
-                        async with lock:
+                        async with self._task_lifecycle_locks.lock(record.task_id):
                             if record.is_final:
                                 logger.info(
                                     "task event ignored after final status",
@@ -409,9 +399,6 @@ class TaskService:
                                 await self._apply_event(record, event)
                                 await self._task_store.save(record)
                                 await self._cleanup_after_final_task(record)
-                            cleanup_lock = record.is_final
-                        if cleanup_lock:
-                            self._cleanup_task_lifecycle_lock(record.task_id)
                         if yielded_canceled_event is not None:
                             yield yielded_canceled_event
                             return
@@ -419,16 +406,12 @@ class TaskService:
                             yield event
                 except Exception as exc:
                     failed_event = CLIEvent(type=EventType.FAILED, task_id=record.task_id, error=str(exc))
-                    lock = self._task_lifecycle_lock(record.task_id)
-                    async with lock:
+                    async with self._task_lifecycle_locks.lock(record.task_id):
                         should_yield = not record.is_final
                         if should_yield:
                             await self._apply_event(record, failed_event)
                             await self._task_store.save(record)
                             await self._cleanup_after_final_task(record)
-                        cleanup_lock = record.is_final
-                    if cleanup_lock:
-                        self._cleanup_task_lifecycle_lock(record.task_id)
                     if should_yield:
                         yield failed_event
 
@@ -445,8 +428,7 @@ class TaskService:
         adapter = self._cli_factory.get(task.provider)
         canceled = await adapter.cancel(task_id)
         canceled_event = CLIEvent(type=EventType.CANCELED, task_id=task_id, error="cancel requested before start")
-        lock = self._task_lifecycle_lock(task_id)
-        async with lock:
+        async with self._task_lifecycle_locks.lock(task_id):
             if task.is_final:
                 if task.status == TaskStatus.CANCELED:
                     canceled = True
@@ -460,31 +442,22 @@ class TaskService:
                 else:
                     await self._task_store.save(task)
                     canceled = True
-            cleanup_lock = task.is_final
-        if cleanup_lock:
-            self._cleanup_task_lifecycle_lock(task_id)
         if canceled:
             logger.info("task cancel requested", extra={"task_id": task_id, "user_id": user_id, "provider": task.provider})
         return canceled
 
     async def mark_stream_timeout(self, task_id: str, user_id: int, *, reason: str) -> bool:
-        lock = self._task_lifecycle_lock(task_id)
-        async with lock:
+        async with self._task_lifecycle_locks.lock(task_id):
             task = await self._task_store.get(task_id)
             if task is None or task.user_id != user_id:
-                cleanup_lock = True
                 marked = False
             elif task.is_final:
-                cleanup_lock = True
                 marked = False
             else:
                 await self._apply_event(task, CLIEvent(type=EventType.TIMEOUT, task_id=task_id, error=reason))
                 await self._task_store.save(task)
                 await self._cleanup_after_final_task(task)
-                cleanup_lock = task.is_final
                 marked = True
-        if cleanup_lock:
-            self._cleanup_task_lifecycle_lock(task_id)
         return marked
 
     async def mark_stream_timeout_and_cancel(
@@ -496,24 +469,18 @@ class TaskService:
         cancel_timeout_sec: float | None = None,
     ) -> tuple[bool, bool]:
         provider: str | None = None
-        lock = self._task_lifecycle_lock(task_id)
-        async with lock:
+        async with self._task_lifecycle_locks.lock(task_id):
             task = await self._task_store.get(task_id)
             if task is None or task.user_id != user_id:
-                cleanup_lock = True
                 marked = False
             elif task.is_final:
-                cleanup_lock = True
                 marked = False
             else:
                 provider = task.provider
                 await self._apply_event(task, CLIEvent(type=EventType.TIMEOUT, task_id=task_id, error=reason))
                 await self._task_store.save(task)
                 await self._cleanup_after_final_task(task)
-                cleanup_lock = task.is_final
                 marked = True
-        if cleanup_lock:
-            self._cleanup_task_lifecycle_lock(task_id)
         if not marked or provider is None:
             return marked, False
 
