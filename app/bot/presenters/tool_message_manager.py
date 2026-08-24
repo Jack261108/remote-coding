@@ -18,7 +18,7 @@ from app.bot.presenters.structured_reply_presenter import (
     build_tool_status_message,
     build_tool_task_list_message,
 )
-from app.bot.presenters.telegram_formatting import render_markdownish_to_telegram_html, split_telegram_html
+from app.bot.presenters.telegram_formatting import TELEGRAM_TEXT_LIMIT, render_markdownish_to_telegram_html, split_telegram_html
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ class ToolMessageManager:
 
     def _render(self, text: str) -> str:
         rendered = render_markdownish_to_telegram_html(text)
-        return split_telegram_html(rendered, 4096)[0]
+        return split_telegram_html(rendered, TELEGRAM_TEXT_LIMIT)[0]
 
 
 def _is_message_not_modified(exc: Exception) -> bool:

@@ -40,6 +40,9 @@ def truncate_text(text: str, max_chars: int, *, suffix: str = "…") -> str:
     return text[: max_chars - len(suffix)] + suffix
 
 
+TELEGRAM_TEXT_LIMIT = 4096
+
+
 def ensure_aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
