@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from app.domain.external_session_models import ExternalBinding
+from app.domain.external_session_models import ExternalBinding, GhosttyInputTarget
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,52 @@ def _normalize_to_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _ghostty_target_to_dict(target: GhosttyInputTarget) -> dict[str, object]:
+    data: dict[str, object] = {
+        "terminal_id": target.terminal_id,
+        "paired_tty": target.paired_tty,
+        "paired_at": target.paired_at.isoformat(),
+        "binding_id": target.binding_id,
+    }
+    if target.name is not None:
+        data["name"] = target.name
+    if target.cwd is not None:
+        data["cwd"] = target.cwd
+    return data
+
+
+def _ghostty_target_from_dict(raw: object) -> GhosttyInputTarget | None:
+    """Reconstruct a Ghostty target from persisted JSON.
+
+    Returns ``None`` for missing/malformed data so a corrupt target entry
+    degrades gracefully to "not paired" rather than failing binding load.
+    """
+    if not isinstance(raw, dict):
+        return None
+    terminal_id = raw.get("terminal_id")
+    paired_tty = raw.get("paired_tty")
+    paired_at_raw = raw.get("paired_at")
+    binding_id = raw.get("binding_id")
+    if not (
+        isinstance(terminal_id, str) and isinstance(paired_tty, str) and isinstance(binding_id, str) and isinstance(paired_at_raw, str)
+    ):
+        return None
+    try:
+        paired_at = _normalize_to_utc(datetime.fromisoformat(paired_at_raw))
+    except ValueError:
+        return None
+    name = raw.get("name")
+    cwd = raw.get("cwd")
+    return GhosttyInputTarget(
+        terminal_id=terminal_id,
+        paired_tty=paired_tty,
+        paired_at=paired_at,
+        binding_id=binding_id,
+        name=name if isinstance(name, str) else None,
+        cwd=cwd if isinstance(cwd, str) else None,
+    )
 
 
 class ExternalBindingStore:
@@ -98,6 +144,66 @@ class ExternalBindingStore:
         self._persist()
         return True
 
+    def set_ghostty_target(
+        self,
+        session_id: str,
+        expected_binding_id: str,
+        *,
+        terminal_id: str,
+        paired_tty: str,
+        paired_at: datetime,
+        name: str | None = None,
+        cwd: str | None = None,
+    ) -> bool:
+        """Persist a Ghostty terminal pairing for the bound session.
+
+        Generation-safe: only applies when the binding still exists and its
+        ``binding_id`` matches ``expected_binding_id`` (the binding generation
+        observed by the caller). Returns ``True`` when the target was set,
+        ``False`` when the binding vanished or was re-bound under a new
+        generation — in which case the caller must drop the pairing attempt
+        (ABA barrier, same contract as :meth:`set_title_if_current`).
+
+        When the binding's ``tty`` is still unset, it is back-filled from
+        ``paired_tty`` so subsequent sends can re-derive the trust anchor even
+        if the target is later cleared.
+        """
+        binding = self._bindings.get(session_id)
+        if binding is None or binding.binding_id != expected_binding_id:
+            return False
+        binding.ghostty_target = GhosttyInputTarget(
+            terminal_id=terminal_id,
+            paired_tty=paired_tty,
+            paired_at=paired_at,
+            binding_id=expected_binding_id,
+            name=name,
+            cwd=cwd,
+        )
+        if not binding.tty and paired_tty:
+            binding.tty = paired_tty
+        self._persist()
+        return True
+
+    def clear_ghostty_target(
+        self,
+        session_id: str,
+        expected_binding_id: str,
+    ) -> bool:
+        """Remove a Ghostty terminal pairing, generation-safe.
+
+        Clears the target only when ``expected_binding_id`` still matches, so a
+        stale failure path cannot wipe a target that belongs to a newer binding
+        generation. ``tty`` and all other binding fields are left untouched.
+        """
+        binding = self._bindings.get(session_id)
+        if binding is None or binding.binding_id != expected_binding_id:
+            return False
+        if binding.ghostty_target is None:
+            return False
+        binding.ghostty_target = None
+        self._persist()
+        return True
+
     def list_all(self) -> list[ExternalBinding]:
         """Return a snapshot list of all current bindings.
 
@@ -114,6 +220,7 @@ class ExternalBindingStore:
         *,
         persist_min_interval_sec: int = 60,
         pid: int | None = None,
+        tty: str | None = None,
     ) -> None:
         """Update the in-memory ``last_activity_at`` for ``session_id``.
 
@@ -131,6 +238,12 @@ class ExternalBindingStore:
         ``persist_min_interval_sec`` throttle as ``last_activity_at`` — there is
         no separate immediate-persist path for pid.
 
+        ``tty`` follows the same non-clobbering rule as ``pid``: a non-empty
+        value updates the stored ``tty`` in memory, while ``None`` or an empty
+        string leaves any previously recorded ``tty`` intact. This lets a
+        later hook that carries a TTY back-fill a binding that was bound before
+        the TTY was available, without an event that omits the TTY wiping it.
+
         No-op if ``session_id`` is not present in the store.
         """
         binding = self._bindings.get(session_id)
@@ -145,6 +258,10 @@ class ExternalBindingStore:
         # ``None`` or ``<= 0`` leaves any previously recorded pid intact.
         if pid is not None and pid > 0:
             binding.pid = pid
+
+        # Same non-clobbering rule for tty.
+        if tty:
+            binding.tty = tty
 
         now = time.monotonic()
         last_persist = self._last_persist_at.get(session_id)
@@ -184,6 +301,8 @@ class ExternalBindingStore:
                     last_pushed_reply_turn_id=entry.get("last_pushed_reply_turn_id"),
                     reply_cursor_initialized=bool(entry.get("reply_cursor_initialized", False)),
                     last_activity_at_init=last_activity_at,
+                    tty=entry.get("tty"),
+                    ghostty_target=_ghostty_target_from_dict(entry.get("ghostty_target")),
                 )
             return bindings
         except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
@@ -216,6 +335,8 @@ class ExternalBindingStore:
                 "ended_at": binding.ended_at.isoformat() if binding.ended_at is not None else None,
                 "last_pushed_reply_turn_id": binding.last_pushed_reply_turn_id,
                 "reply_cursor_initialized": binding.reply_cursor_initialized,
+                "tty": binding.tty,
+                "ghostty_target": (_ghostty_target_to_dict(binding.ghostty_target) if binding.ghostty_target is not None else None),
             }
         # Atomic write: write to temp file then rename to avoid corruption
         try:

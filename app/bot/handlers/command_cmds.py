@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.bot.handlers.user_utils import extract_user_id
 from app.domain.models import SessionContext
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.claude_command_discovery import ClaudeCommand, discover_commands
 from app.services.task_service import TaskService
 
@@ -51,6 +52,7 @@ def register_cmds_handler(
     *,
     task_service: TaskService,
     permission_gateway: PermissionGateway | None = None,
+    stream_background_tasks: BackgroundTaskRegistry,
 ) -> None:
     @router.message(Command("cmds"))
     async def command_cmds(message: Message, session: SessionContext) -> None:
@@ -129,4 +131,5 @@ def register_cmds_handler(
                 diff_generator=None,
                 result_exporter=None,
                 permission_gateway=permission_gateway,
+                stream_background_tasks=stream_background_tasks,
             )

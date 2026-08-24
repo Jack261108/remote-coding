@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import timedelta
 
 from app.adapters.storage.memory import MemoryTaskStore
-from app.domain.protocols import SessionStateReaderProtocol
+from app.domain.protocols import AdapterCapabilities, SessionStateReaderProtocol
 from app.domain.session_models import SessionState, is_claude_session_id
 from app.services.session_lookup_service import SessionLookupService, _same_workdir
 from app.services.session_notifier import SessionNotifier
@@ -21,6 +22,7 @@ class StructuredSessionResolver:
         *,
         session_service: SessionService,
         task_store: MemoryTaskStore,
+        capabilities_resolver: Callable[[str], AdapterCapabilities],
         session_state_reader: SessionStateReaderProtocol | None = None,
         lookup: SessionLookupService | None = None,
         tracker: StructuredReplyTracker | None = None,
@@ -30,6 +32,7 @@ class StructuredSessionResolver:
     ) -> None:
         self._session_service = session_service
         self._task_store = task_store
+        self._capabilities_resolver = capabilities_resolver
         self._session_state_reader = session_state_reader
 
         # If new-style dependencies are provided, use them directly.
@@ -73,7 +76,11 @@ class StructuredSessionResolver:
         terminal_id = None
         claude_session_id = task.claude_session_id
         claude_chat_active = False
-        if session is not None and session.provider == "claude_code" and _same_workdir(session.workdir, task.workdir):
+        if (
+            session is not None
+            and self._capabilities_resolver(session.provider).session_state
+            and _same_workdir(session.workdir, task.workdir)
+        ):
             terminal_id = session.terminal_id
             claude_chat_active = session.claude_chat_active
 
@@ -132,7 +139,7 @@ class StructuredSessionResolver:
         claude_chat_active: bool,
         log_missing: bool,
     ) -> SessionState | None:
-        if provider != "claude_code":
+        if not self._capabilities_resolver(provider).session_state:
             if log_missing:
                 logger.info(
                     "structured session lookup failed",
@@ -250,7 +257,7 @@ class StructuredSessionResolver:
             return state.user_id == user_id
 
         session = await self._session_service.get(user_id)
-        if session is None or session.provider != "claude_code":
+        if session is None or not self._capabilities_resolver(session.provider).session_state:
             return False
 
         if session.claude_session_id:

@@ -14,6 +14,7 @@ from app.bot.handlers.file_upload import (
 )
 from app.domain.file_models import FileUploadResult, FileValidationError
 from app.domain.models import TaskRecord, TaskStatus
+from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.upload_queue import UploadQueueManager
 
 # --- Unit tests for helper functions ---
@@ -403,6 +404,7 @@ async def test_process_pending_uploads() -> None:
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_processing_locks=RefCountedLockRegistry(ttl_sec=300, cleanup_interval_sec=60, cleanup_batch_size=50),
         user_id=42,
     )
 

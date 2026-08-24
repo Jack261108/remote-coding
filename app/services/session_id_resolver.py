@@ -85,6 +85,24 @@ def _is_tmux_user_wide_prefix(prefix: str) -> bool:
     return len(parts) == 3 and parts[0] == "user" and parts[1].isdigit() and parts[2] == ""
 
 
+def external_session_select_token(
+    session_id: str,
+    *,
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> str:
+    """Return the `sess:select` callback token for a fully-resolved external session.
+
+    The candidate set mirrors `validate_external_session_select` and the `/list`
+    rendering, so the emitted token is the same one `handle_session_select`
+    re-derives on click and resolves back to ``session_id``.
+    """
+    token_candidates = [session.session_id for session in discovery.list_unbound()]
+    token_candidates.extend(binding.session_id for binding in binder._binding_store.list_all())
+    token_candidates.extend(discovery.unavailable_session_ids())
+    return unique_prefixes(token_candidates, min_length=16, max_length=52)[session_id]
+
+
 def unavailable_unbound_session_message(session_id: str, discovery: ExternalSessionDiscoveryService) -> str | None:
     """Return an unavailable message when an unbound session is stale or dead."""
     unbound = discovery.get(session_id)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.config.settings import Settings, is_workdir_allowed
 from app.domain.models import SessionContext
-from app.domain.protocols import ClaudeTerminalRuntimeProtocol
+from app.domain.protocols import AdapterCapabilities, ClaudeTerminalRuntimeProtocol
 from app.services.auto_approve_service import AutoApproveService
 from app.services.session_service import SessionService
 
@@ -28,12 +28,14 @@ class TerminalSessionService:
         settings: Settings,
         session_service: SessionService,
         clear_user_questions: Callable[[int], None],
+        capabilities_resolver: Callable[[str], AdapterCapabilities],
         terminal_runtime: ClaudeTerminalRuntimeProtocol | None = None,
         cli_factory: ClaudeTerminalRuntimeProtocol | None = None,
         auto_approve_service: AutoApproveService | None = None,
     ) -> None:
         self._settings = settings
         self._session_service = session_service
+        self._capabilities_resolver = capabilities_resolver
         resolved_terminal_runtime = terminal_runtime or cli_factory
         if resolved_terminal_runtime is None:
             raise ValueError("terminal_runtime is required")
@@ -77,7 +79,12 @@ class TerminalSessionService:
             self._clear_user_questions(affected_user_id)
 
     async def resolve_for_task(self, *, user_id: int, provider: str, workdir: str) -> TaskTerminalContext:
-        terminal_mode = provider == "claude_code" and self._settings.claude_tmux_mode
+        caps = self._capabilities_resolver(provider)
+        # persistent_terminal_active（动态能力位）已吸收原手写的
+        # settings.claude_tmux_mode 闸门：claude_code 的动态位 = tmux 后端
+        # 此刻可用，codex/gemini 恒 False，等价于原先由 caps.persistent_terminal
+        # 先短路掉 claude_tmux_mode 的真值表。
+        terminal_mode = caps.persistent_terminal_active
         session, orphaned = await self._session_service.get_or_create(
             user_id=user_id,
             provider=provider,
@@ -92,7 +99,7 @@ class TerminalSessionService:
                 user_id=orphaned.user_id,
             )
         terminal_key = session.terminal_id if session.terminal_mode else None
-        interactive = bool(terminal_key and provider == "claude_code" and session.claude_chat_active and self._settings.claude_tmux_mode)
+        interactive = bool(terminal_key and caps.interactive_input and session.claude_chat_active and caps.persistent_terminal_active)
         return TaskTerminalContext(session=session, terminal_key=terminal_key, interactive=interactive)
 
     async def close_terminal(self, user_id: int) -> tuple[bool, str]:
@@ -226,6 +233,14 @@ class TerminalSessionService:
         return True, message
 
     async def open_claude_resume_session(self, user_id: int, session_id: str, *, workdir: str | None = None) -> tuple[bool, str]:
+        # 能力位门控（ AdapterCapabilities.claude_resume）：仅支持会话恢复的
+        # provider 才能进入 resume 路径。必须早于 _prepare_claude_session，否则
+        # 后者会把当前 provider 硬改写为 claude_code，静默污染 codex/gemini 等
+        # 用户的会话 provider。
+        existing = await self._session_service.get(user_id)
+        resume_provider = existing.provider if existing is not None else "claude_code"
+        if not self._capabilities_resolver(resume_provider).claude_resume:
+            return False, f"{resume_provider} 不支持会话恢复"
         result = await self._prepare_claude_session(user_id, workdir)
         if isinstance(result, str):
             return False, result

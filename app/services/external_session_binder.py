@@ -8,6 +8,7 @@ from app.domain.external_session_models import BindResult, ExternalBinding
 from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.local_process_probe import LocalProcessProbe
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class ExternalSessionBinder:
         sync_callback: Callable[[str, str], Awaitable[None]] | None = None,
         save_callback: Callable[[ExternalBinding], Awaitable[bool]] | None = None,
         remove_callback: Callable[[str, str | None], Awaitable[ExternalBinding | None]] | None = None,
+        process_probe: LocalProcessProbe | None = None,
     ) -> None:
         self._discovery = discovery
         self._binding_store = binding_store
@@ -41,6 +43,7 @@ class ExternalSessionBinder:
         self._sync_callback = sync_callback
         self._save_callback = save_callback
         self._remove_callback = remove_callback
+        self._process_probe = process_probe
 
     async def bind(self, *, user_id: int, session_id: str) -> BindResult:
         """Bind an unbound session to a user.
@@ -93,6 +96,20 @@ class ExternalSessionBinder:
         except Exception:  # pragma: no cover - defensive per Req 3.3
             captured_pid = None
 
+        # Resolve the controlling tty for the binding's trust anchor. Discovery
+        # supplies ``unbound.tty`` from hook events, but the Claude Code CLI may
+        # not emit a tty, leaving bindings without the (pid, paired_tty) pair
+        # that the external input service needs to validate foreground / pair.
+        # Fall back to probing the live pid's controlling tty so bind alone is
+        # sufficient to anchor external input (no reliance on a tty-bearing hook).
+        resolved_tty = getattr(unbound, "tty", None)
+        if resolved_tty is None and self._process_probe is not None and captured_pid:
+            try:
+                resolved_tty = self._process_probe.pid_controlling_tty(captured_pid)
+            except Exception:  # pragma: no cover - defensive; never block bind
+                logger.debug("process_probe pid_controlling_tty failed", exc_info=True)
+                resolved_tty = None
+
         binding = ExternalBinding(
             session_id=session_id,
             user_id=user_id,
@@ -102,6 +119,7 @@ class ExternalSessionBinder:
             pid=captured_pid,
             title=unbound.title,
             reply_cursor_initialized=True,
+            tty=resolved_tty,
         )
         if self._save_callback is not None:
             saved = await self._save_callback(binding)

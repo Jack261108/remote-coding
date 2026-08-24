@@ -10,13 +10,23 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from app.domain.models import CLIEvent, ExecutionTask
     from app.domain.session_models import SessionEvent, SessionPhase, SessionState
+    from app.domain.user_question_models import ExternalQuestionActionResult, ExternalUserQuestionContext
 
 
 @dataclass(frozen=True)
 class AdapterCapabilities:
-    """声明 CLI adapter/runtime 可用能力的轻量视图。"""
+    """声明 CLI adapter/runtime 可用能力的轻量视图。
+
+    静态位（persistent_terminal / interactive_input / claude_resume /
+    user_question_tui / session_state）表达"该 provider 类别支持某能力"，
+    与运行环境无关——claude_code 恒真，codex/gemini 恒假。动态位
+    persistent_terminal_active 表达"持久终端后端此刻可用"（tmux 已开启并
+    完成初始化），随 settings.claude_tmux_mode 变化。
+    """
 
     run_task: bool = True
     cancel_task: bool = True
@@ -25,6 +35,7 @@ class AdapterCapabilities:
     claude_resume: bool = False
     user_question_tui: bool = False
     session_state: bool = False
+    persistent_terminal_active: bool = False
 
 
 @runtime_checkable
@@ -43,6 +54,8 @@ class CLIAdapterProtocol(Protocol):
     ) -> AsyncGenerator[CLIEvent, None]: ...
 
     async def cancel(self, task_id: str) -> bool: ...
+
+    def build_file_args(self, file_paths: list[Path]) -> list[str]: ...
 
 
 @runtime_checkable
@@ -77,7 +90,7 @@ class ClaudeTerminalRuntimeProtocol(Protocol):
 
 @runtime_checkable
 class ClaudeUserQuestionTransportProtocol(Protocol):
-    """Claude AskUserQuestion 的终端/TUI 操作能力。"""
+    """Claude AskUserQuestion 的 managed terminal/TUI 操作能力。"""
 
     async def select_option(
         self,
@@ -105,6 +118,44 @@ class ClaudeUserQuestionTransportProtocol(Protocol):
         workdir: str,
         final_question: bool,
     ) -> tuple[bool, str]: ...
+
+
+@runtime_checkable
+class ExternalClaudeUserQuestionTransportProtocol(Protocol):
+    """External Ghostty AskUserQuestion 的显式 target 操作能力。"""
+
+    async def select_option(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        option_index: int,
+        submit_after: bool,
+    ) -> ExternalQuestionActionResult: ...
+
+    async def answer_with_text(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        text: str,
+        submit_after: bool,
+    ) -> ExternalQuestionActionResult: ...
+
+    async def advance_after_multi_select(
+        self,
+        *,
+        context: ExternalUserQuestionContext,
+        question_index: int,
+        option_count: int,
+        final_question: bool,
+    ) -> ExternalQuestionActionResult: ...
+
+    async def question_completed(self, *, context: ExternalUserQuestionContext) -> None: ...
+
+    async def question_indeterminate(self, *, context: ExternalUserQuestionContext, reason: str) -> None: ...
 
 
 @runtime_checkable

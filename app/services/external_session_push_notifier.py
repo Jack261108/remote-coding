@@ -5,18 +5,46 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.domain.permission_models import PermissionPromptInput
+from app.domain.user_question_models import UserQuestionPrompt
 from app.infra.text_formatting import render_markdownish_to_telegram_html, render_markdownish_with_html_fallback, short_id
+from app.infra.user_question_callbacks import build_user_question_callback_data
 from app.services.message_sender import Button, Keyboard, MessageSender
 from app.services.permission_callback_registry import SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
+from app.services.user_question_callback_registry import (
+    QuestionCallbackTokens,
+    UserQuestionCallbackOrigin,
+)
 
 if TYPE_CHECKING:
     from app.domain.session_models import SessionPhase
-    from app.domain.user_question_models import UserQuestionPrompt
     from app.services.external_binding_store import ExternalBindingStore
+    from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_gateway import PermissionGateway
+    from app.services.user_question_callback_registry import UserQuestionCallbackRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def format_external_tmux_question_text(prompt: UserQuestionPrompt, session_id: str) -> str:
+    """Render the shared ❓/{sid}/问题/选项 block for a tmux external question card.
+
+    Used both by the initial ``notify_user_question`` push and the mid-batch
+    next-prompt push in the external_permission handler, so the two cards stay
+    visually consistent instead of the follow-up drifting to a bare question
+    string. Callers append their own CTA tail (button hint etc) when needed.
+    """
+    sid = short_id(session_id)
+    lines: list[str] = [f"❓ [{sid}] 用户选择"]
+    lines.append(f"问题: {prompt.question}")
+    if prompt.options:
+        lines.append("选项:")
+        for i, option in enumerate(prompt.options, start=1):
+            label = option.label
+            if option.description:
+                label += f" — {option.description}"
+            lines.append(f"  {i}. {label}")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -36,11 +64,15 @@ class ExternalSessionPushNotifier:
         binding_store: ExternalBindingStore,
         retry_count: int = 1,
         permission_gateway: PermissionGateway | None = None,
+        external_uq_state: ExternalUserQuestionState | None = None,
+        user_question_callback_registry: UserQuestionCallbackRegistry | None = None,
     ) -> None:
         self._message_sender = message_sender
         self._binding_store = binding_store
         self._retry_count = retry_count
         self._permission_gateway = permission_gateway
+        self._external_uq_state = external_uq_state
+        self._user_question_callback_registry = user_question_callback_registry
         self._pending_reply_chunks: dict[tuple[int, str, str], _PendingReplyChunks] = {}
 
     async def notify_permission_request(
@@ -190,53 +222,99 @@ class ExternalSessionPushNotifier:
         session_id: str,
         prompts: tuple[UserQuestionPrompt, ...],
         interactive: bool = False,
+        origin: UserQuestionCallbackOrigin = UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY,
     ) -> bool:
         """Send notification showing AskUserQuestion options.
 
-        When *interactive* is True, options are shown as clickable buttons that
-        inject the answer into the external terminal via PTY injection.
-        Otherwise, this is informational only (user answers in terminal).
-        Returns True if delivered.
+        When *interactive* is True, the first prompt's options are shown as
+        clickable buttons backed by opaque registry tokens (``ask:`` for
+        Ghostty, ``ext_uq:`` for the legacy tmux path). Multiple-select prompts
+        get toggles plus a submit button. Otherwise this is informational only
+        (the user answers in the terminal). Returns True if delivered.
         """
         if not prompts:
             return False
-        sid = short_id(session_id)
         # For interactive mode, we only show the first unanswered prompt with buttons
         prompt = prompts[0]
-        lines: list[str] = []
-        lines.append(f"❓ [{sid}] 用户选择")
-        lines.append(f"问题: {prompt.question}")
-        if prompt.options:
-            lines.append("选项:")
-            for i, option in enumerate(prompt.options, start=1):
-                label = option.label
-                if option.description:
-                    label += f" — {option.description}"
-                lines.append(f"  {i}. {label}")
+        prefix = "ask" if origin is UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY else "ext_uq"
+        lines = format_external_tmux_question_text(prompt, session_id).splitlines()
 
-        if interactive and prompt.options:
-            lines.append("")
-            lines.append("👇 点击按钮选择:")
-            text = "\n".join(lines).rstrip()
-            # Build option buttons
-            # Callback data format: ext_uq:{tool_use_id}:{option_index}
-            buttons: list[list[Button]] = []
-            tool_use_id = prompt.tool_use_id
-            for i, option in enumerate(prompt.options):
-                # Telegram callback_data max 64 bytes; truncate tool_use_id if needed
-                cb_data = f"ext_uq:{tool_use_id}:{i}"
-                if len(cb_data.encode()) > 64:
-                    # Truncate tool_use_id to fit
-                    max_id_len = 64 - len(f"ext_uq::{i}".encode())
-                    cb_data = f"ext_uq:{tool_use_id[:max_id_len]}:{i}"
-                buttons.append([Button(text=f"{i + 1}. {option.label}"[:40], callback_data=cb_data)])
-            keyboard = Keyboard(rows=buttons)
-            return await self._send_with_retry(chat_id=user_id, text=text, keyboard=keyboard) is not None
-        else:
+        if not interactive or not prompt.options:
             lines.append("请在终端中选择")
             lines.append("")
             text = "\n".join(lines).rstrip()
             return await self._send_with_retry(chat_id=user_id, text=text) is not None
+
+        tokens = await self._register_question_buttons(
+            user_id=user_id,
+            session_id=session_id,
+            prompt=prompt,
+            origin=origin,
+        )
+        if tokens is None:
+            # No registry wired in: show informational-only card (no buttons).
+            lines.append("请在终端中选择")
+            lines.append("")
+            text = "\n".join(lines).rstrip()
+            return await self._send_with_retry(chat_id=user_id, text=text) is not None
+
+        lines.append("")
+        lines.append("👇 点击按钮选择；可直接回复文字作为 Other/自由文本")
+        if origin is UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY:
+            lines.append("作答期间请勿在 Ghostty 本地操作")
+        text = "\n".join(lines).rstrip()
+        buttons: list[list[Button]] = []
+        # The legacy tmux PTY injector (``inject_option_selection``) only models a
+        # single-choice "move cursor down N then Enter" sequence — it has no
+        # multi-select toggle/submit semantics. Render multi-select prompts as
+        # one-shot single-choice buttons for tmux so every emitted button carries
+        # a resolveable SELECT token; Ghostty keeps its native toggle + submit UX.
+        supports_multi_select = origin is UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY
+        if prompt.multi_select and supports_multi_select:
+            for index, option in enumerate(prompt.options):
+                token = tokens.toggle_tokens[index] if index < len(tokens.toggle_tokens) else None
+                buttons.append([Button(text=f"{index + 1}. {option.label}"[:40], callback_data=self._button_data(prefix, token))])
+            submit_data = self._button_data(prefix, tokens.submit_token)
+            buttons.append([Button(text="提交选择", callback_data=submit_data)])
+        else:
+            for index, option in enumerate(prompt.options):
+                token = tokens.select_tokens[index] if index < len(tokens.select_tokens) else None
+                buttons.append([Button(text=f"{index + 1}. {option.label}"[:40], callback_data=self._button_data(prefix, token))])
+        keyboard = Keyboard(rows=buttons)
+        return await self._send_with_retry(chat_id=user_id, text=text, keyboard=keyboard) is not None
+
+    async def _register_question_buttons(
+        self,
+        *,
+        user_id: int,
+        session_id: str,
+        prompt: UserQuestionPrompt,
+        origin: UserQuestionCallbackOrigin,
+    ) -> QuestionCallbackTokens | None:
+        registry = self._user_question_callback_registry
+        if registry is None or not prompt.options:
+            return None
+        # The legacy tmux injector only models single-choice keystrokes; render
+        # even a multi_select prompt as single-choice (registering select_tokens,
+        # not toggle/submit). Ghostty keeps the native multi-select registration.
+        supports_multi_select = origin is UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY
+        return await registry.register_question_tokens(
+            owner_user_id=user_id,
+            session_id=session_id,
+            tool_use_id=prompt.tool_use_id,
+            question_index=prompt.question_index,
+            option_count=len(prompt.options),
+            multi_select=prompt.multi_select and supports_multi_select,
+            origin=origin,
+        )
+
+    @staticmethod
+    def _button_data(prefix: str, token: str | None) -> str:
+        if token is None:
+            # Degenerate: registration returned fewer tokens than options.
+            # Forbidden by contract, but guard so we never emit empty callback_data.
+            raise RuntimeError("user-question callback token missing")
+        return build_user_question_callback_data(prefix=prefix, token=token)
 
     async def notify_info(
         self,

@@ -13,6 +13,7 @@ from app.adapters.claude.hook_installer import HookInstaller
 from app.adapters.claude.hook_socket_server import HookSocketServer
 from app.adapters.claude.paths import ClaudePaths
 from app.adapters.cli.factory import CLIAdapterFactory
+from app.adapters.process.ghostty_terminal_adapter import GhosttyTerminalAdapter
 from app.adapters.process.subprocess_runner import SubprocessRunner
 from app.adapters.process.tmux_runner import TmuxRunner
 from app.adapters.storage.file_session_context_store import FileSessionContextStore
@@ -47,14 +48,19 @@ from app.services.external_binding_cleanup_service import ExternalBindingCleanup
 from app.services.external_binding_cleanup_task import ExternalBindingCleanupTask
 from app.services.external_binding_reaper import ExternalBindingReaper
 from app.services.external_binding_store import ExternalBindingStore
+from app.services.external_input_mode_state import ExternalInputTargetStore
+from app.services.external_input_queue import ExternalInputQueue
 from app.services.external_reply_delivery_pump import ExternalReplyDeliveryPump
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.external_session_input_service import ExternalSessionInputService
 from app.services.external_session_push_notifier import ExternalSessionPushNotifier
 from app.services.file_receiver import FileReceiverService
 from app.services.file_sender import FileSenderService
 from app.services.janitor_task import JanitorTask
 from app.services.jsonl_file_watcher import JSONLFileWatcher
+from app.services.local_process_probe import LocalProcessProbe
+from app.services.pairing_callback_registry import PairingCallbackRegistry
 from app.services.periodic_janitor import PeriodicJanitor
 from app.services.permission_callback_registry import PermissionCallbackRegistry
 from app.services.permission_gateway import PermissionGateway
@@ -220,7 +226,13 @@ class AppContainer(
     def _init_session_and_task_services(self) -> None:
         """Initialize session service, task service, and session registry."""
         settings = self.settings
-        self.session_service = SessionService(store=self.session_context_store)
+        claude_session_capable_providers = frozenset(
+            p for p in self.cli_factory.available_providers() if self.cli_factory.capabilities(p).session_state
+        )
+        self.session_service = SessionService(
+            store=self.session_context_store,
+            claude_session_capable_providers=claude_session_capable_providers,
+        )
         self.task_service = TaskService(
             settings=settings,
             task_store=self.task_store,
@@ -244,6 +256,15 @@ class AppContainer(
     def _init_external_services(self) -> None:
         """Initialize external session discovery, binding, permission, and notification services."""
         settings = self.settings
+        # External input uses an independent per-session lock registry (design §6):
+        # it is NOT part of the reply-delivery → session-event lock order, and must
+        # stay out of _init_infrastructure so ExternalSessionInputService can be built
+        # here (this method runs before _init_infrastructure).
+        self._input_locks = RefCountedLockRegistry(
+            ttl_sec=settings.session_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
         self.external_binding_store = ExternalBindingStore(
             data_dir=Path(settings.tmux_data_dir),
         )
@@ -256,6 +277,9 @@ class AppContainer(
             session_service=self.session_service,
             binding_store=self.external_binding_store,
         )
+        # Built before the binder so bind-time tty backfill (pid → controlling
+        # tty) has a probe to consult; also reused by the external input service.
+        self.local_process_probe = LocalProcessProbe()
         self.external_binder = ExternalSessionBinder(
             discovery=self.external_discovery,
             binding_store=self.external_binding_store,
@@ -263,6 +287,7 @@ class AppContainer(
             sync_callback=self._sync_and_baseline_external_reply,
             save_callback=self._save_external_binding,
             remove_callback=self._unbind_external_binding,
+            process_probe=self.local_process_probe,
         )
         self.unbound_permission_handler = UnboundPermissionHandler(
             message_sender=self.message_sender,
@@ -291,17 +316,30 @@ class AppContainer(
             risk_evaluator=self.risk_evaluator,
         )
         self.unbound_permission_handler.set_permission_gateway(self.permission_gateway)
-        self.push_notifier = ExternalSessionPushNotifier(
-            message_sender=self.message_sender,
-            binding_store=self.external_binding_store,
-            permission_gateway=self.permission_gateway,
-            retry_count=settings.push_notification_retry_count,
-        )
 
         # External user question state for PTY injection
         from app.services.external_user_question_state import ExternalUserQuestionState
 
         self.external_uq_state = ExternalUserQuestionState()
+        # Opaque token registry shared by Telegram AskUserQuestion callbacks (managed
+        # tmux + external Ghostty + external tmux) so identity never travels in
+        # callback_data. TTL seconds match the external pending-question TTL so a live
+        # button never resolves against an already-pruned pending question; both stores
+        # judge expiry on a monotonic clock (immune to wall-clock jumps) — the pending
+        # store keeps wall-clock timestamps only for snapshot display.
+        from app.services.user_question_callback_registry import UserQuestionCallbackRegistry
+
+        self.user_question_callback_registry = UserQuestionCallbackRegistry(
+            ttl_sec=settings.user_question_callback_ttl_sec,
+        )
+        self.push_notifier = ExternalSessionPushNotifier(
+            message_sender=self.message_sender,
+            binding_store=self.external_binding_store,
+            permission_gateway=self.permission_gateway,
+            retry_count=settings.push_notification_retry_count,
+            external_uq_state=self.external_uq_state,
+            user_question_callback_registry=self.user_question_callback_registry,
+        )
 
         self.external_binding_reaper = ExternalBindingReaper(
             binding_store=self.external_binding_store,
@@ -310,6 +348,7 @@ class AppContainer(
             permission_callback_registry=self.permission_callback_registry,
             unbound_permission_handler=self.unbound_permission_handler,
             external_uq_state=self.external_uq_state,
+            user_question_callback_registry=self.user_question_callback_registry,
             external_discovery=self.external_discovery,
             tombstone=self.tombstone_store,
             remove_callback=self._remove_external_binding,
@@ -322,6 +361,44 @@ class AppContainer(
             liveness_enabled=settings.external_binding_pid_liveness_enabled,
             ttl=timedelta(hours=settings.external_binding_idle_ttl_hours),
             interval_sec=settings.session_health_check_interval_sec,
+        )
+
+        # External Ghostty session input (design specs/2026-08-03-external-ghostty-input-design.md §4-9).
+        # Built unconditionally so enabled=False short-circuits internally and the rest of the
+        # binding/permission/reply system keeps working; the service methods are no-ops when off.
+        self.ghostty_adapter = GhosttyTerminalAdapter(
+            enable_applescript=settings.ghostty_applescript_enabled,
+        )
+        self.pairing_callback_registry = PairingCallbackRegistry(
+            ttl_sec=settings.ghostty_pairing_token_ttl_sec,
+        )
+        self.external_input_mode_store = ExternalInputTargetStore()
+        self.external_input_queue = ExternalInputQueue(
+            max_size=settings.ghostty_input_queue_max_size,
+            ttl_sec=settings.ghostty_input_queue_ttl_sec,
+        )
+        self.external_session_input_service = ExternalSessionInputService(
+            enabled=settings.ghostty_input_enabled,
+            binding_store=self.external_binding_store,
+            session_store=self.structured_session_store,
+            ghostty_adapter=self.ghostty_adapter,
+            process_probe=self.local_process_probe,
+            pairing_registry=self.pairing_callback_registry,
+            input_mode_store=self.external_input_mode_store,
+            input_queue=self.external_input_queue,
+            input_locks=self._input_locks,
+            external_user_question_state=self.external_uq_state,
+            user_question_callback_registry=self.user_question_callback_registry,
+            drain_publish_wait_timeout_sec=settings.ghostty_drain_publish_wait_timeout_sec,
+        )
+
+        # Hook external question transport/state/registry into the managed
+        # UserQuestionService *after* all external services are built, to avoid
+        # reordering the bootstrap dependency ring (design §6 / §10).
+        self.task_service.configure_external(
+            external_uq_state=self.external_uq_state,
+            external_question_transport=self.external_session_input_service,
+            callback_registry=self.user_question_callback_registry,
         )
 
     async def _resolve_unbound_permission_notify_user_ids(self) -> set[int]:
@@ -348,10 +425,25 @@ class AppContainer(
 
     def _init_infrastructure(self) -> None:
         """Initialize lock registries, background tasks, and janitor."""
+        settings = self.settings
         self._jsonl_sync_locks = self._session_lock_registry()
         self._session_event_locks = self._session_lock_registry()
         self._external_reply_delivery_locks = self._session_lock_registry()
         self._background_tasks = BackgroundTaskRegistry(label="bootstrap")
+        # upload 队列 drain 的后台 task 与按用户串行处理锁——由组合根构造并
+        # 注入 file_upload handler，停机时随 _stop_background_tasks 一并 cancel。
+        # 此前这两者在 handler 模块顶层创建，脱离容器停机序列（CLAUDE.md 禁止
+        # handler 直接创建后台任务），现回归组合根装配。
+        self._upload_background_tasks = BackgroundTaskRegistry(label="upload")
+        self._upload_processing_locks = RefCountedLockRegistry(
+            ttl_sec=settings.upload_processing_lock_ttl_sec,
+            cleanup_interval_sec=settings.lock_cleanup_interval_sec,
+            cleanup_batch_size=settings.lock_cleanup_batch_size,
+        )
+        # /run、Claude 聊天自由文本、/cmds 回调的后台 watchdog task——此前是
+        # command_run 模块顶层的裸 set，停机时不会被 cancel_all，已脱管。现由
+        # 组合根构造并注入，停机时一并 cancel。
+        self._stream_background_tasks = BackgroundTaskRegistry(label="stream")
         self.external_reply_delivery_pump = ExternalReplyDeliveryPump(
             session_store=self.structured_session_store,
             binding_store=self.external_binding_store,
@@ -385,6 +477,10 @@ class AppContainer(
             ("permission callback registry", lambda: self.permission_callback_registry.invalidate_session(session_id)),
             ("unbound permission handler", lambda: self.unbound_permission_handler.invalidate_session(session_id)),
             ("external user question state", invalidate_external_uq_state),
+            (
+                "user question callback registry",
+                lambda: self.user_question_callback_registry.invalidate_session(session_id),
+            ),
             ("hook pending permissions", lambda: self.hook_socket_server.cancel_pending_permissions(session_id=session_id)),
         )
         success = True
@@ -515,6 +611,7 @@ class AppContainer(
             await self.external_reply_delivery_pump.stop_all()
             await self.session_supervisor.stop_all()
             await self._stop_background_tasks()
+            await self.external_session_input_service.shutdown()
             self.external_binding_store.flush()
         finally:
             await self.bot.session.close()
@@ -544,6 +641,9 @@ class AppContainer(
             registry_service=self.session_registry,
             file_receiver=self.file_receiver,
             upload_queue=self.upload_queue,
+            upload_background_tasks=self._upload_background_tasks,
+            upload_processing_locks=self._upload_processing_locks,
+            stream_background_tasks=self._stream_background_tasks,
             result_exporter=self.result_exporter,
             diff_generator=self.diff_generator,
             status_display=self.status_display,
@@ -561,5 +661,7 @@ class AppContainer(
             title_resolver=lambda sid, cwd: self.claude_jsonl_parser.extract_session_title(session_id=sid, cwd=cwd),
             dead_unbound_cleanup=self._cleanup_dead_unbound_external_session,
             admin_password_service=self.admin_password_service,
+            external_session_input_service=self.external_session_input_service,
+            user_question_callback_registry=self.user_question_callback_registry,
         )
         self.dispatcher.include_router(router)

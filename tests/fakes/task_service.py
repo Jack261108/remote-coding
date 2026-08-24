@@ -16,9 +16,14 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 from app.domain.models import CLIEvent, EventType, TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, SessionPhase
+from app.services.user_question_callback_registry import QuestionCallbackTokens
+
+if TYPE_CHECKING:
+    from app.domain.user_question_models import UserQuestionPrompt
 
 
 class FakeTaskService:
@@ -130,6 +135,14 @@ class FakeTaskService:
         self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
     ) -> None:
         self._structured_user_question_key = question_key
+
+    async def register_question_callback_tokens(
+        self,
+        *,
+        user_id: int,
+        prompt: UserQuestionPrompt,
+    ) -> QuestionCallbackTokens:
+        return QuestionCallbackTokens()
 
     async def wait_for_structured_session_update(
         self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None

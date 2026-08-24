@@ -27,6 +27,9 @@ class BackgroundTaskRegistry:
     def active_count(self) -> int:
         return len(self._tasks)
 
+    def __contains__(self, task: object) -> bool:
+        return task in self._tasks
+
     def spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Create a tracked task from *coro*.
 

@@ -11,6 +11,7 @@ import pytest
 from app.bot.handlers.command_run import run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.domain.file_models import ExportResult
+from app.services.background_task_registry import BackgroundTaskRegistry
 from tests.fakes.task_service import FakeTaskService, make_cli_event_stream, make_task_record
 
 
@@ -39,8 +40,13 @@ class DummyMessage:
         self._answers.append(text)
 
 
+@pytest.fixture
+def stream_background_tasks() -> BackgroundTaskRegistry:
+    return BackgroundTaskRegistry(label="stream")
+
+
 @pytest.mark.asyncio
-async def test_auto_export_triggers_when_output_exceeds_threshold(tmp_path: Path) -> None:
+async def test_auto_export_triggers_when_output_exceeds_threshold(tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry) -> None:
     """When output_chars exceeds threshold, export_markdown is called and document is sent."""
     record = make_task_record(user_id=42, prompt="hello", workdir="/tmp", timeout_sec=60, output_chars=5000)
     task_service = FakeTaskService(events=make_cli_event_stream(), status=record)
@@ -65,6 +71,7 @@ async def test_auto_export_triggers_when_output_exceeds_threshold(tmp_path: Path
         prompt="hello",
         workdir="/tmp",
         result_exporter=result_exporter,
+        stream_background_tasks=stream_background_tasks,
     )
     if task is not None:
         await task
@@ -75,7 +82,7 @@ async def test_auto_export_triggers_when_output_exceeds_threshold(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_auto_export_does_not_trigger_when_output_below_threshold() -> None:
+async def test_auto_export_does_not_trigger_when_output_below_threshold(stream_background_tasks: BackgroundTaskRegistry) -> None:
     """When output_chars is below threshold, no export happens."""
     record = make_task_record(user_id=42, prompt="hello", workdir="/tmp", timeout_sec=60, output_chars=100)
     task_service = FakeTaskService(events=make_cli_event_stream(), status=record)
@@ -95,6 +102,7 @@ async def test_auto_export_does_not_trigger_when_output_below_threshold() -> Non
         prompt="hello",
         workdir="/tmp",
         result_exporter=result_exporter,
+        stream_background_tasks=stream_background_tasks,
     )
     if task is not None:
         await task
@@ -105,7 +113,7 @@ async def test_auto_export_does_not_trigger_when_output_below_threshold() -> Non
 
 
 @pytest.mark.asyncio
-async def test_auto_export_does_not_trigger_on_failure() -> None:
+async def test_auto_export_does_not_trigger_on_failure(stream_background_tasks: BackgroundTaskRegistry) -> None:
     """Auto-export should not trigger when task fails."""
     record = make_task_record(user_id=42, prompt="hello", workdir="/tmp", timeout_sec=60, output_chars=5000)
     task_service = FakeTaskService(events=make_cli_event_stream(failed=True, error="something broke"), status=record)
@@ -124,6 +132,7 @@ async def test_auto_export_does_not_trigger_on_failure() -> None:
         prompt="hello",
         workdir="/tmp",
         result_exporter=result_exporter,
+        stream_background_tasks=stream_background_tasks,
     )
     if task is not None:
         await task
@@ -134,7 +143,7 @@ async def test_auto_export_does_not_trigger_on_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_export_error_is_non_blocking(tmp_path: Path) -> None:
+async def test_auto_export_error_is_non_blocking(tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry) -> None:
     """If auto-export raises an exception, it should not break the streamer."""
     record = make_task_record(user_id=42, prompt="hello", workdir="/tmp", timeout_sec=60, output_chars=5000)
     task_service = FakeTaskService(events=make_cli_event_stream(), status=record)
@@ -154,6 +163,7 @@ async def test_auto_export_error_is_non_blocking(tmp_path: Path) -> None:
         prompt="hello",
         workdir="/tmp",
         result_exporter=result_exporter,
+        stream_background_tasks=stream_background_tasks,
     )
     # Should not raise
     if task is not None:
@@ -165,7 +175,7 @@ async def test_auto_export_error_is_non_blocking(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_export_cleans_up_temp_file(tmp_path: Path) -> None:
+async def test_auto_export_cleans_up_temp_file(tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry) -> None:
     """After sending the document, the temp file should be cleaned up."""
     record = make_task_record(user_id=42, prompt="hello", workdir="/tmp", timeout_sec=60, output_chars=5000)
     task_service = FakeTaskService(events=make_cli_event_stream(), status=record)
@@ -192,6 +202,7 @@ async def test_auto_export_cleans_up_temp_file(tmp_path: Path) -> None:
         prompt="hello",
         workdir="/tmp",
         result_exporter=result_exporter,
+        stream_background_tasks=stream_background_tasks,
     )
     if task is not None:
         await task
@@ -201,7 +212,7 @@ async def test_auto_export_cleans_up_temp_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_export_not_called_when_no_exporter() -> None:
+async def test_auto_export_not_called_when_no_exporter(stream_background_tasks: BackgroundTaskRegistry) -> None:
     """When result_exporter is None, no export is attempted."""
     record = make_task_record(user_id=42, prompt="hello", workdir="/tmp", timeout_sec=60, output_chars=5000)
     task_service = FakeTaskService(events=make_cli_event_stream(), status=record)
@@ -217,6 +228,7 @@ async def test_auto_export_not_called_when_no_exporter() -> None:
         prompt="hello",
         workdir="/tmp",
         # No result_exporter passed (defaults to None)
+        stream_background_tasks=stream_background_tasks,
     )
     if task is not None:
         await task

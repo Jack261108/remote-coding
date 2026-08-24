@@ -28,6 +28,7 @@ from app.bot.presenters.structured_reply_models import (
 from app.domain.models import EventType
 from app.domain.user_question_models import UserQuestionPrompt
 from app.services.permission_callback_registry import AutoApproveOutcome
+from app.services.user_question_callback_registry import QuestionCallbackTokens
 
 
 class _RecordingSender:
@@ -83,12 +84,16 @@ def _build_dispatcher() -> tuple[PresenterOutputDispatcher, _RecordingSender, _R
     tool_manager = _RecordingToolManager()
     permission_gateway = MagicMock()
     permission_gateway.maybe_auto_approve = AsyncMock(return_value=AutoApproveOutcome.APPROVED)
+    task_service = MagicMock()
+    task_service.register_question_callback_tokens = AsyncMock(return_value=QuestionCallbackTokens())
     dispatcher = PresenterOutputDispatcher(
         presenter=presenter,
         sender=sender,
         messenger=messenger,
         tool_message_manager=tool_manager,
         task_id="t1",
+        user_id=1,
+        task_service=task_service,
         permission_gateway=permission_gateway,
     )
     return dispatcher, sender, messenger, tool_manager, presenter

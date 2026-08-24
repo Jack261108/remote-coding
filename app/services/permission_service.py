@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from app.adapters.claude.hook_socket_server import HookSocketServer
+from app.domain.protocols import AdapterCapabilities
 from app.domain.session_models import PermissionDecisionPayload, SessionEvent, SessionEventType, SessionState
 from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.session_service import SessionService
@@ -18,6 +21,7 @@ class PermissionService:
         structured_session_store: SessionStore | None,
         hook_socket_server: HookSocketServer | None,
         session_resolver: StructuredSessionResolver,
+        capabilities_resolver: Callable[[str], AdapterCapabilities],
         permission_lock_ttl_sec: int = 600,
         lock_cleanup_interval_sec: int = 60,
         lock_cleanup_batch_size: int = 50,
@@ -26,6 +30,7 @@ class PermissionService:
         self._structured_session_store = structured_session_store
         self._hook_socket_server = hook_socket_server
         self._session_resolver = session_resolver
+        self._capabilities_resolver = capabilities_resolver
         self._permission_locks = RefCountedLockRegistry(
             ttl_sec=permission_lock_ttl_sec,
             cleanup_interval_sec=lock_cleanup_interval_sec,
@@ -45,7 +50,7 @@ class PermissionService:
         if self._structured_session_store is None or self._hook_socket_server is None:
             return False, "当前未启用 Claude hooks 权限通道"
         session = await self._session_service.get(user_id)
-        if session is None or session.provider != "claude_code":
+        if session is None or not self._capabilities_resolver(session.provider).session_state:
             return False, "当前没有 Claude 会话"
 
         lock_tool_use_id = expected_tool_use_id

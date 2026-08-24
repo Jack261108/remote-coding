@@ -40,7 +40,13 @@ from app.services.terminal_session_service import TerminalSessionService
 from app.services.user_question_service import UserQuestionService
 
 if TYPE_CHECKING:
+    from app.domain.protocols import ExternalClaudeUserQuestionTransportProtocol
     from app.services.context_builder import ContextBuilderService
+    from app.services.external_user_question_state import ExternalUserQuestionState
+    from app.services.user_question_callback_registry import (
+        QuestionCallbackTokens,
+        UserQuestionCallbackRegistry,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +94,7 @@ class TaskService:
         self._structured_session_resolver = StructuredSessionResolver(
             session_service=session_service,
             task_store=task_store,
+            capabilities_resolver=cli_factory.capabilities,
             session_state_reader=resolved_session_state_reader,
             structured_session_store=structured_session_store,
         )
@@ -98,12 +105,14 @@ class TaskService:
             structured_session_store=structured_session_store,
             hook_socket_server=hook_socket_server,
             session_resolver=self._structured_session_resolver,
+            capabilities_resolver=cli_factory.capabilities,
         )
         self._permission_service = PermissionService(
             session_service=session_service,
             structured_session_store=structured_session_store,
             hook_socket_server=hook_socket_server,
             session_resolver=self._structured_session_resolver,
+            capabilities_resolver=cli_factory.capabilities,
             permission_lock_ttl_sec=settings.effective_permission_lock_ttl_sec,
             lock_cleanup_interval_sec=settings.lock_cleanup_interval_sec,
             lock_cleanup_batch_size=settings.lock_cleanup_batch_size,
@@ -112,9 +121,23 @@ class TaskService:
         self._terminal_session_service = TerminalSessionService(
             settings=settings,
             session_service=session_service,
+            capabilities_resolver=cli_factory.capabilities,
             terminal_runtime=resolved_terminal_runtime,
             clear_user_questions=self._user_question_service.clear_user,
             auto_approve_service=auto_approve_service,
+        )
+
+    def configure_external(
+        self,
+        *,
+        external_uq_state: ExternalUserQuestionState | None,
+        external_question_transport: ExternalClaudeUserQuestionTransportProtocol | None,
+        callback_registry: UserQuestionCallbackRegistry | None,
+    ) -> None:
+        self._user_question_service.configure_external(
+            external_uq_state=external_uq_state,
+            external_question_transport=external_question_transport,
+            callback_registry=callback_registry,
         )
 
     async def cleanup_orphaned_terminal(self, terminal_id: str, *, claude_session_id: str | None, user_id: int) -> None:
@@ -223,6 +246,17 @@ class TaskService:
     async def get_pending_user_questions(self, user_id: int) -> tuple[UserQuestionPrompt, ...]:
         return await self._user_question_service.get_pending_user_questions(user_id)
 
+    async def register_question_callback_tokens(
+        self,
+        *,
+        user_id: int,
+        prompt: UserQuestionPrompt,
+    ) -> QuestionCallbackTokens:
+        return await self._user_question_service.register_question_callback_tokens(
+            user_id=user_id,
+            prompt=prompt,
+        )
+
     async def answer_pending_user_question_option(
         self, *, user_id: int, tool_use_id: str, question_index: int, option_index: int
     ) -> tuple[bool, str, UserQuestionPrompt | None]:
@@ -277,6 +311,12 @@ class TaskService:
     ) -> StartTaskResult:
         selected_provider = provider or self._settings.default_provider
         selected_provider = self._cli_factory.normalize_provider(selected_provider)
+        # 能力位门控（ AdapterCapabilities.run_task）：仅支持启动任务的 provider
+        # 才能进入 run 路径。当前所有内置 provider 恒 True，此门为未来不支持 run
+        # 的 provider 预留统一拒接点；拒绝语义沿用 ValueError，由 command_run 转
+        # 成参数错误文案，与上方 normalize/workdir 校验一致。
+        if not self._cli_factory.capabilities(selected_provider).run_task:
+            raise ValueError(f"{selected_provider} 不支持启动任务")
 
         selected_timeout = timeout_sec if timeout_sec is not None else self._settings.default_timeout_sec
 
@@ -323,7 +363,7 @@ class TaskService:
             task_context = self._context_builder.build_context(
                 user_id=user_id,
                 workdir=selected_workdir,
-                provider=selected_provider,
+                adapter=self._cli_factory.get(selected_provider),
                 prompt=prompt,
                 since=since,
             )
@@ -425,6 +465,12 @@ class TaskService:
         if task.is_final:
             return False
 
+        # 能力位门控（ AdapterCapabilities.cancel_task）：provider 不支持取消时
+        # 直接返回 False（与任务已结束语义一致）。当前内置 provider 恒 True，
+        # 此门为未来不支持 cancel 的 provider 预留统一拒接点。
+        if not self._cli_factory.capabilities(task.provider).cancel_task:
+            return False
+
         adapter = self._cli_factory.get(task.provider)
         canceled = await adapter.cancel(task_id)
         canceled_event = CLIEvent(type=EventType.CANCELED, task_id=task_id, error="cancel requested before start")
@@ -482,6 +528,11 @@ class TaskService:
                 await self._cleanup_after_final_task(task)
                 marked = True
         if not marked or provider is None:
+            return marked, False
+
+        # 能力位门控（ AdapterCapabilities.cancel_task）：watchdog 取消路径同
+        # TaskService.cancel 一样按能力拒接；provider 不支持取消则不尝试 adapter。
+        if not self._cli_factory.capabilities(provider).cancel_task:
             return marked, False
 
         adapter = self._cli_factory.get(provider)

@@ -30,6 +30,7 @@ from app.bot.presenters.structured_reply_presenter import (
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
 from app.domain.models import TERMINAL_EVENT_TYPES
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.diff_generator import DiffGeneratorService
 from app.services.result_exporter import ResultExporterService
 from app.services.status_display import StatusDisplayService
@@ -41,7 +42,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MARKER_LINE_RE = _PRESENTER_MARKER_LINE_RE
-_ACTIVE_STREAM_TASKS: set[asyncio.Task] = set()
+# watchdog 内层 stream_task 的取消宽限放弃通道——宽限超时仍未结束的内层子任务
+# 在此兜底，避免泄漏。这与外层 watchdog 后台 task（由容器注入的
+# stream_background_tasks registry 跟踪）属不同层级，停机时不强制 cancel。
 _ABANDONED_STREAM_TASKS: set[asyncio.Task] = set()
 _STREAM_WATCHDOG_BUFFER_SEC = 30.0
 _STREAM_WATCHDOG_MIN_SEC = 1.0
@@ -135,6 +138,8 @@ async def _create_streaming_components(
         messenger=messenger,
         tool_message_manager=tool_message_manager,
         task_id=start.task.task_id,
+        user_id=user_id,
+        task_service=task_service,
         permission_gateway=permission_gateway,
     )
     streamer = RunEventStreamer(
@@ -399,8 +404,10 @@ def _on_stream_done(
     provider: str,
     messenger: RunTelegramMessenger,
 ) -> None:
-    """Done callback for the outer stream watchdog task."""
-    _ACTIVE_STREAM_TASKS.discard(done_task)
+    """Done callback for the outer stream watchdog task.
+
+    registry 已在自身 _on_done 中回收该 task，此处只负责异常通知。
+    """
     if done_task.cancelled():
         return
     exc = done_task.exception()
@@ -453,6 +460,7 @@ async def run_prompt_and_stream(
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    stream_background_tasks: BackgroundTaskRegistry,
     structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
     spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
     spinner_interval_sec: float = _SPINNER_INTERVAL_SEC,
@@ -536,15 +544,14 @@ async def run_prompt_and_stream(
         message=message,
     )
 
-    task = asyncio.create_task(watchdog.run())
-    _ACTIVE_STREAM_TASKS.add(task)
+    task = stream_background_tasks.spawn(watchdog.run())
     logger.info(
         "task stream spawned",
         extra={
             "task_id": start.task.task_id,
             "user_id": user_id,
             "interactive": start.interactive,
-            "active_stream_tasks": len(_ACTIVE_STREAM_TASKS),
+            "active_stream_tasks": stream_background_tasks.active_count,
         },
     )
 
@@ -571,6 +578,7 @@ def register_run_handler(
     queued_upload_scheduler: Callable[[Message, int, str], None] | None = None,
     pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None = None,
     permission_gateway: PermissionGateway | None = None,
+    stream_background_tasks: BackgroundTaskRegistry,
     structured_reply_pump_interval_sec: float = _STRUCTURED_REPLY_PUMP_INTERVAL_SEC,
     spinner_initial_delay_sec: float = _SPINNER_INITIAL_DELAY_SEC,
     spinner_interval_sec: float = _SPINNER_INTERVAL_SEC,
@@ -593,6 +601,7 @@ def register_run_handler(
             queued_upload_scheduler=queued_upload_scheduler,
             pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
+            stream_background_tasks=stream_background_tasks,
             structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
             spinner_initial_delay_sec=spinner_initial_delay_sec,
             spinner_interval_sec=spinner_interval_sec,

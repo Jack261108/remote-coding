@@ -59,13 +59,21 @@ class StubAdapter(BaseCLIAdapter):
 
 
 class StubFactory:
-    def __init__(self, adapter: BaseCLIAdapter) -> None:
+    def __init__(self, adapter: BaseCLIAdapter, *, claude_terminal_active: bool = True) -> None:
         self._adapters = {"claude_code": adapter, "codex": adapter, "gemini": adapter}
+        # 与真实 CLIAdapterRegistry 对齐：claude_code 的持久终端动态位反映 tmux
+        # 后端此刻可用性（生产中 = claude_tmux_mode ∧ tmux_runner 存在）。默认
+        # True 贴合多数 fixture 的 claude_tmux_mode=True；个别 tmux 关闭用例
+        # 显式传 False 让 claude 不走终端路径。codex/gemini 恒走默认 False。
+        self._claude_terminal_active = claude_terminal_active
         self._closed_terminal_key: str | None = None
         self._ensured_terminal_key: str | None = None
         self._ensured_workdir: str | None = None
         self._ensured_interactive_terminal_key: str | None = None
         self._ensured_interactive_workdir: str | None = None
+        self._ensured_resume_terminal_key: str | None = None
+        self._ensured_resume_workdir: str | None = None
+        self._ensured_resume_session_id: str | None = None
         self._revealed_terminal_key: str | None = None
         self._interactive_inputs: list[tuple[str, str, str]] = []
         self._user_question_option_actions: list[tuple[str, str, int, bool]] = []
@@ -89,13 +97,18 @@ class StubFactory:
         return ["claude_code", "codex", "gemini"]
 
     def capabilities(self, provider: str) -> AdapterCapabilities:
-        _ = self.normalize_provider(provider)
+        # 贴近真实 registry：仅 claude_code 具备持久终端/交互/结构化会话能力；
+        # codex/gemini 默认无这些能力。StubAdapter 用于交互式回放，构造时假定
+        # 已运行于 claude_code 上下文，故 claude_code 返回满能力。
+        if self.normalize_provider(provider) != "claude_code":
+            return AdapterCapabilities()
         return AdapterCapabilities(
             persistent_terminal=True,
             interactive_input=True,
             claude_resume=True,
             user_question_tui=True,
             session_state=True,
+            persistent_terminal_active=self._claude_terminal_active,
         )
 
     @property

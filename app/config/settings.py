@@ -76,7 +76,6 @@ class Settings(BaseSettings):
     tmux_bin: str = Field("tmux", alias="TMUX_BIN")
     tmux_data_dir: str = Field("/tmp/tg-cli-gateway", alias="TMUX_DATA_DIR")
 
-    claude_cli_bin: str = Field("claude", alias="CLAUDE_CLI_BIN")
     claude_config_dir: str | None = Field(None, alias="CLAUDE_CONFIG_DIR")
     claude_hook_socket_path: str = Field("/tmp/remote-coding-claude.sock", alias="CLAUDE_HOOK_SOCKET_PATH")
     claude_install_hooks: bool = Field(True, alias="CLAUDE_INSTALL_HOOKS")
@@ -99,8 +98,46 @@ class Settings(BaseSettings):
     structured_reply_pump_interval_sec: float = Field(1.0, alias="STRUCTURED_REPLY_PUMP_INTERVAL_SEC")
     spinner_initial_delay_sec: float = Field(3.0, alias="SPINNER_INITIAL_DELAY_SEC")
     spinner_interval_sec: float = Field(1.0, alias="SPINNER_INTERVAL_SEC")
-    codex_cli_bin: str = Field("codex", alias="CODEX_CLI_BIN")
-    gemini_cli_bin: str = Field("gemini", alias="GEMINI_CLI_BIN")
+
+    # Provider CLI 可执行文件路径，按标准 provider 名索引。新增 provider 只需在此
+    # dict 或 .env 的 CLI_BINS 加一条。未设时不预填默认——_absorb_legacy_cli_bins
+    # validator 负责并入老 env CLAUDE_CLI_BIN/CODEX_CLI_BIN/GEMINI_CLI_BIN 与三个内置
+    # provider 的默认可执行名，使 cli_bins 成为填满后的单一事实源。
+    cli_bins: dict[str, str] = Field(default_factory=dict, alias="CLI_BINS")
+    # legacy 收集器：仅承接老式 env / .env 变量，validator after 阶段并入 cli_bins。
+    legacy_claude_cli_bin: str | None = Field(default=None, alias="CLAUDE_CLI_BIN")
+    legacy_codex_cli_bin: str | None = Field(default=None, alias="CODEX_CLI_BIN")
+    legacy_gemini_cli_bin: str | None = Field(default=None, alias="GEMINI_CLI_BIN")
+
+    @model_validator(mode="after")
+    def _absorb_legacy_cli_bins(self) -> Settings:
+        """把老式 CLAUDE_CLI_BIN/CODEX_CLI_BIN/GEMINI_CLI_BIN 与内置默认并入 cli_bins。
+
+        优先级：CLI_BINS dict 项 > 对应 legacy env > 内置默认二进制名（claude/codex/
+        gemini）。因 cli_bins 默认为空，setdefault 可干净区分用户提供与否，无需判等。
+        合并后三个内置 provider 总在 cli_bins 中，registry 直接按 provider 索引取值即可。
+        """
+        for legacy_value, canonical, default_bin in (
+            (self.legacy_claude_cli_bin, "claude_code", "claude"),
+            (self.legacy_codex_cli_bin, "codex", "codex"),
+            (self.legacy_gemini_cli_bin, "gemini", "gemini"),
+        ):
+            if legacy_value:
+                self.cli_bins.setdefault(canonical, legacy_value)
+            self.cli_bins.setdefault(canonical, default_bin)
+        return self
+
+    @property
+    def claude_cli_bin(self) -> str:
+        return self.cli_bins.get("claude_code", "claude")
+
+    @property
+    def codex_cli_bin(self) -> str:
+        return self.cli_bins.get("codex", "codex")
+
+    @property
+    def gemini_cli_bin(self) -> str:
+        return self.cli_bins.get("gemini", "gemini")
 
     allowed_workdirs: Annotated[list[str], NoDecode] = Field(default_factory=lambda: [str(Path.cwd())], alias="ALLOWED_WORKDIRS")
     admin_password: str | None = Field(None, alias="ADMIN_PASSWORD")
@@ -142,12 +179,28 @@ class Settings(BaseSettings):
     )
     upload_expiry_hours: int = Field(24, alias="UPLOAD_EXPIRY_HOURS")
     upload_cleanup_interval_min: int = Field(60, alias="UPLOAD_CLEANUP_INTERVAL_MIN")
+    # upload 串行处理锁的条目 TTL——上传队列 drain 按用户串行化，空闲后回收
+    upload_processing_lock_ttl_sec: int = Field(300, alias="UPLOAD_PROCESSING_LOCK_TTL_SEC")
 
     # External session settings
     external_session_stale_timeout_sec: float = Field(600.0, alias="EXTERNAL_SESSION_STALE_TIMEOUT_SEC")
     external_push_reply_enabled: bool = Field(True, alias="EXTERNAL_PUSH_REPLY_ENABLED")
     tombstone_ttl_sec: int = Field(3600, alias="TOMBSTONE_TTL_SEC")
     push_notification_retry_count: int = Field(1, alias="PUSH_NOTIFICATION_RETRY_COUNT")
+
+    # External Ghostty session input (design specs/2026-08-03-external-ghostty-input-design.md §4-9).
+    # Off by default; the rest of the binding/permission/reply system keeps working when disabled.
+    ghostty_input_enabled: bool = Field(False, alias="GHOSTTY_INPUT_ENABLED")
+    ghostty_applescript_enabled: bool = Field(True, alias="GHOSTTY_APPLESCRIPT_ENABLED")
+    ghostty_pairing_token_ttl_sec: int = Field(180, alias="GHOSTTY_PAIRING_TOKEN_TTL_SEC", ge=1)
+    ghostty_input_queue_max_size: int = Field(5, alias="GHOSTTY_INPUT_QUEUE_MAX_SIZE", ge=1)
+    ghostty_input_queue_ttl_sec: int = Field(300, alias="GHOSTTY_INPUT_QUEUE_TTL_SEC", ge=1)
+    ghostty_drain_publish_wait_timeout_sec: float = Field(30.0, alias="GHOSTTY_DRAIN_PUBLISH_WAIT_TIMEOUT_SEC", gt=0)
+
+    # TTL for opaque AskUserQuestion callback tokens (managed + external). Aligned
+    # with the external pending-question TTL so a live button never resolves against
+    # an already-pruned pending question.
+    user_question_callback_ttl_sec: int = Field(300, alias="USER_QUESTION_CALLBACK_TTL_SEC", ge=1)
 
     # Session cleanup settings
     session_cleanup_interval_sec: int = Field(3600, alias="SESSION_CLEANUP_INTERVAL_SEC")  # 1 hour
@@ -325,6 +378,8 @@ class Settings(BaseSettings):
         "claude_install_hooks",
         "jsonl_file_watcher_enabled",
         "auto_file_send_enabled",
+        "ghostty_input_enabled",
+        "ghostty_applescript_enabled",
         mode="before",
     )
     @classmethod
@@ -383,6 +438,10 @@ class Settings(BaseSettings):
         "zip_max_size_mb",
         "push_notification_retry_count",
         "tombstone_ttl_sec",
+        "ghostty_pairing_token_ttl_sec",
+        "ghostty_input_queue_max_size",
+        "ghostty_input_queue_ttl_sec",
+        "user_question_callback_ttl_sec",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:
@@ -409,6 +468,7 @@ class Settings(BaseSettings):
         "spinner_interval_sec",
         "session_health_check_interval_sec",
         "external_session_stale_timeout_sec",
+        "ghostty_drain_publish_wait_timeout_sec",
     )
     @classmethod
     def validate_positive_float(cls, value: float) -> float:

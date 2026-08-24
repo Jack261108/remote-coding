@@ -11,7 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from app.config.settings import is_workdir_allowed
 from app.domain.hook_models import HookEvent, HookResponse, PendingPermissionRequest
@@ -168,6 +168,37 @@ class HookSocketServer:
         if pending is None:
             return False
         return await self._write_response(pending=pending, decision=decision, reason=reason)
+
+    async def respond_to_permission_outcome(
+        self, *, tool_use_id: str, decision: str, reason: str | None = None
+    ) -> Literal["wrote", "not_pending", "write_failed"]:
+        """Like ``respond_to_permission`` but distinguishes WHY it returned False.
+
+        External question approval needs to tell apart two False cases that the
+        boolean cannot:
+
+        * ``"not_pending"`` — no pending connection exists for ``tool_use_id``
+          (PostToolUse already closed it after reading the TUI answer). The answer
+          reached Claude; this is the race-tolerant success the external flow must
+          keep treating as approved.
+        * ``"write_failed"`` — the connection existed but the response write/drain
+          raised. Claude is still blocked on this ``allow``; the external flow must
+          NOT claim success and must converge to ``INDETERMINATE``.
+
+        ``"wrote"`` means the allow was written; identical to the True branch of
+        ``respond_to_permission``.
+        """
+        expired: list[PendingPermissionRequest]
+        async with self._lock:
+            expired = self._pop_expired_pending_permissions_locked()
+            pending = self._pending_permissions.pop(tool_use_id, None)
+            if pending is not None:
+                self._cancel_pending_expiration_locked(tool_use_id)
+                self._cancel_pending_disconnect_watch_locked(tool_use_id)
+        await self._expire_pending_permissions(expired)
+        if pending is None:
+            return "not_pending"
+        return "wrote" if await self._write_response(pending=pending, decision=decision, reason=reason) else "write_failed"
 
     async def respond_to_permission_by_session(self, *, session_id: str, decision: str, reason: str | None = None) -> bool:
         expired: list[PendingPermissionRequest]

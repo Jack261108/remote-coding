@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.adapters.storage.upload_store import UploadStoreAdapter
 from app.domain.file_models import TaskContext
+from app.domain.protocols import CLIAdapterProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class ContextBuilderService:
         *,
         user_id: int,
         workdir: str,
-        provider: str,
+        adapter: CLIAdapterProtocol,
         prompt: str,
         since: datetime,
     ) -> TaskContext:
@@ -35,7 +36,7 @@ class ContextBuilderService:
                 cli_args=[],
             )
 
-        cli_args = self.build_cli_args(provider, file_paths)
+        cli_args = self.build_cli_args(adapter, file_paths)
         augmented_prompt = self.augment_prompt(prompt, file_paths)
 
         return TaskContext(
@@ -44,21 +45,14 @@ class ContextBuilderService:
             cli_args=cli_args,
         )
 
-    def build_cli_args(self, provider: str, file_paths: list[Path]) -> list[str]:
+    def build_cli_args(self, adapter: CLIAdapterProtocol, file_paths: list[Path]) -> list[str]:
         """Build provider-specific CLI arguments for file context.
 
-        claude_code: ["--file", path1, "--file", path2, ...]
-        codex/gemini: referenced in prompt text (empty list)
+        Delegates to the adapter's self-described file-arg semantics (e.g. claude_code
+        emits repeated --file flags); providers that reference files in the prompt text
+        return an empty list by default.
         """
-        if provider == "claude_code":
-            args: list[str] = []
-            for path in file_paths:
-                args.append("--file")
-                args.append(str(path))
-            return args
-
-        # For codex, gemini, and other providers: files are referenced in the prompt
-        return []
+        return adapter.build_file_args(file_paths)
 
     # Image extensions that Claude CLI can analyze when given a local path
     IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})

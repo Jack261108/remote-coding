@@ -61,7 +61,7 @@ async def test_build_context_called_before_execution(tmp_path: Path) -> None:
     call_kwargs = context_builder.build_context.call_args.kwargs
     assert call_kwargs["user_id"] == 1
     assert call_kwargs["workdir"] == str(tmp_path.resolve())
-    assert call_kwargs["provider"] == "claude_code"
+    assert call_kwargs["adapter"] is adapter  # provider="claude" 经归一化后取到的 adapter
     assert call_kwargs["prompt"] == "hi"
     assert isinstance(call_kwargs["since"], datetime)
 

@@ -18,7 +18,7 @@ from app.domain.external_session_models import ExternalBinding
 from app.domain.hook_models import HookEvent
 from app.domain.models import TaskRecord, TaskStatus, utc_now
 from app.domain.session_models import ConversationTurn, SessionEvent, SessionEventType, SessionPhase, ToolCallRecord, ToolStatus
-from app.domain.user_question_models import UserQuestionPrompt
+from app.domain.user_question_models import ExternalTmuxQuestionTarget, UserQuestionPrompt
 from app.services.auto_approve_service import ActivationSlot
 from app.services.external_user_question_state import PendingExternalUserQuestion
 from app.services.permission_callback_registry import AuthorizationMode, SessionOrigin
@@ -596,7 +596,6 @@ async def test_dead_unbound_cleanup_clears_external_user_question_state(tmp_path
             tool_use_id=tool_use_id,
             session_id=session_id,
             user_id=42,
-            pid=12345,
             prompts=(
                 UserQuestionPrompt(
                     tool_use_id=tool_use_id,
@@ -605,7 +604,7 @@ async def test_dead_unbound_cleanup_clears_external_user_question_state(tmp_path
                     question="Continue?",
                 ),
             ),
-            pane_id="%1",
+            target=ExternalTmuxQuestionTarget(pane_id="%1"),
         )
     )
 
@@ -687,7 +686,10 @@ async def test_manual_unbind_clears_owner_state_before_allowing_rebind(
         assert result.success is True
         registry_invalidate.assert_awaited_once_with(session_id)
         unbound_invalidate.assert_awaited_once_with(session_id)
-        uq_invalidate.assert_called_once_with(session_id)
+        # external_uq_state is invalidated by BOTH the reaper's owner-state cleanup
+        # and the input-service binding teardown — both idempotent, so the call
+        # may be repeated. Assert it is invalidated at least once for this session.
+        uq_invalidate.assert_called_with(session_id)
         cancel_pending_mock.assert_awaited_once_with(session_id=session_id)
         assert not container.auto_approve_service.is_active(session_id)
         assert not container.auto_approve_service.is_session_ended(session_id)
@@ -3009,3 +3011,36 @@ async def test_session_end_reconcile_terminal_less_path_clears_chat_active_and_s
     finally:
         await container.session_supervisor.stop_all()
         await container.bot.session.close()
+
+
+def test_bootstrap_wires_user_question_callback_registry_to_router() -> None:
+    """Regression: AppContainer.start must forward user_question_callback_registry
+    to create_router. Without it the AskUserQuestion callback handler received
+    ``None``, skipped token resolution, and answered "无效的选择操作" on every
+    interactive Ghostty card tap (bootstrap.py's create_router call originally
+    omitted the parameter).
+
+    Source-level assertion: ``start()`` runs the full service stack (hook socket,
+    polling, background tasks) which is impractical to drive here, so we assert the
+    create_router call site carries the keyword instead.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path("app/bootstrap.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "create_router"]
+    assert calls, "create_router call not found in app/bootstrap.py"
+
+    found = False
+    for call in calls:
+        for kw in call.keywords:
+            if kw.arg == "user_question_callback_registry":
+                found = True
+                value = getattr(kw.value, "attr", None)
+                assert value == "user_question_callback_registry", (
+                    f"create_router user_question_callback_registry must be self.user_question_callback_registry, "
+                    f"got attribute chain ending in {value!r}"
+                )
+    assert found, "create_router call does not pass user_question_callback_registry"

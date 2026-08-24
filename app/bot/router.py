@@ -22,7 +22,11 @@ from app.bot.handlers.command_resume import register_resume_handler
 from app.bot.handlers.command_run import register_run_handler, run_prompt_and_stream
 from app.bot.handlers.command_session import register_session_handler
 from app.bot.handlers.command_status import register_status_handler
-from app.bot.handlers.command_user_question import maybe_handle_pending_user_question_text, register_user_question_handlers
+from app.bot.handlers.command_user_question import (
+    _acknowledge_and_send_next_prompt,
+    maybe_handle_pending_user_question_text,
+    register_user_question_handlers,
+)
 from app.bot.handlers.external_permission import register_external_permission_handler
 from app.bot.handlers.external_session import register_external_session_handler
 from app.bot.handlers.file_upload import (
@@ -30,16 +34,26 @@ from app.bot.handlers.file_upload import (
     register_file_upload_handler,
     schedule_pending_upload_processing,
 )
-from app.bot.handlers.session_actions import register_session_action_handlers
+from app.bot.handlers.session_actions import (
+    register_external_text_handlers,
+    register_pair_consume_handler,
+    register_session_action_handlers,
+)
 from app.bot.middleware.callback_validator import CallbackValidatorMiddleware
 from app.bot.middleware.error_handling import ErrorHandlingMiddleware
 from app.bot.middleware.session_guard import SessionGuardMiddleware
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.config.settings import Settings
 from app.domain.models import SessionContext
+from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.diff_generator import DiffGeneratorService
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from app.services.external_user_question_state import (
+    ExternalQuestionPendingAmbiguous,
+    ExternalQuestionPendingUnique,
+)
 from app.services.file_receiver import FileReceiverService
 from app.services.result_exporter import ResultExporterService
 from app.services.session_registry import SessionRegistryService
@@ -49,11 +63,13 @@ from app.services.session_store import SessionStore
 from app.services.status_display import StatusDisplayService
 from app.services.task_service import TaskService
 from app.services.upload_queue import UploadQueueManager
+from app.services.user_question_callback_registry import UserQuestionCallbackRegistry
 
 if TYPE_CHECKING:
     from app.adapters.claude.hook_socket_server import HookSocketServer
     from app.services.admin_password_service import AdminPasswordService
     from app.services.external_binding_reaper import ExternalBindingReaper
+    from app.services.external_session_input_service import ExternalSessionInputService
     from app.services.external_user_question_state import ExternalUserQuestionState
     from app.services.permission_gateway import PermissionGateway
     from app.services.unbound_permission_handler import UnboundPermissionHandler
@@ -72,6 +88,122 @@ class PendingAdminPasswordFilter(BaseFilter):
             and self._admin_password_service is not None
             and self._admin_password_service.is_enabled
             and self._admin_password_service.has_pending(user_id)
+        )
+
+
+class ExternalInputTargetActiveFilter(BaseFilter):
+    """Match only when the user has an active external Ghostty input target.
+
+    Returns False (no match) when there is no target, so a plain text message
+    falls through to the managed ``chat_text_router`` instead of being consumed
+    here. This keeps the two flows partitioned by user state without raising
+    ``SkipHandler`` (which ErrorHandlingMiddleware would intercept).
+    """
+
+    def __init__(self, input_service: ExternalSessionInputService) -> None:
+        self._input_service = input_service
+
+    async def __call__(self, message: Message) -> bool:
+        user_id = message.from_user.id if message.from_user else 0
+        if not user_id:
+            return False
+        return await self._input_service.has_target(user_id)
+
+
+class ExternalQuestionActiveFilter(BaseFilter):
+    """Match plain text only when there is exactly one active external Ghostty
+    question AND no managed pending question.
+
+    Routing here (before the ordinary external/text routers) lets the user
+    answer a Ghostty ``AskUserQuestion`` by typing free text as ``Other``.
+    Managed pending questions are checked first so this never hijacks a managed
+    tmux session. ``True`` consumes the message; ``False`` lets it fall through.
+    """
+
+    def __init__(
+        self,
+        external_uq_state: ExternalUserQuestionState | None,
+        task_service: TaskService,
+    ) -> None:
+        self._external_uq_state = external_uq_state
+        self._task_service = task_service
+
+    async def __call__(self, message: Message) -> bool:
+        if self._external_uq_state is None:
+            return False
+        user_id = message.from_user.id if message.from_user else 0
+        if not user_id:
+            return False
+        if message.text is None or message.text.startswith("/"):
+            return False
+        managed_pending = await self._task_service.get_pending_user_questions(user_id)
+        if managed_pending:
+            return False
+        resolution = self._external_uq_state.resolve_unique_active_for_user(user_id, kind="ghostty")
+        return isinstance(resolution, ExternalQuestionPendingUnique)
+
+
+async def answer_external_user_question_text(
+    message: Message,
+    *,
+    external_uq_state: ExternalUserQuestionState,
+    task_service: TaskService,
+) -> None:
+    """Consume a free-text message as an external Ghostty ``AskUserQuestion`` Other answer.
+
+    Mirrors the routing gate in ``ExternalQuestionActiveFilter``. The filter only
+    gates routing; a managed AskUserQuestion may appear in the filter→handler
+    window, so managed pending is re-checked here and wins (fail closed) before
+    the text is consumed as a Ghostty Other answer.
+
+    Residual race window: between the filter's ``get_pending_user_questions``
+    and this handler's re-check, a managed pending could appear AND be consumed
+    by a concurrent handler, leaving this re-check seeing an empty managed set.
+    In that case the message would be consumed as a Ghostty Other answer despite a
+    managed question having existed. This is not a flaw the filter can close: the
+    two ``get_pending_user_questions`` reads are non-locking snapshots. The
+    invariant that holds it together is the per-user lock in
+    ``UserQuestionService.answer_pending_user_question_text``: it serialises the
+    resolve+submit of *this* user's free-text answers, so two answers for one user
+    cannot both pass the re-check simultaneously. The remaining edge needs a same-user
+    managed question to be born, answered, and cleared in the exact window between the
+    two reads — narrow enough to be acceptable, and any double-consumption still
+    reaches exactly-one owner (per-user lock downstream). Document this so future
+    "tighten the re-check with a lock" ideas know the lock already exists one layer
+    down, and is the right place to harden rather than the filter.
+    """
+    user_id = message.from_user.id if message.from_user else 0
+    text = (message.text or "").strip()
+    if not user_id or not text:
+        await message.answer("请发送非空文字作为回答")
+        return
+    if await task_service.get_pending_user_questions(user_id):
+        await message.answer("已有待处理的选择题，请先用其按钮回答")
+        return
+    resolution = external_uq_state.resolve_unique_active_for_user(user_id, kind="ghostty")
+    if isinstance(resolution, ExternalQuestionPendingAmbiguous):
+        await message.answer("存在多个待处理的外部问题，请用按钮精确回答")
+        return
+    if not isinstance(resolution, ExternalQuestionPendingUnique):
+        await message.answer("该问题刚过期，请稍后重试或使用按钮")
+        return
+    ok, response_text, next_prompt = await task_service.answer_pending_user_question_text(user_id=user_id, text=text)
+    # ``response_text`` is already a complete user-facing sentence from the service
+    # (success: "已记录选择: ..." / failure: "问题已过期或目标已变化" etc.). Forward it
+    # verbatim in both branches so the service is the single source of copy — do not
+    # prefix failures here, which would double-wrap the service's own sentence.
+    await message.answer(response_text)
+    if ok and next_prompt is not None:
+        # Render the next prompt with a fresh inline keyboard (tokens + buttons),
+        # mirroring the managed button path. The plain-text card the router
+        # previously emitted left multi/option intermediate prompts answerable
+        # only via the "Other" free-text fallback, even when buttons were meant
+        # to be the UX.
+        await _acknowledge_and_send_next_prompt(
+            message=message,
+            task_service=task_service,
+            user_id=user_id,
+            next_prompt=next_prompt,
         )
 
 
@@ -118,6 +250,9 @@ def _register_optional_handlers(
     external_binding_reaper: ExternalBindingReaper | None,
     title_resolver: Callable[[str, str], str | None] | None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None,
+    external_session_input_service: ExternalSessionInputService | None,
+    external_question_callbacks: CallbackValidatorMiddleware,
+    user_question_callback_registry: UserQuestionCallbackRegistry | None,
 ) -> None:
     """Register optional handlers that depend on service availability."""
     if session_scanner is not None and claude_paths is not None:
@@ -157,8 +292,51 @@ def _register_optional_handlers(
             discovery=external_discovery,
             binder=external_binder,
             registry_service=registry_service,
+            external_session_input_service=external_session_input_service,
         )
         router.include_router(session_action_router)
+
+        # Pairing callbacks live on a separate router with their own ``ghpair`` prefix; sharing
+        # ``sess`` middleware would reject ghpair buttons (and vice versa), since
+        # CallbackValidatorMiddleware answers+consumes any callback whose prefix does not match.
+        if external_session_input_service is not None:
+            ghpair_router = Router()
+            ghpair_router.callback_query.middleware(CallbackValidatorMiddleware(expected_parts=2, prefix="ghpair"))
+            register_pair_consume_handler(ghpair_router, input_service=external_session_input_service)
+            router.include_router(ghpair_router)
+
+            # Free-text answer router for external Ghostty AskUserQuestion.
+            # Registered BEFORE the ordinary external text router so a typed answer
+            # takes the question path instead of being sent into the terminal. The
+            # filter requires exactly one active Ghostty question and no managed
+            # pending; the handler re-resolves to guard against a stale match.
+            if external_uq_state is not None:
+                external_question_text_router = Router()
+                question_filter = ExternalQuestionActiveFilter(external_uq_state, task_service)
+
+                @external_question_text_router.message(question_filter, F.text & ~F.text.startswith("/"))
+                async def answer_external_user_question_with_text(message: Message) -> None:
+                    await answer_external_user_question_text(
+                        message,
+                        external_uq_state=external_uq_state,
+                        task_service=task_service,
+                    )
+
+                router.include_router(external_question_text_router)
+
+            # External text injection: match only when the user has an active
+            # Ghostty input target. Deliberately NOT guarded by ``guard_active``
+            # (the guard checks ``claude_chat_active`` for managed sessions, not
+            # external targets). ``F.text`` does not exclude slash commands, so
+            # an unregistered slash like ``/compact`` reaches Claude as text when
+            # a target is active; registered slashes are handled by earlier
+            # command routers which are included before this one. When there is
+            # no active target the filter returns False and the message falls
+            # through to ``chat_text_router`` (UNHANDLED propagation).
+            external_text_router = Router()
+            target_filter = ExternalInputTargetActiveFilter(external_session_input_service)
+            register_external_text_handlers(external_text_router, input_service=external_session_input_service, target_filter=target_filter)
+            router.include_router(external_text_router)
 
     if external_discovery is not None and external_binder is not None and structured_session_store is not None:
         register_external_session_handler(
@@ -166,19 +344,25 @@ def _register_optional_handlers(
             discovery=external_discovery,
             binder=external_binder,
             session_store=structured_session_store,
+            input_service=external_session_input_service,
         )
 
     if hook_socket_server is not None and unbound_permission_handler is not None and permission_gateway is not None:
         ext_perm_router = Router()
         ext_perm_router.callback_query.middleware(permission_callbacks)
+        ext_uq_router = Router()
+        ext_uq_router.callback_query.middleware(external_question_callbacks)
         register_external_permission_handler(
             ext_perm_router,
+            uq_router=ext_uq_router,
             hook_socket_server=hook_socket_server,
             unbound_permission_handler=unbound_permission_handler,
             external_uq_state=external_uq_state,
             permission_gateway=permission_gateway,
+            user_question_callback_registry=user_question_callback_registry,
         )
         router.include_router(ext_perm_router)
+        router.include_router(ext_uq_router)
 
     if file_receiver is not None and upload_queue is not None:
         upload_guard_router = Router()
@@ -215,6 +399,7 @@ def _create_chat_text_router(
     queued_upload_scheduler: Callable[[Message, int, str], None] | None,
     pending_upload_finalizer: Callable[[Message, int], Awaitable[None]] | None,
     permission_gateway: PermissionGateway | None,
+    stream_background_tasks: BackgroundTaskRegistry,
     structured_reply_pump_interval_sec: float,
     spinner_initial_delay_sec: float,
     spinner_interval_sec: float,
@@ -265,6 +450,7 @@ def _create_chat_text_router(
             queued_upload_scheduler=queued_upload_scheduler,
             pending_upload_finalizer=pending_upload_finalizer,
             permission_gateway=permission_gateway,
+            stream_background_tasks=stream_background_tasks,
             structured_reply_pump_interval_sec=structured_reply_pump_interval_sec,
             spinner_initial_delay_sec=spinner_initial_delay_sec,
             spinner_interval_sec=spinner_interval_sec,
@@ -290,6 +476,9 @@ def create_router(
     registry_service: SessionRegistryService | None = None,
     file_receiver: FileReceiverService | None = None,
     upload_queue: UploadQueueManager | None = None,
+    upload_background_tasks: BackgroundTaskRegistry | None = None,
+    upload_processing_locks: RefCountedLockRegistry | None = None,
+    stream_background_tasks: BackgroundTaskRegistry | None = None,
     result_exporter: ResultExporterService | None = None,
     diff_generator: DiffGeneratorService | None = None,
     status_display: StatusDisplayService | None = None,
@@ -307,6 +496,8 @@ def create_router(
     title_resolver: Callable[[str, str], str | None] | None = None,
     dead_unbound_cleanup: Callable[[str], Awaitable[object]] | None = None,
     admin_password_service: AdminPasswordService | None = None,
+    external_session_input_service: ExternalSessionInputService | None = None,
+    user_question_callback_registry: UserQuestionCallbackRegistry | None = None,
 ) -> Router:
     router = Router()
 
@@ -315,12 +506,10 @@ def create_router(
 
     # 回调数据验证中间件
     session_callbacks = CallbackValidatorMiddleware(expected_parts=3, prefix="sess")
-    permission_callbacks = CallbackValidatorMiddleware(
-        expected_parts=3,
-        prefix=("ext_perm", "ext_uq"),
-    )
+    permission_callbacks = CallbackValidatorMiddleware(expected_parts=3, prefix="ext_perm")
+    external_question_callbacks = CallbackValidatorMiddleware(expected_parts=2, prefix="ext_uq")
     user_question_callbacks = CallbackValidatorMiddleware(
-        expected_parts=(4, 5),
+        expected_parts=(2, 4, 5),
         prefix="ask",
     )
 
@@ -365,6 +554,8 @@ def create_router(
     queued_upload_scheduler = None
     pending_upload_finalizer = None
     if file_receiver is not None and upload_queue is not None:
+        # 走 upload 路径时，后台 task registry 与串行处理锁必须由组合根同时注入。
+        assert upload_background_tasks is not None and upload_processing_locks is not None
 
         def _queued_upload_scheduler(message: Message, user_id: int, completed_task_id: str) -> None:
             schedule_pending_upload_processing(
@@ -372,6 +563,8 @@ def create_router(
                 file_receiver=file_receiver,
                 session_service=session_service,
                 upload_queue=upload_queue,
+                upload_background_tasks=upload_background_tasks,
+                upload_processing_locks=upload_processing_locks,
                 user_id=user_id,
                 task_service=task_service,
                 completed_task_id=completed_task_id,
@@ -383,6 +576,7 @@ def create_router(
                 file_receiver=file_receiver,
                 session_service=session_service,
                 upload_queue=upload_queue,
+                upload_processing_locks=upload_processing_locks,
                 user_id=user_id,
                 task_service=task_service,
             )
@@ -391,6 +585,9 @@ def create_router(
         pending_upload_finalizer = _pending_upload_finalizer
 
     # 核心命令处理器
+    # /run 与 Claude 聊天自由文本都走后台 watchdog task，stream 后台 registry
+    # 必须由组合根注入。
+    assert stream_background_tasks is not None
     register_run_handler(
         router,
         task_service=task_service,
@@ -401,6 +598,7 @@ def create_router(
         queued_upload_scheduler=queued_upload_scheduler,
         pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
         structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
         spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
         spinner_interval_sec=settings.spinner_interval_sec,
@@ -421,7 +619,7 @@ def create_router(
         router.include_router(permission_router)
     uq_router = Router()
     uq_router.callback_query.middleware(user_question_callbacks)
-    register_user_question_handlers(uq_router, task_service=task_service)
+    register_user_question_handlers(uq_router, task_service=task_service, callback_registry=user_question_callback_registry)
     router.include_router(uq_router)
     register_exit_handler(router, task_service=task_service)
     # 子路由器：需要活跃会话的命令
@@ -433,6 +631,7 @@ def create_router(
         cmds_active_router,
         task_service=task_service,
         permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
     )
     router.include_router(cmds_active_router)
 
@@ -463,6 +662,9 @@ def create_router(
         external_binding_reaper=external_binding_reaper,
         title_resolver=title_resolver,
         dead_unbound_cleanup=dead_unbound_cleanup,
+        external_session_input_service=external_session_input_service,
+        external_question_callbacks=external_question_callbacks,
+        user_question_callback_registry=user_question_callback_registry,
     )
 
     @router.message(PendingAdminPasswordFilter(admin_password_service), F.text & ~F.text.startswith("/"))
@@ -487,6 +689,7 @@ def create_router(
         queued_upload_scheduler=queued_upload_scheduler,
         pending_upload_finalizer=pending_upload_finalizer,
         permission_gateway=permission_gateway,
+        stream_background_tasks=stream_background_tasks,
         structured_reply_pump_interval_sec=settings.structured_reply_pump_interval_sec,
         spinner_initial_delay_sec=settings.spinner_initial_delay_sec,
         spinner_interval_sec=settings.spinner_interval_sec,

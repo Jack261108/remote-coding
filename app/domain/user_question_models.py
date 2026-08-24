@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from enum import StrEnum
+from typing import Any, Literal, TypeAlias
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,57 @@ class UserQuestionPrompt:
     @property
     def key(self) -> str:
         return f"{self.tool_use_id}:{self.question_index}"
+
+
+class ExternalUserQuestionPhase(StrEnum):
+    ACTIVE = "active"
+    TERMINAL_ACTION_APPLIED = "terminal_action_applied"
+    COMPLETED = "completed"
+    INDETERMINATE = "indeterminate"
+    # INVALIDATED intentionally omitted: the ``invalidate_*`` family in
+    # ExternalUserQuestionState pops records directly (销账即回收), so no record
+    # ever transitions into an INVALIDATED tombstone here. Stale-button
+    # rejection is handled independently by the callback registries' own
+    # INVALIDATED status. Do NOT add a mark_invalidated without a consumer.
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalTmuxQuestionTarget:
+    pane_id: str
+    tmux_bin: str = "tmux"
+    kind: Literal["tmux"] = "tmux"
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalGhosttyQuestionTarget:
+    binding_id: str
+    terminal_id: str
+    paired_tty: str
+    paired_at: datetime
+    kind: Literal["ghostty"] = "ghostty"
+
+
+ExternalUserQuestionTarget: TypeAlias = ExternalTmuxQuestionTarget | ExternalGhosttyQuestionTarget
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalUserQuestionContext:
+    tool_use_id: str
+    session_id: str
+    user_id: int
+    target: ExternalUserQuestionTarget
+
+
+class ExternalQuestionActionStatus(StrEnum):
+    APPLIED = "applied"
+    REJECTED = "rejected"
+    INDETERMINATE = "indeterminate"
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalQuestionActionResult:
+    status: ExternalQuestionActionStatus
+    message: str = ""
 
 
 def extract_user_question_prompts(

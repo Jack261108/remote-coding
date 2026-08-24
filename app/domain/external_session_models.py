@@ -30,6 +30,28 @@ class UnboundExternalSession:
     last_seen: datetime
     event_count: int
     title: str | None = None
+    tty: str | None = None
+
+
+@dataclass
+class GhosttyInputTarget:
+    """Stable Ghostty terminal selected for injecting input to a bound session.
+
+    ``terminal_id`` is the only addressing field — Ghostty's stable surface
+    UUID. ``paired_tty`` is the trust anchor used on every send to verify the
+    bound Claude process still runs in the same PTY as at pairing time.
+    ``binding_id`` records the binding generation at pairing time and acts as
+    an ABA barrier: an unbind+rebind that produced a new binding_id invalidates
+    a previously-paired target. ``name``/``cwd`` snapshots are display-only and
+    must never participate in addressing.
+    """
+
+    terminal_id: str
+    paired_tty: str
+    paired_at: datetime
+    binding_id: str
+    name: str | None = None
+    cwd: str | None = None
 
 
 @dataclass
@@ -47,6 +69,8 @@ class ExternalBinding:
     ended_at: datetime | None = None
     last_pushed_reply_turn_id: str | None = None
     reply_cursor_initialized: bool = False
+    tty: str | None = None
+    ghostty_target: GhosttyInputTarget | None = None
 
     def __post_init__(self, last_activity_at_init: datetime | None) -> None:
         # Default activity timestamp to bind time so existing callers that don't

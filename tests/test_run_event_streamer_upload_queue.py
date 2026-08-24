@@ -10,6 +10,8 @@ from app.bot.handlers.command_run import run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.domain.file_models import DiffResult, FileUploadResult, FileValidationError
 from app.domain.models import TaskStatus
+from app.infra.lock_registry import RefCountedLockRegistry
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.upload_queue import UploadQueueManager
 from tests.fakes.task_service import FakeTaskService, make_cli_event_stream, make_task_record
 from tests.fakes.telegram import DummyMessage
@@ -58,8 +60,15 @@ def _task_record(*, task_id: str, user_id: int, status: TaskStatus):
     return make_task_record(task_id=task_id, user_id=user_id, status=status)
 
 
+@pytest.fixture
+def stream_background_tasks() -> BackgroundTaskRegistry:
+    return BackgroundTaskRegistry(label="stream")
+
+
 @pytest.mark.asyncio
-async def test_queued_upload_scheduler_runs_after_success_message_is_displayed() -> None:
+async def test_queued_upload_scheduler_runs_after_success_message_is_displayed(
+    stream_background_tasks: BackgroundTaskRegistry,
+) -> None:
     message = DummyMessage(user_id=7)
     task_service = FakeTaskService(
         events=make_cli_event_stream(),
@@ -79,6 +88,7 @@ async def test_queued_upload_scheduler_runs_after_success_message_is_displayed()
         prompt="hello",
         workdir="/tmp/work",
         queued_upload_scheduler=queued_upload_scheduler,
+        stream_background_tasks=stream_background_tasks,
     )
     assert task is not None
     await task
@@ -91,7 +101,9 @@ async def test_queued_upload_scheduler_runs_after_success_message_is_displayed()
 
 
 @pytest.mark.asyncio
-async def test_queued_upload_scheduler_runs_after_success_diff_output(tmp_path: Path) -> None:
+async def test_queued_upload_scheduler_runs_after_success_diff_output(
+    tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry
+) -> None:
     order: list[str] = []
     message = OrderRecordingMessage(user_id=7, order=order)
     modified_file = tmp_path / "file.py"
@@ -116,6 +128,7 @@ async def test_queued_upload_scheduler_runs_after_success_diff_output(tmp_path: 
         workdir=str(tmp_path),
         diff_generator=OrderRecordingDiffGenerator(modified_file=modified_file),
         queued_upload_scheduler=queued_upload_scheduler,
+        stream_background_tasks=stream_background_tasks,
     )
     assert task is not None
     await task
@@ -148,6 +161,8 @@ async def test_queued_upload_processing_continues_after_failed_file(tmp_path: Pa
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_background_tasks=BackgroundTaskRegistry(label="upload"),
+        upload_processing_locks=RefCountedLockRegistry(ttl_sec=300, cleanup_interval_sec=60, cleanup_batch_size=50),
         user_id=user_id,
     )
     await task
@@ -167,6 +182,8 @@ async def test_queued_upload_processing_waits_for_other_active_task(tmp_path: Pa
     message = DummyMessage(user_id=user_id)
     upload_queue = UploadQueueManager(max_files_per_user=2, max_bytes_per_user=100)
     await upload_queue.enqueue(user_id=user_id, filename="queued.txt", data=b"queued")
+    upload_background_tasks = BackgroundTaskRegistry(label="upload")
+    upload_processing_locks = RefCountedLockRegistry(ttl_sec=300, cleanup_interval_sec=60, cleanup_batch_size=50)
 
     session_service = AsyncMock()
     session_service.get = AsyncMock(return_value=SimpleNamespace(workdir=str(tmp_path)))
@@ -188,6 +205,8 @@ async def test_queued_upload_processing_waits_for_other_active_task(tmp_path: Pa
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_background_tasks=upload_background_tasks,
+        upload_processing_locks=upload_processing_locks,
         user_id=user_id,
         task_service=task_service,
         completed_task_id="completed",
@@ -203,6 +222,8 @@ async def test_queued_upload_processing_waits_for_other_active_task(tmp_path: Pa
         file_receiver=file_receiver,
         session_service=session_service,
         upload_queue=upload_queue,
+        upload_background_tasks=upload_background_tasks,
+        upload_processing_locks=upload_processing_locks,
         user_id=user_id,
         task_service=task_service,
         completed_task_id="completed",

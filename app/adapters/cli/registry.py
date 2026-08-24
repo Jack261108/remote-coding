@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
+from typing import Any
+
 from app.adapters.cli.base import BaseCLIAdapter
 from app.adapters.cli.claude_code import ClaudeCodeAdapter
 from app.adapters.cli.codex_cli import CodexCLIAdapter
@@ -11,39 +14,67 @@ from app.domain.protocols import AdapterCapabilities
 
 
 class CLIAdapterRegistry:
-    """Provider adapter 注册表。"""
+    """Provider adapter 注册表。
 
-    _ALIASES = {
-        "claude": "claude_code",
-        "claude_code": "claude_code",
-        "claude-code": "claude_code",
-        "codex": "codex",
-        "codex_cli": "codex",
-        "codex-cli": "codex",
-        "gemini": "gemini",
-        "gemini_cli": "gemini",
-        "gemini-cli": "gemini",
-    }
+    新增 provider：编写 BaseCLIAdapter 子类（声明 provider/aliases/class_capabilities/
+    build_file_args），在 settings.cli_bins 配置对应 provider 的可执行路径，然后调
+    register(<XxxCLIAdapter>) 即可接入，无需改本类内部字典。runner 后端默认走
+    subprocess；仅 claude_code 在 tmux 启用时改走 tmux_runner（见 register 内注释）。
+    """
 
     def __init__(self, settings: Settings, runner: SubprocessRunner, tmux_runner: TmuxRunner | None = None) -> None:
+        self._settings = settings
+        self._runner = runner
+        self._tmux_runner = tmux_runner
         self._claude_terminal_enabled = settings.claude_tmux_mode and tmux_runner is not None
-        claude_runner: SubprocessRunner | TmuxRunner = tmux_runner if self._claude_terminal_enabled and tmux_runner is not None else runner
-        self._adapters: dict[str, BaseCLIAdapter] = {
-            "claude_code": ClaudeCodeAdapter(cli_bin=settings.claude_cli_bin, runner=claude_runner),
-            "codex": CodexCLIAdapter(cli_bin=settings.codex_cli_bin, runner=runner),
-            "gemini": GeminiCLIAdapter(cli_bin=settings.gemini_cli_bin, runner=runner),
-        }
-        self._capabilities: dict[str, AdapterCapabilities] = {
-            "claude_code": AdapterCapabilities(
-                persistent_terminal=self._claude_terminal_enabled,
-                interactive_input=self._claude_terminal_enabled,
-                claude_resume=self._claude_terminal_enabled,
-                user_question_tui=self._claude_terminal_enabled,
-                session_state=self._claude_terminal_enabled,
-            ),
-            "codex": AdapterCapabilities(),
-            "gemini": AdapterCapabilities(),
-        }
+        self._adapters: dict[str, BaseCLIAdapter] = {}
+        self._capabilities: dict[str, AdapterCapabilities] = {}
+        self._aliases: dict[str, str] = {}
+        self._register_builtin()
+
+    def _register_builtin(self) -> None:
+        """注册内置 provider——保持与历史硬编码等价的能力与运行时配置。"""
+        self.register(
+            ClaudeCodeAdapter,
+            persistent_terminal_active=self._claude_terminal_enabled,
+        )
+        self.register(CodexCLIAdapter)
+        self.register(GeminiCLIAdapter)
+
+    def register(
+        self,
+        adapter_cls: type[BaseCLIAdapter],
+        *,
+        persistent_terminal_active: bool | None = None,
+    ) -> None:
+        """注册一个 provider adapter。
+
+        provider、aliases、静态能力由 adapter 类自描述；registry 仅按运行环境
+        覆盖动态位 persistent_terminal_active（tmux 后端可用性）。cli_bin 取自
+        settings.cli_bins[provider]（老式 CLAUDE_CLI_BIN 等 env 经
+        _absorb_legacy_cli_bins validator 收编进 cli_bins），runner 选取对内置
+        claude_code 走 tmux_runner（启用时），其余走默认 subprocess runner。
+        """
+        provider = adapter_cls.provider
+        bin_value = self._settings.cli_bins[provider]
+        # runner 后端绑定：claude_code 的持久交互必须走 tmux_runner；这是 runner
+        # 后端选型，非能力位路由（能力路由已全部交 AdapterCapabilities 驱动）。
+        # 仅 claude 需 tmux，不为此给 adapter 加"自述 runner 后端"抽象（YAGNI）。
+        runner: Any = (
+            self._tmux_runner
+            if provider == "claude_code" and self._claude_terminal_enabled and self._tmux_runner is not None
+            else self._runner
+        )
+        self._adapters[provider] = adapter_cls(cli_bin=bin_value, runner=runner)
+
+        caps = adapter_cls.class_capabilities()
+        if persistent_terminal_active is not None:
+            caps = dataclasses.replace(caps, persistent_terminal_active=persistent_terminal_active)
+        self._capabilities[provider] = caps
+
+        self._aliases[provider.lower()] = provider
+        for alias in adapter_cls.aliases():
+            self._aliases[alias.lower()] = provider
 
     @property
     def claude_terminal_enabled(self) -> bool:
@@ -51,7 +82,7 @@ class CLIAdapterRegistry:
 
     def normalize_provider(self, provider: str) -> str:
         key = provider.strip().lower()
-        normalized = self._ALIASES.get(key)
+        normalized = self._aliases.get(key)
         if normalized is None:
             raise ValueError(f"不支持 provider: {provider}")
         return normalized

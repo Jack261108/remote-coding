@@ -33,11 +33,10 @@ def register_status_handler(router, *, task_service: TaskService):
                 await message.answer("未找到该任务。")
                 return
             lines = [_render_task(task)]
-            if task.provider == "claude_code":
-                structured = await task_service.get_structured_session_for_task(task_id=task.task_id, user_id=user_id)
-                if structured is not None:
-                    lines.append("")
-                    lines.append(render_structured_session(structured, include_last_reply=False))
+            structured = await task_service.get_structured_session_for_task(task_id=task.task_id, user_id=user_id)
+            if structured is not None:
+                lines.append("")
+                lines.append(render_structured_session(structured, include_last_reply=False))
             await message.answer("\n".join(lines))
             return
 

@@ -11,6 +11,7 @@ from app.bot.handlers.command_run import run_prompt_and_stream
 from app.bot.presenters.chunk_sender import ChunkSender
 from app.domain.file_models import DiffResult
 from app.domain.models import TaskStatus
+from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.diff_generator import DiffGeneratorService
 from tests.fakes.task_service import FakeTaskService, make_cli_event_stream, make_task_record
 from tests.fakes.telegram import DummyMessage
@@ -25,8 +26,13 @@ def _task_service(tmp_path: Path, *, status: TaskStatus, failed: bool = False) -
     )
 
 
+@pytest.fixture
+def stream_background_tasks() -> BackgroundTaskRegistry:
+    return BackgroundTaskRegistry(label="stream")
+
+
 @pytest.mark.asyncio
-async def test_diff_integration_sends_short_diff_as_message(tmp_path: Path) -> None:
+async def test_diff_integration_sends_short_diff_as_message(tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry) -> None:
     """When diff is short (<4096), it should be sent as a code-block message."""
     diff_generator = DiffGeneratorService()
     snapshot = {tmp_path / "file.py": 100.0}
@@ -49,6 +55,7 @@ async def test_diff_integration_sends_short_diff_as_message(tmp_path: Path) -> N
             prompt="hello",
             workdir=str(tmp_path),
             diff_generator=diff_generator,
+            stream_background_tasks=stream_background_tasks,
         )
         if task:
             await task
@@ -64,7 +71,7 @@ async def test_diff_integration_sends_short_diff_as_message(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_diff_integration_sends_large_diff_as_patch_file(tmp_path: Path) -> None:
+async def test_diff_integration_sends_large_diff_as_patch_file(tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry) -> None:
     """When diff is large (>=4096), it should be sent as a .patch file."""
     diff_generator = DiffGeneratorService()
     snapshot = {tmp_path / "file.py": 100.0}
@@ -88,6 +95,7 @@ async def test_diff_integration_sends_large_diff_as_patch_file(tmp_path: Path) -
             prompt="hello",
             workdir=str(tmp_path),
             diff_generator=diff_generator,
+            stream_background_tasks=stream_background_tasks,
         )
         if task:
             await task
@@ -99,7 +107,7 @@ async def test_diff_integration_sends_large_diff_as_patch_file(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_diff_integration_no_diff_when_no_changes(tmp_path: Path) -> None:
+async def test_diff_integration_no_diff_when_no_changes(tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry) -> None:
     """When generate_unified_diff returns None, no diff message should be sent."""
     diff_generator = DiffGeneratorService()
     snapshot = {tmp_path / "file.py": 100.0}
@@ -121,6 +129,7 @@ async def test_diff_integration_no_diff_when_no_changes(tmp_path: Path) -> None:
             prompt="hello",
             workdir=str(tmp_path),
             diff_generator=diff_generator,
+            stream_background_tasks=stream_background_tasks,
         )
         if task:
             await task
@@ -131,7 +140,7 @@ async def test_diff_integration_no_diff_when_no_changes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_diff_integration_error_does_not_block_task(tmp_path: Path) -> None:
+async def test_diff_integration_error_does_not_block_task(tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry) -> None:
     """If diff generation raises an exception, the task should still complete."""
     diff_generator = DiffGeneratorService()
 
@@ -148,6 +157,7 @@ async def test_diff_integration_error_does_not_block_task(tmp_path: Path) -> Non
             prompt="hello",
             workdir=str(tmp_path),
             diff_generator=diff_generator,
+            stream_background_tasks=stream_background_tasks,
         )
         if task:
             await task
@@ -160,7 +170,7 @@ async def test_diff_integration_error_does_not_block_task(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_diff_not_triggered_on_failure(tmp_path: Path) -> None:
+async def test_diff_not_triggered_on_failure(tmp_path: Path, stream_background_tasks: BackgroundTaskRegistry) -> None:
     """Diff should NOT be generated when task fails."""
     diff_generator = DiffGeneratorService()
     snapshot = {tmp_path / "file.py": 100.0}
@@ -182,6 +192,7 @@ async def test_diff_not_triggered_on_failure(tmp_path: Path) -> None:
             prompt="hello",
             workdir=str(tmp_path),
             diff_generator=diff_generator,
+            stream_background_tasks=stream_background_tasks,
         )
         if task:
             await task

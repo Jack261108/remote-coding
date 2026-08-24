@@ -26,8 +26,14 @@ class OrphanedTerminalInfo:
 class UserSessionContextService:
     """Manages user-level session context (provider, workdir, terminal_mode)."""
 
-    def __init__(self, store: SessionContextStore) -> None:
+    def __init__(
+        self,
+        store: SessionContextStore,
+        *,
+        claude_session_capable_providers: frozenset[str] = frozenset({"claude_code"}),
+    ) -> None:
         self._store = store
+        self._claude_session_capable_providers = claude_session_capable_providers
         self._terminal_locks = RefCountedLockRegistry(
             ttl_sec=300,  # 5 minutes
             cleanup_interval_sec=60,  # 1 minute
@@ -100,7 +106,7 @@ class UserSessionContextService:
         provider_changed = previous_provider is not None and provider != previous_provider
 
         orphaned: OrphanedTerminalInfo | None = None
-        if provider != "claude_code" or workdir_changed or provider_changed:
+        if provider not in self._claude_session_capable_providers or workdir_changed or provider_changed:
             existing.claude_session_id = None
             # Detect orphaned terminal: old terminal_id exists and either
             # workdir/provider changed or terminal_id will be rebuilt

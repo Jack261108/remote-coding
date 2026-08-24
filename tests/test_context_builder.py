@@ -11,6 +11,10 @@ from unittest.mock import patch
 
 import pytest
 
+from app.adapters.cli.base import BaseCLIAdapter
+from app.adapters.cli.claude_code import ClaudeCodeAdapter
+from app.adapters.cli.codex_cli import CodexCLIAdapter
+from app.adapters.cli.gemini_cli import GeminiCLIAdapter
 from app.adapters.storage.upload_store import UploadStoreAdapter
 from app.services.context_builder import ContextBuilderService
 
@@ -32,29 +36,42 @@ def service(adapter: UploadStoreAdapter) -> ContextBuilderService:
     return ContextBuilderService(upload_store=adapter)
 
 
+def _claude_adapter() -> BaseCLIAdapter:
+    # build_file_args 不触碰 cli_bin/runner，传占位即可。
+    return ClaudeCodeAdapter(cli_bin="claude", runner=None)
+
+
+def _codex_adapter() -> BaseCLIAdapter:
+    return CodexCLIAdapter(cli_bin="codex", runner=None)
+
+
+def _gemini_adapter() -> BaseCLIAdapter:
+    return GeminiCLIAdapter(cli_bin="gemini", runner=None)
+
+
 class TestBuildCliArgs:
     def test_claude_code_produces_file_flags(self, service: ContextBuilderService, tmp_path: Path) -> None:
         paths = [tmp_path / "a.py", tmp_path / "b.txt"]
-        result = service.build_cli_args("claude_code", paths)
+        result = service.build_cli_args(_claude_adapter(), paths)
         assert result == ["--file", str(paths[0]), "--file", str(paths[1])]
 
     def test_claude_code_empty_paths(self, service: ContextBuilderService) -> None:
-        result = service.build_cli_args("claude_code", [])
+        result = service.build_cli_args(_claude_adapter(), [])
         assert result == []
 
     def test_codex_returns_empty(self, service: ContextBuilderService, tmp_path: Path) -> None:
         paths = [tmp_path / "a.py"]
-        result = service.build_cli_args("codex", paths)
+        result = service.build_cli_args(_codex_adapter(), paths)
         assert result == []
 
     def test_gemini_returns_empty(self, service: ContextBuilderService, tmp_path: Path) -> None:
         paths = [tmp_path / "a.py"]
-        result = service.build_cli_args("gemini", paths)
+        result = service.build_cli_args(_gemini_adapter(), paths)
         assert result == []
 
     def test_unknown_provider_returns_empty(self, service: ContextBuilderService, tmp_path: Path) -> None:
         paths = [tmp_path / "a.py"]
-        result = service.build_cli_args("unknown_provider", paths)
+        result = service.build_cli_args(_gemini_adapter(), paths)
         assert result == []
 
 
@@ -81,7 +98,7 @@ class TestAugmentPrompt:
 class TestBuildContext:
     def test_no_files_returns_original_prompt(self, service: ContextBuilderService, adapter: UploadStoreAdapter, workdir: str) -> None:
         since = datetime.fromtimestamp(0, tz=UTC)
-        ctx = service.build_context(user_id=1, workdir=workdir, provider="claude_code", prompt="Do stuff", since=since)
+        ctx = service.build_context(user_id=1, workdir=workdir, adapter=_claude_adapter(), prompt="Do stuff", since=since)
         assert ctx.file_paths == []
         assert ctx.augmented_prompt == "Do stuff"
         assert ctx.cli_args == []
@@ -91,7 +108,7 @@ class TestBuildContext:
         asyncio.run(adapter.save_file(1, workdir, "test.py", b"content"))
 
         since = datetime.fromtimestamp(0, tz=UTC)
-        ctx = service.build_context(user_id=1, workdir=workdir, provider="claude_code", prompt="Fix it", since=since)
+        ctx = service.build_context(user_id=1, workdir=workdir, adapter=_claude_adapter(), prompt="Fix it", since=since)
         assert len(ctx.file_paths) == 1
         assert ctx.file_paths[0].name == "test.py"
         assert "--file" in ctx.cli_args
@@ -102,7 +119,7 @@ class TestBuildContext:
         asyncio.run(adapter.save_file(1, workdir, "data.json", b"{}"))
 
         since = datetime.fromtimestamp(0, tz=UTC)
-        ctx = service.build_context(user_id=1, workdir=workdir, provider="codex", prompt="Analyze", since=since)
+        ctx = service.build_context(user_id=1, workdir=workdir, adapter=_codex_adapter(), prompt="Analyze", since=since)
         assert len(ctx.file_paths) == 1
         assert ctx.cli_args == []
         assert "data.json" in ctx.augmented_prompt
@@ -118,7 +135,7 @@ class TestBuildContext:
 
         # Since is after old file
         since = datetime.fromtimestamp(time.time() - 60, tz=UTC)
-        ctx = service.build_context(user_id=1, workdir=workdir, provider="claude_code", prompt="Go", since=since)
+        ctx = service.build_context(user_id=1, workdir=workdir, adapter=_claude_adapter(), prompt="Go", since=since)
         assert ctx.file_paths == []
         assert ctx.augmented_prompt == "Go"
 

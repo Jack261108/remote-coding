@@ -34,6 +34,7 @@ from app.infra.source_text_normalization import normalize_source_text
 from app.services.message_sender import Keyboard
 from app.services.permission_callback_registry import AutoApproveOutcome, SessionOrigin
 from app.services.permission_gateway import RegisterForButtonConflict, RegisterForButtonOk
+from app.services.task_service import TaskService
 
 if TYPE_CHECKING:
     from app.services.permission_gateway import PermissionGateway
@@ -59,6 +60,8 @@ class PresenterOutputDispatcher:
         messenger: RunTelegramMessenger,
         tool_message_manager: ToolMessageManager,
         task_id: str,
+        user_id: int,
+        task_service: TaskService,
         permission_gateway: PermissionGateway | None = None,
     ) -> None:
         self._presenter = presenter
@@ -66,6 +69,8 @@ class PresenterOutputDispatcher:
         self._messenger = messenger
         self._tool_message_manager = tool_message_manager
         self._task_id = task_id
+        self._user_id = user_id
+        self._task_service = task_service
         self._permission_gateway = permission_gateway
         self._fallback_message: Message | None = None
 
@@ -236,9 +241,10 @@ class PresenterOutputDispatcher:
             await self._presenter.acknowledge_delivery(output)
 
     async def _send_user_question(self, output: UserQuestionOutput) -> None:
+        tokens = await self._task_service.register_question_callback_tokens(user_id=self._user_id, prompt=output.question)
         sent = await self._messenger.answer_safely(
             output.text,
-            reply_markup=build_user_question_keyboard(output),
+            reply_markup=build_user_question_keyboard(output, tokens=tokens),
         )
         if sent:
             await self._presenter.acknowledge_delivery(output)
