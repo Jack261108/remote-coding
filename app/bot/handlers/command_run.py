@@ -29,7 +29,7 @@ from app.bot.presenters.structured_reply_presenter import (
     StructuredReplyPresenter,
 )
 from app.bot.presenters.tool_message_manager import ToolMessageManager
-from app.domain.models import EventType
+from app.domain.models import TERMINAL_EVENT_TYPES
 from app.services.diff_generator import DiffGeneratorService
 from app.services.result_exporter import ResultExporterService
 from app.services.status_display import StatusDisplayService
@@ -178,7 +178,7 @@ def _wrap_events_with_progress(
                 return
             now = asyncio.get_running_loop().time()
             state.last_progress_at = now
-            if event.type in {EventType.EXITED, EventType.FAILED, EventType.TIMEOUT, EventType.CANCELED}:
+            if event.type in TERMINAL_EVENT_TYPES:
                 state.terminal_seen = True
                 state.terminal_seen_at = now
             yield event

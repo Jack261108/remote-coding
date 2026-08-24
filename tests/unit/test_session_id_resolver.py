@@ -13,7 +13,12 @@ from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
-from app.services.session_id_resolver import _resolve_session_id, resolve_and_bind, unique_prefixes
+from app.services.session_id_resolver import (
+    _resolve_session_id,
+    build_token_candidates,
+    resolve_and_bind,
+    unique_prefixes,
+)
 
 
 @pytest.fixture
@@ -392,3 +397,38 @@ async def test_resolve_and_bind_exact_stale_unbound_does_not_bind_live_prefix_ex
     assert result.success is False
     assert result.message == "Session is no longer available"
     binder.bind.assert_not_awaited()
+
+
+def test_build_token_candidates_orders_unbound_bound_then_unavailable(
+    discovery: ExternalSessionDiscoveryService,
+    binding_store: ExternalBindingStore,
+    binder: ExternalSessionBinder,
+) -> None:
+    _record_unbound(discovery, "unbound-session-0001")
+    _record_unbound(discovery, "unbound-session-0002")
+    binding_store.save_binding(
+        ExternalBinding(
+            session_id="bound-session-0001",
+            user_id=42,
+            cwd="/home/user/project",
+            bound_at=utc_now(),
+            jsonl_path=None,
+        )
+    )
+    discovery.mark_session_unavailable("unavailable-session-0001")
+
+    candidates = build_token_candidates(discovery, binder)
+
+    assert candidates == [
+        "unbound-session-0001",
+        "unbound-session-0002",
+        "bound-session-0001",
+        "unavailable-session-0001",
+    ]
+
+
+def test_build_token_candidates_empty_when_no_sessions(
+    discovery: ExternalSessionDiscoveryService,
+    binder: ExternalSessionBinder,
+) -> None:
+    assert build_token_candidates(discovery, binder) == []
