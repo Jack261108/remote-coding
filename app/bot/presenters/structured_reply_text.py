@@ -24,7 +24,7 @@ def normalize_stream_text(text: str) -> str:
 
 
 def _truncate_text(text: str, *, char_limit: int, line_limit: int, suffix: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = _source_text.normalize_line_endings(text).strip()
     if not normalized:
         return ""
 

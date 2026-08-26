@@ -47,6 +47,7 @@ from app.domain.user_question_models import (
     ExternalUserQuestionContext,
 )
 from app.infra.lock_registry import RefCountedLockRegistry
+from app.infra.source_text_normalization import normalize_line_endings
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_input_mode_state import ExternalInputTargetStore
 from app.services.external_input_queue import (
@@ -1417,4 +1418,4 @@ class ExternalSessionInputService:
 
 def _normalise_text(text: str) -> str:
     """Normalise CRLF/CR to LF (design §8). No shell escaping."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalize_line_endings(text)

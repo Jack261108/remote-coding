@@ -10,6 +10,8 @@ import html
 import re
 from datetime import UTC, datetime
 
+from app.infra.source_text_normalization import normalize_line_endings
+
 
 def short_id(id_str: str, length: int = 8) -> str:
     """Truncate an ID string for display purposes.
@@ -120,7 +122,7 @@ def render_markdownish_to_telegram_html(text: str) -> str:
     if not text:
         return ""
 
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalize_line_endings(text)
     parts: list[str] = []
     cursor = 0
     for match in _FENCED_CODE_RE.finditer(normalized):
@@ -360,7 +362,7 @@ def split_markdownish_for_telegram(text: str, max_len: int) -> list[str]:
     if max_len <= 0:
         return [text]
 
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalize_line_endings(text)
     parts: list[str] = []
     cursor = 0
     for match in _FENCED_CODE_RE.finditer(normalized):
