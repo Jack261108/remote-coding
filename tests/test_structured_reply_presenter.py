@@ -42,44 +42,7 @@ from app.domain.session_models import (
 from app.domain.user_question_models import UserQuestionOption, UserQuestionPrompt
 from app.services.session_store import SessionStore
 from tests.fakes.structured import make_structured_session as _session
-
-
-class DummyTaskService:
-    def __init__(self, sessions: list[object | None]) -> None:
-        self._sessions = sessions
-        self._index = 0
-        self._question_key: str | None = None
-
-    async def get_structured_session(self, user_id: int, *, log_missing: bool = True):
-        if self._index >= len(self._sessions):
-            return self._sessions[-1]
-        session = self._sessions[self._index]
-        self._index += 1
-        return session
-
-    async def get_structured_session_cursor(self, user_id: int, *, task_id: str | None = None) -> int:
-        return self._index
-
-    async def get_structured_reply_cursor(self, user_id: int, *, task_id: str | None = None):
-        return None, None
-
-    async def acknowledge_structured_reply(
-        self, user_id: int, *, turn_id: str | None = None, permission_key: str | None = None, task_id: str | None = None
-    ) -> None:
-        return None
-
-    async def get_structured_user_question_cursor(self, user_id: int, *, task_id: str | None = None):
-        return self._question_key
-
-    async def acknowledge_structured_user_question(
-        self, user_id: int, *, question_key: str | None = None, task_id: str | None = None
-    ) -> None:
-        self._question_key = question_key
-
-    async def wait_for_structured_session_update(
-        self, *, user_id: int, since_cursor: int, timeout_sec: float, task_id: str | None = None
-    ) -> bool:
-        return True
+from tests.fakes.task_service import FakeTaskService
 
 
 class PersistentTaskService:
@@ -128,8 +91,8 @@ class PersistentTaskService:
 @pytest.mark.asyncio
 async def test_presenter_emits_new_completed_turn_once() -> None:
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(
                     phase=SessionPhase.WAITING_FOR_INPUT,
@@ -156,8 +119,8 @@ async def test_presenter_emits_new_completed_turn_once() -> None:
 @pytest.mark.asyncio
 async def test_presenter_reemits_completed_turn_until_delivery_acknowledged() -> None:
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(
                     phase=SessionPhase.WAITING_FOR_INPUT,
@@ -184,8 +147,8 @@ async def test_presenter_reemits_completed_turn_until_delivery_acknowledged() ->
 async def test_presenter_reports_pending_permission_once() -> None:
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
@@ -217,8 +180,8 @@ async def test_presenter_reports_pending_permission_once() -> None:
 async def test_presenter_reemits_pending_permission_until_delivery_acknowledged() -> None:
     pending = PendingPermission(tool_use_id="tool-1", tool_name="Bash", tool_input={"command": "pwd"})
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
@@ -252,8 +215,8 @@ async def test_presenter_pending_permission_includes_session_metadata_without_co
     session.title = "Project Session"
     session.user_id = 99
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 session,
             ]
@@ -312,8 +275,8 @@ async def test_presenter_reports_user_question_once_without_generic_progress() -
         multi_select=False,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
@@ -368,8 +331,8 @@ async def test_presenter_reemits_user_question_until_delivery_acknowledged() -> 
         multi_select=False,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
@@ -431,8 +394,8 @@ async def test_presenter_reports_only_first_question_when_tool_contains_multiple
         multi_select=False,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
@@ -485,8 +448,8 @@ async def test_presenter_skips_question_already_acknowledged_by_handler() -> Non
         },
         status=ToolStatus.RUNNING,
     )
-    service = DummyTaskService(
-        [
+    service = FakeTaskService(
+        structured_sessions=[
             _session(phase=SessionPhase.WAITING_FOR_INPUT),
             _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
             _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
@@ -496,7 +459,7 @@ async def test_presenter_skips_question_already_acknowledged_by_handler() -> Non
 
     await presenter.prime()
     first = await presenter.poll(task_id="task-1")
-    service._question_key = "tool-ask-1:0"
+    service._structured_user_question_key = "tool-ask-1:0"
     second = await presenter.poll(task_id="task-1")
 
     assert len(first) == 1
@@ -533,13 +496,13 @@ async def test_presenter_does_not_regress_to_first_question_when_cursor_already_
         },
         status=ToolStatus.RUNNING,
     )
-    service = DummyTaskService(
-        [
+    service = FakeTaskService(
+        structured_sessions=[
             _session(phase=SessionPhase.WAITING_FOR_INPUT),
             _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-ask-1": question_tool}),
         ]
     )
-    service._question_key = "tool-ask-1:1"
+    service._structured_user_question_key = "tool-ask-1:1"
     presenter = StructuredReplyPresenter(task_service=service, user_id=1)
 
     await presenter.prime()
@@ -589,8 +552,8 @@ async def test_presenter_reports_pending_ask_user_question_instead_of_permission
         multi_select=False,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, pending=pending),
@@ -656,8 +619,8 @@ async def test_presenter_reports_waiting_for_approval_ask_user_question_without_
         multi_select=False,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-ask-waiting": waiting_question_tool}),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-ask-waiting": waiting_question_tool}),
@@ -690,8 +653,8 @@ async def test_presenter_reports_waiting_for_approval_tool_without_pending_permi
         status=ToolStatus.WAITING_FOR_APPROVAL,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-mcp-waiting": waiting_tool}),
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-mcp-waiting": waiting_tool}),
@@ -941,8 +904,8 @@ async def test_presenter_aggregates_top_level_file_tools_without_read_spam() -> 
         status=ToolStatus.SUCCESS,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"grep-1": grep_tool, "read-1": read_1_running}),
                 _session(
@@ -1195,8 +1158,8 @@ async def test_presenter_emits_one_aggregate_for_multiple_agents() -> None:
         ],
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"agent-1": agent_1, "agent-2": agent_2}),
             ]
@@ -1261,8 +1224,8 @@ async def test_presenter_emits_subagent_aggregate_with_subagent_tools() -> None:
         ],
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": task_tool}),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": task_tool}),
@@ -1336,8 +1299,8 @@ async def test_presenter_emits_subagent_aggregate_when_subagent_status_changes()
         ],
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": read_running_task}),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"task-1": bash_running_task}),
@@ -1430,8 +1393,8 @@ async def test_presenter_preserves_subagent_tool_count_when_final_snapshot_is_em
         subagent_tools=[],
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"agent-1": running_agent}),
                 _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"agent-1": finished_agent}),
@@ -1524,8 +1487,8 @@ async def test_presenter_skips_flat_status_for_nested_tool_duplicate() -> None:
         status=ToolStatus.RUNNING,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(
                     phase=SessionPhase.PROCESSING,
@@ -1611,8 +1574,8 @@ async def test_presenter_emits_task_list_for_task_create_and_update_without_tool
         status=ToolStatus.RUNNING,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(
                     phase=SessionPhase.PROCESSING,
@@ -1699,8 +1662,8 @@ async def test_presenter_keeps_task_update_status_when_update_is_before_create()
         structured_result={"task": {"id": "1", "subject": "梳理项目结构"}},
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(
                     phase=SessionPhase.PROCESSING,
@@ -1751,8 +1714,8 @@ async def test_presenter_updates_preexisting_flat_tool_after_task_list_appears()
         structured_result={"task": {"id": "1", "subject": "运行测试"}},
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"bash-1": bash_running}),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"create-1": create_1, "bash-1": bash_success}),
@@ -1810,8 +1773,8 @@ async def test_presenter_marks_failed_task_update_as_failed_instead_of_completed
         status=ToolStatus.ERROR,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"create-1": create_1, "update-1": failed_update}),
             ]
@@ -1848,8 +1811,8 @@ async def test_presenter_emits_running_tool_status_once() -> None:
         )
     }
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls=tool_calls),
                 _session(phase=SessionPhase.PROCESSING, tool_calls=tool_calls),
@@ -1888,8 +1851,8 @@ async def test_presenter_emits_success_tool_status_after_running() -> None:
         status=ToolStatus.SUCCESS,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-1": running_tool}),
                 _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"tool-1": success_tool}),
@@ -1941,8 +1904,8 @@ async def test_presenter_emits_error_and_interrupted_tool_statuses() -> None:
         status=ToolStatus.INTERRUPTED,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_INPUT),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-1": running_tool}),
                 _session(phase=SessionPhase.WAITING_FOR_INPUT, tool_calls={"tool-1": error_tool}),
@@ -1983,8 +1946,8 @@ async def test_presenter_emits_error_and_interrupted_tool_statuses() -> None:
 @pytest.mark.asyncio
 async def test_presenter_emits_compacting_progress_once() -> None:
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.PROCESSING),
                 _session(phase=SessionPhase.COMPACTING),
                 _session(phase=SessionPhase.COMPACTING),
@@ -2016,8 +1979,8 @@ async def test_presenter_emits_resume_progress_after_permission() -> None:
         status=ToolStatus.RUNNING,
     )
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.WAITING_FOR_APPROVAL, tool_calls={"tool-1": waiting_tool}),
                 _session(phase=SessionPhase.PROCESSING, tool_calls={"tool-1": resumed_tool}),
             ]
@@ -2041,8 +2004,8 @@ async def test_presenter_emits_resume_progress_after_permission() -> None:
 @pytest.mark.asyncio
 async def test_presenter_final_poll_emits_fallback_once() -> None:
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.PROCESSING, turns=[]),
                 _session(phase=SessionPhase.WAITING_FOR_INPUT, turns=[]),
                 _session(phase=SessionPhase.WAITING_FOR_INPUT, turns=[]),
@@ -2062,8 +2025,8 @@ async def test_presenter_final_poll_emits_fallback_once() -> None:
 @pytest.mark.asyncio
 async def test_presenter_final_poll_does_not_fallback_after_structured_reply_emitted() -> None:
     presenter = StructuredReplyPresenter(
-        task_service=DummyTaskService(
-            [
+        task_service=FakeTaskService(
+            structured_sessions=[
                 _session(phase=SessionPhase.PROCESSING, turns=[]),
                 _session(
                     phase=SessionPhase.WAITING_FOR_INPUT,
@@ -2089,7 +2052,7 @@ async def test_presenter_final_poll_does_not_fallback_after_structured_reply_emi
 
 @pytest.mark.asyncio
 async def test_presenter_without_structured_session_emits_nothing() -> None:
-    presenter = StructuredReplyPresenter(task_service=DummyTaskService([None, None]), user_id=1)
+    presenter = StructuredReplyPresenter(task_service=FakeTaskService(structured_sessions=[None, None]), user_id=1)
 
     await presenter.prime()
     messages = await presenter.poll(task_id="task-1", final=True)

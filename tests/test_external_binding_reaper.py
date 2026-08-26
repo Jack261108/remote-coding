@@ -23,23 +23,16 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.domain.external_session_models import ExternalBinding
-from app.domain.models import utc_now
 from app.domain.session_tombstone import SessionTombstoneStore
 from app.services.auto_approve_service import AutoApproveService
 from app.services.external_binding_reaper import ExternalBindingReaper
+from tests.fakes.external_session import make_binding
 
 
 def _make_binding(session_id: str = "sess-1") -> ExternalBinding:
     """A fully-populated binding so the reaper's INFO log can read every
     context field (user_id, cwd, bound_at, last_activity_at, pid)."""
-    return ExternalBinding(
-        session_id=session_id,
-        user_id=7,
-        cwd="/home/user/project",
-        bound_at=utc_now(),
-        jsonl_path=None,
-        pid=1234,
-    )
+    return make_binding(session_id=session_id, user_id=7, pid=1234)
 
 
 # --- Canonical order (Req 6.4) ----------------------------------------------

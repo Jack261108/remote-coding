@@ -53,17 +53,16 @@ from app.services.user_question_callback_registry import (
     UserQuestionCallbackRegistry,
     UserQuestionCallbackResolved,
 )
+from tests.fakes.external_session import make_binding
 from tests.fakes.ghostty import FakeGhosttyTerminalAdapter
 from tests.fakes.process_probe import FakeLocalProcessProbe
 
 
 def _binding(session_id: str, binding_id: str, *, paired: bool = True) -> ExternalBinding:
-    binding = ExternalBinding(
+    binding = make_binding(
         session_id=session_id,
         user_id=42,
         cwd="/project",
-        bound_at=utc_now(),
-        jsonl_path=None,
         binding_id=binding_id,
         pid=1234,
         tty="/dev/ttys005",

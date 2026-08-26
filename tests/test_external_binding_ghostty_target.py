@@ -26,6 +26,7 @@ from app.domain.external_session_models import ExternalBinding, GhosttyInputTarg
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
+from tests.fakes.external_session import make_binding, make_hook_event
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -46,28 +47,19 @@ def _make_binding(
     binding_id: str | None = None,
     tty: str | None = None,
 ) -> ExternalBinding:
-    return ExternalBinding(
+    return make_binding(
         session_id=session_id,
         user_id=user_id,
-        cwd="/home/user/project",
-        bound_at=utc_now() - timedelta(hours=1),
-        jsonl_path=None,
-        pid=4242,
         binding_id=binding_id or "binding-gen-1",
+        pid=4242,
         tty=tty,
+        bound_at=utc_now() - timedelta(hours=1),
     )
 
 
 def _make_hook(event: str, tty: str | None) -> HookEvent:
     """Build a minimal HookEvent for discovery/binder tests."""
-    return HookEvent(
-        session_id="s1",
-        event=event,
-        status="running",
-        cwd="/p",
-        pid=100,
-        tty=tty,
-    )
+    return make_hook_event(session_id="s1", event=event, status="running", cwd="/p", pid=100, tty=tty)
 
 
 # --- Round-trip -------------------------------------------------------------

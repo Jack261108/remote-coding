@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 
 from app.domain.external_session_models import ExternalBinding
-from app.domain.models import utc_now
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from tests.fakes.external_session import make_binding
 
 
 @pytest.fixture
@@ -35,13 +35,7 @@ def binder(
 
 
 def _binding(session_id: str, user_id: int = 42) -> ExternalBinding:
-    return ExternalBinding(
-        session_id=session_id,
-        user_id=user_id,
-        cwd="/home/user/project",
-        bound_at=utc_now(),
-        jsonl_path=None,
-    )
+    return make_binding(session_id=session_id, user_id=user_id)
 
 
 def test_get_binding_returns_store_binding(

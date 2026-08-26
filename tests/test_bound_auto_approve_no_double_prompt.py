@@ -23,31 +23,28 @@ from app.domain.hook_models import HookEvent
 from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.auto_approve_service import AutoApproveService
 from app.services.permission_callback_registry import AutoApproveOutcome
+from tests.fakes.external_session import make_hook_event
 
 
 def _make_event(*, tool: str = "Edit", expects_response: bool = True) -> HookEvent:
     """Build a HookEvent. `expects_response` is a property derived from
     event=="PermissionRequest" and status=="waiting_for_approval"."""
     if expects_response:
-        return HookEvent(
+        return make_hook_event(
             session_id="sess-123",
-            cwd="/home/user/project",
             event="PermissionRequest",
             status="waiting_for_approval",
             tool=tool,
             tool_input={"file_path": "/x.py"},
             tool_use_id="toolu_abc",
-            pid=None,
         )
-    return HookEvent(
+    return make_hook_event(
         session_id="sess-123",
-        cwd="/home/user/project",
         event="PostToolUse",
         status="processing",
         tool=tool,
         tool_input={"file_path": "/x.py"},
         tool_use_id="toolu_abc",
-        pid=None,
     )
 
 

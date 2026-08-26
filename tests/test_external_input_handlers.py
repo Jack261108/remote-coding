@@ -13,6 +13,7 @@ verified is the same code path the dispatcher hits in production.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -31,26 +32,24 @@ from app.bot.handlers.session_actions import (
     register_session_action_handlers,
 )
 from app.bot.router import ExternalInputTargetActiveFilter
-from app.domain.external_session_models import ExternalBinding, GhosttyInputTarget
-from app.domain.models import utc_now
+from app.domain.external_session_models import ExternalBinding
 from app.domain.session_models import SessionPhase
-from app.infra.lock_registry import RefCountedLockRegistry
 from app.services.external_binding_store import ExternalBindingStore
-from app.services.external_input_mode_state import ExternalInputTargetStore
-from app.services.external_input_queue import ExternalInputQueue
 from app.services.external_session_binder import ExternalSessionBinder
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
 from app.services.external_session_input_service import (
     ExternalSessionInputService,
     PairOutcome,
 )
-from app.services.pairing_callback_registry import PairingCallbackRegistry
 from app.services.session_store import SessionStore
+from tests.fakes.external_input_harness import build_input_harness
 from tests.fakes.ghostty import FakeGhosttyTerminalAdapter
-from tests.fakes.process_probe import FakeLocalProcessProbe
 
 if TYPE_CHECKING:
     from app.services.session_service import SessionService
+
+
+_make_service_serial = itertools.count(1)
 
 
 def _make_service(
@@ -62,54 +61,16 @@ def _make_service(
     enabled: bool = True,
     adapter: FakeGhosttyTerminalAdapter | None = None,
 ) -> tuple[ExternalSessionInputService, ExternalBindingStore, SessionStore, ExternalBinding]:
-    counter = [0]
-    counter[0] += 1
-    root = tmp_path / f"h-{counter[0]}"
-    binding_store = ExternalBindingStore(root / "binding")
-    binding = ExternalBinding(
+    harness = build_input_harness(
+        tmp_path,
+        name=f"h-{next(_make_service_serial)}",
         session_id=session_id,
         user_id=user_id,
-        cwd="/project",
-        bound_at=utc_now(),
-        jsonl_path=None,
-        binding_id=f"binding-{counter[0]}",
-        pid=1234,
-        tty="/dev/ttys005",
-    )
-    if paired:
-        binding.ghostty_target = GhosttyInputTarget(
-            terminal_id="term-1",
-            paired_tty="/dev/ttys005",
-            paired_at=utc_now(),
-            binding_id=binding.binding_id,
-            name="claude — project",
-            cwd="/project",
-        )
-    binding_store.save_binding(binding)
-
-    session_store = SessionStore(FileSessionStore(str(root / "state")))
-    state = session_store.get_or_create(
-        session_id=session_id,
-        user_id=user_id,
-        workdir="/project",
-        claude_session_id=session_id,
-    )
-    state.phase = SessionPhase.IDLE
-    session_store.save(state)
-
-    service = ExternalSessionInputService(
+        paired=paired,
         enabled=enabled,
-        binding_store=binding_store,
-        session_store=session_store,
-        ghostty_adapter=adapter or FakeGhosttyTerminalAdapter(),
-        process_probe=FakeLocalProcessProbe(),
-        pairing_registry=PairingCallbackRegistry(ttl_sec=60),
-        input_mode_store=ExternalInputTargetStore(),
-        input_queue=ExternalInputQueue(max_size=5, ttl_sec=60),
-        input_locks=RefCountedLockRegistry(ttl_sec=60, cleanup_interval_sec=60, cleanup_batch_size=50),
-        drain_publish_wait_timeout_sec=0.05,
+        adapter=adapter,
     )
-    return service, binding_store, session_store, binding
+    return harness.service, harness.binding_store, harness.session_store, harness.binding
 
 
 def _callback(data: str, *, user_id: int = 42, message: Message | None = None) -> CallbackQuery:

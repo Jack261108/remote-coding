@@ -56,8 +56,8 @@ _FRESH_TURN_ID = "FRESH-TURN-B"
 
 
 class _DummyTaskServiceWithPersistedCursor:
-    """Fake task service that mirrors ``DummyTaskService`` from
-    ``tests/test_structured_reply_presenter.py`` but lets the test pin the
+    """Fake task service that mirrors ``FakeTaskService(structured_sessions=...)``
+    from ``tests/fakes/task_service.py`` but lets the test pin the
     persisted reply cursor returned by ``get_structured_reply_cursor``."""
 
     def __init__(self, sessions: list[object], *, persisted_turn_id: str) -> None:

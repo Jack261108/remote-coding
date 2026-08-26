@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -13,31 +12,7 @@ from app.bot.presenters.chunk_sender import ChunkSender
 from app.domain.file_models import ExportResult
 from app.services.background_task_registry import BackgroundTaskRegistry
 from tests.fakes.task_service import FakeTaskService, make_cli_event_stream, make_task_record
-
-
-class DummyMessage:
-    """Minimal aiogram Message fake for testing."""
-
-    def __init__(self) -> None:
-        self.from_user = SimpleNamespace(id=42)
-        self.chat = SimpleNamespace(id=100)
-        self._answers: list[str] = []
-        self._documents: list[object] = []
-
-    async def answer(self, text: str, **kwargs) -> DummyMessage:
-        self._answers.append(text)
-        new_msg = DummyMessage()
-        new_msg.message_id = len(self._answers)
-        return new_msg
-
-    async def answer_document(self, document, **kwargs) -> DummyMessage:
-        self._documents.append(document)
-        new_msg = DummyMessage()
-        new_msg.message_id = 999
-        return new_msg
-
-    async def edit_text(self, text: str, **kwargs) -> None:
-        self._answers.append(text)
+from tests.fakes.telegram import DummyMessage
 
 
 @pytest.fixture
@@ -78,7 +53,7 @@ async def test_auto_export_triggers_when_output_exceeds_threshold(tmp_path: Path
 
     result_exporter.should_auto_export.assert_called_once_with(5000)
     result_exporter.export_markdown.assert_awaited_once_with(record)
-    assert len(message._documents) == 1
+    assert len(message.sent_documents) == 1
 
 
 @pytest.mark.asyncio
@@ -109,7 +84,7 @@ async def test_auto_export_does_not_trigger_when_output_below_threshold(stream_b
 
     result_exporter.should_auto_export.assert_called_once_with(100)
     result_exporter.export_markdown.assert_not_awaited()
-    assert len(message._documents) == 0
+    assert len(message.sent_documents) == 0
 
 
 @pytest.mark.asyncio
@@ -139,7 +114,7 @@ async def test_auto_export_does_not_trigger_on_failure(stream_background_tasks: 
 
     # should_auto_export should NOT be called on failure
     result_exporter.should_auto_export.assert_not_called()
-    assert len(message._documents) == 0
+    assert len(message.sent_documents) == 0
 
 
 @pytest.mark.asyncio
@@ -171,7 +146,7 @@ async def test_auto_export_error_is_non_blocking(tmp_path: Path, stream_backgrou
 
     # Export was attempted but failed gracefully
     result_exporter.export_markdown.assert_awaited_once()
-    assert len(message._documents) == 0
+    assert len(message.sent_documents) == 0
 
 
 @pytest.mark.asyncio
@@ -234,4 +209,4 @@ async def test_auto_export_not_called_when_no_exporter(stream_background_tasks: 
         await task
 
     # No crash, no document
-    assert len(message._documents) == 0
+    assert len(message.sent_documents) == 0

@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from app.adapters.process.ghostty_terminal_adapter import GhosttyTerminal, InjectionOutcome
-from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.external_session_models import ExternalBinding, GhosttyInputTarget
 from app.domain.models import utc_now
 from app.domain.session_models import PendingPermission, SessionPhase
@@ -29,35 +27,15 @@ from app.domain.user_question_models import (
     UserQuestionOption,
     UserQuestionPrompt,
 )
-from app.infra.lock_registry import RefCountedLockRegistry
-from app.services.external_binding_store import ExternalBindingStore
-from app.services.external_input_mode_state import ExternalInputTargetStore
-from app.services.external_input_queue import ExternalInputQueue
 from app.services.external_session_input_service import (
     ExternalSessionInputService,
     PairOutcome,
     SendOutcome,
 )
-from app.services.external_user_question_state import ExternalUserQuestionState, PendingExternalUserQuestion
-from app.services.pairing_callback_registry import PairingCallbackRegistry
-from app.services.session_store import SessionStore
+from app.services.external_user_question_state import PendingExternalUserQuestion
+from tests.fakes.external_input_harness import InputHarness, build_input_harness
 from tests.fakes.ghostty import FakeGhosttyTerminalAdapter
 from tests.fakes.process_probe import FakeLocalProcessProbe
-
-
-@dataclass
-class _Harness:
-    service: ExternalSessionInputService
-    binding_store: ExternalBindingStore
-    session_store: SessionStore
-    mode_store: ExternalInputTargetStore
-    queue: ExternalInputQueue
-    pairing: PairingCallbackRegistry
-    adapter: FakeGhosttyTerminalAdapter
-    probe: FakeLocalProcessProbe
-    external_uq_state: ExternalUserQuestionState
-    binding: ExternalBinding
-    notices: list[tuple[int, str]]
 
 
 @pytest.fixture
@@ -77,94 +55,32 @@ async def make_harness(tmp_path: Path):
         queue_max_size: int = 5,
         drain_wait: float = 0.05,
         monotonic: Callable[[], float] | None = None,
-    ) -> _Harness:
+    ) -> InputHarness:
         nonlocal counter
         counter += 1
-        root = tmp_path / f"h-{counter}"
-        binding_store = ExternalBindingStore(root / "binding")
-        binding = ExternalBinding(
+        harness = build_input_harness(
+            tmp_path,
+            name=f"h-{counter}",
             session_id=session_id,
             user_id=user_id,
-            cwd="/project",
-            bound_at=utc_now(),
-            jsonl_path=None,
-            binding_id=f"binding-{counter}",
-            pid=1234,
-            tty="/dev/ttys005",
-        )
-        if paired:
-            binding.ghostty_target = GhosttyInputTarget(
-                terminal_id="term-1",
-                paired_tty="/dev/ttys005",
-                paired_at=utc_now(),
-                binding_id=binding.binding_id,
-                name="claude — project",
-                cwd="/project",
-            )
-        binding_store.save_binding(binding)
-
-        session_store = SessionStore(FileSessionStore(str(root / "state")))
-        state = session_store.get_or_create(
-            session_id=session_id,
-            user_id=user_id,
-            workdir="/project",
-            claude_session_id=session_id,
-        )
-        state.phase = phase
-        session_store.save(state)
-
-        adapter = adapter or FakeGhosttyTerminalAdapter()
-        probe = probe or FakeLocalProcessProbe()
-        pairing = PairingCallbackRegistry(ttl_sec=60)
-        external_uq_state = ExternalUserQuestionState(ttl_sec=60)
-        mode_store = ExternalInputTargetStore()
-        queue = ExternalInputQueue(max_size=queue_max_size, ttl_sec=60, monotonic=monotonic)
-        locks = RefCountedLockRegistry(
-            ttl_sec=60,
-            cleanup_interval_sec=60,
-            cleanup_batch_size=50,
-        )
-        notices: list[tuple[int, str]] = []
-
-        async def _notify_spy(*, user_id: int, text: str) -> bool:
-            notices.append((user_id, text))
-            return True
-
-        service = ExternalSessionInputService(
+            phase=phase,
+            paired=paired,
             enabled=enabled,
-            binding_store=binding_store,
-            session_store=session_store,
-            ghostty_adapter=adapter,  # type: ignore[arg-type]
-            process_probe=probe,  # type: ignore[arg-type]
-            pairing_registry=pairing,
-            input_mode_store=mode_store,
-            input_queue=queue,
-            input_locks=locks,
-            external_user_question_state=external_uq_state,
-            drain_publish_wait_timeout_sec=drain_wait,
-            notify_user=_notify_spy,
-        )
-        services.append(service)
-        return _Harness(
-            service=service,
-            binding_store=binding_store,
-            session_store=session_store,
-            mode_store=mode_store,
-            queue=queue,
-            pairing=pairing,
             adapter=adapter,
             probe=probe,
-            external_uq_state=external_uq_state,
-            binding=binding,
-            notices=notices,
+            queue_max_size=queue_max_size,
+            drain_wait=drain_wait,
+            monotonic=monotonic,
         )
+        services.append(harness.service)
+        return harness
 
     yield _make
 
     await asyncio.gather(*(service.shutdown() for service in services), return_exceptions=True)
 
 
-async def _activate(harness: _Harness, *, user_id: int = 42) -> None:
+async def _activate(harness: InputHarness, *, user_id: int = 42) -> None:
     await harness.mode_store.set_target(
         user_id=user_id,
         session_id=harness.binding.session_id,
@@ -173,7 +89,7 @@ async def _activate(harness: _Harness, *, user_id: int = 42) -> None:
 
 
 def _seed_external_question(
-    harness: _Harness,
+    harness: InputHarness,
     *,
     tool_use_id: str = "tool-question",
     multi_select: bool = False,
