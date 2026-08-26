@@ -57,6 +57,7 @@ class _Harness:
     probe: FakeLocalProcessProbe
     external_uq_state: ExternalUserQuestionState
     binding: ExternalBinding
+    notices: list[tuple[int, str]]
 
 
 @pytest.fixture
@@ -75,6 +76,7 @@ async def make_harness(tmp_path: Path):
         probe: FakeLocalProcessProbe | None = None,
         queue_max_size: int = 5,
         drain_wait: float = 0.05,
+        monotonic: Callable[[], float] | None = None,
     ) -> _Harness:
         nonlocal counter
         counter += 1
@@ -116,12 +118,18 @@ async def make_harness(tmp_path: Path):
         pairing = PairingCallbackRegistry(ttl_sec=60)
         external_uq_state = ExternalUserQuestionState(ttl_sec=60)
         mode_store = ExternalInputTargetStore()
-        queue = ExternalInputQueue(max_size=queue_max_size, ttl_sec=60)
+        queue = ExternalInputQueue(max_size=queue_max_size, ttl_sec=60, monotonic=monotonic)
         locks = RefCountedLockRegistry(
             ttl_sec=60,
             cleanup_interval_sec=60,
             cleanup_batch_size=50,
         )
+        notices: list[tuple[int, str]] = []
+
+        async def _notify_spy(*, user_id: int, text: str) -> bool:
+            notices.append((user_id, text))
+            return True
+
         service = ExternalSessionInputService(
             enabled=enabled,
             binding_store=binding_store,
@@ -134,6 +142,7 @@ async def make_harness(tmp_path: Path):
             input_locks=locks,
             external_user_question_state=external_uq_state,
             drain_publish_wait_timeout_sec=drain_wait,
+            notify_user=_notify_spy,
         )
         services.append(service)
         return _Harness(
@@ -147,6 +156,7 @@ async def make_harness(tmp_path: Path):
             probe=probe,
             external_uq_state=external_uq_state,
             binding=binding,
+            notices=notices,
         )
 
     yield _make
@@ -917,6 +927,109 @@ async def test_drain_rechecks_binding_generation_after_terminal_await(make_harne
 
     await asyncio.wait_for(_wait_queue_cleared(), timeout=1)
     assert adapter.inject_calls == []
+
+
+async def test_drain_preflight_failure_restores_head_without_drops(make_harness) -> None:
+    """A preflight inject failure (nothing pasted) must keep the entry queued
+    and notify nobody — the drain retries once Ghostty is reachable again."""
+    adapter = FakeGhosttyTerminalAdapter()
+    # Plenty of preflight failures so the head is still queued (not consumed by
+    # a trailing default OK) when the assertions run below.
+    adapter.inject_outcomes.extend([InjectionOutcome.GHOSTTY_NOT_RUNNING] * 8)
+    harness = make_harness(phase=SessionPhase.PROCESSING, adapter=adapter)
+    await _activate(harness)
+    assert await harness.service.send_text(user_id=42, text="hold") is SendOutcome.QUEUED
+
+    state = harness.session_store.get("session-1")
+    assert state is not None
+    state.phase = SessionPhase.IDLE
+    harness.session_store.save(state)
+
+    await _wait_until(lambda: len(harness.adapter.inject_calls) >= 2)
+    assert await harness.queue.peek_size("session-1") == 1
+    assert harness.notices == []
+
+
+async def test_drain_indeterminate_drops_only_current_and_notifies(make_harness) -> None:
+    """An indeterminate injection drops only the dequeued head (it may have been
+    pasted); the untouched remainder continues and the user is told."""
+    adapter = FakeGhosttyTerminalAdapter()
+    adapter.inject_outcomes.append(InjectionOutcome.INDETERMINATE)
+    harness = make_harness(phase=SessionPhase.PROCESSING, adapter=adapter, drain_wait=0.05)
+    await _activate(harness)
+    assert await harness.service.send_text(user_id=42, text="first") is SendOutcome.QUEUED
+    assert await harness.service.send_text(user_id=42, text="second") is SendOutcome.QUEUED
+
+    state = harness.session_store.get("session-1")
+    assert state is not None
+    state.phase = SessionPhase.IDLE
+    harness.session_store.save(state)
+
+    await _wait_until(lambda: [t for _term, t in harness.adapter.inject_calls] == ["first", "second"])
+    assert len(harness.notices) == 1
+    uid, text = harness.notices[0]
+    assert uid == 42
+    assert "已丢弃" in text
+    assert "indeterminate" in text
+    assert "其余 1 条继续排队" in text
+
+
+async def test_drain_prunes_expired_heads_and_notifies(make_harness) -> None:
+    clock = {"t": 100.0}
+    harness = make_harness(phase=SessionPhase.PROCESSING, monotonic=lambda: clock["t"], drain_wait=0.05)
+    await _activate(harness)
+    assert await harness.service.send_text(user_id=42, text="stale") is SendOutcome.QUEUED
+    clock["t"] += 61.0  # past ttl_sec=60
+
+    state = harness.session_store.get("session-1")
+    assert state is not None
+    state.phase = SessionPhase.IDLE
+    harness.session_store.save(state)
+
+    await _wait_until(lambda: any("等待超时" in t for _, t in harness.notices))
+    assert await harness.queue.peek_size("session-1") == 0
+
+
+async def test_drain_entry_expiring_during_validation_notifies(make_harness) -> None:
+    """An entry whose TTL lapses during the drain's validation awaits is
+    silently dropped by dequeue — it must still surface as a notice."""
+    clock = {"t": 100.0}
+    adapter = FakeGhosttyTerminalAdapter()
+    harness = make_harness(phase=SessionPhase.PROCESSING, adapter=adapter, monotonic=lambda: clock["t"], drain_wait=0.05)
+    await _activate(harness)
+    assert await harness.service.send_text(user_id=42, text="lapse") is SendOutcome.QUEUED
+    # Hold validate_terminal open so the TTL crosses while the drain awaits.
+    # Created after send_text: its own preflight also calls validate_terminal.
+    adapter.validate_entered = asyncio.Event()
+    adapter.validate_release = asyncio.Event()
+
+    state = harness.session_store.get("session-1")
+    assert state is not None
+    state.phase = SessionPhase.IDLE
+    harness.session_store.save(state)
+
+    await asyncio.wait_for(adapter.validate_entered.wait(), timeout=1)
+    clock["t"] += 61.0  # entry expires while the drain is inside validate_terminal
+    adapter.validate_release.set()
+
+    await _wait_until(lambda: any("过期或失效" in t for _, t in harness.notices))
+    assert await harness.queue.peek_size("session-1") == 0
+    assert harness.adapter.inject_calls == []
+
+
+async def test_leave_and_invalidate_notify_discarded_counts(make_harness) -> None:
+    harness = make_harness(phase=SessionPhase.PROCESSING)
+    await _activate(harness)
+    await harness.service.send_text(user_id=42, text="q1")
+    await harness.service.send_text(user_id=42, text="q2")
+    assert await harness.service.leave(user_id=42)
+    assert any(user == 42 and "丢弃 2 条未发送的排队消息" in text for user, text in harness.notices)
+
+    await _activate(harness)
+    harness.notices.clear()
+    await harness.queue.enqueue("session-1", text="queued3", binding_id=harness.binding.binding_id)
+    await harness.service.invalidate_binding("session-1", reason="test")
+    assert any(user == 42 and "丢弃 1 条未发送的排队消息" in text for user, text in harness.notices)
 
 
 async def test_leave_and_invalidate_clear_queue_and_mode(make_harness) -> None:

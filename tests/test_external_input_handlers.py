@@ -14,6 +14,8 @@ verified is the same code path the dispatcher hits in production.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -46,6 +48,9 @@ from app.services.pairing_callback_registry import PairingCallbackRegistry
 from app.services.session_store import SessionStore
 from tests.fakes.ghostty import FakeGhosttyTerminalAdapter
 from tests.fakes.process_probe import FakeLocalProcessProbe
+
+if TYPE_CHECKING:
+    from app.services.session_service import SessionService
 
 
 def _make_service(
@@ -117,6 +122,20 @@ def _callback(data: str, *, user_id: int = 42, message: Message | None = None) -
     return cb
 
 
+class _StubSessionService:
+    """Minimal SessionService stand-in for the router filters/handlers."""
+
+    def __init__(self, *, chat_active: bool = False) -> None:
+        self._session = SimpleNamespace(claude_chat_active=chat_active)
+
+    async def get(self, user_id: int):
+        return self._session
+
+
+def _session_service_stub(*, chat_active: bool = False) -> SessionService:
+    return cast("SessionService", _StubSessionService(chat_active=chat_active))
+
+
 def _message(text: str, *, user_id: int = 42) -> Message:
     msg = MagicMock(spec=Message)
     msg.text = text
@@ -170,6 +189,30 @@ class TestPairConsumeHandler:
         cb = _callback(f"ghpair:{token}", message=msg)
         await _dispatch_cb(router, 0, cb)
         msg.answer.assert_awaited_once_with("✅ 配对成功，已进入外部输入模式。")
+
+    @pytest.mark.asyncio
+    async def test_paired_with_active_managed_chat_appends_hint(self, tmp_path: Path) -> None:
+        """Pairing succeeds while a managed chat is active: the reply must warn
+        that plain text will keep going to the managed session."""
+        service, binding_store, _, binding = _make_service(tmp_path)
+        token = await service.register_pair_token(
+            user_id=42,
+            session_id=binding.session_id,
+            expected_binding_id=binding.binding_id,
+            terminal_id="term-1",
+        )
+        assert token is not None
+
+        router = Router()
+        register_pair_consume_handler(router, input_service=service, session_service=_session_service_stub(chat_active=True))
+        msg = _message("")
+        cb = _callback(f"ghpair:{token}", message=msg)
+        await _dispatch_cb(router, 0, cb)
+        assert msg.answer.await_count == 1
+        reply = msg.answer.await_args.args[0]
+        assert "配对成功" in reply
+        assert "managed 会话" in reply
+        assert "/exit" in reply
 
     @pytest.mark.asyncio
     async def test_invalid_token_replies_error(self, tmp_path: Path) -> None:
@@ -265,20 +308,33 @@ class TestExternalTextRouter:
     @pytest.mark.asyncio
     async def test_filter_no_target_falls_through(self, tmp_path: Path) -> None:
         service, *_ = _make_service(tmp_path)
-        assert await ExternalInputTargetActiveFilter(service)(_message("hi")) is False
+        target_filter = ExternalInputTargetActiveFilter(service, _session_service_stub())
+        assert await target_filter(_message("hi")) is False
 
     @pytest.mark.asyncio
     async def test_filter_with_target_matches(self, tmp_path: Path) -> None:
         service, *_ = _make_service(tmp_path)
         await service.activate_select(user_id=42, session_id="session-1")
-        assert await ExternalInputTargetActiveFilter(service)(_message("hi")) is True
+        target_filter = ExternalInputTargetActiveFilter(service, _session_service_stub())
+        assert await target_filter(_message("hi")) is True
+
+    @pytest.mark.asyncio
+    async def test_filter_yields_to_active_managed_chat(self, tmp_path: Path) -> None:
+        """Coexistence: an active managed ``claude_chat_active`` session owns plain
+        text; the external router must fall through instead of hijacking it."""
+        service, *_ = _make_service(tmp_path)
+        await service.activate_select(user_id=42, session_id="session-1")
+        target_filter = ExternalInputTargetActiveFilter(service, _session_service_stub(chat_active=True))
+        assert await target_filter(_message("hi")) is False
 
     @pytest.mark.asyncio
     async def test_sent_is_silent(self, tmp_path: Path) -> None:
         service, *_ = _make_service(tmp_path)
         await service.activate_select(user_id=42, session_id="session-1")
         router = Router()
-        register_external_text_handlers(router, input_service=service, target_filter=ExternalInputTargetActiveFilter(service))
+        register_external_text_handlers(
+            router, input_service=service, target_filter=ExternalInputTargetActiveFilter(service, _session_service_stub())
+        )
         msg = _message("hello world")
         await _dispatch_msg(router, 0, msg)
         msg.answer.assert_not_awaited()
@@ -293,7 +349,9 @@ class TestExternalTextRouter:
         session_store.save(state)
         await service.activate_select(user_id=42, session_id="session-1")
         router = Router()
-        register_external_text_handlers(router, input_service=service, target_filter=ExternalInputTargetActiveFilter(service))
+        register_external_text_handlers(
+            router, input_service=service, target_filter=ExternalInputTargetActiveFilter(service, _session_service_stub())
+        )
         msg = _message("queue me")
         await _dispatch_msg(router, 0, msg)
         msg.answer.assert_awaited_once()
