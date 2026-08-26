@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import secrets
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
+
+from app.services.base_callback_registry import BaseCallbackRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -181,25 +179,9 @@ class InFlightConflictError(Exception):
     pass
 
 
-class PermissionCallbackRegistry:
-    def __init__(
-        self,
-        *,
-        ttl_sec: int,
-        token_factory: Callable[[], str] | None = None,
-        clock: Callable[[], float] | None = None,
-        wall_clock: Callable[[], datetime] | None = None,
-    ) -> None:
-        if ttl_sec <= 0:
-            raise ValueError("ttl_sec must be positive")
-        self._ttl_sec = ttl_sec
-        self._token_factory = token_factory or (lambda: secrets.token_urlsafe(6))
-        self._clock = clock or time.monotonic
-        self._wall_clock = wall_clock or (lambda: datetime.now(UTC))
-        self._records: dict[str, PermissionCallbackRecord] = {}
-        self._ttl_deadlines: dict[str, float] = {}
-        self._lock = asyncio.Lock()
-        self._compound_index: dict[tuple[str, str], str] = {}
+class PermissionCallbackRegistry(BaseCallbackRegistry[PermissionCallbackRecord, CallbackRecordStatus, tuple[str, str]]):
+    def _pending_status(self) -> CallbackRecordStatus:
+        return CallbackRecordStatus.PENDING
 
     async def register_token(
         self,
@@ -221,32 +203,26 @@ class PermissionCallbackRegistry:
             if existing_record is not None and existing_record.status is CallbackRecordStatus.CLAIMED:
                 raise InFlightConflictError(f"permission callback already in flight for {session_id}:{tool_use_id}")
 
-            for _ in range(16):
-                token = self._token_factory()
-                if token in self._records:
-                    continue
-                monotonic_now = self._clock()
-                created_at = self._now_datetime()
-                record = PermissionCallbackRecord(
-                    token=token,
-                    tool_use_id=tool_use_id,
-                    session_id=session_id,
-                    origin=origin,
-                    authorization_mode=authorization_mode,
-                    authorized_user_ids=frozenset(authorized_user_ids),
-                    created_at=created_at,
-                    expires_at=created_at + timedelta(seconds=self._ttl_sec),
-                    status=CallbackRecordStatus.PENDING,
-                    decision=None,
-                    responded_by_user_id=None,
-                    responded_at=None,
-                    dispatch_error_reason=None,
-                    telegram_chat_id=telegram_chat_id,
-                    telegram_message_id=telegram_message_id,
-                )
-                break
-            else:
-                raise RuntimeError("failed to generate unique permission callback token")
+            token = self._generate_unique_token("permission callback token")
+            monotonic_now = self._clock()
+            created_at = self._now_datetime()
+            record = PermissionCallbackRecord(
+                token=token,
+                tool_use_id=tool_use_id,
+                session_id=session_id,
+                origin=origin,
+                authorization_mode=authorization_mode,
+                authorized_user_ids=frozenset(authorized_user_ids),
+                created_at=created_at,
+                expires_at=created_at + timedelta(seconds=self._ttl_sec),
+                status=CallbackRecordStatus.PENDING,
+                decision=None,
+                responded_by_user_id=None,
+                responded_at=None,
+                dispatch_error_reason=None,
+                telegram_chat_id=telegram_chat_id,
+                telegram_message_id=telegram_message_id,
+            )
 
             if existing_record is not None and existing_record.status in {
                 CallbackRecordStatus.PENDING,
@@ -439,42 +415,3 @@ class PermissionCallbackRegistry:
         if not isinstance(reason, str):
             raise AssertionError("dispatch_failed callback record is missing dispatch_error_reason")
         return reason
-
-    def _is_expired(self, record: PermissionCallbackRecord) -> bool:
-        if record.status is not CallbackRecordStatus.PENDING:
-            return False
-        deadline = self._ttl_deadlines.get(record.token)
-        if deadline is not None:
-            return deadline <= self._clock()
-        return record.expires_at <= self._now_datetime()
-
-    _NON_PENDING_EVICT_GRACE_MULTIPLIER = 5
-
-    def _evict_stale(self) -> None:
-        grace = self._ttl_sec * self._NON_PENDING_EVICT_GRACE_MULTIPLIER
-        monotonic_grace_cutoff = self._clock() - grace
-        wall_grace_cutoff = self._now_datetime() - timedelta(seconds=grace)
-        stale_tokens = []
-        for token, record in self._records.items():
-            deadline = self._ttl_deadlines.get(token)
-            if record.status is CallbackRecordStatus.PENDING:
-                if self._is_expired(record):
-                    stale_tokens.append(token)
-            else:
-                if deadline is not None:
-                    if deadline <= monotonic_grace_cutoff:
-                        stale_tokens.append(token)
-                elif record.expires_at <= wall_grace_cutoff:
-                    stale_tokens.append(token)
-
-        for token in stale_tokens:
-            self._records.pop(token, None)
-            self._ttl_deadlines.pop(token, None)
-        if stale_tokens:
-            stale_token_set = set(stale_tokens)
-            for compound_key, token in list(self._compound_index.items()):
-                if token in stale_token_set:
-                    self._compound_index.pop(compound_key, None)
-
-    def _now_datetime(self) -> datetime:
-        return self._wall_clock()

@@ -28,14 +28,12 @@ flips the record to ``CONSUMED`` and it can never be consumed again.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import secrets
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
+
+from app.services.base_callback_registry import BaseCallbackRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -112,35 +110,22 @@ class PairConsumeAlreadyConsumed:
 PairConsumeResult = PairConsumeOk | PairConsumeNotFound | PairConsumeUnauthorized | PairConsumeAlreadyConsumed
 
 
-class PairingCallbackRegistry:
+class PairingCallbackRegistry(BaseCallbackRegistry[PairingTokenRecord, PairingTokenStatus, tuple[str, str]]):
     """In-memory, TTL-bounded pairing token registry.
 
     Construct with ``ttl_sec`` (token lifetime), an optional token factory and
-    clocks (for tests). All public mutating methods take the ``asyncio.Lock`` so
-    concurrent callback presses for the same token are serialised: exactly one
-    press consumes, the rest see ``PairConsumeAlreadyConsumed``.
+    clocks (for tests). All public mutating methods take the shared
+    ``asyncio.Lock`` so concurrent callback presses for the same token are
+    serialised: exactly one press consumes, the rest see
+    ``PairConsumeAlreadyConsumed``. Eviction/expiry mechanics come from
+    ``BaseCallbackRegistry``; this subclass adds the pairing domain policy —
+    superseding a still-pending token on a fresh register for the same
+    ``(session_id, terminal_id)``, single-use consumption and
+    binding-generation invalidation.
     """
 
-    def __init__(
-        self,
-        *,
-        ttl_sec: int,
-        token_factory: Callable[[], str] | None = None,
-        clock: Callable[[], float] | None = None,
-        wall_clock: Callable[[], datetime] | None = None,
-    ) -> None:
-        if ttl_sec <= 0:
-            raise ValueError("ttl_sec must be positive")
-        self._ttl_sec = ttl_sec
-        self._token_factory = token_factory or (lambda: secrets.token_urlsafe(6))
-        self._clock = clock or time.monotonic
-        self._wall_clock = wall_clock or (lambda: datetime.now(UTC))
-        self._records: dict[str, PairingTokenRecord] = {}
-        self._ttl_deadlines: dict[str, float] = {}
-        self._lock = asyncio.Lock()
-        # latest token per (session_id, terminal_id) so a fresh register supersedes
-        # a still-pending older one (candidate list refresh).
-        self._compound_index: dict[tuple[str, str], str] = {}
+    def _pending_status(self) -> PairingTokenStatus:
+        return PairingTokenStatus.PENDING
 
     async def register_token(
         self,
@@ -165,25 +150,19 @@ class PairingCallbackRegistry:
             if previous is not None and previous.status is PairingTokenStatus.PENDING:
                 previous.status = PairingTokenStatus.INVALIDATED
 
-            for _ in range(16):
-                token = self._token_factory()
-                if token in self._records:
-                    continue
-                monotonic_now = self._clock()
-                created_at = self._now_datetime()
-                record = PairingTokenRecord(
-                    token=token,
-                    user_id=user_id,
-                    session_id=session_id,
-                    binding_id=binding_id,
-                    terminal_id=terminal_id,
-                    created_at=created_at,
-                    expires_at=created_at + timedelta(seconds=self._ttl_sec),
-                    status=PairingTokenStatus.PENDING,
-                )
-                break
-            else:  # pragma: no cover - 16 collisions is astronomically unlikely
-                raise RuntimeError("failed to generate unique pairing token")
+            token = self._generate_unique_token("pairing token")
+            monotonic_now = self._clock()
+            created_at = self._now_datetime()
+            record = PairingTokenRecord(
+                token=token,
+                user_id=user_id,
+                session_id=session_id,
+                binding_id=binding_id,
+                terminal_id=terminal_id,
+                created_at=created_at,
+                expires_at=created_at + timedelta(seconds=self._ttl_sec),
+                status=PairingTokenStatus.PENDING,
+            )
 
             self._records[token] = record
             self._ttl_deadlines[token] = monotonic_now + self._ttl_sec
@@ -264,43 +243,3 @@ class PairingCallbackRegistry:
             if record is None:
                 return None
             return PairingTokenSnapshot.from_record(record)
-
-    def _is_expired(self, record: PairingTokenRecord) -> bool:
-        if record.status is not PairingTokenStatus.PENDING:
-            # CONSUMED / INVALIDATED are reaped by the grace sweep, not here.
-            return False
-        deadline = self._ttl_deadlines.get(record.token)
-        if deadline is not None:
-            return deadline <= self._clock()
-        return record.expires_at <= self._now_datetime()
-
-    _NON_PENDING_EVICT_GRACE_MULTIPLIER = 5
-
-    def _evict_stale(self) -> None:
-        grace = self._ttl_sec * self._NON_PENDING_EVICT_GRACE_MULTIPLIER
-        monotonic_grace_cutoff = self._clock() - grace
-        wall_grace_cutoff = self._now_datetime() - timedelta(seconds=grace)
-        stale_tokens: list[str] = []
-        for token, record in self._records.items():
-            deadline = self._ttl_deadlines.get(token)
-            if record.status is PairingTokenStatus.PENDING:
-                if self._is_expired(record):
-                    stale_tokens.append(token)
-            else:
-                if deadline is not None:
-                    if deadline <= monotonic_grace_cutoff:
-                        stale_tokens.append(token)
-                elif record.expires_at <= wall_grace_cutoff:
-                    stale_tokens.append(token)
-
-        for token in stale_tokens:
-            self._records.pop(token, None)
-            self._ttl_deadlines.pop(token, None)
-        if stale_tokens:
-            stale_set = set(stale_tokens)
-            for compound_key, token in list(self._compound_index.items()):
-                if token in stale_set:
-                    self._compound_index.pop(compound_key, None)
-
-    def _now_datetime(self) -> datetime:
-        return self._wall_clock()
