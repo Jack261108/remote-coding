@@ -82,7 +82,7 @@ class BaseCallbackRegistry(ABC, Generic[RecordT, StatusT, CompoundKeyT]):
         """Draw tokens until one is unused; raise after repeated collisions."""
         for _ in range(16):
             token = self._token_factory()
-            if token not in self._records:
+            if token and token not in self._records:
                 return token
         raise RuntimeError(f"failed to generate unique {error_context}")
 
