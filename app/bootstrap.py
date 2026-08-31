@@ -320,7 +320,12 @@ class AppContainer(
         # External user question state for PTY injection
         from app.services.external_user_question_state import ExternalUserQuestionState
 
-        self.external_uq_state = ExternalUserQuestionState()
+        # Same TTL source as the callback registry below: the two stores must
+        # agree (see the registry comment) so a live button never outlives — or
+        # is pruned ahead of — its pending question.
+        self.external_uq_state = ExternalUserQuestionState(
+            ttl_sec=settings.user_question_callback_ttl_sec,
+        )
         # Opaque token registry shared by Telegram AskUserQuestion callbacks (managed
         # tmux + external Ghostty + external tmux) so identity never travels in
         # callback_data. TTL seconds match the external pending-question TTL so a live
@@ -390,6 +395,8 @@ class AppContainer(
             external_user_question_state=self.external_uq_state,
             user_question_callback_registry=self.user_question_callback_registry,
             drain_publish_wait_timeout_sec=settings.ghostty_drain_publish_wait_timeout_sec,
+            # Queue-drop notices (design §9) ride the same push channel.
+            notify_user=self.push_notifier.notify_info,
         )
 
         # Hook external question transport/state/registry into the managed

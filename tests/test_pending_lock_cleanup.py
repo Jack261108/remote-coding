@@ -20,6 +20,7 @@ from app.domain.hook_models import HookEvent
 from app.services.message_sender import Button, Keyboard
 from app.services.permission_gateway import RegisterForButtonOk
 from app.services.unbound_permission_handler import UnboundPermissionHandler
+from tests.fakes.external_session import make_hook_event
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,7 +56,7 @@ def _make_handler(
 
 
 def _make_event(tool_use_id: str = "tuid-1", session_id: str = "sess-1") -> HookEvent:
-    return HookEvent(
+    return make_hook_event(
         session_id=session_id,
         cwd="/tmp/project",
         event="PermissionRequest",

@@ -10,6 +10,11 @@ _ANSI_OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 COMMAND_NAME_RE = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
 
 
+def normalize_line_endings(text: str) -> str:
+    """Normalize CRLF and lone CR to LF."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def strip_bridge_markers(text: str) -> str:
     if not text:
         return ""
@@ -35,7 +40,7 @@ def normalize_source_text(value: Any) -> str:
     if not text.strip():
         return ""
 
-    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = normalize_line_endings(text)
     cleaned = strip_bridge_markers(strip_ansi_escapes(cleaned))
     if not cleaned.strip():
         return ""

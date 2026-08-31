@@ -30,6 +30,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from app.adapters.process.ghostty_terminal_adapter import (
     GhosttyTerminal,
@@ -46,6 +47,7 @@ from app.domain.user_question_models import (
     ExternalUserQuestionContext,
 )
 from app.infra.lock_registry import RefCountedLockRegistry
+from app.infra.source_text_normalization import normalize_line_endings
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_input_mode_state import ExternalInputTargetStore
 from app.services.external_input_queue import (
@@ -109,6 +111,7 @@ class PairOutcome(StrEnum):
 class _DrainStep(StrEnum):
     INJECTED = "injected"
     WAIT = "wait"
+    WAIT_SETTLED = "wait_settled"
     EMPTY = "empty"
     ABORT = "abort"
 
@@ -117,6 +120,28 @@ class _DrainStep(StrEnum):
 # queues instead. AskUserQuestion and pending permission gate via the state
 # fields, not the phase enum.
 _SENDABLE_PHASES = frozenset({SessionPhase.IDLE, SessionPhase.WAITING_FOR_INPUT})
+
+# Injection failures that the adapter reports BEFORE anything was pasted into
+# the terminal. Single source of truth shared by both injection paths:
+# ``send_text`` maps them to ``ADAPTER_UNAVAILABLE``; the drain treats the
+# dequeued entry as safe to restore and retry once Ghostty becomes reachable.
+_RETRYABLE_PREFLIGHT_OUTCOMES = frozenset(
+    {
+        InjectionOutcome.GHOSTTY_NOT_RUNNING,
+        InjectionOutcome.APPLESCRIPT_DISABLED,
+        InjectionOutcome.NON_DARWIN,
+        InjectionOutcome.OSASCRIPT_MISSING,
+        InjectionOutcome.TCC_DENIED,
+    }
+)
+
+# Best-effort user notification for queue drops (design §9: "丢弃并通知").
+# Wired to ``ExternalSessionPushNotifier.notify_info`` at the composition root.
+_Notice = tuple[int, str]
+
+
+class _NotifyUserFn(Protocol):
+    async def __call__(self, *, user_id: int, text: str) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,12 +186,14 @@ class ExternalSessionInputService:
         external_user_question_state: ExternalUserQuestionState | None = None,
         user_question_callback_registry: UserQuestionCallbackRegistry | None = None,
         drain_publish_wait_timeout_sec: float = 30.0,
+        notify_user: _NotifyUserFn | None = None,
     ) -> None:
         self._enabled = enabled
         self._binding_store = binding_store
         self._session_store = session_store
         self._adapter = ghostty_adapter
         self._probe = process_probe
+        self._notify_user = notify_user
         self._pairing = pairing_registry
         self._mode_store = input_mode_store
         self._queue = input_queue
@@ -179,6 +206,7 @@ class ExternalSessionInputService:
         self._drain_slots: dict[str, _DrainSlot] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._shutting_down: bool = False
+        self._pending_notices: set[asyncio.Task[None]] = set()
 
     # ─── public: pairing ────────────────────────────────────────────
 
@@ -419,10 +447,15 @@ class ExternalSessionInputService:
             if current is None or current.session_id != target.session_id:
                 return False
             await self._mode_store.clear_target(user_id)
-            await self._queue.clear(target.session_id)
+            dropped = await self._queue.clear(target.session_id)
             self._injecting.discard(target.session_id)
             self._in_flight.discard(target.session_id)
             await self._stop_drain(target.session_id)
+        if dropped:
+            await self._deliver_notices(
+                target.session_id,
+                [(user_id, f"已退出外部输入模式，丢弃 {len(dropped)} 条未发送的排队消息。")],
+            )
         return True
 
     # ─── public: AskUserQuestion transport ───────────────────────────
@@ -543,7 +576,7 @@ class ExternalSessionInputService:
             state = self._session_store.get(session_id)
             if binding.ended_at is not None or (state is not None and state.phase is SessionPhase.ENDED):
                 await self._mode_store.clear_target_for_session(session_id)
-                await self._queue.clear(session_id)
+                await self._notify_queue_cleared(session_id, user_id=user_id, reason="会话已结束")
                 return SendOutcome.SESSION_ENDED
             if binding.binding_id != target.binding_id:
                 # Stale selection from before a rebind.
@@ -572,7 +605,7 @@ class ExternalSessionInputService:
                 if terminal_error in {InjectionOutcome.NOT_FOUND, InjectionOutcome.NOT_UNIQUE}:
                     self._binding_store.clear_ghostty_target(session_id, binding.binding_id)
                     await self._mode_store.clear_target_for_session(session_id)
-                    await self._queue.clear(session_id)
+                    await self._notify_queue_cleared(session_id, user_id=user_id, reason="配对的终端已失效")
                     return SendOutcome.TERMINAL_INVALID
                 return SendOutcome.ADAPTER_UNAVAILABLE
 
@@ -637,13 +670,7 @@ class ExternalSessionInputService:
                 return SendOutcome.SENT
             if outcome == InjectionOutcome.INDETERMINATE:
                 return SendOutcome.INJECTION_INDETERMINATE
-            if outcome in {
-                InjectionOutcome.GHOSTTY_NOT_RUNNING,
-                InjectionOutcome.APPLESCRIPT_DISABLED,
-                InjectionOutcome.NON_DARWIN,
-                InjectionOutcome.OSASCRIPT_MISSING,
-                InjectionOutcome.TCC_DENIED,
-            }:
+            if outcome in _RETRYABLE_PREFLIGHT_OUTCOMES:
                 return SendOutcome.ADAPTER_UNAVAILABLE
             return SendOutcome.INJECTION_FAILED
 
@@ -686,6 +713,9 @@ class ExternalSessionInputService:
         if not self._enabled:
             return
         async with self._input_locks.lock(session_id):
+            # Resolve the §9 notice recipient under the input lock so the owner
+            # matches the binding generation whose queue is cleared below.
+            binding = self._binding_store.get_binding(session_id)
             cleared_targets = await self._mode_store.clear_target_for_session(session_id)
             dropped = await self._queue.clear(session_id)
             await self._pairing.invalidate_session(session_id)
@@ -706,6 +736,19 @@ class ExternalSessionInputService:
                     "queued_dropped": len(dropped),
                 },
             )
+        # Design §9: report how many queued entries were discarded to every
+        # affected owner — the binding owner plus each user whose input target
+        # pointed here (``clear_target_for_session`` supports several).
+        owners: set[int] = set()
+        if binding is not None:
+            owners.add(binding.user_id)
+        owners.update(cleared.user_id for cleared in cleared_targets)
+        if dropped and owners:
+            text = f"⚠️ 外部输入会话已失效（{reason}），丢弃 {len(dropped)} 条未发送的排队消息。"
+            # One delivery per owner; ``_deliver_notices`` requires a single
+            # owner per batch.
+            for owner in owners:
+                self._spawn_notice_delivery(session_id, [(owner, text)])
 
     async def rebind_aba(self, session_id: str, new_binding_id: str) -> None:
         """Called after an unbind+rebind produced a new generation."""
@@ -724,14 +767,18 @@ class ExternalSessionInputService:
                 await self._uq_callback_registry.invalidate_session(session_id)
 
     async def shutdown(self) -> None:
-        """Cancel all drain tasks. Call on container shutdown."""
+        """Cancel all drain tasks and pending notice deliveries. Call on container shutdown."""
         async with self._lifecycle_lock:
             self._shutting_down = True
             slots = list(self._drain_slots.values())
             self._drain_slots.clear()
+            pending = list(self._pending_notices)
+            self._pending_notices.clear()
         for slot in slots:
             slot.task.cancel()
-        await asyncio.gather(*(slot.task for slot in slots), return_exceptions=True)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*(slot.task for slot in slots), *pending, return_exceptions=True)
 
     # ─── internals ──────────────────────────────────────────────────
 
@@ -1027,7 +1074,7 @@ class ExternalSessionInputService:
             async with self._input_locks.lock(previous.session_id):
                 current = await self._mode_store.get_target(user_id)
                 if current is not None and current.session_id == previous.session_id:
-                    await self._queue.clear(previous.session_id)
+                    await self._notify_queue_cleared(previous.session_id, user_id=user_id, reason="已切换到其他输入会话")
                     self._injecting.discard(previous.session_id)
                     self._in_flight.discard(previous.session_id)
                     await self._stop_drain(previous.session_id)
@@ -1116,6 +1163,14 @@ class ExternalSessionInputService:
                 if step is _DrainStep.EMPTY:
                     restart_if_queued = True
                     return
+                if step is _DrainStep.WAIT_SETTLED:
+                    # The terminal input line may still hold unsubmitted pasted
+                    # text; only a real session publish (Claude produced output
+                    # ⇒ the line was submitted or cleared) or an explicit user
+                    # re-send proves it is safe to inject the next head. The
+                    # timeout-driven re-check below must NOT apply here.
+                    await self._wait_for_drain_activity(session_id, wake, settle=True)
+                    continue
                 await self._wait_for_drain_activity(session_id, wake)
         finally:
             async with self._lifecycle_lock:
@@ -1128,18 +1183,35 @@ class ExternalSessionInputService:
                 # a replacement instead of silently swallowing/stranding it.
                 await self._ensure_drain(session_id)
 
-    async def _wait_for_drain_activity(self, session_id: str, wake: asyncio.Event) -> None:
-        """Wait for an explicit Hook wake or a SessionStore publish."""
+    async def _wait_for_drain_activity(
+        self,
+        session_id: str,
+        wake: asyncio.Event,
+        *,
+        settle: bool = False,
+    ) -> None:
+        """Wait for an explicit Hook wake or a SessionStore publish.
+
+        ``settle`` disables the publish timeout: after an indeterminate drop
+        the terminal input line may hold unsubmitted pasted text, and a
+        timeout-driven wake-up could concatenate the next queued entry onto
+        it. Only a real publish or wake may release that wait.
+        """
         if wake.is_set():
             wake.clear()
-            return
+            if not settle:
+                return
+            # settle: the pending wake predates the indeterminate drop (the
+            # enqueue that raised it is already inside the paused queue), so
+            # it is not proof the input line is clear — keep waiting for a
+            # NEW wake (user re-send) or publish.
         since_cursor = self._session_store.get_publish_cursor(session_id)
         wake_task = asyncio.create_task(wake.wait())
         publish_task = asyncio.create_task(
             self._session_store.wait_for_publish(
                 session_id,
                 since_cursor=since_cursor,
-                timeout_sec=self._drain_wait_timeout,
+                timeout_sec=None if settle else self._drain_wait_timeout,
             )
         )
         try:
@@ -1152,59 +1224,208 @@ class ExternalSessionInputService:
             if wake.is_set():
                 wake.clear()
 
-    async def _abort_drain(self, session_id: str) -> _DrainStep:
-        """Clear old queued work while the caller still owns the input lock."""
-        await self._queue.clear(session_id)
-        return _DrainStep.ABORT
+    async def _abort_drain_locked(
+        self,
+        session_id: str,
+        *,
+        user_id: int | None,
+        reason: str,
+        extra_dropped: int = 0,
+    ) -> tuple[_DrainStep, list[_Notice]]:
+        """Clear old queued work while the caller still owns the input lock.
+
+        Design §9 requires notifying the user how many unsent entries were
+        discarded; the notice itself is delivered after the lock is released.
+        ``extra_dropped`` counts entries the caller already removed from the
+        queue (e.g. a just-dequeued head) so the reported total is exact.
+        """
+        dropped = await self._queue.clear(session_id)
+        total = len(dropped) + extra_dropped
+        notices: list[_Notice] = []
+        if total and user_id is not None:
+            notices.append((user_id, f"⚠️ 已丢弃 {total} 条未发送的排队消息（{reason}）。"))
+        return _DrainStep.ABORT, notices
+
+    async def _drop_current_and_continue(
+        self,
+        session_id: str,
+        *,
+        user_id: int | None,
+        notices: list[_Notice],
+        detail: str,
+        terminal_state_unknown: bool = False,
+    ) -> tuple[_DrainStep, list[_Notice]]:
+        """Finish a drain iteration whose just-dequeued head cannot be retried.
+
+        Only that entry is dropped — the remaining entries were never at risk.
+        The drain then pauses until the session publishes a real event (or the
+        user re-sends) instead of re-kicking itself: with
+        ``terminal_state_unknown`` the adapter could not tell whether the text
+        was pasted without Enter (INDETERMINATE/TIMEOUT/…), so injecting the
+        next head immediately could concatenate it onto the unsubmitted line;
+        otherwise the adapter/queue is in a state where an immediate retry of
+        the next head would only repeat the failure — one notice and one
+        subprocess attempt per entry, never a backoff-free drop loop.
+        """
+        # Count only live entries: reporting a soon-to-expire remainder as
+        # "paused" would contradict the very next drop notice for it (§9).
+        pruned = await self._queue.prune_expired(session_id)
+        if pruned and user_id is not None:
+            notices.append((user_id, f"⏳ 已丢弃 {pruned} 条等待超时的排队消息。"))
+        remaining = await self._queue.peek_size(session_id)
+        if user_id is not None:
+            if terminal_state_unknown:
+                tail = f"。其余 {remaining} 条已暂缓，待会话出现新事件或你再次发消息后继续" if remaining else ""
+                notices.append(
+                    (
+                        user_id,
+                        f"⚠️ 有 1 条排队消息发送结果不确定已丢弃（{detail}）{tail}。请到终端确认输入行没有残留文本。",
+                    )
+                )
+            else:
+                tail = f"。其余 {remaining} 条已暂缓，待会话出现新事件或你再次发消息后继续" if remaining else ""
+                notices.append((user_id, f"⚠️ 有 1 条排队消息发送失败已丢弃（{detail}）{tail}。"))
+        if remaining == 0:
+            return _DrainStep.EMPTY, notices
+        return _DrainStep.WAIT_SETTLED, notices
 
     async def _try_drain_one(self, session_id: str) -> _DrainStep:
-        """Inject one ready queue head under the per-session input lock."""
+        """Inject one ready queue head under the per-session input lock.
+
+        Drop notices are collected while holding the input lock and delivered
+        in a background task: Telegram I/O never extends the lock hold, and a
+        ``_stop_drain`` cancellation racing this delivery cannot lose already
+        counted drops (design §9).
+        """
         async with self._input_locks.lock(session_id):
-            if await self._queue.peek_size(session_id) == 0:
-                return _DrainStep.EMPTY
-            if session_id in self._in_flight or not self._is_sendable(session_id):
-                return _DrainStep.WAIT
+            step, notices = await self._try_drain_one_locked(session_id)
+        if notices:
+            self._spawn_notice_delivery(session_id, notices)
+        return step
 
-            binding = self._binding_store.get_binding(session_id)
-            if binding is None or binding.ended_at is not None:
-                return await self._abort_drain(session_id)
-            target = binding.ghostty_target
-            if target is None or target.binding_id != binding.binding_id:
-                return await self._abort_drain(session_id)
+    async def _notify_queue_cleared(self, session_id: str, *, user_id: int, reason: str) -> None:
+        """Clear the queue and report the discarded count (design §9).
 
-            process = await self._validate_foreground(
-                pid=binding.pid or 0,
-                paired_tty=target.paired_tty,
+        Used by the ``send_text`` dead-binding paths and ``_activate_target``'s
+        old-session cleanup, which previously cleared silently. Called under
+        the per-session input lock; the notice itself is delivered in the
+        background (see ``_spawn_notice_delivery``).
+        """
+        dropped = await self._queue.clear(session_id)
+        if dropped:
+            self._spawn_notice_delivery(session_id, [(user_id, f"⚠️ {reason}，丢弃 {len(dropped)} 条未发送的排队消息。")])
+
+    def _spawn_notice_delivery(self, session_id: str, notices: list[_Notice]) -> None:
+        """Schedule best-effort notice delivery without blocking the caller.
+
+        ``invalidate_binding`` callers may hold the external reply-delivery
+        lock, and the drain loop itself may be cancelled mid-flight
+        (``_stop_drain``) with notices already counted — the notice must not
+        extend that critical section nor die with the drain task. Keeps a
+        strong reference so the task cannot be garbage-collected mid-flight;
+        ``_deliver_notices`` already swallows every delivery error.
+        """
+        task = asyncio.create_task(self._deliver_notices(session_id, notices))
+        self._pending_notices.add(task)
+        task.add_done_callback(self._pending_notices.discard)
+
+    async def _deliver_notices(self, session_id: str, notices: list[_Notice]) -> None:
+        """Best-effort delivery of queue-drop notices (design §9). Never raises.
+
+        Every notice in a batch carries the SAME owner — resolved from the
+        session's binding at entry (``_try_drain_one_locked``) or from the
+        cleared target (``invalidate_binding``). Merging the texts and sending
+        to ``notices[0]``'s owner is safe only by that invariant; do not add
+        notices for other users to a batch.
+        """
+        if not notices or self._notify_user is None:
+            return
+        user_id = notices[0][0]
+        text = "\n".join(t for _, t in notices)
+        try:
+            delivered = await self._notify_user(user_id=user_id, text=text)
+        except Exception:
+            logger.exception(
+                "queue-drop notification raised",
+                extra={"session_id": session_id, "user_id": user_id},
             )
-            if not process.ok:
-                return _DrainStep.WAIT
-            if not self._adapter.is_available():
-                return _DrainStep.WAIT
-            terminal_ok, _terminal, terminal_error = await self._adapter.validate_terminal(target.terminal_id)
-            if not terminal_ok:
-                if terminal_error in {InjectionOutcome.NOT_FOUND, InjectionOutcome.NOT_UNIQUE}:
-                    self._binding_store.clear_ghostty_target(session_id, binding.binding_id)
-                    await self._mode_store.clear_target_for_session(session_id)
-                    return await self._abort_drain(session_id)
-                return _DrainStep.WAIT
-
-            current = self._current_binding_target(
-                session_id=session_id,
-                user_id=binding.user_id,
-                expected_binding_id=binding.binding_id,
-                expected_target=target,
+            return
+        if not delivered:
+            logger.warning(
+                "queue-drop notification not delivered",
+                extra={"session_id": session_id, "user_id": user_id},
             )
-            if current is None:
-                return await self._abort_drain(session_id)
-            binding, target = current
 
-            entry: QueuedInput | None = await self._queue.dequeue(
-                session_id,
-                binding_id=binding.binding_id,
-            )
-            if entry is None:
-                return _DrainStep.EMPTY
+    async def _try_drain_one_locked(self, session_id: str) -> tuple[_DrainStep, list[_Notice]]:
+        notices: list[_Notice] = []
+        binding = self._binding_store.get_binding(session_id)
+        user_id = binding.user_id if binding is not None else None
 
+        # Age out expired heads up front so timeouts surface as a counted,
+        # notifyable drop instead of being silently swallowed by dequeue.
+        pruned = await self._queue.prune_expired(session_id)
+        if pruned and user_id is not None:
+            notices.append((user_id, f"⏳ 已丢弃 {pruned} 条等待超时的排队消息。"))
+
+        if await self._queue.peek_size(session_id) == 0:
+            return _DrainStep.EMPTY, notices
+        if session_id in self._in_flight or not self._is_sendable(session_id):
+            return _DrainStep.WAIT, notices
+
+        if binding is None or binding.ended_at is not None:
+            return await self._abort_drain_locked(session_id, user_id=user_id, reason="会话已结束")
+        target = binding.ghostty_target
+        if target is None or target.binding_id != binding.binding_id:
+            return await self._abort_drain_locked(session_id, user_id=user_id, reason="绑定已变更，请重新配对")
+
+        process = await self._validate_foreground(
+            pid=binding.pid or 0,
+            paired_tty=target.paired_tty,
+        )
+        if not process.ok:
+            return _DrainStep.WAIT, notices
+        if not self._adapter.is_available():
+            return _DrainStep.WAIT, notices
+        terminal_ok, _terminal, terminal_error = await self._adapter.validate_terminal(target.terminal_id)
+        if not terminal_ok:
+            if terminal_error in {InjectionOutcome.NOT_FOUND, InjectionOutcome.NOT_UNIQUE}:
+                self._binding_store.clear_ghostty_target(session_id, binding.binding_id)
+                await self._mode_store.clear_target_for_session(session_id)
+                return await self._abort_drain_locked(session_id, user_id=user_id, reason="配对的终端已失效")
+            return _DrainStep.WAIT, notices
+
+        current = self._current_binding_target(
+            session_id=session_id,
+            user_id=binding.user_id,
+            expected_binding_id=binding.binding_id,
+            expected_target=target,
+        )
+        if current is None:
+            return await self._abort_drain_locked(session_id, user_id=user_id, reason="绑定已变更，请重新配对")
+        binding, target = current
+
+        before_dequeue = await self._queue.peek_size(session_id)
+        entry: QueuedInput | None = await self._queue.dequeue(
+            session_id,
+            binding_id=binding.binding_id,
+        )
+        if entry is None:
+            # dequeue silently discards heads that expired or went stale during
+            # the multi-second validation awaits above (its internal
+            # _drop_unusable_head_locked). Surface that drop as a notice
+            # instead of letting the entries vanish uncounted.
+            lost = before_dequeue - await self._queue.peek_size(session_id)
+            if lost and user_id is not None:
+                notices.append((user_id, f"⚠️ 已丢弃 {lost} 条过期或失效的排队消息。"))
+            return _DrainStep.EMPTY, notices
+        # A successful dequeue may still have skipped expired/stale entries in
+        # front of it (same internal drop as above): before - after - 1 (the
+        # entry now in hand) is what vanished silently.
+        skipped = before_dequeue - await self._queue.peek_size(session_id) - 1
+        if skipped and user_id is not None:
+            notices.append((user_id, f"⚠️ 已丢弃 {skipped} 条过期或失效的排队消息。"))
+
+        try:
             current = self._current_binding_target(
                 session_id=session_id,
                 user_id=binding.user_id,
@@ -1214,7 +1435,13 @@ class ExternalSessionInputService:
             if current is None:
                 # The entry belongs to the old generation/target; abort clears
                 # the remaining old queue rather than injecting after rebind.
-                return await self._abort_drain(session_id)
+                # The just-dequeued entry is dropped too — count it (design §9).
+                return await self._abort_drain_locked(
+                    session_id,
+                    user_id=user_id,
+                    reason="绑定代际已变更",
+                    extra_dropped=1,
+                )
             binding, target = current
 
             # As in the immediate-send path, close the AppleScript validation
@@ -1231,7 +1458,9 @@ class ExternalSessionInputService:
                         "failed to restore queued input after process revalidation",
                         extra={"session_id": session_id},
                     )
-                return _DrainStep.WAIT
+                    if user_id is not None:
+                        notices.append((user_id, "⚠️ 有 1 条排队消息恢复失败已被丢弃。"))
+                return _DrainStep.WAIT, notices
 
             self._injecting.add(session_id)
             try:
@@ -1239,20 +1468,73 @@ class ExternalSessionInputService:
             except Exception:
                 logger.exception("ghostty drain inject raised", extra={"session_id": session_id})
                 self._injecting.discard(session_id)
-                return await self._abort_drain(session_id)
+                # Unknown adapter state: this entry cannot be retried safely, and
+                # the terminal may hold unsubmitted text — the untouched remainder
+                # stays queued until the session shows real activity.
+                return await self._drop_current_and_continue(
+                    session_id,
+                    user_id=user_id,
+                    notices=notices,
+                    detail="内部错误",
+                    terminal_state_unknown=True,
+                )
             self._injecting.discard(session_id)
             if outcome == InjectionOutcome.OK:
                 self._in_flight.add(session_id)
-                return _DrainStep.INJECTED
+                return _DrainStep.INJECTED, notices
+            if outcome in _RETRYABLE_PREFLIGHT_OUTCOMES:
+                # Preflight failure before anything was pasted (same set send_text
+                # maps to ADAPTER_UNAVAILABLE): restore the head and wait for
+                # Ghostty to become reachable again.
+                restored = await self._queue.prepend(session_id, entry)
+                if not restored:
+                    logger.warning(
+                        "failed to restore queued input after preflight failure",
+                        extra={"session_id": session_id, "outcome": outcome},
+                    )
+                    return await self._drop_current_and_continue(
+                        session_id,
+                        user_id=user_id,
+                        notices=notices,
+                        detail=f"{outcome}，恢复失败",
+                    )
+                logger.info(
+                    "ghostty drain deferred until adapter recovers",
+                    extra={"session_id": session_id, "outcome": outcome},
+                )
+                return _DrainStep.WAIT, notices
             logger.warning(
                 "ghostty drain inject failed",
                 extra={"session_id": session_id, "outcome": outcome},
             )
-            # The dequeued entry cannot be retried safely when the script may
-            # have pasted text. Abort and clear remaining entries.
-            return await self._abort_drain(session_id)
+            # The dequeued entry may or may not have been pasted (INDETERMINATE/
+            # TIMEOUT/OS_ERROR): it cannot be retried safely. The rest of the
+            # queue was never touched and must survive — and because the input
+            # line may still hold the unsubmitted head, it must wait for a real
+            # session event rather than being injected right away.
+            return await self._drop_current_and_continue(
+                session_id,
+                user_id=user_id,
+                notices=notices,
+                detail=outcome,
+                terminal_state_unknown=True,
+            )
+        except asyncio.CancelledError:
+            # _stop_drain cancelled this drain while the dequeued entry was in
+            # hand (leave / invalidate / target switch): it will never be
+            # injected, and the caller's queue clear() can no longer see it.
+            # Report the drop (design §9) in the background, then let the
+            # cancellation propagate. The entry's text may already be pasted
+            # without Enter, hence the line-check hint.
+            self._injecting.discard(session_id)
+            if user_id is not None:
+                self._spawn_notice_delivery(
+                    session_id,
+                    [(user_id, "⚠️ 有 1 条排队消息在退出或切换输入模式时被丢弃，请到终端确认输入行没有残留文本。")],
+                )
+            raise
 
 
 def _normalise_text(text: str) -> str:
     """Normalise CRLF/CR to LF (design §8). No shell escaping."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalize_line_endings(text)

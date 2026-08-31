@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import secrets
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
+
+from app.services.base_callback_registry import BaseCallbackRegistry
 
 
 class UserQuestionCallbackAction(StrEnum):
@@ -109,30 +109,35 @@ class QuestionCallbackTokens:
     submit_token: str | None = None
 
 
-class UserQuestionCallbackRegistry:
+UserQuestionCompoundKey = tuple[int, str, str, int, UserQuestionCallbackAction, int | None, UserQuestionCallbackOrigin]
+
+
+class UserQuestionCallbackRegistry(BaseCallbackRegistry[UserQuestionCallbackRecord, UserQuestionCallbackStatus, UserQuestionCompoundKey]):
     """TTL registry whose tokens can be resolved repeatedly until invalidated."""
+
+    # No post-deadline grace for invalidated tokens: unlike resolved
+    # permission/pairing records they serve no "already answered" observation
+    # window (resolve() only accepts ACTIVE), so reap them at their deadline
+    # like the pre-BaseCallbackRegistry implementation did.
+    _NON_PENDING_EVICT_GRACE_MULTIPLIER = 0
 
     def __init__(
         self,
         *,
-        ttl_sec: float,
+        ttl_sec: int,
         token_factory: Callable[[], str] | None = None,
         clock: Callable[[], float] | None = None,
         wall_clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if ttl_sec <= 0:
-            raise ValueError("ttl_sec must be positive")
-        self._ttl_sec = ttl_sec
-        self._token_factory = token_factory or (lambda: secrets.token_urlsafe(12))
-        self._clock = clock or time.monotonic
-        self._wall_clock = wall_clock or (lambda: datetime.now(UTC))
-        self._records: dict[str, UserQuestionCallbackRecord] = {}
-        self._ttl_deadlines: dict[str, float] = {}
-        self._compound_index: dict[
-            tuple[int, str, str, int, UserQuestionCallbackAction, int | None, UserQuestionCallbackOrigin],
-            str,
-        ] = {}
-        self._lock = asyncio.Lock()
+        super().__init__(
+            ttl_sec=ttl_sec,
+            token_factory=token_factory or (lambda: secrets.token_urlsafe(12)),
+            clock=clock,
+            wall_clock=wall_clock,
+        )
+
+    def _pending_status(self) -> UserQuestionCallbackStatus:
+        return UserQuestionCallbackStatus.ACTIVE
 
     async def register_question_tokens(
         self,
@@ -213,7 +218,7 @@ class UserQuestionCallbackRegistry:
         elif option_index is not None:
             raise ValueError("submit must not include option_index")
 
-        compound_key = (
+        compound_key: UserQuestionCompoundKey = (
             owner_user_id,
             session_id,
             tool_use_id,
@@ -229,15 +234,9 @@ class UserQuestionCallbackRegistry:
             if existing is not None and existing.status is UserQuestionCallbackStatus.ACTIVE and not self._is_expired(existing):
                 return existing.token
 
-            for _ in range(16):
-                token = self._token_factory()
-                if token and token not in self._records:
-                    break
-            else:
-                raise RuntimeError("failed to generate unique user-question callback token")
-
+            token = self._generate_unique_token("user-question callback token")
             monotonic_now = self._clock()
-            created_at = self._wall_clock()
+            created_at = self._now_datetime()
             record = UserQuestionCallbackRecord(
                 token=token,
                 owner_user_id=owner_user_id,
@@ -285,7 +284,9 @@ class UserQuestionCallbackRegistry:
 
     async def prune_stale(self) -> int:
         async with self._lock:
-            return self._evict_stale()
+            before = len(self._records)
+            self._evict_stale()
+            return before - len(self._records)
 
     async def _invalidate_matching(self, predicate: Callable[[UserQuestionCallbackRecord], bool]) -> int:
         async with self._lock:
@@ -300,21 +301,3 @@ class UserQuestionCallbackRegistry:
                     if token in invalidated_tokens:
                         self._compound_index.pop(compound_key, None)
             return len(invalidated_tokens)
-
-    def _is_expired(self, record: UserQuestionCallbackRecord) -> bool:
-        deadline = self._ttl_deadlines.get(record.token)
-        if deadline is not None:
-            return deadline <= self._clock()
-        return record.expires_at <= self._wall_clock()
-
-    def _evict_stale(self) -> int:
-        stale_tokens = [token for token, record in self._records.items() if self._is_expired(record)]
-        for token in stale_tokens:
-            self._records.pop(token, None)
-            self._ttl_deadlines.pop(token, None)
-        if stale_tokens:
-            stale_set = set(stale_tokens)
-            for compound_key, token in list(self._compound_index.items()):
-                if token in stale_set:
-                    self._compound_index.pop(compound_key, None)
-        return len(stale_tokens)

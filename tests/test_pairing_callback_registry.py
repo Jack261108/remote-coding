@@ -86,7 +86,9 @@ async def test_token_expires_after_ttl() -> None:
         token_factory=lambda: "tok-1",
     )
     token = await reg.register_token(user_id=42, session_id="s1", binding_id="gen-A", terminal_id="term-uuid")
-    assert isinstance(await reg.consume(token, 42), PairConsumeOk)
+    clock["t"] += 11.0
+    result = await reg.consume(token, 42)
+    assert isinstance(result, PairConsumeNotFound), "expired token must not consume"
 
 
 async def test_invalidate_session_marks_pending_invalidated() -> None:

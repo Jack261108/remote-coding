@@ -57,10 +57,12 @@ class SessionNotifier:
         """Return the current revision cursor for *session_id* (0 if unknown)."""
         return self._cursors.get(session_id, 0)
 
-    async def wait_for_publish(self, session_id: str, *, since_cursor: int, timeout_sec: float) -> bool:
+    async def wait_for_publish(self, session_id: str, *, since_cursor: int, timeout_sec: float | None) -> bool:
         """Block until the cursor for *session_id* exceeds *since_cursor*.
 
         Returns True if a new revision was observed, False on timeout.
+        ``timeout_sec=None`` waits without a timeout (used by the Ghostty
+        drain's settle wait after an indeterminate drop).
         """
         if self.get_cursor(session_id) > since_cursor:
             return True

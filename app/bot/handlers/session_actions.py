@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from aiogram import F, Router
 from aiogram.filters import BaseFilter
@@ -22,6 +22,9 @@ from app.services.session_id_resolver import (
     resolve_unique_prefix,
 )
 from app.services.session_registry import SessionRegistryService
+
+if TYPE_CHECKING:
+    from app.services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +267,12 @@ def register_session_action_handlers(
         await editable_message.edit_text(updated_text, reply_markup=keyboard)
 
 
-def register_pair_consume_handler(router: Router, *, input_service: ExternalSessionInputService) -> None:
+def register_pair_consume_handler(
+    router: Router,
+    *,
+    input_service: ExternalSessionInputService,
+    session_service: SessionService | None = None,
+) -> None:
     """Consume a ``ghpair:<token>`` callback and finalise Ghostty pairing."""
 
     @router.callback_query(F.data.startswith("ghpair:"))
@@ -278,7 +286,21 @@ def register_pair_consume_handler(router: Router, *, input_service: ExternalSess
         await callback.answer()
         if callback.message:
             if outcome == PairOutcome.PAIRED:
-                await callback.message.answer("✅ 配对成功，已进入外部输入模式。")
+                text = "✅ 配对成功，已进入外部输入模式。"
+                # The external text router yields to an active managed chat
+                # (see ExternalInputTargetActiveFilter), so tell the user up
+                # front instead of letting texts silently go to the chat.
+                session = await session_service.get(user_id) if session_service is not None else None
+                if session is not None and session.claude_chat_active:
+                    text += "\n⚠️ 当前还有活跃的 managed 会话：普通文本将发给该会话，未注册的斜杠命令仍会注入外部终端。"
+                    if session.terminal_mode:
+                        # /exit closes the managed persistent terminal (and its
+                        # Claude session) in terminal_mode — irreversible, so
+                        # warn instead of recommending it as a light switch.
+                        text += "注意：/exit 会关闭 managed 终端及其中运行的 Claude 会话（不可逆），请确认后再使用。"
+                    else:
+                        text += "如需让普通文本也走外部终端，请先 /exit 退出聊天模式。"
+                await callback.message.answer(text)
             else:
                 await callback.message.answer(f"❌ {_pair_outcome_text(outcome)}")
 

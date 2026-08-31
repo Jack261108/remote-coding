@@ -6,7 +6,6 @@ Feature: external-session-takeover
 from __future__ import annotations
 
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +16,8 @@ from app.domain.external_session_models import ExternalBinding, SessionOrigin
 from app.domain.models import SessionContext
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.session_ownership_resolver import SessionOwnershipResolver
+from tests.fakes.external_session import FakeSessionService, make_binding
+from tests.fakes.external_session import make_session_context as _make_context
 
 # --- Strategies ---
 
@@ -41,46 +42,8 @@ workdirs = st.text(
 ).map(lambda s: "/" + s.lstrip("/"))
 
 
-def _make_context(
-    *,
-    user_id: int,
-    claude_session_id: str,
-    terminal_id: str | None = None,
-    workdir: str = "/home/user/project",
-) -> SessionContext:
-    return SessionContext(
-        user_id=user_id,
-        session_id="internal-id",
-        provider="claude_code",
-        workdir=workdir,
-        terminal_mode=terminal_id is not None,
-        terminal_id=terminal_id,
-        claude_session_id=claude_session_id,
-    )
-
-
 def _make_binding(session_id: str, user_id: int, cwd: str = "/tmp") -> ExternalBinding:
-    return ExternalBinding(
-        session_id=session_id,
-        user_id=user_id,
-        cwd=cwd,
-        bound_at=datetime.now(UTC),
-        jsonl_path=None,
-    )
-
-
-class _FakeSessionService:
-    def __init__(self, contexts: list[SessionContext]) -> None:
-        self._contexts = contexts
-
-    async def list_all(self) -> list[SessionContext]:
-        return self._contexts
-
-    async def lookup_by_claude_session_id(self, session_id: str) -> SessionContext | None:
-        for ctx in self._contexts:
-            if ctx.claude_session_id == session_id:
-                return ctx
-        return None
+    return make_binding(session_id=session_id, user_id=user_id, cwd=cwd)
 
 
 def _make_resolver(contexts: list[SessionContext], bindings: list[ExternalBinding] | None = None) -> SessionOwnershipResolver:
@@ -90,7 +53,7 @@ def _make_resolver(contexts: list[SessionContext], bindings: list[ExternalBindin
         for b in bindings or []:
             store.save_binding(b)
 
-        return SessionOwnershipResolver(session_service=_FakeSessionService(contexts), binding_store=store)
+        return SessionOwnershipResolver(session_service=FakeSessionService(contexts), binding_store=store)
 
 
 # --- Property 9: Ownership resolver priority chain ---

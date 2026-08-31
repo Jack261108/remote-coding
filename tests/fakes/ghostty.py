@@ -29,6 +29,7 @@ class FakeGhosttyTerminalAdapter:
         )
         self.list_error: str | None = None
         self.validate_error: str | None = None
+        self.inject_error: str | None = None
         self.inject_outcomes: deque[str] = deque()
         self.inject_calls: list[tuple[str, str]] = []
         self.question_outcomes: deque[str] = deque()
@@ -153,6 +154,8 @@ class FakeGhosttyTerminalAdapter:
                 self.inject_entered.set()
             if self.inject_release is not None:
                 await self.inject_release.wait()
+            if self.inject_error is not None:
+                return self.inject_error
             return self.inject_outcomes.popleft() if self.inject_outcomes else InjectionOutcome.OK
         finally:
             self.active_injections -= 1

@@ -23,17 +23,12 @@ from unittest.mock import patch
 from app.domain.hook_models import HookEvent
 from app.domain.models import utc_now
 from app.services.external_session_discovery import ExternalSessionDiscoveryService
+from tests.fakes.external_session import make_hook_event
 
 
 def _make_hook_event(session_id: str, *, pid: int | None) -> HookEvent:
     """Build a minimal valid HookEvent carrying the given pid."""
-    return HookEvent(
-        session_id=session_id,
-        cwd="/home/user/project",
-        event="PreToolUse",
-        status="running",
-        pid=pid,
-    )
+    return make_hook_event(session_id=session_id, event="PreToolUse", status="running", pid=pid)
 
 
 def test_is_pid_alive_delegates_to_shared_probe() -> None:

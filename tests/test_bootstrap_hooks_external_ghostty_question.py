@@ -25,6 +25,7 @@ from app.domain.user_question_models import (
     UserQuestionPrompt,
 )
 from app.services.user_question_callback_registry import UserQuestionCallbackOrigin
+from tests.fakes.external_session import make_hook_event
 
 
 def _make_settings(tmp_path, *, install_hooks: bool = False) -> Settings:
@@ -84,7 +85,7 @@ def _prompts(tool_use_id: str = "tuid-1") -> tuple[UserQuestionPrompt, ...]:
 
 
 def _event(session_id: str, tool_use_id: str = "tuid-1") -> HookEvent:
-    return HookEvent(
+    return make_hook_event(
         session_id=session_id,
         cwd="/project",
         event="PreToolUse",

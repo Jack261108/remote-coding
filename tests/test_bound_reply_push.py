@@ -18,6 +18,7 @@ from app.services.background_task_registry import BackgroundTaskRegistry
 from app.services.external_binding_store import ExternalBindingStore
 from app.services.external_reply_delivery_pump import ExternalReplyDeliveryPump, ExternalReplyDrainResult
 from app.services.session_store import SessionStore
+from tests.fakes.external_session import make_hook_event
 
 _BOUND_AT = datetime(2026, 1, 2, tzinfo=UTC)
 
@@ -41,12 +42,7 @@ def _turn(
 
 
 def _stop_event() -> HookEvent:
-    return HookEvent(
-        session_id="sess-123456",
-        cwd="/home/user/project",
-        event="Stop",
-        status="waiting_for_input",
-    )
+    return make_hook_event(session_id="sess-123456", event="Stop", status="waiting_for_input")
 
 
 async def _wait_until(predicate: Callable[[], bool], *, timeout_sec: float = 1.0) -> None:

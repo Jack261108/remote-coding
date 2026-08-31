@@ -5,15 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.process import pty_injector
-
-
-class _FakeProcess:
-    def __init__(self, *, stdout: bytes, returncode: int = 0) -> None:
-        self._stdout = stdout
-        self.returncode = returncode
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        return self._stdout, b""
+from tests.fakes.subprocess_process import FakeSubprocessProcess
 
 
 @pytest.mark.asyncio
@@ -23,9 +15,9 @@ async def test_find_tmux_targets_for_pid_walks_ancestors_and_preserves_pane_api(
     stdout = b"tgcli_user_1 %1 100\nother-session %2 200\nmalformed\ninvalid %3 nope\n"
     calls: list[tuple[object, ...]] = []
 
-    async def fake_create_subprocess_exec(*args: object, **_kwargs: object) -> _FakeProcess:
+    async def fake_create_subprocess_exec(*args: object, **_kwargs: object) -> FakeSubprocessProcess:
         calls.append(args)
-        return _FakeProcess(stdout=stdout)
+        return FakeSubprocessProcess(stdout=stdout)
 
     parents = {300: 250, 250: 100}
 
@@ -63,8 +55,8 @@ async def test_find_tmux_session_for_pid_returns_none_when_tmux_unavailable(
     )
     if which_result is not None:
 
-        async def fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _FakeProcess:
-            return _FakeProcess(stdout=b"tgcli_user_1 %1 100\n", returncode=returncode)
+        async def fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> FakeSubprocessProcess:
+            return FakeSubprocessProcess(stdout=b"tgcli_user_1 %1 100\n", returncode=returncode)
 
         monkeypatch.setattr(pty_injector.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.domain.models import SessionContext
@@ -14,34 +15,53 @@ class FileSessionContextStore:
         self._claude_session_index: dict[str, SessionContext] = {}
         self._index_loaded = False  # Track whether index has been loaded from disk
 
+    async def _reload_cache_locked(self) -> list[SessionContext]:
+        """(Re)load every context from disk off the event loop and refresh caches.
+
+        Caller must hold ``self._lock``. Corrupt files are skipped by
+        ``list_session_contexts`` and therefore absent from the cache, matching
+        ``load_session_context``'s tolerant single-file read.
+        """
+        contexts = await asyncio.to_thread(self._file_store.list_session_contexts)
+        self._list_cache = contexts
+        self._claude_session_index = {ctx.claude_session_id: ctx for ctx in contexts if ctx.claude_session_id}
+        self._index_loaded = True
+        return contexts
+
     async def get(self, user_id: int) -> SessionContext | None:
         async with self._lock:
-            return self._file_store.load_session_context(user_id)
+            # The cache, once loaded, mirrors disk (save updates it in place,
+            # delete drops it), so the per-message router filter + session-guard
+            # middleware double get() reads memory instead of blocking the
+            # event loop on JSON file loads.
+            cache = self._list_cache
+            if cache is None:
+                cache = await self._reload_cache_locked()
+            for ctx in cache:
+                if ctx.user_id == user_id:
+                    # Callers mutate the returned context in place and save it
+                    # back (SessionService.get_or_create), so hand out a copy —
+                    # matching the fresh object the old per-call disk parse
+                    # returned — to keep the cache snapshot intact.
+                    return copy.deepcopy(ctx)
+            return None
 
     async def list_all(self) -> list[SessionContext]:
         async with self._lock:
             if self._list_cache is not None:
                 return list(self._list_cache)
-            contexts = self._file_store.list_session_contexts()
-            self._list_cache = contexts
-            # Rebuild index from loaded contexts
-            self._claude_session_index = {ctx.claude_session_id: ctx for ctx in contexts if ctx.claude_session_id}
-            self._index_loaded = True
-            return list(contexts)
+            return list(await self._reload_cache_locked())
 
     async def get_by_claude_session_id(self, claude_session_id: str) -> SessionContext | None:
         """O(1) index lookup by claude_session_id. Returns None on miss.
 
-        On cold start (index never loaded), triggers a full list_all() to
+        On cold start (index never loaded), triggers a full reload to
         populate the index before looking up.
         """
         async with self._lock:
             if not self._index_loaded:
                 # Cold start: load from disk to populate index
-                contexts = self._file_store.list_session_contexts()
-                self._list_cache = contexts
-                self._claude_session_index = {ctx.claude_session_id: ctx for ctx in contexts if ctx.claude_session_id}
-                self._index_loaded = True
+                await self._reload_cache_locked()
             return self._claude_session_index.get(claude_session_id)
 
     async def save(self, session: SessionContext) -> None:

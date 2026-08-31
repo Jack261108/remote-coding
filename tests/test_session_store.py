@@ -4,8 +4,9 @@ from datetime import timedelta
 
 import pytest
 
+from app.adapters.storage.file_session_context_store import FileSessionContextStore
 from app.adapters.storage.file_session_store import FileSessionStore
-from app.domain.models import utc_now
+from app.domain.models import SessionContext, utc_now
 from app.domain.session_models import (
     ConversationTurn,
     ParserCheckpoint,
@@ -17,6 +18,56 @@ from app.domain.session_models import (
     ToolStatus,
 )
 from app.services.session_store import SessionStore
+
+
+def test_file_store_load_session_context_degrades_on_corrupt_file(tmp_path) -> None:
+    """A half-written or unreadable context file must read as absent instead
+    of raising: the router's external-target filter and the pairing flow call
+    this per plain-text message, and a raise silently drops the message."""
+    file_store = FileSessionStore(str(tmp_path))
+    file_store.save_session_context(SessionContext(user_id=42, session_id="s1", provider="claude_code", workdir="/project"))
+    context_path = file_store.session_context_path(42)
+    context_path.write_text("{half-written", encoding="utf-8")
+    assert file_store.load_session_context(42) is None
+
+
+@pytest.mark.asyncio
+async def test_context_store_get_loads_disk_once_then_serves_memory(tmp_path) -> None:
+    """The external-target router filter and the session-guard middleware both
+    call get() for one plain-text message: only the cold start may touch disk."""
+    file_store = FileSessionStore(str(tmp_path))
+    file_store.save_session_context(SessionContext(user_id=42, session_id="s1", provider="claude_code", workdir="/project"))
+    store = FileSessionContextStore(file_store)
+
+    first = await store.get(42)
+    assert first is not None
+    assert first.session_id == "s1"
+
+    def fail_if_disk_read(user_id: int = 0):
+        raise AssertionError("get() must serve the loaded cache instead of reading disk")
+
+    file_store.list_session_contexts = fail_if_disk_read  # type: ignore[method-assign]
+    file_store.load_session_context = fail_if_disk_read  # type: ignore[method-assign]
+
+    second = await store.get(42)
+    assert second is not first  # independent snapshot: callers mutate it in place
+    assert second == first
+    assert await store.get(7) is None
+
+
+@pytest.mark.asyncio
+async def test_context_store_get_tolerates_corrupt_context_file(tmp_path) -> None:
+    """The cache is built via a directory scan, so a corrupt file must degrade
+    to absent for its own user only — same contract as load_session_context."""
+    file_store = FileSessionStore(str(tmp_path))
+    file_store.save_session_context(SessionContext(user_id=42, session_id="s1", provider="claude_code", workdir="/project"))
+    file_store.session_context_path(7).write_text("{half-written", encoding="utf-8")
+    store = FileSessionContextStore(file_store)
+
+    healthy = await store.get(42)
+    assert healthy is not None
+    assert healthy.session_id == "s1"
+    assert await store.get(7) is None
 
 
 def test_session_store_persists_checkpoint_and_turns(tmp_path) -> None:

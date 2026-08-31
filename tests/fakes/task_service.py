@@ -38,7 +38,7 @@ class FakeTaskService:
 
     def __init__(
         self,
-        events: list[CLIEvent],
+        events: list[CLIEvent] | None = None,
         status: TaskRecord | None = None,
         *,
         interactive: bool = False,
@@ -59,7 +59,7 @@ class FakeTaskService:
         self._structured_turns = structured_turns
         self._structured_sessions = structured_sessions
         self._structured_session_index = 0
-        self._event_delays = event_delays or [0.0] * len(events)
+        self._event_delays = event_delays or [0.0] * len(events or [])
         self._wait_update_result = wait_update_result
         self._wait_update_sleep = wait_update_sleep
         self._task_id = task_id

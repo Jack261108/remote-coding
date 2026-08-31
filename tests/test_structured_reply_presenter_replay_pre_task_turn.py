@@ -84,8 +84,8 @@ _FRESH_TURN_B_ENDED_AT = _FIXED_TASK_STARTED_AT + timedelta(seconds=2)
 class _DummyTaskServiceWithEmptyPersistedCursor:
     """Fake task service for the post-bot-restart shape.
 
-    Mirrors ``DummyTaskService`` from
-    ``tests/test_structured_reply_presenter.py`` and
+    Mirrors ``FakeTaskService(structured_sessions=...)`` from
+    ``tests/fakes/task_service.py`` and
     ``_DummyTaskServiceWithPersistedCursor`` from
     ``tests/test_structured_reply_presenter_prime.py``, but
     ``get_structured_reply_cursor`` returns ``(None, None)`` to model the

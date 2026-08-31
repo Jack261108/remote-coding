@@ -19,25 +19,9 @@ from app.adapters.process.ghostty_terminal_adapter import (
     GhosttyTerminalAdapter,
     InjectionOutcome,
 )
+from tests.fakes.subprocess_process import FakeSubprocessProcess
 
-
-class _FakeProc:
-    def __init__(self, *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0) -> None:
-        self._stdout = stdout
-        self._stderr = stderr
-        self.returncode = returncode
-        self.killed = False
-        self.waited = False
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        return self._stdout, self._stderr
-
-    def kill(self) -> None:
-        self.killed = True
-
-    async def wait(self) -> int:
-        self.waited = True
-        return self.returncode
+_FakeProc = FakeSubprocessProcess
 
 
 def _patch_exec(monkeypatch: pytest.MonkeyPatch, factory) -> list[list[object]]:
