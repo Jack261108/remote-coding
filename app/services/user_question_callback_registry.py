@@ -115,6 +115,12 @@ UserQuestionCompoundKey = tuple[int, str, str, int, UserQuestionCallbackAction, 
 class UserQuestionCallbackRegistry(BaseCallbackRegistry[UserQuestionCallbackRecord, UserQuestionCallbackStatus, UserQuestionCompoundKey]):
     """TTL registry whose tokens can be resolved repeatedly until invalidated."""
 
+    # No post-deadline grace for invalidated tokens: unlike resolved
+    # permission/pairing records they serve no "already answered" observation
+    # window (resolve() only accepts ACTIVE), so reap them at their deadline
+    # like the pre-BaseCallbackRegistry implementation did.
+    _NON_PENDING_EVICT_GRACE_MULTIPLIER = 0
+
     def __init__(
         self,
         *,

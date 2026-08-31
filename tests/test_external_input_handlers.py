@@ -86,15 +86,15 @@ def _callback(data: str, *, user_id: int = 42, message: Message | None = None) -
 class _StubSessionService:
     """Minimal SessionService stand-in for the router filters/handlers."""
 
-    def __init__(self, *, chat_active: bool = False) -> None:
-        self._session = SimpleNamespace(claude_chat_active=chat_active)
+    def __init__(self, *, chat_active: bool = False, terminal_mode: bool = False) -> None:
+        self._session = SimpleNamespace(claude_chat_active=chat_active, terminal_mode=terminal_mode)
 
     async def get(self, user_id: int):
         return self._session
 
 
-def _session_service_stub(*, chat_active: bool = False) -> SessionService:
-    return cast("SessionService", _StubSessionService(chat_active=chat_active))
+def _session_service_stub(*, chat_active: bool = False, terminal_mode: bool = False) -> SessionService:
+    return cast("SessionService", _StubSessionService(chat_active=chat_active, terminal_mode=terminal_mode))
 
 
 def _message(text: str, *, user_id: int = 42) -> Message:
@@ -153,8 +153,9 @@ class TestPairConsumeHandler:
 
     @pytest.mark.asyncio
     async def test_paired_with_active_managed_chat_appends_hint(self, tmp_path: Path) -> None:
-        """Pairing succeeds while a managed chat is active: the reply must warn
-        that plain text will keep going to the managed session."""
+        """Pairing succeeds while a managed chat is active (no terminal): the
+        reply must warn that plain text keeps going to the managed session and
+        recommend the light /exit."""
         service, binding_store, _, binding = _make_service(tmp_path)
         token = await service.register_pair_token(
             user_id=42,
@@ -173,7 +174,37 @@ class TestPairConsumeHandler:
         reply = msg.answer.await_args.args[0]
         assert "配对成功" in reply
         assert "managed 会话" in reply
-        assert "/exit" in reply
+        assert "斜杠命令仍会注入外部终端" in reply
+        assert "请先 /exit 退出聊天模式" in reply
+        assert "不可逆" not in reply
+
+    @pytest.mark.asyncio
+    async def test_paired_with_active_managed_terminal_warns_about_exit(self, tmp_path: Path) -> None:
+        """In terminal_mode /exit closes the managed terminal and its Claude
+        session (irreversible): the hint must warn, not recommend it as a
+        light route switch."""
+        service, binding_store, _, binding = _make_service(tmp_path)
+        token = await service.register_pair_token(
+            user_id=42,
+            session_id=binding.session_id,
+            expected_binding_id=binding.binding_id,
+            terminal_id="term-1",
+        )
+        assert token is not None
+
+        router = Router()
+        register_pair_consume_handler(
+            router, input_service=service, session_service=_session_service_stub(chat_active=True, terminal_mode=True)
+        )
+        msg = _message("")
+        cb = _callback(f"ghpair:{token}", message=msg)
+        await _dispatch_cb(router, 0, cb)
+        assert msg.answer.await_count == 1
+        reply = msg.answer.await_args.args[0]
+        assert "配对成功" in reply
+        assert "斜杠命令仍会注入外部终端" in reply
+        assert "/exit 会关闭 managed 终端" in reply
+        assert "不可逆" in reply
 
     @pytest.mark.asyncio
     async def test_invalid_token_replies_error(self, tmp_path: Path) -> None:
@@ -289,6 +320,15 @@ class TestExternalTextRouter:
         assert await target_filter(_message("hi")) is False
 
     @pytest.mark.asyncio
+    async def test_filter_coexisting_chat_still_takes_slash_commands(self, tmp_path: Path) -> None:
+        """``chat_text_router`` excludes slash text, so a slash that also yielded
+        on coexistence would be silently dropped — it must still match."""
+        service, *_ = _make_service(tmp_path)
+        await service.activate_select(user_id=42, session_id="session-1")
+        target_filter = ExternalInputTargetActiveFilter(service, _session_service_stub(chat_active=True))
+        assert await target_filter(_message("/compact")) is True
+
+    @pytest.mark.asyncio
     async def test_sent_is_silent(self, tmp_path: Path) -> None:
         service, *_ = _make_service(tmp_path)
         await service.activate_select(user_id=42, session_id="session-1")
@@ -299,6 +339,21 @@ class TestExternalTextRouter:
         msg = _message("hello world")
         await _dispatch_msg(router, 0, msg)
         msg.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_coexisting_chat_slash_command_routes_to_terminal(self, tmp_path: Path) -> None:
+        """An unregistered slash command during coexistence must reach the
+        external terminal instead of vanishing between the two routers
+        (``chat_text_router`` excludes slash text)."""
+        adapter = FakeGhosttyTerminalAdapter()
+        service, *_ = _make_service(tmp_path, adapter=adapter)
+        await service.activate_select(user_id=42, session_id="session-1")
+        router = Router()
+        register_external_text_handlers(
+            router, input_service=service, target_filter=ExternalInputTargetActiveFilter(service, _session_service_stub(chat_active=True))
+        )
+        await _dispatch_msg(router, 0, _message("/compact"))
+        assert [text for _term, text in adapter.inject_calls] == ["/compact"]
 
     @pytest.mark.asyncio
     async def test_queued_replies_notice(self, tmp_path: Path) -> None:

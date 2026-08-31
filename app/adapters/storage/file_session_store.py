@@ -98,7 +98,19 @@ class FileSessionStore:
         path = self.session_context_path(user_id)
         if not path.exists():
             return None
-        return SessionContext.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return SessionContext.from_dict(payload)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            # A half-written or unreadable context file must degrade to "no
+            # session": callers like the router's external-target filter and
+            # the pairing flow treat a raise as a silently lost user message.
+            # ``list_session_contexts`` already skips the same damage.
+            logger.warning(
+                "failed to load session context; treating as absent",
+                extra={"user_id": user_id},
+            )
+            return None
 
     def list_session_contexts(self) -> list[SessionContext]:
         contexts: list[SessionContext] = []

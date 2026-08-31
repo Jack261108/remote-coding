@@ -238,7 +238,7 @@ class SessionStoreFacade:
     def mark_structured_user_question_emitted(self, session_id: str, *, question_key: str) -> SessionState:
         return self._tracker.mark_structured_user_question_emitted(session_id, question_key=question_key)
 
-    async def wait_for_publish(self, session_id: str, *, since_cursor: int, timeout_sec: float) -> bool:
+    async def wait_for_publish(self, session_id: str, *, since_cursor: int, timeout_sec: float | None) -> bool:
         return await self._notifier.wait_for_publish(session_id, since_cursor=since_cursor, timeout_sec=timeout_sec)
 
     async def wait_for_change(self, session_id: str, *, since_revision: int, timeout_sec: float) -> bool:

@@ -106,6 +106,35 @@ async def test_ttl_uses_monotonic_clock_without_refreshing_reused_token() -> Non
     assert isinstance(await registry.resolve(token, user_id=42), UserQuestionCallbackNotFound)
 
 
+async def test_invalidated_record_is_reaped_at_deadline_without_grace() -> None:
+    """Invalidated tokens get no 5xTTL eviction grace: resolve() only accepts
+    ACTIVE records, so keeping them past the deadline just grows ``_records``."""
+    now = 0.0
+    registry = UserQuestionCallbackRegistry(
+        ttl_sec=10,
+        token_factory=lambda: "token",
+        clock=lambda: now,
+        wall_clock=lambda: datetime(2026, 8, 6, tzinfo=UTC),
+    )
+    kwargs = dict(
+        owner_user_id=42,
+        session_id="session-1",
+        tool_use_id="tool-1",
+        question_index=0,
+        action=UserQuestionCallbackAction.SELECT,
+        option_index=0,
+        origin=UserQuestionCallbackOrigin.MANAGED,
+    )
+    token = await registry.register(**kwargs)
+    assert await registry.invalidate_tool(session_id="session-1", tool_use_id="tool-1") == 1
+
+    now = 10.1  # just past the deadline, far inside the base-class 5xTTL grace
+    assert await registry.prune_stale() == 1
+    assert isinstance(await registry.resolve(token, user_id=42), UserQuestionCallbackNotFound)
+    # The compound key was reaped with the record, so re-registering mints a fresh token.
+    assert await registry.register(**kwargs) == "token"
+
+
 @pytest.mark.parametrize(
     ("action", "option_index"),
     [

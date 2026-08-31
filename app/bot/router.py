@@ -97,16 +97,21 @@ class ExternalInputTargetActiveFilter(BaseFilter):
 
     The two states can coexist (activating an external target does not clear
     ``claude_chat_active``, and ``/claude`` does not clear the target). When
-    they do, the managed chat wins: this filter returns False so plain text
-    falls through to the managed ``chat_text_router`` instead of being
-    silently injected into the external terminal. Without a target it also
-    returns False. Partitioning by user state without raising ``SkipHandler``
-    (which ErrorHandlingMiddleware would intercept).
+    they do, the managed chat wins for plain text only: this filter returns
+    False so plain text falls through to the managed ``chat_text_router``
+    instead of being silently injected into the external terminal. Slash
+    commands are the exception — ``chat_text_router`` excludes them, so an
+    unregistered command that also yielded here would fall through to
+    nothing; slashes still route to the external terminal (registered
+    commands were already consumed by the earlier command routers).
+    Without a target it also returns False. Partitioning by user state
+    without raising ``SkipHandler`` (which ErrorHandlingMiddleware would
+    intercept).
 
     Order matters for the hot path: ``has_target`` is an in-memory lookup and
-    gates the ``session_service.get`` read (a blocking JSON file load on the
-    event-loop thread), so users without an external target — the vast
-    majority of plain-text traffic — never pay for it.
+    gates the ``session_service.get`` read (an in-memory cache hit in the
+    context store after its cold start), so users without an external target —
+    the vast majority of plain-text traffic — never pay for it.
     """
 
     def __init__(self, input_service: ExternalSessionInputService, session_service: SessionService) -> None:
@@ -118,9 +123,15 @@ class ExternalInputTargetActiveFilter(BaseFilter):
         if not user_id:
             return False
         # Cheap in-memory check first: no external target → the session read
-        # (a blocking file load behind the store lock) is never reached.
+        # is never reached.
         if not await self._input_service.has_target(user_id):
             return False
+        if (message.text or "").startswith("/"):
+            # Slash text never reaches ``chat_text_router`` (it excludes
+            # leading slashes), so yielding on coexistence would silently drop
+            # an unregistered command. Route it to the terminal — registered
+            # commands were consumed earlier — and skip the session read.
+            return True
         session = await self._session_service.get(user_id)
         if session is not None and session.claude_chat_active:
             return False

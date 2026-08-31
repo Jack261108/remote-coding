@@ -292,7 +292,14 @@ def register_pair_consume_handler(
                 # front instead of letting texts silently go to the chat.
                 session = await session_service.get(user_id) if session_service is not None else None
                 if session is not None and session.claude_chat_active:
-                    text += "\n⚠️ 当前还有活跃的 managed 会话：普通文本将发给该会话；注入终端请先 /exit 退出聊天模式。"
+                    text += "\n⚠️ 当前还有活跃的 managed 会话：普通文本将发给该会话，未注册的斜杠命令仍会注入外部终端。"
+                    if session.terminal_mode:
+                        # /exit closes the managed persistent terminal (and its
+                        # Claude session) in terminal_mode — irreversible, so
+                        # warn instead of recommending it as a light switch.
+                        text += "注意：/exit 会关闭 managed 终端及其中运行的 Claude 会话（不可逆），请确认后再使用。"
+                    else:
+                        text += "如需让普通文本也走外部终端，请先 /exit 退出聊天模式。"
                 await callback.message.answer(text)
             else:
                 await callback.message.answer(f"❌ {_pair_outcome_text(outcome)}")
