@@ -128,14 +128,17 @@ class HookSocketServer:
         self._stopping = True
         server = self._server
         self._server = None
-        if server is not None:
-            server.close()
-            await server.wait_closed()
+        # 先取消并等待 client handlers 结束，再关闭监听 server。Python 3.12+
+        # 的 Server.wait_closed() 会等待活跃连接 handler 退出；若 handler 卡在
+        # paused ingress 或等待 EOF 读上，先 close 会让 stop() 永久阻塞。
         client_tasks = list(self._client_tasks)
         for task in client_tasks:
             task.cancel()
         await asyncio.gather(*client_tasks, return_exceptions=True)
         self._client_tasks.clear()
+        if server is not None:
+            server.close()
+            await server.wait_closed()
         async with self._lock:
             pending = list(self._pending_permissions.values())
             expiration_tasks = list(self._pending_expiration_tasks.values())
