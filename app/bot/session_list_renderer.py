@@ -94,7 +94,7 @@ def build_session_list_message(
             recent_buttons.append(
                 InlineKeyboardButton(
                     text=f"{index} 继续",
-                    callback_data=f"sess:select:{external_prefixes[item.session_id]}",
+                    callback_data=f"sess:open:{external_prefixes[item.session_id]}",
                 )
             )
         buttons.append(recent_buttons)
@@ -190,10 +190,10 @@ def _attention_callback_data(
     external_prefixes: Mapping[str, str] | None = None,
 ) -> str:
     if item.source == ListSessionSource.UNBOUND:
-        return f"sess:select:{(external_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
+        return f"sess:open:{(external_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
     if item.source == ListSessionSource.TMUX:
         return f"sess:attach:{(tmux_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
-    return f"sess:select:{(external_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
+    return f"sess:open:{(external_prefixes or {}).get(item.session_id, _sid_prefix(item))}"
 
 
 def _display_title(item: ListSessionView) -> str:

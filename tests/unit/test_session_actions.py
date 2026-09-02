@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram import Router
-from aiogram.types import CallbackQuery, Message, User
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, User
 
 from app.adapters.process.ghostty_terminal_adapter import GhosttyTerminal
-from app.bot.handlers.session_actions import _resolve_terminal_id_prefix, register_session_action_handlers
+from app.bot.handlers.session_actions import _edit_or_answer, _resolve_terminal_id_prefix, register_session_action_handlers
 from app.domain.external_session_models import ExternalBinding
 from app.domain.hook_models import HookEvent
 from app.domain.models import TerminalSessionInfo, utc_now
@@ -179,12 +181,13 @@ class TestSessionSelectHandler:
         callback.answer = AsyncMock()
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
+        callback.message.edit_text = AsyncMock()
 
         await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with()
-        callback.message.answer.assert_awaited_once()
-        keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
+        callback.message.edit_text.assert_awaited_once()
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
         callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
         assert callbacks == [f"sess:unbind:{session_id[:16]}"]
 
@@ -203,12 +206,13 @@ class TestSessionSelectHandler:
         callback.answer = AsyncMock()
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
+        callback.message.edit_text = AsyncMock()
 
         await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with()
-        callback.message.answer.assert_awaited_once()
-        keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
+        callback.message.edit_text.assert_awaited_once()
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
         callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
         assert callbacks == [f"sess:bind:{session_id[:16]}"]
 
@@ -324,11 +328,12 @@ class TestSessionSelectHandler:
         callback.answer = AsyncMock()
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
+        callback.message.edit_text = AsyncMock()
 
         await _dispatch(router, 0, callback)
 
         callback.answer.assert_awaited_once_with()
-        keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
         callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
         assert callbacks == [f"sess:bind:{session_id[:16]}"]
 
@@ -378,6 +383,34 @@ class TestSessionSelectHandler:
 
         callback.answer.assert_awaited_once_with("Session is no longer available")
         callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_open_from_list_answers_new_message_instead_of_editing_list(
+        self, discovery: ExternalSessionDiscoveryService, binder: ExternalSessionBinder
+    ) -> None:
+        """/list 来源的 ``sess:open`` 必须另发详情，不能就地编辑列表消息（其余会话按钮需保留）。"""
+        session_id = "abcdef1234567890full"
+        discovery.record_event(HookEvent(session_id=session_id, cwd="/home/user/proj", event="PreToolUse", status="running"))
+
+        router = Router()
+        register_session_action_handlers(router, discovery=discovery, binder=binder)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.data = f"sess:open:{session_id[:16]}"
+        callback.from_user = MagicMock(spec=User)
+        callback.from_user.id = 42
+        callback.answer = AsyncMock()
+        callback.message = AsyncMock(spec=Message)
+        callback.message.answer = AsyncMock()
+        callback.message.edit_text = AsyncMock()
+
+        await _dispatch(router, 0, callback)
+
+        callback.answer.assert_awaited_once_with()
+        callback.message.edit_text.assert_not_awaited()
+        callback.message.answer.assert_awaited_once()
+        keyboard = callback.message.answer.call_args.kwargs["reply_markup"]
+        callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        assert callbacks == [f"sess:bind:{session_id[:16]}"]
 
 
 class TestTmuxSessionActionHandler:
@@ -460,10 +493,14 @@ class TestTmuxSessionActionHandler:
         callback.answer = AsyncMock()
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
+        callback.message.edit_text = AsyncMock()
 
         await _dispatch(router, 3, callback)
 
         registry.attach_user.assert_awaited_once_with(user_id=42, terminal_id=terminal_id)
+        # tmux attach 必须另发结果消息，不能就地编辑列表（保留其它会话的按钮）
+        callback.message.edit_text.assert_not_awaited()
+        callback.message.answer.assert_awaited_once_with("已连接")
 
     @pytest.mark.asyncio
     async def test_attach_stale_dead_session_does_not_call_registry_attach(
@@ -505,10 +542,14 @@ class TestTmuxSessionActionHandler:
         callback.answer = AsyncMock()
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
+        callback.message.edit_text = AsyncMock()
 
         await _dispatch(router, 4, callback)
 
         registry.close_session.assert_awaited_once_with(terminal_id)
+        # tmux close 必须另发结果消息，不能就地编辑列表（保留其它会话的按钮）
+        callback.message.edit_text.assert_not_awaited()
+        callback.message.answer.assert_awaited_once_with(f"✅ 会话 `{terminal_id}` 已关闭")
 
     @pytest.mark.asyncio
     async def test_close_stale_dead_session_does_not_call_registry_close(
@@ -627,12 +668,13 @@ class TestBindSuccessPairingPrompt:
         callback.answer = AsyncMock()
         callback.message = AsyncMock(spec=Message)
         callback.message.answer = AsyncMock()
+        callback.message.edit_text = AsyncMock()
 
         await _dispatch(router, 1, callback)
 
         callback.answer.assert_awaited_once_with("绑定成功")
-        callback.message.answer.assert_awaited_once()
-        _, kwargs = callback.message.answer.call_args
+        callback.message.edit_text.assert_awaited_once()
+        _, kwargs = callback.message.edit_text.call_args
         expected_token = external_session_select_token(session_id, discovery=discovery, binder=binder)
         buttons = kwargs["reply_markup"].inline_keyboard
         assert len(buttons) == 1
@@ -679,10 +721,11 @@ class TestBindSuccessPairingPrompt:
         bind_callback.answer = AsyncMock()
         bind_callback.message = AsyncMock(spec=Message)
         bind_callback.message.answer = AsyncMock()
+        bind_callback.message.edit_text = AsyncMock()
         await _dispatch(router, 1, bind_callback)
 
         expected_token = external_session_select_token(session_id, discovery=discovery, binder=binder)
-        select_buttons = bind_callback.message.answer.call_args.kwargs["reply_markup"].inline_keyboard
+        select_buttons = bind_callback.message.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
         assert select_buttons[0][0].callback_data == f"sess:select:{expected_token}"
 
         # Step 2: click the sess:select button → should route to NEEDS_PAIRING and render ghpair.
@@ -693,9 +736,98 @@ class TestBindSuccessPairingPrompt:
         select_callback.answer = AsyncMock()
         select_callback.message = AsyncMock(spec=Message)
         select_callback.message.answer = AsyncMock()
+        select_callback.message.edit_text = AsyncMock()
         await _dispatch(router, 0, select_callback)
 
-        select_args, select_kwargs = select_callback.message.answer.call_args
+        select_args, select_kwargs = select_callback.message.edit_text.call_args
         rendered_text = select_args[0] if select_args else ""
         assert "选择要配对的 Ghostty 终端" in rendered_text or "终端" in rendered_text
         assert "ghpair:pairtoken123" in [b.callback_data for row in select_kwargs["reply_markup"].inline_keyboard for b in row]
+
+
+class TestEditOrAnswer:
+    """_edit_or_answer:优先 edit_text 就地改写，消息不可编辑时回落到 answer。"""
+
+    @staticmethod
+    def _make_callback() -> AsyncMock:
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.message = AsyncMock(spec=Message)
+        callback.message.edit_text = AsyncMock()
+        callback.message.answer = AsyncMock()
+        return callback
+
+    @pytest.mark.asyncio
+    async def test_edits_message_when_editable(self) -> None:
+        callback = self._make_callback()
+
+        await _edit_or_answer(callback, "hello")
+
+        # 未指定键盘时必须显式传空键盘，否则旧 inline 按钮残留
+        callback.message.edit_text.assert_awaited_once_with("hello", reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+        callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_edits_message_keeps_given_markup(self) -> None:
+        callback = self._make_callback()
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="b", callback_data="x")]])
+
+        await _edit_or_answer(callback, "hello", reply_markup=keyboard)
+
+        callback.message.edit_text.assert_awaited_once_with("hello", reply_markup=keyboard)
+        callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_answer_on_deterministic_bad_request(self) -> None:
+        """确定性 BAD REQUEST（消息不可编辑/已删除）：旧消息已不可用，回落为新消息。"""
+        callback = self._make_callback()
+        callback.message.edit_text = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="Bad Request: message to edit not found")
+        )
+
+        await _edit_or_answer(callback, "hello")
+
+        callback.message.edit_text.assert_awaited_once()
+        callback.message.answer.assert_awaited_once_with("hello", reply_markup=None)
+
+    @pytest.mark.asyncio
+    async def test_propagates_transient_error(self) -> None:
+        """暂时性错误（限流/网络/服务器）不应回落 answer，避免制造重复内容；向上冒泡交由 router。"""
+        from aiogram.exceptions import TelegramNetworkError
+
+        callback = self._make_callback()
+        callback.message.edit_text = AsyncMock(side_effect=TelegramNetworkError(method=MagicMock(), message="timeout"))
+
+        with pytest.raises(TelegramNetworkError):
+            await _edit_or_answer(callback, "hello")
+
+        callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_content_unchanged(self) -> None:
+        """重复点击同一按钮触发 message is not modified：不回退、不重复发消息。"""
+        callback = self._make_callback()
+        callback.message.edit_text = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="Bad Request: message is not modified")
+        )
+
+        await _edit_or_answer(callback, "hello")
+
+        callback.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_answers_when_message_inaccessible(self) -> None:
+        """>48h 的旧消息是 InaccessibleMessage（无 edit_text）：直接另发新消息。"""
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.message = SimpleNamespace(answer=AsyncMock())  # 无 edit_text 的不可编辑消息
+
+        await _edit_or_answer(callback, "hello")
+
+        callback.message.answer.assert_awaited_once_with("hello", reply_markup=None)
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_message(self) -> None:
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.message = None
+
+        # 无消息可编辑也无 chat 可回复：只能跳过，验证不抛异常
+        await _edit_or_answer(callback, "hello")

@@ -63,9 +63,9 @@ def test_recent_bound_sessions_show_top_three_and_hide_the_rest() -> None:
     first_row = result.keyboard.inline_keyboard[0]
     assert [button.text for button in first_row] == ["1 继续", "2 继续", "3 继续"]
     assert [button.callback_data for button in first_row] == [
-        "sess:select:sess-newest-0001",
-        "sess:select:sess-second-0002",
-        "sess:select:sess-third-0003",
+        "sess:open:sess-newest-0001",
+        "sess:open:sess-second-0002",
+        "sess:open:sess-third-0003",
     ]
     assert _callbacks(result)[-1] == "sess:list:all"
 
@@ -91,7 +91,7 @@ def test_unbound_session_stays_in_attention_even_when_newer_than_bound() -> None
     assert "⚠️ <b>需要处理</b>" in result.text
     assert "📡 可绑定新会话" in result.text
     assert "project/new-app" in result.text
-    assert "sess:select:unbound-session-" in _callbacks(result)
+    assert "sess:open:unbound-session-" in _callbacks(result)
 
 
 def test_attention_items_sort_by_priority_before_activity_time() -> None:

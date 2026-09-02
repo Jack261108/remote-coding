@@ -250,8 +250,8 @@ async def test_external_unbound_list_callback_selects_then_binds_without_session
         await router.message.handlers[-1].callback(list_message)
 
     callbacks = _callback_data_from_answer(list_message)
-    select_callbacks = [callback for callback in callbacks if callback.startswith("sess:select:")]
-    assert select_callbacks == [f"sess:select:{session_id[:16]}"]
+    select_callbacks = [callback for callback in callbacks if callback.startswith("sess:open:")]
+    assert select_callbacks == [f"sess:open:{session_id[:16]}"]
     select_callback_data = select_callbacks[0]
 
     select_callback = MagicMock()
@@ -318,8 +318,8 @@ async def test_bound_external_list_callback_avoids_other_users_bound_prefix_coll
     message = _message(42)
     await router.message.handlers[-1].callback(message)
 
-    select_callback_data = next(callback for callback in _callback_data_from_answer(message) if callback.startswith("sess:select:"))
-    assert select_callback_data != f"sess:select:{shared_prefix}"
+    select_callback_data = next(callback for callback in _callback_data_from_answer(message) if callback.startswith("sess:open:"))
+    assert select_callback_data != f"sess:open:{shared_prefix}"
     callback = MagicMock()
     callback.from_user = SimpleNamespace(id=42)
     callback.data = select_callback_data
@@ -371,7 +371,7 @@ async def test_external_list_callbacks_fit_telegram_limit_for_long_session_ids(t
 
     select_callback = MagicMock()
     select_callback.from_user = SimpleNamespace(id=42)
-    select_callback.data = next(callback for callback in list_callbacks if callback.startswith("sess:select:"))
+    select_callback.data = next(callback for callback in list_callbacks if callback.startswith("sess:open:"))
     select_callback.answer = AsyncMock()
     select_callback.message = MagicMock()
     select_callback.message.answer = AsyncMock()
@@ -424,10 +424,8 @@ async def test_unavailable_old_callback_prefix_does_not_bind_new_live_session_wi
     with patch("app.bot.handlers.command_list.process_is_alive", return_value=True):
         await router.message.handlers[-1].callback(list_message)
 
-    live_select_callback_data = next(
-        callback for callback in _callback_data_from_answer(list_message) if callback.startswith("sess:select:")
-    )
-    assert live_select_callback_data != f"sess:select:{old_prefix}"
+    live_select_callback_data = next(callback for callback in _callback_data_from_answer(list_message) if callback.startswith("sess:open:"))
+    assert live_select_callback_data != f"sess:open:{old_prefix}"
 
     old_select_callback = MagicMock()
     old_select_callback.from_user = SimpleNamespace(id=42)
@@ -499,7 +497,7 @@ async def test_dead_unbound_cleanup_refresh_removes_callback_and_old_click_is_no
     with patch("app.bot.handlers.command_list.process_is_alive", return_value=True):
         await router.message.handlers[-1].callback(list_message)
     stale_select_callback_data = next(
-        callback for callback in _callback_data_from_answer(list_message) if callback.startswith("sess:select:")
+        callback for callback in _callback_data_from_answer(list_message) if callback.startswith("sess:open:")
     )
 
     stale_select_callback = MagicMock()
@@ -591,9 +589,9 @@ async def test_command_list_renders_recent_bound_summary(tmp_path: Path) -> None
     assert "Hidden" not in text
     assert "还有 1 个旧会话未显示" in text
     assert _callback_data_from_answer(message) == [
-        "sess:select:sess-newest-0001",
-        "sess:select:sess-second-0002",
-        "sess:select:sess-third-0003",
+        "sess:open:sess-newest-0001",
+        "sess:open:sess-second-0002",
+        "sess:open:sess-third-0003",
         "sess:list:all",
     ]
 
@@ -757,7 +755,7 @@ async def test_list_all_callback_renders_full_legacy_list(tmp_path: Path) -> Non
     callbacks = [
         button.callback_data or "" for row in callback.message.answer.call_args.kwargs["reply_markup"].inline_keyboard for button in row
     ]
-    assert "sess:select:sess-hidden-0004" in callbacks
+    assert "sess:open:sess-hidden-0004" in callbacks
 
 
 @pytest.mark.asyncio

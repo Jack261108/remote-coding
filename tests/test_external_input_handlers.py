@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram import Router
-from aiogram.types import CallbackQuery, Message, User
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User
 
 from app.adapters.storage.file_session_store import FileSessionStore
 from app.bot.handlers.external_session import register_external_session_handler
@@ -103,6 +103,7 @@ def _message(text: str, *, user_id: int = 42) -> Message:
     msg.from_user = MagicMock(spec=User)
     msg.from_user.id = user_id
     msg.answer = AsyncMock()
+    msg.edit_text = AsyncMock()
     return msg
 
 
@@ -149,7 +150,8 @@ class TestPairConsumeHandler:
         msg = _message("")
         cb = _callback(f"ghpair:{token}", message=msg)
         await _dispatch_cb(router, 0, cb)
-        msg.answer.assert_awaited_once_with("✅ 配对成功，已进入外部输入模式。")
+        # 配对成功后必须清掉消息上残留的配对/取消绑定按钮（空键盘而非 None）
+        msg.edit_text.assert_awaited_once_with("✅ 配对成功，已进入外部输入模式。", reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
 
     @pytest.mark.asyncio
     async def test_paired_with_active_managed_chat_appends_hint(self, tmp_path: Path) -> None:
@@ -170,8 +172,8 @@ class TestPairConsumeHandler:
         msg = _message("")
         cb = _callback(f"ghpair:{token}", message=msg)
         await _dispatch_cb(router, 0, cb)
-        assert msg.answer.await_count == 1
-        reply = msg.answer.await_args.args[0]
+        assert msg.edit_text.await_count == 1
+        reply = msg.edit_text.await_args.args[0]
         assert "配对成功" in reply
         assert "managed 会话" in reply
         assert "斜杠命令仍会注入外部终端" in reply
@@ -199,22 +201,26 @@ class TestPairConsumeHandler:
         msg = _message("")
         cb = _callback(f"ghpair:{token}", message=msg)
         await _dispatch_cb(router, 0, cb)
-        assert msg.answer.await_count == 1
-        reply = msg.answer.await_args.args[0]
+        assert msg.edit_text.await_count == 1
+        reply = msg.edit_text.await_args.args[0]
         assert "配对成功" in reply
         assert "斜杠命令仍会注入外部终端" in reply
         assert "/exit 会关闭 managed 终端" in reply
         assert "不可逆" in reply
 
     @pytest.mark.asyncio
-    async def test_invalid_token_replies_error(self, tmp_path: Path) -> None:
+    async def test_invalid_token_replies_error_without_editing_candidates(self, tmp_path: Path) -> None:
+        """配对失败时不能编辑候选消息：其余候选终端与「取消绑定」按钮需保留，
+        用户才能换终端重试。错误另发新消息。"""
         service, *_ = _make_service(tmp_path)
         router = Router()
         register_pair_consume_handler(router, input_service=service)
         msg = _message("")
         cb = _callback("ghpair:does-not-exist", message=msg)
         await _dispatch_cb(router, 0, cb)
-        assert msg.answer.await_args is not None
+        msg.edit_text.assert_not_awaited()
+        msg.answer.assert_awaited_once()
+        assert msg.answer.await_args.args[0].startswith("❌")
 
 
 # ── sess:leave ─────────────────────────────────────────────────────────────

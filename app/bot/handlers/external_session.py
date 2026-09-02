@@ -7,6 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.handlers.command_utils import split_message_command
+from app.bot.handlers.session_actions import EXTERNAL_INPUT_LEFT_MARK
 from app.bot.handlers.user_utils import extract_user_id
 from app.infra.text_formatting import (
     format_external_session_action_outcome,
@@ -65,7 +66,7 @@ def register_external_session_handler(
                 await message.answer("外部输入功能未启用。")
             else:
                 left = await input_service.leave(user_id=user_id)
-                await message.answer("✅ 已退出外部输入模式。" if left else "当前不在外部输入模式。")
+                await message.answer(f"{EXTERNAL_INPUT_LEFT_MARK}。" if left else "当前不在外部输入模式。")
         else:
             await message.answer(f"未知子命令: {subcommand}")
 

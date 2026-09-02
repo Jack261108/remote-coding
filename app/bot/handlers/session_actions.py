@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -27,6 +28,12 @@ if TYPE_CHECKING:
     from app.services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
+
+# 进入/退出外部输入模式的消息标记：leave 依赖它在原文上做替换，
+# 与 handle_session_select 的 ACTIVATED 分支必须保持同一常量。
+# external_session 命令入口同样复用 LEFT_MARK，保证多入口文案一致。
+EXTERNAL_INPUT_ACTIVE_MARK = "✅ 已进入外部输入模式"
+EXTERNAL_INPUT_LEFT_MARK = "✅ 已退出外部输入模式"
 
 
 def _pair_outcome_text(outcome: PairOutcome) -> str:
@@ -62,6 +69,49 @@ async def _resolve_terminal_id_prefix(
     return resolve_unique_prefix(terminal_id_prefix, candidates)
 
 
+def _clear_keyboard() -> InlineKeyboardMarkup:
+    """Telegram 对省略 reply_markup 的语义是「保持不变」，须传空键盘才能移除旧按钮。"""
+    return InlineKeyboardMarkup(inline_keyboard=[])
+
+
+def _unbind_button(callback_token: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")
+
+
+async def _edit_or_answer(
+    callback: CallbackQuery,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """编辑触发 callback 的消息；确定性不可编辑时另发一条，暂时性错误向上冒泡。
+
+    把「绑定 → 配对 → 进入输入模式」的连续步骤合并到同一条消息上，而不是每步
+    都另发新消息。消息超过 48h 后 Telegram 会返回不可编辑的 InaccessibleMessage，
+    此时另发新消息；edit 因内容未变被拒（message is not modified）时视为无事
+    发生，避免回退成重复消息。未指定新键盘时必须显式传空键盘，否则旧 inline
+    按钮会原样残留。
+
+    仅 TelegramBadRequest 中的确定性错误（消息不可编辑/已删除/文本超长等）回落
+    answer；TelegramRetryAfter/TelegramNetworkError/TelegramServerError 等暂时性
+    错误不回落——旧消息其实仍可编辑，回落会制造重复内容，交由 router 错误层处理。
+    """
+    markup = reply_markup if reply_markup is not None else _clear_keyboard()
+    message = callback.message
+    if isinstance(message, Message):
+        try:
+            await message.edit_text(text, reply_markup=markup)
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            # 确定性 BAD REQUEST（消息不可编辑/已删除/文本超长等）：旧消息已不可用，回落为新消息。
+            logger.warning("编辑消息失败，回退为发送新消息: %s", exc)
+        # TelegramRetryAfter / TelegramNetworkError / TelegramServerError 等暂时性错误不回落
+        # answer：旧消息其实仍可编辑，回落会制造重复内容；交由 router 错误层处理。
+    if message is not None:
+        await message.answer(text, reply_markup=reply_markup)
+
+
 def register_session_action_handlers(
     router: Router,
     *,
@@ -70,9 +120,10 @@ def register_session_action_handlers(
     registry_service: SessionRegistryService | None = None,
     external_session_input_service: ExternalSessionInputService | None = None,
 ) -> None:
-    @router.callback_query(F.data.startswith("sess:select:"))
+    @router.callback_query(F.data.startswith("sess:select:") | F.data.startswith("sess:open:"))
     async def handle_session_select(callback: CallbackQuery, callback_parts: tuple[str, ...]) -> None:
         user_id = extract_user_id(callback)
+        opens_from_list = callback_parts[1] == "open"
         session_id_prefix = callback_parts[2]
 
         validation = validate_external_session_select(
@@ -89,19 +140,34 @@ def register_session_action_handlers(
         callback_token = validation.callback_token
         detail_text = f"📂 Session: {short_id(session_id, 12)}...\n  cwd: {validation.cwd}"
 
+        async def _show_selection_result(
+            text: str,
+            reply_markup: InlineKeyboardMarkup | None = None,
+        ) -> None:
+            if opens_from_list:
+                message = callback.message
+                if message is not None:
+                    await message.answer(text, reply_markup=reply_markup)
+                return
+            await _edit_or_answer(callback, text, reply_markup=reply_markup)
+
+        async def _show_pair_failure(outcome: PairOutcome) -> None:
+            await callback.answer()
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[_unbind_button(callback_token)]])
+            await _show_selection_result(detail_text + f"\n\n⚠️ {_pair_outcome_text(outcome)}", reply_markup=keyboard)
+
         if validation.action == "unbind" and external_session_input_service is not None:
             # Bound + owner: offer Ghostty input activation/pairing in addition to unbind.
             outcome = await external_session_input_service.activate_select(user_id=user_id, session_id=session_id)
             if outcome == PairOutcome.ACTIVATED:
                 await callback.answer()
-                if callback.message:
-                    keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [InlineKeyboardButton(text="退出输入模式", callback_data=f"sess:leave:{callback_token}")],
-                            [InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")],
-                        ]
-                    )
-                    await callback.message.answer(detail_text + "\n\n✅ 已进入外部输入模式", reply_markup=keyboard)
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="退出输入模式", callback_data=f"sess:leave:{callback_token}")],
+                        [_unbind_button(callback_token)],
+                    ]
+                )
+                await _show_selection_result(detail_text + "\n\n" + EXTERNAL_INPUT_ACTIVE_MARK, reply_markup=keyboard)
                 return
             if outcome == PairOutcome.NEEDS_PAIRING:
                 pair_outcome, candidates = await external_session_input_service.pair_candidates(user_id=user_id, session_id=session_id)
@@ -122,43 +188,25 @@ def register_session_action_handlers(
                             cwd=terminal.cwd,
                         )
                         buttons.append([InlineKeyboardButton(text=label, callback_data=f"ghpair:{token}")])
-                    buttons.append([InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")])
+                    buttons.append([_unbind_button(callback_token)])
                     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
                     await callback.answer()
-                    if callback.message:
-                        await callback.message.answer(detail_text + "\n\n🔌 选择要配对的 Ghostty 终端：", reply_markup=keyboard)
+                    await _show_selection_result(detail_text + "\n\n🔌 选择要配对的 Ghostty 终端：", reply_markup=keyboard)
                     return
-                await callback.answer()
-                if callback.message:
-                    keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[[InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")]]
-                    )
-                    await callback.message.answer(
-                        detail_text + f"\n\n⚠️ {_pair_outcome_text(pair_outcome)}",
-                        reply_markup=keyboard,
-                    )
+                await _show_pair_failure(pair_outcome)
                 return
-            await callback.answer()
-            if callback.message:
-                keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")]]
-                )
-                await callback.message.answer(
-                    detail_text + f"\n\n⚠️ {_pair_outcome_text(outcome)}",
-                    reply_markup=keyboard,
-                )
+            await _show_pair_failure(outcome)
             return
 
         if validation.action == "unbind":
-            buttons = [[InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")]]
+            buttons = [[_unbind_button(callback_token)]]
         else:
             buttons = [[InlineKeyboardButton(text="绑定", callback_data=f"sess:bind:{callback_token}")]]
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
         await callback.answer()
-        if callback.message:
-            await callback.message.answer(detail_text, reply_markup=keyboard)
+        await _show_selection_result(detail_text, reply_markup=keyboard)
 
     async def _handle_bind_unbind_action(callback: CallbackQuery, callback_parts: tuple[str, ...], action_type: str) -> None:
         user_id = extract_user_id(callback)
@@ -173,21 +221,22 @@ def register_session_action_handlers(
         if result.success:
             success_text = "绑定成功" if action_type == "bind" else "取消绑定成功"
             await callback.answer(success_text)
-            if callback.message:
-                if action_type == "bind":
-                    assert result.session_id is not None  # success ⇒ resolved session_id
-                    token = external_session_select_token(result.session_id, discovery=discovery, binder=binder)
-                    keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[[InlineKeyboardButton(text="进入终端输入", callback_data=f"sess:select:{token}")]]
-                    )
-                    await callback.message.answer(
-                        format_external_session_action_outcome(action_type, True, session_id=result.session_id, message=result.message),
-                        reply_markup=keyboard,
-                    )
-                else:
-                    await callback.message.answer(
-                        format_external_session_action_outcome(action_type, True, session_id=result.session_id, message=result.message)
-                    )
+            if action_type == "bind":
+                assert result.session_id is not None  # success ⇒ resolved session_id
+                token = external_session_select_token(result.session_id, discovery=discovery, binder=binder)
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="进入终端输入", callback_data=f"sess:select:{token}")]]
+                )
+                await _edit_or_answer(
+                    callback,
+                    format_external_session_action_outcome(action_type, True, session_id=result.session_id, message=result.message),
+                    reply_markup=keyboard,
+                )
+            else:
+                await _edit_or_answer(
+                    callback,
+                    format_external_session_action_outcome(action_type, True, session_id=result.session_id, message=result.message),
+                )
         else:
             await callback.answer(f"❌ {result.message}")
 
@@ -246,25 +295,24 @@ def register_session_action_handlers(
         message = callback.message
         if not left or not isinstance(message, Message):
             return
-        editable_message = cast(Message, message)
 
         parts = callback_parts or tuple((callback.data or "").split(":"))
         callback_token = parts[2] if len(parts) > 2 else None
         current_text = message.text
-        if isinstance(current_text, str) and "✅ 已进入外部输入模式" in current_text:
-            updated_text = current_text.replace("✅ 已进入外部输入模式", "✅ 已退出外部输入模式")
+        if isinstance(current_text, str) and EXTERNAL_INPUT_ACTIVE_MARK in current_text:
+            updated_text = current_text.replace(EXTERNAL_INPUT_ACTIVE_MARK, EXTERNAL_INPUT_LEFT_MARK)
         else:
-            updated_text = "✅ 已退出外部输入模式"
+            updated_text = EXTERNAL_INPUT_LEFT_MARK
 
         keyboard = None
         if callback_token:
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="重新进入输入模式", callback_data=f"sess:select:{callback_token}")],
-                    [InlineKeyboardButton(text="取消绑定", callback_data=f"sess:unbind:{callback_token}")],
+                    [_unbind_button(callback_token)],
                 ]
             )
-        await editable_message.edit_text(updated_text, reply_markup=keyboard)
+        await _edit_or_answer(callback, updated_text, reply_markup=keyboard)
 
 
 def register_pair_consume_handler(
@@ -284,25 +332,24 @@ def register_pair_consume_handler(
         user_id = extract_user_id(callback)
         outcome = await input_service.consume_pair_token(token=token, user_id=user_id)
         await callback.answer()
-        if callback.message:
-            if outcome == PairOutcome.PAIRED:
-                text = "✅ 配对成功，已进入外部输入模式。"
-                # The external text router yields to an active managed chat
-                # (see ExternalInputTargetActiveFilter), so tell the user up
-                # front instead of letting texts silently go to the chat.
-                session = await session_service.get(user_id) if session_service is not None else None
-                if session is not None and session.claude_chat_active:
-                    text += "\n⚠️ 当前还有活跃的 managed 会话：普通文本将发给该会话，未注册的斜杠命令仍会注入外部终端。"
-                    if session.terminal_mode:
-                        # /exit closes the managed persistent terminal (and its
-                        # Claude session) in terminal_mode — irreversible, so
-                        # warn instead of recommending it as a light switch.
-                        text += "注意：/exit 会关闭 managed 终端及其中运行的 Claude 会话（不可逆），请确认后再使用。"
-                    else:
-                        text += "如需让普通文本也走外部终端，请先 /exit 退出聊天模式。"
-                await callback.message.answer(text)
-            else:
-                await callback.message.answer(f"❌ {_pair_outcome_text(outcome)}")
+        if outcome == PairOutcome.PAIRED:
+            text = "✅ 配对成功，已进入外部输入模式。"
+            # The external text router yields to an active managed chat
+            # (see ExternalInputTargetActiveFilter), so tell the user up
+            # front instead of letting texts silently go to the chat.
+            session = await session_service.get(user_id) if session_service is not None else None
+            if session is not None and session.claude_chat_active:
+                text += "\n⚠️ 当前还有活跃的 managed 会话：普通文本将发给该会话，未注册的斜杠命令仍会注入外部终端。"
+                if session.terminal_mode:
+                    # /exit closes the managed persistent terminal (and its
+                    # Claude session) in terminal_mode — irreversible, so
+                    # warn instead of recommending it as a light switch.
+                    text += "注意：/exit 会关闭 managed 终端及其中运行的 Claude 会话（不可逆），请确认后再使用。"
+                else:
+                    text += "如需让普通文本也走外部终端，请先 /exit 退出聊天模式。"
+            await _edit_or_answer(callback, text)
+        elif callback.message:
+            await callback.message.answer(f"❌ {_pair_outcome_text(outcome)}")
 
 
 def register_external_text_handlers(

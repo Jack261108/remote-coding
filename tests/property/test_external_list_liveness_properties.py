@@ -60,7 +60,7 @@ from app.services.external_binding_store import ExternalBindingStore
 
 _USER_ID = 777
 _PROBE_PATH = "app.bot.handlers.command_list.process_is_alive"
-_CALLBACK_PREFIX = "sess:select:"
+_CALLBACK_PREFIX = "sess:open:"
 
 
 def _rendered_session_id_prefixes(message: _DummyMessage) -> set[str]:

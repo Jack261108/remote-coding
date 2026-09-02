@@ -143,7 +143,7 @@ def _collect_external_items(
                 status_icon="📡",
                 status_text=status,
                 source="external",
-                buttons=[(ext.title or short_cwd(ext.cwd, fallback=""), f"sess:select:{external_prefixes[ext.session_id]}")],
+                buttons=[(ext.title or short_cwd(ext.cwd, fallback=""), f"sess:open:{external_prefixes[ext.session_id]}")],
             )
         )
         summary_items.append(
@@ -219,7 +219,7 @@ async def _collect_bound_items(
                 status_icon="🔗",
                 status_text="已绑定",
                 source="bound",
-                buttons=[(title or short_cwd(b.cwd, fallback=""), f"sess:select:{external_prefixes[b.session_id]}")],
+                buttons=[(title or short_cwd(b.cwd, fallback=""), f"sess:open:{external_prefixes[b.session_id]}")],
             )
         )
         summary_items.append(

@@ -336,7 +336,7 @@ async def test_liveness_disabled_retains_and_lists_dead_pid(tmp_path: Path, capl
     list_reaper.remove_with_cleanup.assert_not_awaited()
     # Binding still present and rendered as a bound-session button.
     assert ctx.store.get_binding(session_id) is not None
-    assert f"sess:select:{session_id[:16]}" in _answer_callback_data(message)
+    assert f"sess:open:{session_id[:16]}" in _answer_callback_data(message)
 
 
 # --------------------------------------------------------------------------
