@@ -34,6 +34,7 @@ from app.services.external_user_question_state import (
 from app.services.session_store import SessionStore
 from app.services.task_service import TaskService
 from app.services.user_question_callback_registry import (
+    UserQuestionCallbackNotFound,
     UserQuestionCallbackOrigin,
     UserQuestionCallbackRegistry,
 )
@@ -510,3 +511,214 @@ async def test_free_text_prefers_managed_pending_over_external_ghostty(tmp_path:
     service._user_question_service._hook_socket_server.respond_to_permission.assert_awaited_once_with(  # type: ignore[attr-defined,union-attr]
         tool_use_id="tool-ask-managed", decision="allow"
     )
+
+
+@pytest.mark.asyncio
+async def test_external_multi_select_toggle_and_intermediate_advance(tmp_path: Path) -> None:
+    """Multi-select external workflow: a toggle on question 0 selects an option
+    and the intermediate submit advances to question 1 without completing or
+    allowing the Hook (design §9 intermediate-question semantics).
+    """
+    service, factory, structured_store = await _build_service(tmp_path)
+    session_id = "claude-session-1"
+    prompts = (
+        UserQuestionPrompt(
+            tool_use_id="tool-ask-multi2",
+            question_index=0,
+            total_questions=2,
+            question="Q1 many",
+            options=(UserQuestionOption(label="A"), UserQuestionOption(label="B")),
+            multi_select=True,
+        ),
+        UserQuestionPrompt(
+            tool_use_id="tool-ask-multi2",
+            question_index=1,
+            total_questions=2,
+            question="Q2 many",
+            options=(UserQuestionOption(label="C"), UserQuestionOption(label="D")),
+            multi_select=True,
+        ),
+    )
+    state = ExternalUserQuestionState(ttl_sec=60)
+    state.store(_pending("tool-ask-multi2", session_id, prompts))
+    registry = UserQuestionCallbackRegistry(ttl_sec=60)
+    transport = _RecordingTransport(state)
+    service.configure_external(external_uq_state=state, external_question_transport=transport, callback_registry=registry)
+
+    # Toggle Q1 option A.
+    ok, text, next_prompt, selected = await service.toggle_pending_user_question_multi_select_option(
+        user_id=1, tool_use_id="tool-ask-multi2", question_index=0, option_index=0
+    )
+    assert ok is True, text
+    assert selected == frozenset({0})
+    # Toggle Q1 option B (now two selected).
+    ok, text, next_prompt, selected = await service.toggle_pending_user_question_multi_select_option(
+        user_id=1, tool_use_id="tool-ask-multi2", question_index=0, option_index=1
+    )
+    assert ok is True, text
+    assert selected == frozenset({0, 1})
+    assert transport.completed == []
+
+    # Submit Q1 → intermediate: advances to Q2, no Hook allow yet.
+    ok, text, next_prompt = await service.submit_pending_user_question_multi_select(
+        user_id=1, tool_use_id="tool-ask-multi2", question_index=0
+    )
+    assert ok is True, text
+    assert next_prompt is not None and next_prompt.question_index == 1
+    service._user_question_service._hook_socket_server.respond_to_permission_outcome.assert_not_awaited()  # type: ignore[attr-defined,union-attr]
+    # Managed terminal never invoked.
+    assert factory._interactive_inputs == []
+    assert factory._user_question_option_actions == []
+
+
+@pytest.mark.asyncio
+async def test_external_multi_select_final_submit_allows_and_completes(tmp_path: Path) -> None:
+    """Second (final) multi-select question submit must send the allow to the
+    Hook exactly once and complete the question, advancing the external state.
+    """
+    service, factory, structured_store = await _build_service(tmp_path)
+    session_id = "claude-session-1"
+    prompts = (
+        UserQuestionPrompt(
+            tool_use_id="tool-ask-multi3",
+            question_index=0,
+            total_questions=1,
+            question="Final many",
+            options=(UserQuestionOption(label="A"), UserQuestionOption(label="B")),
+            multi_select=True,
+        ),
+    )
+    state = ExternalUserQuestionState(ttl_sec=60)
+    state.store(_pending("tool-ask-multi3", session_id, prompts))
+    registry = UserQuestionCallbackRegistry(ttl_sec=60)
+    transport = _RecordingTransport(state)
+    service.configure_external(external_uq_state=state, external_question_transport=transport, callback_registry=registry)
+
+    await service.toggle_pending_user_question_multi_select_option(
+        user_id=1, tool_use_id="tool-ask-multi3", question_index=0, option_index=0
+    )
+    ok, text, next_prompt = await service.submit_pending_user_question_multi_select(
+        user_id=1, tool_use_id="tool-ask-multi3", question_index=0
+    )
+
+    assert ok is True, text
+    assert next_prompt is None
+    service._user_question_service._hook_socket_server.respond_to_permission_outcome.assert_awaited_once_with(  # type: ignore[attr-defined,union-attr]
+        tool_use_id="tool-ask-multi3", decision="allow"
+    )
+    assert transport.completed
+    assert state.get_active("tool-ask-multi3") is None
+    assert factory._user_question_option_actions == []
+
+
+@pytest.mark.asyncio
+async def test_external_multi_select_toggle_when_not_configured(tmp_path: Path) -> None:
+    """External multi-select toggle when ``configure_external`` wired no transport
+    must fail closed with “外部 Ghostty 问答功能未启用”.
+    """
+    service, factory, structured_store = await _build_service(tmp_path)
+    session_id = "claude-session-1"
+    prompts = (
+        UserQuestionPrompt(
+            tool_use_id="tool-ask-ms-off",
+            question_index=0,
+            total_questions=1,
+            question="Pick many",
+            options=(UserQuestionOption(label="A"), UserQuestionOption(label="B")),
+            multi_select=True,
+        ),
+    )
+    state = ExternalUserQuestionState(ttl_sec=60)
+    state.store(_pending("tool-ask-ms-off", session_id, prompts))
+    service.configure_external(external_uq_state=state, external_question_transport=None, callback_registry=None)
+
+    ok, text, next_prompt, selected = await service.toggle_pending_user_question_multi_select_option(
+        user_id=1, tool_use_id="tool-ask-ms-off", question_index=0, option_index=0
+    )
+
+    assert ok is False, text
+    assert next_prompt is None
+    assert selected is None
+
+
+@pytest.mark.asyncio
+async def test_external_final_indeterminate_transport_invalidates_tokens(tmp_path: Path) -> None:
+    """INDETERMINATE transport result must not complete or allow; it must clear
+    the callback registry tokens so the stale buttons stop working.
+
+    Distinguishes the transport-action uncertainty from REJECTED: the question is
+    left alive (not COMPLETED) and the Hook allow is never attempted.
+    """
+    service, factory, structured_store = await _build_service(tmp_path)
+    session_id = "claude-session-1"
+    prompts = (
+        UserQuestionPrompt(
+            tool_use_id="tool-ask-1",
+            question_index=0,
+            total_questions=1,
+            question="Pick one",
+            options=(UserQuestionOption(label="A"), UserQuestionOption(label="B")),
+        ),
+    )
+    state = ExternalUserQuestionState(ttl_sec=60)
+    state.store(_pending("tool-ask-1", session_id, prompts))
+    registry = UserQuestionCallbackRegistry(ttl_sec=60)
+    tokens = await registry.register_question_tokens(
+        owner_user_id=1,
+        session_id=session_id,
+        tool_use_id="tool-ask-1",
+        question_index=0,
+        option_count=2,
+        multi_select=False,
+        origin=UserQuestionCallbackOrigin.EXTERNAL_GHOSTTY,
+    )
+    transport = _RecordingTransport(state, result=ExternalQuestionActionStatus.INDETERMINATE)
+    service.configure_external(external_uq_state=state, external_question_transport=transport, callback_registry=registry)
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1, tool_use_id="tool-ask-1", question_index=0, option_index=0
+    )
+
+    assert ok is False, text
+    assert next_prompt is None
+    assert transport.completed == []
+    # INDETERMINATE → tokens invalidated (buttons dead): resolve reports NotFound.
+    resolved = await registry.resolve(tokens.select_tokens[0], user_id=1)
+    assert isinstance(resolved, UserQuestionCallbackNotFound)
+    assert factory._interactive_inputs == []
+    assert factory._user_question_option_actions == []
+
+
+@pytest.mark.asyncio
+async def test_external_approve_hookless_is_approved(tmp_path: Path) -> None:
+    """A hookless wiring (``_hook_socket_server`` is None) treats the external
+    allow as approved, so a final select completes without hanging.
+    """
+    service, factory, structured_store = await _build_service(tmp_path)
+    session_id = "claude-session-1"
+    prompts = (
+        UserQuestionPrompt(
+            tool_use_id="tool-ask-6",
+            question_index=0,
+            total_questions=1,
+            question="Pick one",
+            options=(UserQuestionOption(label="A"), UserQuestionOption(label="B")),
+        ),
+    )
+    state = ExternalUserQuestionState(ttl_sec=60)
+    state.store(_pending("tool-ask-6", session_id, prompts))
+    registry = UserQuestionCallbackRegistry(ttl_sec=60)
+    transport = _RecordingTransport(state)
+    service.configure_external(external_uq_state=state, external_question_transport=transport, callback_registry=registry)
+    # Remove the hook socket: the approve helper must treat it as approved.
+    service._user_question_service._hook_socket_server = None  # type: ignore[attr-defined]
+
+    ok, text, next_prompt = await service.answer_pending_user_question_option(
+        user_id=1, tool_use_id="tool-ask-6", question_index=0, option_index=0
+    )
+
+    assert ok is True, text
+    assert "Claude 继续执行中" in text
+    assert next_prompt is None
+    assert transport.completed
+    assert state.get_active("tool-ask-6") is None

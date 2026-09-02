@@ -33,6 +33,35 @@ def stream_background_tasks() -> BackgroundTaskRegistry:
     return BackgroundTaskRegistry(label="stream")
 
 
+async def _wait_task_done(
+    task: asyncio.Task,
+    *,
+    registry: BackgroundTaskRegistry | None = None,
+    timeout_sec: float = 5.0,
+    interval_sec: float = 0.005,
+) -> None:
+    """Poll until the background task finishes, instead of a fixed sleep.
+
+    The watchdog/cleanup paths complete in well under a second here, but relying
+    on ``asyncio.sleep(0.1)`` before ``task.done()`` made the suite flaky on busy
+    CI: the sleep is not a synchronization point. Polling with a hard timeout is.
+
+    When *registry* is given, also waits for the task to be removed from it. A
+    task whose ``asyncio.Task.done()`` is True has not necessarily run its done
+    callback yet (the ``BackgroundTaskRegistry._on_done`` removal runs on a later
+    loop iteration), so asserting ``not in registry`` right after ``done()`` is
+    still a race — this poll covers both transitions.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while not task.done() or (registry is not None and task in registry):
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(interval_sec)
+    assert task.done(), f"background task did not finish within {timeout_sec}s"
+    assert registry is None or task not in registry, "background task not removed from the registry in time"
+
+
 async def _run_and_wait(
     *,
     message: DummyMessage,
@@ -255,7 +284,7 @@ async def test_run_prompt_and_stream_watchdog_cancels_stuck_stream(
 
     assert task is not None
     try:
-        await asyncio.sleep(0.2)
+        await _wait_task_done(task, registry=stream_background_tasks)
         assert task.done()
         assert task not in stream_background_tasks
         assert task_service.cancel_called is True
@@ -318,7 +347,7 @@ async def test_run_prompt_and_stream_watchdog_timeout_schedules_queued_uploads(
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task)
         assert task.done()
         assert upload_scheduled is True
     finally:
@@ -378,7 +407,7 @@ async def test_run_prompt_and_stream_watchdog_ignores_late_exit_after_timeout(
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task)
         assert task.done()
         assert task_service._status.status == TaskStatus.TIMEOUT
         lifecycle = message.sent_messages[0]
@@ -443,7 +472,7 @@ async def test_run_prompt_and_stream_marks_timeout_before_cancel_race(
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task)
         assert task.done()
         assert task_service._status.status == TaskStatus.TIMEOUT
     finally:
@@ -509,7 +538,7 @@ async def test_run_prompt_and_stream_does_not_abandon_terminal_event_when_timeou
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task)
         assert task.done()
         assert task_service._status.status == TaskStatus.SUCCEEDED
         assert task_service.cancel_called is False
@@ -730,7 +759,7 @@ async def test_run_prompt_and_stream_watchdog_cancels_stuck_finalization(
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task, registry=stream_background_tasks)
         assert task.done()
         assert task not in stream_background_tasks
         assert cleanup_started.is_set()
@@ -790,7 +819,7 @@ async def test_run_prompt_and_stream_tracks_abandoned_stream_and_force_cleans_in
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task, registry=stream_background_tasks)
         assert task.done()
         assert task not in stream_background_tasks
         assert inner_stream_task is not None
@@ -864,7 +893,7 @@ async def test_run_prompt_and_stream_force_cleanup_does_not_block_on_uncancellab
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task, registry=stream_background_tasks)
         assert task.done()
         assert task not in stream_background_tasks
         assert pump_task is not None
@@ -925,7 +954,7 @@ async def test_run_prompt_and_stream_real_finally_tracks_uncancellable_interacti
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task)
         assert task.done()
         assert pump_task is not None
         assert pump_task in run_event_streamer_module._ABANDONED_INTERACTIVE_PUMP_TASKS
@@ -975,7 +1004,7 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_before_interactive
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task, registry=stream_background_tasks)
         assert task.done()
         assert task not in stream_background_tasks
         assert upload_scheduled is True
@@ -1026,7 +1055,7 @@ async def test_run_prompt_and_stream_schedules_queued_uploads_when_terminal_flus
 
     assert task is not None
     try:
-        await asyncio.sleep(0.1)
+        await _wait_task_done(task, registry=stream_background_tasks)
         assert task.done()
         assert task not in stream_background_tasks
         assert upload_scheduled is True
